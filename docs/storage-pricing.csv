@@ -1,0 +1,36 @@
+provider,category,storage_usd_per_gb_month,egress_usd_per_gb,api_style,min_commitment,typical_retrieval_latency,durability_claim,notes
+AWS S3 Standard,cloud,0.023,0.09,S3,none,<100ms,11 nines,Default tier; egress dominates TCO
+AWS S3 Standard-IA,cloud,0.0125,0.09,S3,30-day floor,<100ms,11 nines,Infrequent access; per-retrieve fee $0.01/GB
+AWS S3 Glacier Instant,cloud,0.004,0.09,S3,90-day floor,<100ms,11 nines,Per-retrieve $0.03/GB
+AWS S3 Glacier Flexible,cloud,0.0036,0.02,S3,90-day floor,minutes-hours,11 nines,Per-retrieve $0.01/GB
+AWS S3 Glacier Deep Archive,cloud,0.00099,0.02,S3,180-day floor,hours,11 nines,Per-retrieve $0.0025/GB; cold archival only
+Google Cloud Standard,cloud,0.020,0.12,GCS,none,<100ms,11 nines,Worse egress than S3
+Google Cloud Nearline,cloud,0.010,0.12,GCS,30-day floor,<100ms,11 nines,Per-retrieve $0.01/GB
+Google Cloud Coldline,cloud,0.004,0.12,GCS,90-day floor,<100ms,11 nines,Per-retrieve $0.02/GB
+Google Cloud Archive,cloud,0.0012,0.12,GCS,365-day floor,hours,11 nines,Per-retrieve $0.05/GB
+Azure Blob Hot,cloud,0.0184,0.087,Azure Blob,none,<100ms,11 nines,
+Azure Blob Cool,cloud,0.010,0.087,Azure Blob,30-day floor,<100ms,11 nines,Per-retrieve $0.01/GB
+Azure Blob Archive,cloud,0.00099,0.087,Azure Blob,180-day floor,hours,11 nines,Per-retrieve $0.02/GB
+Cloudflare R2,cloud,0.015,0.00,S3,none,<100ms,11 nines,Zero egress is the killer feature; class A/B ops priced
+DigitalOcean Spaces,cloud,0.020,0.01,S3,none,<100ms,9 nines,$5/mo includes 250 GB + 1 TB transfer; predictable pricing
+Linode Object Storage,cloud,0.020,0.005,S3,none,<100ms,11 nines,$5/mo includes 250 GB + 1 TB transfer
+Vultr Object Storage,cloud,0.020,0.01,S3,none,<100ms,11 nines,$5/mo includes 250 GB
+Wasabi,cloud,0.0069,0.00,S3,90-day floor,<100ms,11 nines,No egress fees but must keep data ≥90 days
+Backblaze B2,cloud,0.006,0.01,S3+B2 native,none,~100ms,11 nines,3× monthly egress free; cheapest mainstream hot tier
+Hetzner Storage Box,cloud,0.003,0.00,SFTP/SMB/WebDAV,annual contract,<100ms,RAID6,Not S3-API; off-the-radar value
+Hetzner Object Storage,cloud,0.0058,0.00,S3,none,<100ms,11 nines,New product; competitive
+OVH Object Storage,cloud,0.012,0.011,S3,none,<100ms,11 nines,European data residency
+Storj DCS,p2p,0.004,0.007,S3,none,200-500ms,11 nines (RS 29/80),Decentralized but centralized metadata; real working network
+Sia,p2p,0.001,0.0005,native,3-month renewal,seconds,RS 30/40,Tiny network; volatile
+Filecoin (storage deal),p2p,0.0001,variable,native,180-day deal,minutes-hours,11 nines,Archival; retrieval markets immature
+Crust Network,p2p,0.001,included,native,none,seconds,storage-replica based,Small network
+Arweave (one-time),p2p,0,0,native,permanent,seconds,replication-permanent,Pay once ~$5-20/GB; immutable; not monthly
+Swarm (Ethereum),p2p,0.04,variable,native,stamp-based,seconds,erasure-coded,Volatile with ETH gas; postage stamps
+Pinata Picnic,ipfs-pinning,0.40,included,IPFS+REST,none,1-10s,depends on backing,$20/mo for 50 GB; expensive at small scale
+Pinata Fiesta,ipfs-pinning,0.50,included,IPFS+REST,none,1-10s,depends on backing,$250/mo for 500 GB
+Filebase,ipfs-pinning,0.0059,0.01,S3,none,seconds,11 nines (Filecoin+IPFS),S3-API frontend to IPFS+Filecoin
+Web3.Storage,ipfs-pinning,0.001,included,REST,none,seconds,Filecoin-backed,Free tier up to 5 GB; paid tier varies
+Lighthouse.storage,ipfs-pinning,0.0003,included,REST,one-time payment,1-10s,Filecoin-backed,Pay ~$5/GB once for perpetual storage
+4everland,ipfs-pinning,0.0006,included,multi,none,seconds,Filecoin+Arweave hybrid,Bundles multiple decentralized backends
+NFT.Storage,ipfs-pinning,0,0,REST,permanent,1-10s,Filecoin-backed,Free for NFTs; not for general purpose
+c0mpute,p2p,0.008,0.005,S3+native,none,200-500ms,11 nines (RS 10/14),Egress $0 to internal c0mpute jobs; compute-locality value

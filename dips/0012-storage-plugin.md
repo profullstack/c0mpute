@@ -1,192 +1,263 @@
 ---
 dip: 0012
-title: "c0mpute is compute-only; storage is BYOS3"
+title: "c0mpute hosts files: Reed-Solomon 10/14, compute-locality value"
 status: Accepted
 authors:
   - anthony@profullstack.com
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: customer storage URLs in job manifests; BYOS plugin (DIP-0013)
+implementation: c0mpute-store::erasure (shipped) + storage role on workers + HTTP shard endpoints (in progress)
 supersedes:
 superseded-by:
 ---
 
 ## Summary
 
-c0mpute is a **compute marketplace**, not a storage network. Customers
-bring their own storage (R2, B2, S3, IPFS, anything addressable by
-URL) for both inputs and outputs. Workers hold data only ephemerally
-during a job.
+c0mpute **hosts files**. Workers that opt into the storage role accept
+Reed-Solomon-encoded shards (k=10, n=14) and serve them over HTTP.
+Auto-repair re-shards on node failure.
 
-We are **not** building a price-competitive p2p storage network and
-this DIP rejects the design that would have done so. See DIP-0013 for
-the BYOS3 integrations that let customers plug in storage cheaply.
+We do **not** position this as "cheaper than R2". We position it as:
+
+1. **Compute-locality** — data lives where the work happens; reading
+   from c0mpute storage into a c0mpute worker is internal-egress-free.
+2. **Sovereignty / E2E encryption** — customer-held keys; the network
+   sees only ciphertext.
+3. **No vendor lock-in** — content-addressed, portable across workers.
+4. **Pay-as-you-go** — no minimums, no 90-day floors.
+5. **Idle-disk arbitrage** — same shape as the GPU arbitrage; workers
+   have spare disk on prosumer rigs.
 
 ## Motivation
 
-This DIP went through two drafts. The first said "no storage" —
-correct conclusion. The second tried to argue we could ship Reed-
-Solomon 10/14 + auto-repair and hit cents-per-GB. That second draft
-was wrong, and reviewer pushback called it out:
+This DIP went through three drafts; recording the path so the next
+person doesn't repeat it.
 
-> it doesn't scale. i worked at a company that was wanting to do p2p
-> file hosting and they said ipfs and all the other native crypto
-> ones were garbage because they couldn't compete with s3 pricing
+| Draft | Position | Why withdrawn / kept |
+|---|---|---|
+| v1 | "no storage network" | Too narrow — storage really is part of the cloud-hosting story we want to tell |
+| v2 | "build it, beat S3 on $/GB" | Withdrawn — couldn't survive the pricing math; per-GB consumer-network economics don't beat hyperscaler infrastructure spend |
+| **v3 (this)** | **"build it, compete on value not price"** | Reconciles the two — yes we host, but we don't claim to beat R2 on raw $/GB |
 
-The reviewer was right and matches everyone else's conclusion.
-Reverting to the original position with the math committed to record:
+The decisive directive from review: *"c0mpute will host files."*
 
-### Why p2p storage can't beat S3-class pricing
-
-1. **S3-class providers sell at near-cost on integrated infrastructure
-   spend.** Cloudflare R2 ($0.015/GB + $0 egress), Backblaze B2
-   ($0.006/GB), AWS Glacier Deep Archive ($0.00099/GB-month) — these
-   prices come from dedicated peering, optimized hardware lifecycle,
-   power/cooling at hyperscale. Not from clever protocols.
-
-2. **A p2p network of consumer/prosumer nodes can't reach those
-   per-GB economics**, no matter the coding scheme. Storj at $0.004
-   only works because operators effectively donate spare capacity AND
-   Storj runs centralized metadata under the hood. Filecoin "wins"
-   on storage cost but retrieval is slow and unreliable for active
-   workloads.
-
-3. **Hidden overheads consume any nominal margin:**
-   - Verification (proof-of-replication compute)
-   - Repair bandwidth on node churn
-   - Coordinator operations (placement, manifest tracking)
-   - Sybil prevention / trust establishment
-   - Customer-side latency tax (worse UX vs. CDN-served S3)
-
-4. **Where p2p storage genuinely wins, it isn't on price.**
-   Sovereignty (data jurisdiction), customer-held encryption keys,
-   censorship resistance, compute-locality. Real but small markets;
-   not a flagship product.
-
-The honest conclusion: the only sensible storage plan for c0mpute is
-**don't run a storage network**.
+The honest math from v2's withdrawal still stands: we won't be
+cheaper than R2 ($0.015/GB + $0 egress) or B2 ($0.006/GB) on raw
+$/GB-month. But we can offer a different bundle of values that some
+customers will pay the same or slightly more for.
 
 ## Detailed design
 
-### v1 storage model: customer-provided URLs
+### Pricing target (be honest)
 
-Job manifests reference inputs and outputs by URL:
+| Provider | Storage $/GB-mo | Egress $/GB | Notes |
+|---|---|---|---|
+| Cloudflare R2 | $0.015 | $0 | The ergonomic winner for most |
+| Backblaze B2 | $0.006 | $0.01 | The price winner |
+| Storj | $0.004 | $0.007 | Centralized metadata; competitive |
+| **c0mpute** | **$0.008** | **$0 internal**, $0.005 internet | Roughly B2 + a touch; internal egress is the value |
 
-```json
-{
-  "input": {
-    "uri": "https://customer-bucket.r2.cloudflarestorage.com/input.mov?signed=...",
-    "sha256": "..."
-  },
-  "output": {
-    "uri": "https://customer-bucket.r2.cloudflarestorage.com/output.mp4?signed=...",
-    "format": "mp4"
-  }
+Crucial: customers who run c0mpute jobs that *read* data we host pay
+**zero internal egress**. For transcode/inference workloads where the
+input file dominates bandwidth, that's a real saving compared to
+"store on R2, run inference on c0mpute" — even though R2 is also
+$0-egress, the data still has to leave R2's network into the worker.
+Same logical cost, but with c0mpute we keep it on-network.
+
+### Architecture (single daemon, HTTP-shaped)
+
+The c0mpute Rust daemon already runs an axum gateway. We extend it
+with shard endpoints — same daemon, same auth, same operator
+experience. Workers opt into the `storage` role just like they opt
+into `transcode` or `gateway`.
+
+```
+┌────────────────────── c0mpute (Rust binary) ──────────────────────┐
+│ axum gateway                                                       │
+│   GET  /chunks/<hash>          (existing, content-addressed)       │
+│   GET  /storage/v1/objects/<oh>     (NEW: erasure-coded read)      │
+│   PUT  /storage/v1/objects/<oh>     (NEW: erasure-coded write)     │
+│   GET  /storage/v1/shards/<sh>      (NEW: per-shard read)          │
+│   PUT  /storage/v1/shards/<sh>      (NEW: peer placement target)   │
+│   POST /storage/v1/repair/<oh>      (NEW: auto-repair trigger)     │
+│ storage role  →  c0mpute-store + erasure-coding (shipped Phase 1)  │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Erasure-coding scheme
+
+Reed-Solomon **10/14** (10 data + 4 parity). Already implemented in
+`c0mpute-store::erasure` (DIP-0012 Phase 1 ships in tree as of
+commit `6b5b771`):
+
+- 40% storage overhead vs. 200% for 3-copy replication
+- Tolerates 4 simultaneous shard losses
+- Real-world durability ~11 nines under typical churn assumptions
+
+Standard parameters; same Storj uses, well-trodden territory.
+
+### Tiers
+
+```
+"storage": {
+  "tier": "verified",  // "cheap" | "verified" | "private"
+  "object_hash": "blake3:..."
 }
 ```
 
-The worker:
+| Tier | Scheme | Encryption | Use case |
+|---|---|---|---|
+| `cheap` | 3-copy replication | optional | Low-stakes / replaceable / dev |
+| `verified` | RS 10/14 | server-side at-rest (worker-local key) | Default production |
+| `private` | RS 10/14 | customer-encrypted before PUT (E2E) | Sovereignty / regulated content |
 
-1. Downloads input from the signed URL.
-2. Verifies the sha256 (customer commits a hash so the worker can
-   detect tampering).
-3. Runs the workload locally on ephemeral disk.
-4. Uploads output to the customer-provided destination URL.
-5. Signs a receipt covering input hash + output hash + runtime image
-   hash, returns through CoinPay.
+`private` is the genuine differentiator — workers process / serve
+opaque ciphertext. If the workload is "store and serve later" without
+any worker-side processing of plaintext, E2E is straightforward.
+If the workload is "transcode this video", `private` doesn't apply
+because the worker needs plaintext.
 
-Working data on the worker is ephemeral.
+### HTTP wire format
 
-### What we keep from the brief storage detour
+Object PUT (multipart not required; raw body works):
 
-- **`c0mpute-store` Rust crate** stays. It's per-node ephemeral cache
-  for working data — not the basis of a storage network.
-- **`c0mpute-store::erasure`** (Reed-Solomon 10/14 in ~150 LOC) stays
-  as **niche capability**, not a product. Use cases: bit-rot
-  protection on long-running worker chunks; sovereignty-tier customers
-  who want encrypted-at-rest output stored locally on workers (an
-  edge-case feature, not the default path); future cold-archive
-  experiments.
-- **`c0mpute-store::storage::Storage`** wrapper stays for the same
-  niche cases. Enabling it is opt-in via job-manifest tier and is
-  not exposed as a marketed storage product.
+```
+PUT /storage/v1/objects/<expected-hash>
+X-Coinpay-Auth: base64url(envelope)
+Content-Type: application/octet-stream
+Content-Length: <bytes>
 
-### What this DIP rules out
+<raw bytes>
 
-- A `storage` worker role marketed at general-purpose customers.
-- Pricing claims like "cheaper than S3".
-- Building a CDN out of c0mpute gateway nodes.
-- Cross-node Reed-Solomon shard distribution as a v1 deliverable.
-- Any storage-as-a-service positioning on c0mpute.com.
+→ 201 Created
+{
+  "object_hash": "blake3:...",
+  "shards": [
+    { "index": 0, "hash": "blake3:...", "host_hint": "12D3Koo..." },
+    ...
+    { "index": 13, "hash": "blake3:...", "host_hint": "12D3Koo..." }
+  ],
+  "tier": "verified"
+}
+```
 
-### What replaces it
+Object GET:
 
-DIP-0013: **BYOS plugin** — first-class integrations with R2 / B2 /
-S3 / Backblaze / IPFS gateways / Storj S3 gateway. Customer connects
-their storage credentials once in the dashboard or via
-`c0mpute coinpay storage link <provider>`; jobs reference outputs by
-the customer's chosen prefix; c0mpute uploads land there
-automatically. We don't host bytes; we make hosting them elsewhere
-frictionless.
+```
+GET /storage/v1/objects/<object-hash>
 
-### When storage might come back as a product
+→ 200 OK
+Content-Type: application/octet-stream
+<reconstructed bytes>
+```
 
-A future c0mpute revisit could justify building a storage network
-only if **all three** of these are true:
+Per-shard endpoints (for peer placement and auto-repair):
 
-1. **A specific market with non-price-driven needs is paying for
-   c0mpute compute** (sovereignty, encryption-at-rest with E2E,
-   censorship resistance).
-2. **Existing networks (Storj / Filecoin / Arweave) don't fit** that
-   market's exact requirements.
-3. **The economics on that segment can sustain the operational
-   overhead** without trying to beat S3 on $/GB.
+```
+PUT /storage/v1/shards/<shard-hash>
+X-C0mpute-Object: <object-hash>
+X-C0mpute-Shard-Index: 0..13
+<raw shard bytes>
 
-Until all three are true, keep storage out.
+GET /storage/v1/shards/<shard-hash>
+→ raw shard bytes
+```
+
+Auth on PUTs: signed-request envelope keyed by CoinPay DID
+(DIP-0007). Reads of public objects don't require auth; reads of
+`private` tier do.
+
+### Phase plan
+
+**Phase 1 — DONE** (commit `6b5b771`):
+- `c0mpute-store::erasure` — RS encode/decode (4 unit tests).
+- `c0mpute-store::storage::Storage` — wrapper over `ChunkStore`,
+  manifests on disk, single-node round-trip works (5 tests).
+
+**Phase 2 — HTTP endpoints + manifest publishing:**
+- Extend `c0mpute-gateway` with the shard / object endpoints above.
+- Manifest publishing: when a worker stores an object, the manifest
+  ends up in the customer's manifest registry (CoinPay-anchored,
+  see Open questions).
+- Single-node first; `host_hint` stays `null`.
+
+**Phase 3 — Cross-node placement (waits on `c0mpute-net` libp2p):**
+- Choose 14 distinct peers weighted by reputation × ASN/region
+  diversity.
+- PUT each shard to its assigned peer.
+- Update manifest with `host_hint` for each shard.
+
+**Phase 4 — Auto-repair daemon:**
+- Periodic scan: for each manifest in our keep list, reach the 14
+  shard hosts. If >2 unreachable, trigger repair.
+- Repair: fetch 10 surviving shards → reconstruct → re-encode the
+  missing 4 → PUT replacements to fresh peers → update manifest →
+  sign a "repair completed" attestation through CoinPay.
+
+**Phase 5 — Storage challenges + billing:**
+- Random byte-range challenges per `c0mpute-verify::StorageChallenge`
+  (already typed, just needs the dispatch).
+- Payouts through CoinPay: $/GB-month accrued per shard host,
+  $/GB egress accrued per server-of-bytes.
+
+### What we keep from the BYOS3 idea (DIP-0013)
+
+DIP-0013 still applies. **BYOS3 is the default; c0mpute storage is
+opt-in.** Customers who already have R2 / B2 / S3 just keep using
+those for free; we don't push storage on them. Customers who want
+the compute-locality / sovereignty benefits opt into c0mpute storage
+explicitly via job manifest.
 
 ## Alternatives considered
 
-**Build it anyway with RS 10/14 + auto-repair.** This was the
-in-flight v2 of this DIP, withdrawn after reviewer pushback. The
-math doesn't survive S3-class price competition — see Motivation.
+**Skip storage (v1 of this DIP).** Withdrawn — the cloud-hosting
+story includes storage; pretending otherwise leaves a real gap.
 
-**Wrap an existing decentralized network (Storj / Filecoin).** Better
-than building our own, but they have their own economics and tokens.
-We'd be reselling. The BYOS plugin in DIP-0013 already includes
-optional integrations with those networks for customers who want them.
+**Try to beat R2 on raw $/GB (v2 of this DIP).** Withdrawn — the
+math doesn't survive scrutiny, hyperscaler infra basis wins.
 
-**Sovereignty-only storage as a premium product.** Genuine demand
-exists (legal, healthcare, defense). But it doesn't justify a
-network-wide storage layer. If a single customer pays for it, build
-a bespoke deployment for them, don't build a marketplace product.
+**This (v3) — build storage, sell it on different value props.**
+Honest about positioning; keeps the compute-locality story which
+is the actual structural advantage.
+
+**Wrap Storj / Filecoin instead.** Their networks, their economics,
+their tokens. We'd be a thin shim adding nothing. The compute-locality
+value goes away because Storj/Filecoin nodes aren't c0mpute workers.
 
 ## Migration & rollout
 
-Performed in this commit:
+The Phase 1 code shipped in `c0mpute-store` is already in tree.
+Phase 2 adds the HTTP endpoints to `c0mpute-gateway` (in-progress
+follow-up to this DIP). Phase 3+ depend on `c0mpute-net` (libp2p)
+landing.
 
-- DIP-0012 v2 (the "build it" draft) is withdrawn before any
-  marketing or external promise of a storage product.
-- The Phase 1 code (`c0mpute-store::erasure`,
-  `c0mpute-store::storage::Storage`, manifest types) stays in the
-  tree for niche / future-experiment use, with module docs updated
-  to clarify it's not a marketed product.
-- HTTP shard endpoints in `c0mpute-gateway` (planned but not yet
-  written) — cancelled.
-- DIP-0013 (BYOS3 plugin) is the actual storage-shaped work.
+Marketing / pricing page on c0mpute.com should reflect this honestly:
+storage is a c0mpute capability, $0.008/GB-month, with $0 internal
+egress as the differentiator. **No claim of "cheaper than R2."**
 
 ## Open questions
 
-- **Receipt anchoring.** Job receipts (signed by worker + validator
-  DIDs) need somewhere durable. CoinPay's own ledger is the assumed
-  home — verifying that assumption is a CoinPay-side question.
-- **Public attestation log.** If customers want a public "yes, c0mpute
-  job XYZ ran successfully" surface, we'd want some persistent
-  destination. Probably CoinPay receipts → a public aggregator. Out
-  of scope here.
+- **Manifest hosting durability.** A manifest = a small JSON saying
+  "these 14 shards on these 14 hosts make object X." If the manifest
+  is lost, the data is unrecoverable even though shards exist.
+  Probably the manifest itself becomes recursively a tier-`verified`
+  object; the customer's keep-list is anchored at a CoinPay-signed
+  registry pointer. Needs CoinPay integration to nail down.
+- **Refcounting for shared shards.** Identical shards across objects
+  share storage in the content-addressed layer (real dedup benefit).
+  Deletion needs refcounting so we don't reap a shard another object
+  still references. Phase 2 work.
+- **Egress accounting.** Workers need to track "served N bytes for
+  this object" to attribute payouts. Same plumbing as job-completion
+  receipts.
+- **Object size cap.** What's the largest single object we accept?
+  Naive RS encoding loads full plaintext into memory at PUT time.
+  Above some threshold (10 GB?) we need streaming RS encoding —
+  doable, but extra work.
 
 ## Out of scope
 
-- Reviving the storage-network idea in any form on c0mpute.com.
+- Filesystem-style mutable objects. Content-addressed, immutable.
 - Permanent / Arweave-style storage.
-- Filesystem-style mutable objects.
+- IPFS interop — could add later as a read-only adapter.
