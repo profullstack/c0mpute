@@ -40,6 +40,7 @@ export default function RootLayout({
               <Link href="/getting-started" className="!border-0 hover:text-[var(--color-accent)]">getting-started</Link>
               <Link href="/plugins" className="!border-0 hover:text-[var(--color-accent)]">plugins</Link>
               <Link href="/docs" className="!border-0 hover:text-[var(--color-accent)]">docs</Link>
+              <Link href="/status" className="!border-0 hover:text-[var(--color-accent)]">status</Link>
               <Link href="/contact" className="!border-0 hover:text-[var(--color-accent)]">contact</Link>
             </div>
           </nav>

@@ -6,6 +6,7 @@ use anyhow::Result;
 use c0mpute_net::{ChunkSource, Libp2pNetwork, Network, NetworkConfig, bootstrap};
 
 use crate::capabilities::{self, Registry};
+use crate::dispatch;
 use c0mpute_proto::Hash;
 use c0mpute_store::ChunkStore;
 use tracing::info;
@@ -91,11 +92,19 @@ impl Supervisor {
         let net = self.libp2p.clone();
         info!(?tags, "advertising capabilities");
         tokio::spawn(capabilities::advertise_loop(
-            net,
-            tags,
+            net.clone(),
+            tags.clone(),
             hardware,
             capabilities::DEFAULT_ADVERTISE_INTERVAL,
         ));
+
+        // Job dispatch: subscribe to c0mpute/jobs/<workload> for each
+        // workload our roles imply. Today: only ffmpeg.transcode if
+        // the Transcode role is enabled.
+        for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
+            info!(%workload_type, "subscribing to job topic");
+            dispatch::run_worker_subscriber(net.clone(), workload_type, tags.clone());
+        }
 
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;

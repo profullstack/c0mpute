@@ -142,8 +142,15 @@ install_c0mpute() {
   platform="$1"
   target="$C0MPUTE_HOME/bin/c0mpute"
   if [ -x "$target" ] && [ "$FORCE" -eq 0 ]; then
-    say "c0mpute already installed at $target (use --force to reinstall)"
-    return 0
+    # Verify the existing binary actually runs. v0.1.0's glibc-linked
+    # build fails on systems with older glibc; v0.1.1+ uses musl. If
+    # the binary can't execute `version` cleanly, treat it as broken
+    # and force reinstall.
+    if "$target" version >/dev/null 2>&1; then
+      say "c0mpute already installed at $target (use --force to reinstall)"
+      return 0
+    fi
+    warn "existing $target appears broken (won't run); reinstalling"
   fi
 
   artifact="c0mpute-${platform}.tar.gz"
@@ -281,16 +288,26 @@ main() {
   print_versions
   run_doctor
 
-  cat <<EOF
+  if ! printf '%s' "$PATH" | grep -q '\.c0mpute/bin'; then
+    cat <<EOF
 
+\033[1;33m! Your CURRENT shell doesn't have ~/.c0mpute/bin on \$PATH yet.\033[0m
+  We added it to your shell rc files for future sessions. To use
+  c0mpute right now in this shell, run:
+
+      \033[1;36mexport PATH="\$HOME/.c0mpute/bin:\$PATH"\033[0m
+
+  …or open a new terminal.
+
+EOF
+  fi
+
+  cat <<EOF
 Next steps:
   c0mpute coinpay did create
   c0mpute worker register
   c0mpute doctor
   c0mpute worker start
-
-If your shell isn't picking up the new binaries:
-  export PATH="\$HOME/.c0mpute/bin:\$PATH"
 
 Docs: https://c0mpute.com/docs
 EOF

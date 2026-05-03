@@ -6,9 +6,11 @@
 
 pub mod capabilities;
 pub mod config;
+pub mod dispatch;
 pub mod supervisor;
 
 pub use capabilities::{Registry, advertise_loop, tags_from_config};
+pub use dispatch::{run_worker_subscriber, workload_types_from_roles};
 pub use config::Config;
 pub use supervisor::Supervisor;
 
