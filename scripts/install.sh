@@ -80,6 +80,36 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
 }
 
+# Detect the user's interactive shell. Tries (in order):
+#   1. $SHELL — the login shell from passwd; what `chsh` sets.
+#   2. /proc/$PPID/comm — the parent process name (best effort).
+#   3. fall back to "sh".
+# Returns one of: bash | zsh | fish | dash | ksh | sh
+detect_shell() {
+  candidate="${SHELL:-}"
+  if [ -z "$candidate" ] && [ -r "/proc/$PPID/comm" ]; then
+    candidate=$(cat "/proc/$PPID/comm" 2>/dev/null || true)
+  fi
+  case "${candidate:-}" in
+    *zsh*)  echo "zsh"  ;;
+    *bash*) echo "bash" ;;
+    *fish*) echo "fish" ;;
+    *dash*) echo "dash" ;;
+    *ksh*)  echo "ksh"  ;;
+    *)      echo "sh"   ;;
+  esac
+}
+
+# Shell rc file path for a given shell name.
+shell_rc_for() {
+  case "$1" in
+    bash) echo "$HOME/.bashrc" ;;
+    zsh)  echo "$HOME/.zshrc"  ;;
+    fish) echo "$HOME/.config/fish/config.fish" ;;
+    *)    echo "$HOME/.profile" ;;
+  esac
+}
+
 # ────────────────────────────────────────────────────────────────────────
 # Idempotent mise + bun install
 # ────────────────────────────────────────────────────────────────────────
@@ -225,9 +255,9 @@ chain_install() {
 # ────────────────────────────────────────────────────────────────────────
 
 ensure_path() {
-  # Add ~/.c0mpute/bin and ~/.local/bin to PATH in every shell rc we
-  # find, plus shell-appropriate `mise activate` so mise-managed
-  # tools (bun, node) are auto-shimmed in new shells.
+  # Bash / Zsh / sh-style profile. Each rc file gets the PATH line +
+  # the right `mise activate <shell>` invocation. Idempotent — won't
+  # duplicate lines on re-run.
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [ -f "$rc" ] || continue
 
@@ -239,9 +269,7 @@ ensure_path() {
     fi
 
     # mise activation per shell. .profile is sh-only and mise's
-    # `activate sh` doesn't exist; we skip it there. New bash/zsh
-    # sessions get the shims; .profile users still have ~/.local/bin
-    # on PATH from the line above.
+    # `activate sh` doesn't exist; we skip it there.
     if command -v mise >/dev/null 2>&1 && ! grep -q 'mise activate' "$rc"; then
       case "$rc" in
         *.bashrc) printf 'eval "$(mise activate bash)"\n' >> "$rc" ;;
@@ -249,6 +277,22 @@ ensure_path() {
       esac
     fi
   done
+
+  # Fish — different syntax, different config path.
+  fish_rc="$HOME/.config/fish/config.fish"
+  if [ -d "$HOME/.config/fish" ] || [ "$(detect_shell)" = "fish" ]; then
+    mkdir -p "$(dirname "$fish_rc")"
+    [ -f "$fish_rc" ] || touch "$fish_rc"
+    if ! grep -q '\.c0mpute/bin' "$fish_rc"; then
+      {
+        printf '\n# Added by c0mpute installer\n'
+        printf 'fish_add_path -p $HOME/.c0mpute/bin $HOME/.local/bin\n'
+      } >> "$fish_rc"
+    fi
+    if command -v mise >/dev/null 2>&1 && ! grep -q 'mise activate' "$fish_rc"; then
+      printf 'mise activate fish | source\n' >> "$fish_rc"
+    fi
+  fi
 }
 
 print_versions() {
@@ -307,15 +351,17 @@ main() {
   run_doctor
 
   if ! printf '%s' "$PATH" | grep -q '\.c0mpute/bin'; then
-    rc_hint="$HOME/.bashrc"
-    case "${SHELL:-}" in
-      */zsh) rc_hint="$HOME/.zshrc" ;;
-    esac
-    printf '\n\033[1;33m! Your CURRENT shell does NOT have c0mpute on $PATH yet.\033[0m\n'
+    user_shell=$(detect_shell)
+    rc_hint=$(shell_rc_for "$user_shell")
+    printf '\n\033[1;33m! Your CURRENT %s shell does NOT have c0mpute on $PATH yet.\033[0m\n' "$user_shell"
     printf '  We added c0mpute + mise activation to your shell rc files,\n'
     printf '  but they only kick in for NEW shells.\n\n'
     printf '  Do ONE of these:\n'
-    printf '    \033[1;36msource %s\033[0m         # reload current shell\n' "$rc_hint"
+    if [ "$user_shell" = "fish" ]; then
+      printf '    \033[1;36msource %s\033[0m\n' "$rc_hint"
+    else
+      printf '    \033[1;36m. %s\033[0m\n' "$rc_hint"
+    fi
     printf '    \033[1;36mexec $SHELL\033[0m                # restart current shell\n'
     printf '    Open a new terminal\n\n'
   fi
