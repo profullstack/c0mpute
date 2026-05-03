@@ -151,7 +151,7 @@ Rollout order:
 1. Add the `@infernetprotocol/auth`-equivalent package to the coordinator
    (or vendor their primitives — license check first).
 2. Add the auth header verification middleware in `apps/coordinator`.
-3. Generate identity in `quest-core::supervisor::boot` before the first
+3. Generate identity in `c0mpute-core::supervisor::boot` before the first
    coordinator call.
 4. Ship NIP-07 login as an additive button on the dashboard sign-in page,
    parallel to magic-link.

@@ -1,0 +1,14 @@
+[package]
+name = "c0mpute-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-upgrade machinery for the Quest node."
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }

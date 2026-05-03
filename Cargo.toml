@@ -1,27 +1,26 @@
 [workspace]
 resolver = "3"
 members = [
-    # ── Host (c0mpute umbrella binary + supporting crates) ─────────────
-    # The host binary AND any in-process workload code lives here.
+    # Host (c0mpute umbrella binary + supporting crates).
     # The `plugins/` directory holds only marketplace wrappers
     # (module.toml + web stubs); plugin source lives in upstream repos.
-    "node/crates/quest-cli",          # produces `c0mpute`
-    "node/crates/quest-core",
-    "node/crates/quest-net",
-    "node/crates/quest-store",
-    "node/crates/quest-gateway",
-    "node/crates/quest-verify",
-    "node/crates/quest-update",
-    "node/crates/quest-doctor",
-    "node/crates/quest-proto",
-    "node/crates/quest-api",
-    "node/crates/quest-transcode",    # in-process transcode workload (FFmpeg)
+    "node/crates/c0mpute-cli",          # produces `c0mpute`
+    "node/crates/c0mpute-core",
+    "node/crates/c0mpute-net",
+    "node/crates/c0mpute-store",
+    "node/crates/c0mpute-gateway",
+    "node/crates/c0mpute-verify",
+    "node/crates/c0mpute-update",
+    "node/crates/c0mpute-doctor",
+    "node/crates/c0mpute-proto",
+    "node/crates/c0mpute-api",
+    "node/crates/c0mpute-transcode",    # in-process transcode workload (FFmpeg)
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "Apache-2.0 OR MIT"
 repository = "https://github.com/profullstack/c0mpute"
 rust-version = "1.85"
 
@@ -49,18 +48,16 @@ url = "2"
 directories = "5"
 sysinfo = "0.32"
 
-# Host crates (node/crates)
-quest-proto = { path = "node/crates/quest-proto" }
-quest-store = { path = "node/crates/quest-store" }
-quest-net = { path = "node/crates/quest-net" }
-quest-gateway = { path = "node/crates/quest-gateway" }
-quest-verify = { path = "node/crates/quest-verify" }
-quest-update = { path = "node/crates/quest-update" }
-quest-doctor = { path = "node/crates/quest-doctor" }
-quest-api = { path = "node/crates/quest-api" }
-quest-core = { path = "node/crates/quest-core" }
-
-quest-transcode = { path = "node/crates/quest-transcode" }
+c0mpute-proto = { path = "node/crates/c0mpute-proto" }
+c0mpute-store = { path = "node/crates/c0mpute-store" }
+c0mpute-net = { path = "node/crates/c0mpute-net" }
+c0mpute-gateway = { path = "node/crates/c0mpute-gateway" }
+c0mpute-verify = { path = "node/crates/c0mpute-verify" }
+c0mpute-update = { path = "node/crates/c0mpute-update" }
+c0mpute-doctor = { path = "node/crates/c0mpute-doctor" }
+c0mpute-api = { path = "node/crates/c0mpute-api" }
+c0mpute-core = { path = "node/crates/c0mpute-core" }
+c0mpute-transcode = { path = "node/crates/c0mpute-transcode" }
 
 [profile.release]
 lto = "thin"

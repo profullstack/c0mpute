@@ -141,7 +141,7 @@ crates/
 └── (existing quest-* crates retained as transcode-module internals)
 ```
 
-Existing `quest-*` crates (`quest-store`, `quest-transcode`, `quest-net`,
+Existing `quest-*` crates (`c0mpute-store`, `c0mpute-transcode`, `c0mpute-net`,
 etc.) keep their names internally — they're the transcode module's
 implementation, not a user-visible brand.
 

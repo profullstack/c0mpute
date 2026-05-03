@@ -7,7 +7,7 @@ authors:
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: node/crates/quest-cli/src/main.rs, scripts/install.sh
+implementation: node/crates/c0mpute-cli/src/main.rs, scripts/install.sh
 supersedes:
 superseded-by: 0005
 ---

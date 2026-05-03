@@ -7,7 +7,7 @@ authors:
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: apps/web (landing), apps/tui (react-blessed scaffold), Cmd::Tui in node/crates/quest-cli
+implementation: apps/web (landing), apps/tui (react-blessed scaffold), Cmd::Tui in node/crates/c0mpute-cli
 supersedes:
 superseded-by:
 ---

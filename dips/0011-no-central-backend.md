@@ -143,11 +143,11 @@ Performed in this commit:
 
 Things that move forward:
 
-- Job manifest schema lives in code (`quest-proto` Rust crate + the v1
+- Job manifest schema lives in code (`c0mpute-proto` Rust crate + the v1
   PRD §"Job Manifest Format"); doesn't need a DB.
 - The `claim_next_job()` SQL RPC was a useful documentation of intent;
   the equivalent gossipsub-based flow lives in DIP-0006 / DIP-0010 and
-  the eventual `quest-net` implementation.
+  the eventual `c0mpute-net` implementation.
 - The `apps/coordinator` route shapes are preserved in git history if
   we ever want to revisit specific endpoint designs.
 

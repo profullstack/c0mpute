@@ -87,11 +87,11 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 ├── dips/                              # design proposals
 ├── node/
 │   └── crates/                        # all Rust source — host + transcode workload
-│       ├── quest-cli/                 # produces `c0mpute`
-│       ├── quest-core/, quest-net/, quest-store/, quest-gateway/
-│       ├── quest-verify/, quest-update/, quest-doctor/
-│       ├── quest-proto/, quest-api/
-│       └── quest-transcode/           # in-process FFmpeg workload
+│       ├── c0mpute-cli/                 # produces `c0mpute`
+│       ├── c0mpute-core/, c0mpute-net/, c0mpute-store/, c0mpute-gateway/
+│       ├── c0mpute-verify/, c0mpute-update/, c0mpute-doctor/
+│       ├── c0mpute-proto/, c0mpute-api/
+│       └── c0mpute-transcode/           # in-process FFmpeg workload
 ├── plugins/                           # marketplace wrappers ONLY (no source)
 │   ├── transcode/{module.toml,web/}
 │   ├── coinpay/{module.toml,web/}     # source lives upstream at coinpay
@@ -154,7 +154,7 @@ cargo build --bin c0mpute
 - Real CoinPay DID generation, escrow, receipts (DIP-0007 — depends on
   upstream coinpay project shipping)
 - Real Infernet runtime integration (depends on upstream infernet-protocol)
-- libp2p networking (`quest-net` is a trait surface today; bootstrap
+- libp2p networking (`c0mpute-net` is a trait surface today; bootstrap
   design in DIP-0010)
 - Plugin marketplace UI on the dashboard (`/plugins` page coming)
 

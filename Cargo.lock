@@ -235,6 +235,166 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "c0mpute-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "c0mpute-proto",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "c0mpute-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "c0mpute-core",
+ "c0mpute-doctor",
+ "c0mpute-proto",
+ "clap",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "c0mpute-api",
+ "c0mpute-doctor",
+ "c0mpute-gateway",
+ "c0mpute-net",
+ "c0mpute-proto",
+ "c0mpute-store",
+ "c0mpute-transcode",
+ "c0mpute-update",
+ "c0mpute-verify",
+ "directories",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "c0mpute-doctor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "c0mpute-net",
+ "c0mpute-proto",
+ "c0mpute-store",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "c0mpute-proto",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-proto"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "c0mpute-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "c0mpute-proto",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-transcode"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "c0mpute-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-update"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-verify"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "c0mpute-proto",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1046,166 +1206,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "quest-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "quest-proto",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "quest-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "quest-core",
- "quest-doctor",
- "quest-proto",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "quest-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "directories",
- "quest-api",
- "quest-doctor",
- "quest-gateway",
- "quest-net",
- "quest-proto",
- "quest-store",
- "quest-transcode",
- "quest-update",
- "quest-verify",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "quest-doctor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quest-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "quest-net",
- "quest-proto",
- "quest-store",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "quest-net"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "quest-proto",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quest-proto"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "hex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "quest-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "hex",
- "quest-proto",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quest-transcode"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "quest-proto",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quest-update"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "quest-verify"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "quest-proto",
- "serde",
- "tokio",
- "tracing",
 ]
 
 [[package]]

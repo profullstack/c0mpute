@@ -7,7 +7,7 @@ authors:
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: deferred until quest-net wires up libp2p
+implementation: deferred until c0mpute-net wires up libp2p
 supersedes:
 superseded-by:
 ---
@@ -172,12 +172,12 @@ least one entry point.
 
 ## Migration & rollout
 
-This DIP only locks the design. Implementation depends on `quest-net`
+This DIP only locks the design. Implementation depends on `c0mpute-net`
 actually wiring up libp2p (currently a trait surface). Sequence:
 
-1. `quest-net` implements libp2p Kad-DHT with protocol id
+1. `c0mpute-net` implements libp2p Kad-DHT with protocol id
    `/c0mpute/kad/1.0.0`.
-2. Bootstrap-list parsing lands in `quest-core` config.
+2. Bootstrap-list parsing lands in `c0mpute-core` config.
 3. CLI flag `--bootstrap` lands in `c0mpute worker start`.
 4. We deploy 3 seed nodes on Hetzner / DO / Hetzner-EU.
 5. Peer IDs + multiaddrs go into the hardcoded list AND

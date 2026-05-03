@@ -239,7 +239,7 @@ Greenfield. Land in this order:
 
 1. `module.toml` schema + parser in `c0mpute-core`.
 2. In-process workload handler trait + transcode handler (existing
-   `quest-transcode` code adapted to it).
+   `c0mpute-transcode` code adapted to it).
 3. Subprocess dispatch path + the contract spec above.
 4. `c0mpute modules list` / `install` / `enable` / `disable`.
 5. Web `/modules` catalog page (Phase 2).

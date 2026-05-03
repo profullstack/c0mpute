@@ -271,17 +271,17 @@ Configured via `depin video start --roles storage,transcode` or via TOML config.
 ```
 quest/
 ├── crates/
-│   ├── quest-cli/         # Binary entrypoint, CLI parsing
-│   ├── quest-core/        # Node coordination, role dispatch
-│   ├── quest-net/         # libp2p stack, DHT, chunk transport protocol
-│   ├── quest-store/       # Local chunk storage, RocksDB, erasure coding
-│   ├── quest-transcode/   # FFmpeg orchestration, job execution
-│   ├── quest-gateway/     # HTTP gateway (axum), HLS serving
-│   ├── quest-verify/      # Challenge/response, reputation scoring
-│   ├── quest-update/      # Self-upgrade mechanism
-│   ├── quest-doctor/      # Self-diagnostics & self-heal
-│   ├── quest-proto/       # Shared protobuf/bincode types
-│   └── quest-api/         # Coordinator API client
+│   ├── c0mpute-cli/         # Binary entrypoint, CLI parsing
+│   ├── c0mpute-core/        # Node coordination, role dispatch
+│   ├── c0mpute-net/         # libp2p stack, DHT, chunk transport protocol
+│   ├── c0mpute-store/       # Local chunk storage, RocksDB, erasure coding
+│   ├── c0mpute-transcode/   # FFmpeg orchestration, job execution
+│   ├── c0mpute-gateway/     # HTTP gateway (axum), HLS serving
+│   ├── c0mpute-verify/      # Challenge/response, reputation scoring
+│   ├── c0mpute-update/      # Self-upgrade mechanism
+│   ├── c0mpute-doctor/      # Self-diagnostics & self-heal
+│   ├── c0mpute-proto/       # Shared protobuf/bincode types
+│   └── c0mpute-api/         # Coordinator API client
 └── Cargo.toml
 ```
 
@@ -317,7 +317,7 @@ The node detects available encoders at startup via `ffmpeg -encoders` and `ffmpe
 
 ### How the transcode worker uses FFmpeg
 
-The Rust worker (`quest-transcode` crate) shells out to `ffmpeg` rather than linking it via `ffmpeg-next`. Reasons:
+The Rust worker (`c0mpute-transcode` crate) shells out to `ffmpeg` rather than linking it via `ffmpeg-next`. Reasons:
 
 1. License hygiene — subprocess boundary keeps GPL FFmpeg cleanly separated from our Apache-2.0 binary
 2. Crash isolation — a segfaulting FFmpeg doesn't take down the worker
@@ -660,7 +660,7 @@ tables:
 
 Customers see only their own videos/billing. Providers see only their own nodes/earnings. Operators see everything. Enforced at Postgres via Supabase RLS policies, not at app layer.
 
-### Network protocol types (Rust + Bun, generated from `quest-proto`)
+### Network protocol types (Rust + Bun, generated from `c0mpute-proto`)
 
 ```rust
 struct ChunkAnnouncement {
@@ -866,7 +866,7 @@ For comparison: Mux charges $0.04/min for 1080p H.264 encoding. Bunny.net charge
 | Component | License |
 |---|---|
 | `quest` (Rust node) | Apache-2.0 |
-| `quest-proto` | Apache-2.0 |
+| `c0mpute-proto` | Apache-2.0 |
 | Coordinator API (Bun) | Apache-2.0 |
 | Dashboard (Next.js) | Apache-2.0 |
 | Install scripts | Apache-2.0 |
