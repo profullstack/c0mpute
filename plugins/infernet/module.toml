@@ -6,7 +6,7 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.1.0"
+version     = "0.1.1"
 kind        = "workload"
 description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification."
 author      = "Infernet Protocol"

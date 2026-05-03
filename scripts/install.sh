@@ -1,12 +1,15 @@
 #!/usr/bin/env sh
 # c0mpute.com installer. Served at https://c0mpute.com/install.sh.
 #
-# Installs the c0mpute v1 CLI stack:
+# Installs the c0mpute v1 stack idempotently:
+#   mise      — runtime version manager (skipped if present)
+#   bun       — JS runtime for TUI / JS-flavoured plugins (skipped if present)
 #   c0mpute   — this repo (https://github.com/profullstack/c0mpute)
-#   coinpay   — chained from https://coinpayportal.com/install.sh
-#   infernet  — chained from https://infernetprotocol.com/install.sh
+#   coinpay   — routed via https://c0mpute.com/plugins/coinpay/install.sh
+#   infernet  — routed via https://c0mpute.com/plugins/infernet/install.sh
 #
-# Idempotent — re-running upgrades in place.
+# Re-running upgrades in place. Each step skips when already installed
+# unless --force is passed.
 #
 # Flags:
 #   --minimal       Install only c0mpute (skip coinpay + infernet)
@@ -21,8 +24,11 @@ C0MPUTE_VERSION="${C0MPUTE_VERSION:-latest}"
 C0MPUTE_HOME="${C0MPUTE_HOME:-$HOME/.c0mpute}"
 RELEASE_BASE="${C0MPUTE_RELEASE_BASE:-https://c0mpute.com/releases}"
 
-COINPAY_INSTALL_URL="${COINPAY_INSTALL_URL:-https://coinpayportal.com/install.sh}"
-INFERNET_INSTALL_URL="${INFERNET_INSTALL_URL:-https://infernetprotocol.com/install.sh}"
+# Route plugin installs through c0mpute.com so each wrapper can do its
+# own error handling; the wrapper at https://c0mpute.com/plugins/<id>/install.sh
+# is the in-repo plugins/<id>/install.sh and chains to upstream itself.
+COINPAY_INSTALL_URL="${COINPAY_INSTALL_URL:-https://c0mpute.com/plugins/coinpay/install.sh}"
+INFERNET_INSTALL_URL="${INFERNET_INSTALL_URL:-https://c0mpute.com/plugins/infernet/install.sh}"
 
 INSTALL_C0MPUTE=1
 INSTALL_COINPAY=1
@@ -72,6 +78,60 @@ detect_platform() {
 
 require() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
+}
+
+# ────────────────────────────────────────────────────────────────────────
+# Idempotent mise + bun install
+# ────────────────────────────────────────────────────────────────────────
+#
+# Some plugins are JS/TS-runtime-based (the Bun-built TUI, Node-based
+# infernet variants). mise gives us a single tool to manage the runtime
+# versions; bun is the JS runtime we standardise on. Both install
+# user-locally — no sudo, no system package manager.
+
+ensure_mise() {
+  if command -v mise >/dev/null 2>&1; then
+    return 0
+  fi
+  say "installing mise"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl missing; skipping mise install"
+    return 1
+  fi
+  curl -fsSL https://mise.run | sh >/dev/null 2>&1 || {
+    warn "mise install failed"
+    return 1
+  }
+  if [ -x "$HOME/.local/bin/mise" ]; then
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+    ok "mise installed"
+  fi
+}
+
+ensure_bun() {
+  if command -v bun >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v mise >/dev/null 2>&1; then
+    say "installing bun via mise"
+    mise use --global bun@latest >/dev/null 2>&1 || mise install bun@latest >/dev/null 2>&1 || true
+    if [ -x "$HOME/.local/share/mise/installs/bun/latest/bin/bun" ] \
+       || command -v bun >/dev/null 2>&1; then
+      ok "bun installed (via mise)"
+      return 0
+    fi
+  fi
+  say "installing bun"
+  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || {
+    warn "bun install failed"
+    return 1
+  }
+  if [ -x "$HOME/.bun/bin/bun" ]; then
+    PATH="$HOME/.bun/bin:$PATH"
+    export PATH
+    ok "bun installed"
+  fi
 }
 
 # ────────────────────────────────────────────────────────────────────────
@@ -203,6 +263,12 @@ main() {
 
   platform=$(detect_platform)
   mkdir -p "$C0MPUTE_HOME/bin"
+
+  # Install runtime tooling some plugins need (idempotent — skipped if
+  # already present). mise manages tool versions; bun runs the TUI and
+  # any future JS-flavoured plugins.
+  ensure_mise || true
+  ensure_bun || true
 
   if [ "$INSTALL_C0MPUTE" -eq 1 ]; then install_c0mpute "$platform"; fi
   if [ "$INSTALL_COINPAY" -eq 1 ];  then chain_install coinpay  "$COINPAY_INSTALL_URL"; fi

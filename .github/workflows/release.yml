@@ -26,12 +26,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux: musl targets produce fully static binaries that run
+          # on any Linux distro (no glibc version dependency). Building
+          # against glibc on ubuntu-latest (24.04, glibc 2.39) made the
+          # v0.1.0 binary unusable on older Linux.
           - platform: linux-x86_64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - platform: linux-aarch64
             os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
           - platform: darwin-x86_64
             os: macos-13
             target: x86_64-apple-darwin
@@ -54,6 +58,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux musl targets)
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build c0mpute binary
         run: cargo build --release --bin c0mpute --target ${{ matrix.target }}

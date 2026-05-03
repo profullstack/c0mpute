@@ -31,28 +31,24 @@ fi
 
 cd "$(dirname "$0")/.."
 
-# JSON package.json files
-find . \
-  -name 'package.json' \
-  -not -path '*/node_modules/*' \
-  -not -path '*/.next/*' \
-  -not -path '*/target/*' \
-  -print0 |
-while IFS= read -r -d '' f; do
-  # First "version": "<x.y.z>" only — don't touch deps
-  python3 -c "
-import json, sys
-p = '$f'
-with open(p) as fh:
-    d = json.load(fh)
-if 'version' in d:
-    d['version'] = '$NEW'
-    with open(p, 'w') as fh:
-        json.dump(d, fh, indent=2)
-        fh.write('\n')
-    print('  updated', p)
-" || true
-done
+# JSON package.json files. Use python's pathlib so we don't need to
+# shell-loop over filenames (dash doesn't support `read -d`).
+python3 - "$NEW" <<'PY'
+import json, pathlib, sys
+new = sys.argv[1]
+for p in pathlib.Path('.').rglob('package.json'):
+    parts = set(p.parts)
+    if {'node_modules', '.next', 'target'} & parts:
+        continue
+    try:
+        d = json.loads(p.read_text())
+    except Exception:
+        continue
+    if 'version' in d:
+        d['version'] = new
+        p.write_text(json.dumps(d, indent=2) + '\n')
+        print(f'  updated {p}')
+PY
 
 # Cargo workspace
 python3 - "$NEW" <<'PY'

@@ -13,5 +13,20 @@ set -eu
 
 UPSTREAM="${INFERNET_INSTALL_URL:-https://infernetprotocol.com/install.sh}"
 
+http_code=$(curl -sS -L -o /dev/null -w '%{http_code}' "$UPSTREAM" 2>/dev/null || echo "000")
+if [ "$http_code" != "200" ]; then
+  cat <<EOF >&2
+✗ infernet upstream installer not available.
+
+  Tried: $UPSTREAM
+  Status: HTTP $http_code
+
+  Track release availability at:
+      https://github.com/infernetprotocol/infernet-protocol
+
+EOF
+  exit 1
+fi
+
 printf '\033[1;36m→\033[0m installing infernet via %s\n' "$UPSTREAM"
 exec sh -c "$(curl -fsSL "$UPSTREAM")" "$@"
