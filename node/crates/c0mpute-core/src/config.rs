@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::{BaseDirs, ProjectDirs};
+use directories::ProjectDirs;
 use c0mpute_proto::Role;
 use serde::{Deserialize, Serialize};
 
@@ -67,23 +67,17 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root: default_storage_root(),
+            root: data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")),
             cap_bytes: None,
         }
     }
 }
 
-/// Default location for encrypted shards. We deliberately put this at
-/// `~/data/c0mpute` rather than the XDG data dir (`~/.local/share/c0mpute`)
-/// so operators can find, monitor, and migrate the disk that holds bulk
-/// shard data without spelunking dotfiles.
-pub fn default_storage_root() -> PathBuf {
-    if let Some(base) = BaseDirs::new() {
-        base.home_dir().join("data").join("c0mpute")
-    } else {
-        PathBuf::from("./c0mpute-data")
-    }
-}
+// Storage root is XDG-standard `~/.local/share/c0mpute`. install.sh may
+// symlink this to a larger volume (e.g. `/mnt/data/c0mpute`) at install
+// time when one is detected — see `detect_storage_volume` in install.sh,
+// modelled on infernet's relocate flow. The Rust side stays unaware of
+// the symlink: same path, bigger disk underneath.
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GatewayConfig {

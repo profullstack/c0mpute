@@ -22,6 +22,12 @@
 #   --no-exec       Don't auto-exec a fresh shell at the end
 #                   (CI-friendly; default is to drop you into a new
 #                   shell with c0mpute already on $PATH)
+#
+# Env vars:
+#   NO_STORAGE_RELOCATE=1   Don't symlink ~/.local/share/c0mpute to a
+#                           bigger volume even if one's available
+#                           (default: relocate when a writable mount
+#                           has ≥2x more free space than $HOME)
 set -eu
 
 C0MPUTE_VERSION="${C0MPUTE_VERSION:-latest}"
@@ -347,6 +353,95 @@ worker_checks() {
 }
 
 # ────────────────────────────────────────────────────────────────────────
+# Storage relocation: symlink the shard data dir onto the largest
+# writable volume.
+#
+# c0mpute stores Reed-Solomon shards under ~/.local/share/c0mpute/shards
+# by default. On hosts with a small root fs and a big mounted volume
+# (RunPod /workspace, Vast.ai /workspace or /data, Lambda /lambda, bare
+# metal /mnt/<whatever>) the shard dir fills the overlay fast.
+#
+# Same approach as infernet's install.sh: scan `df -P`, pick the
+# writable mount with the most free space (excluding $HOME's mount and
+# virtual/system fs), require ≥2x more free space than $HOME, then
+# symlink ~/.local/share/c0mpute → <volume>/c0mpute. The Rust side
+# uses the standard XDG path; the symlink redirects the actual writes.
+#
+# Opt out: NO_STORAGE_RELOCATE=1
+# ────────────────────────────────────────────────────────────────────────
+
+detect_storage_volume() {
+  [ "${NO_STORAGE_RELOCATE:-0}" = "1" ] && return 0
+
+  data_dir="$HOME/.local/share/c0mpute"
+
+  # Don't relocate over an existing real directory with content; the
+  # operator already started using it.
+  if [ -d "$data_dir" ] && [ ! -L "$data_dir" ] && [ -n "$(ls -A "$data_dir" 2>/dev/null)" ]; then
+    return 0
+  fi
+
+  home_mp="$(df -P "$HOME" 2>/dev/null | awk 'NR==2 {print $6}')"
+  home_kb="$(df -P "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
+  [ -n "$home_mp" ] || return 0
+
+  best_mp=""
+  best_kb=0
+  while read -r _fs _blocks _used _avail _capacity _mp; do
+    case "$_fs" in
+      tmpfs|devtmpfs|overlay|proc|sysfs|cgroup*|mqueue|securityfs|pstore|debugfs|tracefs|configfs|fusectl|none|squashfs|nsfs|hugetlbfs|binfmt_misc|autofs)
+        continue ;;
+    esac
+    case "$_mp" in
+      /|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/run|/run/*|/boot|/boot/*|/etc|/etc/*|/usr|/usr/*|/var/lib/docker*|/snap|/snap/*|/tmp)
+        continue ;;
+    esac
+    [ "$_mp" = "$home_mp" ] && continue
+    [ -w "$_mp" ] || continue
+    [ "${_avail:-0}" -lt 10485760 ] && continue   # ≥10 GB free
+    if [ "$_avail" -gt "$best_kb" ]; then
+      best_kb="$_avail"
+      best_mp="$_mp"
+    fi
+  done <<EOF
+$(df -P 2>/dev/null | tail -n +2)
+EOF
+
+  [ -z "$best_mp" ] && return 0
+
+  # Only relocate if the volume has ≥2x more free space than $HOME
+  # (guards against e.g. a 16 GB USB drive on a 200 GB-free desktop).
+  if [ "$best_kb" -lt $(( ${home_kb:-0} * 2 )) ]; then
+    return 0
+  fi
+
+  target="$best_mp/c0mpute"
+  mkdir -p "$target" 2>/dev/null || { warn "cannot mkdir $target; skipping relocation"; return 0; }
+  mkdir -p "$(dirname "$data_dir")" 2>/dev/null || true
+
+  # If the data dir is missing, an empty real dir, or already a symlink,
+  # replace it with a symlink pointing at the big volume.
+  if [ -L "$data_dir" ]; then
+    current="$(readlink "$data_dir" 2>/dev/null)"
+    if [ "$current" = "$target" ]; then
+      ok "shard storage already symlinked → $target"
+      return 0
+    fi
+    rm -f "$data_dir" 2>/dev/null || true
+  elif [ -d "$data_dir" ]; then
+    rmdir "$data_dir" 2>/dev/null || true
+  fi
+  ln -sf "$target" "$data_dir" 2>/dev/null || {
+    warn "ln -s $target $data_dir failed; using $data_dir on root fs"
+    return 0
+  }
+
+  free_g=$(( best_kb / 1024 / 1024 ))
+  home_g=$(( ${home_kb:-0} / 1024 / 1024 ))
+  ok "shard storage → $target (${free_g}G free, vs \$HOME ${home_g}G)"
+}
+
+# ────────────────────────────────────────────────────────────────────────
 # main
 # ────────────────────────────────────────────────────────────────────────
 
@@ -367,6 +462,11 @@ main() {
   if [ "$INSTALL_C0MPUTE" -eq 1 ]; then install_c0mpute "$platform"; fi
   if [ "$INSTALL_COINPAY" -eq 1 ];  then chain_install coinpay  "$COINPAY_INSTALL_URL"; fi
   if [ "$INSTALL_INFERNET" -eq 1 ]; then chain_install infernet "$INFERNET_INSTALL_URL"; fi
+
+  # Symlink the shard data dir onto the biggest writable volume so the
+  # overlay/root fs doesn't fill up. Idempotent + opt-out via
+  # NO_STORAGE_RELOCATE=1. Same approach as infernet's installer.
+  detect_storage_volume || true
 
   ensure_path
 
