@@ -225,10 +225,28 @@ chain_install() {
 # ────────────────────────────────────────────────────────────────────────
 
 ensure_path() {
+  # Add ~/.c0mpute/bin and ~/.local/bin to PATH in every shell rc we
+  # find, plus shell-appropriate `mise activate` so mise-managed
+  # tools (bun, node) are auto-shimmed in new shells.
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [ -f "$rc" ] || continue
+
     if ! grep -q '\.c0mpute/bin' "$rc"; then
-      printf '\n# Added by c0mpute installer\nexport PATH="$HOME/.c0mpute/bin:$PATH"\n' >> "$rc"
+      {
+        printf '\n# Added by c0mpute installer\n'
+        printf 'export PATH="$HOME/.c0mpute/bin:$HOME/.local/bin:$PATH"\n'
+      } >> "$rc"
+    fi
+
+    # mise activation per shell. .profile is sh-only and mise's
+    # `activate sh` doesn't exist; we skip it there. New bash/zsh
+    # sessions get the shims; .profile users still have ~/.local/bin
+    # on PATH from the line above.
+    if command -v mise >/dev/null 2>&1 && ! grep -q 'mise activate' "$rc"; then
+      case "$rc" in
+        *.bashrc) printf 'eval "$(mise activate bash)"\n' >> "$rc" ;;
+        *.zshrc)  printf 'eval "$(mise activate zsh)"\n'  >> "$rc" ;;
+      esac
     fi
   done
 }
@@ -289,17 +307,17 @@ main() {
   run_doctor
 
   if ! printf '%s' "$PATH" | grep -q '\.c0mpute/bin'; then
-    cat <<EOF
-
-\033[1;33m! Your CURRENT shell doesn't have ~/.c0mpute/bin on \$PATH yet.\033[0m
-  We added it to your shell rc files for future sessions. To use
-  c0mpute right now in this shell, run:
-
-      \033[1;36mexport PATH="\$HOME/.c0mpute/bin:\$PATH"\033[0m
-
-  …or open a new terminal.
-
-EOF
+    rc_hint="$HOME/.bashrc"
+    case "${SHELL:-}" in
+      */zsh) rc_hint="$HOME/.zshrc" ;;
+    esac
+    printf '\n\033[1;33m! Your CURRENT shell does NOT have c0mpute on $PATH yet.\033[0m\n'
+    printf '  We added c0mpute + mise activation to your shell rc files,\n'
+    printf '  but they only kick in for NEW shells.\n\n'
+    printf '  Do ONE of these:\n'
+    printf '    \033[1;36msource %s\033[0m         # reload current shell\n' "$rc_hint"
+    printf '    \033[1;36mexec $SHELL\033[0m                # restart current shell\n'
+    printf '    Open a new terminal\n\n'
   fi
 
   cat <<EOF
