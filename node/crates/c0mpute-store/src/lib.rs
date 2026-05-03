@@ -1,9 +1,12 @@
 //! Content-addressed chunk store backed by the local filesystem.
 //!
-//! Layout: `<root>/chunks/<aa>/<bb>/<full-hash>` (sharded two levels deep by
+//! Layout: `<root>/shards/<aa>/<bb>/<full-hash>` (sharded two levels deep by
 //! the first four hex chars). The hash IS the integrity check — every read
 //! re-hashes by default; callers can opt out with `read_unchecked` when they
 //! already trust the source (e.g. just-written file).
+//!
+//! Default `<root>` is `~/data/c0mpute` so operators can find and migrate
+//! their bulk shard data without spelunking dotfiles.
 //!
 //! Two layers in this crate:
 //!
@@ -31,7 +34,7 @@ pub struct ChunkStore {
 impl ChunkStore {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("chunks"))
+        fs::create_dir_all(root.join("shards"))
             .await
             .with_context(|| format!("create_dir_all {}", root.display()))?;
         Ok(Self { root })
@@ -40,7 +43,7 @@ impl ChunkStore {
     fn chunk_path(&self, hash: &Hash) -> PathBuf {
         let hex = hash.to_hex();
         self.root
-            .join("chunks")
+            .join("shards")
             .join(&hex[0..2])
             .join(&hex[2..4])
             .join(&hex)

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use c0mpute_proto::Role;
 use serde::{Deserialize, Serialize};
 
@@ -67,9 +67,21 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root: data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")),
+            root: default_storage_root(),
             cap_bytes: None,
         }
+    }
+}
+
+/// Default location for encrypted shards. We deliberately put this at
+/// `~/data/c0mpute` rather than the XDG data dir (`~/.local/share/c0mpute`)
+/// so operators can find, monitor, and migrate the disk that holds bulk
+/// shard data without spelunking dotfiles.
+pub fn default_storage_root() -> PathBuf {
+    if let Some(base) = BaseDirs::new() {
+        base.home_dir().join("data").join("c0mpute")
+    } else {
+        PathBuf::from("./c0mpute-data")
     }
 }
 

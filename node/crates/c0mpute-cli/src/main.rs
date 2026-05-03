@@ -24,7 +24,7 @@ use std::process::Command;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use c0mpute_core::{Config, Supervisor, config, init_tracing};
+use c0mpute_core::{Config, Supervisor, config, init_tracing, run_register};
 use c0mpute_proto::Role;
 
 #[derive(Parser, Debug)]
@@ -280,8 +280,24 @@ fn peer_status_text(bin: &str) -> String {
 async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
         WorkerCmd::Register => {
-            println!("[stub] worker registration — pending CoinPay DID + coordinator wiring");
-            println!("       run: c0mpute coinpay did create --role worker");
+            let r = run_register(Some(config_path))?;
+            println!("registered as worker:");
+            println!("  peer-id   : {}", r.peer_id);
+            println!(
+                "  identity  : {}{}",
+                r.identity_path.display(),
+                if r.created_identity { "  (new)" } else { "" }
+            );
+            println!(
+                "  config    : {}{}",
+                r.config_path.display(),
+                if r.created_config { "  (new)" } else { "" }
+            );
+            println!("  storage   : {}", r.storage_root.display());
+            println!();
+            println!("next:");
+            println!("  c0mpute coinpay did create --role worker  # mint a payable DID");
+            println!("  c0mpute worker start                       # join the swarm");
             Ok(())
         }
         WorkerCmd::Status => {
