@@ -98,7 +98,11 @@ function PluginCard({ p }: { p: PluginManifest }) {
         </p>
       )}
 
-      <CodeBlock>{`$ ${installCommand(p)}`}</CodeBlock>
+      {p.dispatch?.mode === "in-process" ? (
+        <p className="text-xs accent">ships with c0mpute · installed by default</p>
+      ) : (
+        <CodeBlock>{`$ ${installCommand(p)}`}</CodeBlock>
+      )}
 
       <footer className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-dim)]">
         {p.surfaces?.cli && (
