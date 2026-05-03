@@ -1,6 +1,6 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# Source code lives upstream at github.com/PerryTS/infernet-protocol, NOT
+# Source code lives upstream at github.com/infernetprotocol/infernet-protocol, NOT
 # this repo. This directory is a marketplace wrapper only.
 
 [module]
@@ -9,10 +9,10 @@ name        = "Infernet Protocol — AI inference"
 version     = "0.1.0"
 kind        = "workload"
 description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification."
-author      = "PerryTS / Profullstack"
+author      = "Infernet Protocol"
 license     = "MIT"
 homepage    = "https://infernetprotocol.com"
-repository  = "https://github.com/PerryTS/infernet-protocol"
+repository  = "https://github.com/infernetprotocol/infernet-protocol"
 keywords    = ["ai", "llm", "inference", "gpu"]
 
 [module.requirements]

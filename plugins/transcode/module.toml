@@ -13,6 +13,7 @@ description = "Decentralized audio/video transcoding via FFmpeg with hardware ac
 author      = "Profullstack"
 license     = "MIT"
 homepage    = "https://c0mpute.com"
+repository  = "https://github.com/profullstack/c0mpute/tree/master/plugins/transcode"
 keywords    = ["ffmpeg", "transcode", "video", "audio", "hls", "av1"]
 
 [module.requirements]

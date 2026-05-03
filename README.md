@@ -22,7 +22,7 @@ That installs three CLIs into `~/.c0mpute/bin`:
 |---|---|---|
 | `c0mpute` | Umbrella CLI: jobs, workers, modules, dispatch | this repo |
 | `coinpay` | DID, wallet, escrow, payments, receipts, reputation | upstream coinpay project |
-| `infernet` | AI inference workload runner | [infernet-protocol](https://github.com/PerryTS/infernet-protocol) (upstream) |
+| `infernet` | AI inference workload runner | [infernet-protocol](https://github.com/infernetprotocol/infernet-protocol) (upstream) |
 
 The c0mpute installer pulls each from its own release feed.
 
@@ -82,8 +82,7 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 ```
 .
 ├── docs/
-│   ├── c0mpute-v1.md                  # v1 PRD (current source of truth)
-│   └── PRD.md                         # original PRD (transcode internals)
+│   └── c0mpute-v1.md                  # v1 PRD (source of truth)
 ├── dips/                              # design proposals
 ├── node/
 │   └── crates/                        # all Rust source — host + transcode workload
@@ -92,10 +91,10 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 │       ├── c0mpute-verify/, c0mpute-update/, c0mpute-doctor/
 │       ├── c0mpute-proto/, c0mpute-api/
 │       └── c0mpute-transcode/           # in-process FFmpeg workload
-├── plugins/                           # marketplace wrappers ONLY (no source)
-│   ├── transcode/{module.toml,web/}
-│   ├── coinpay/{module.toml,web/}     # source lives upstream at coinpay
-│   └── infernet/{module.toml,web/}    # source lives upstream at infernet-protocol
+├── plugins/                           # marketplace manifests only
+│   ├── transcode/module.toml          # in-process; code at node/crates/c0mpute-transcode
+│   ├── coinpay/module.toml            # subprocess; binary from upstream coinpay
+│   └── infernet/module.toml           # subprocess; binary from infernetprotocol/infernet-protocol
 ├── apps/
 │   ├── web/                           # @c0mpute/web — Next.js apex landing
 │   └── tui/                           # @c0mpute/tui — react-blessed TUI

@@ -13,6 +13,7 @@ description = "Decentralized identifiers, wallet linking, escrow, signed receipt
 author      = "Profullstack"
 license     = "MIT"
 homepage    = "https://coinpay.com"
+repository  = "https://github.com/profullstack/c0mpute/tree/master/plugins/coinpay"
 keywords    = ["did", "identity", "escrow", "payments", "reputation"]
 
 [module.requirements]
