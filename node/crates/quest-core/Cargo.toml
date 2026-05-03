@@ -1,0 +1,28 @@
+[package]
+name = "quest-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Quest node core: config loading, role dispatch, supervisor."
+
+[dependencies]
+quest-proto = { workspace = true }
+quest-store = { workspace = true }
+quest-net = { workspace = true }
+quest-transcode = { workspace = true }
+quest-gateway = { workspace = true }
+quest-verify = { workspace = true }
+quest-update = { workspace = true }
+quest-doctor = { workspace = true }
+quest-api = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }

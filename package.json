@@ -1,0 +1,21 @@
+{
+  "name": "p2p-one",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "bun run --cwd apps/web dev",
+    "dev:cli": "bun run --cwd apps/cli dev",
+    "dev:coordinator": "bun run --cwd apps/coordinator dev",
+    "node:build": "cargo build --manifest-path node/Cargo.toml",
+    "node:run": "cargo run --manifest-path node/Cargo.toml --bin quest --",
+    "node:test": "cargo test --manifest-path node/Cargo.toml",
+    "build": "bun run --cwd packages/shared build && bun run --cwd apps/web build && bun run --cwd apps/cli build",
+    "lint": "bun run --cwd apps/web lint && bun run --cwd apps/cli lint && bun run --cwd apps/coordinator lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

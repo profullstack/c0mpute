@@ -1,0 +1,21 @@
+{
+  "name": "@p2p-one/coordinator",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/server.ts",
+    "start": "bun run src/server.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@p2p-one/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.49.0",
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}

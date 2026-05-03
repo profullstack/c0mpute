@@ -1,0 +1,16 @@
+[package]
+name = "quest-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local content-addressed chunk store for Quest nodes."
+
+[dependencies]
+quest-proto = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

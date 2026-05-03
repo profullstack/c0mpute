@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/quest-cli",
+    "crates/quest-core",
+    "crates/quest-net",
+    "crates/quest-store",
+    "crates/quest-transcode",
+    "crates/quest-gateway",
+    "crates/quest-verify",
+    "crates/quest-update",
+    "crates/quest-doctor",
+    "crates/quest-proto",
+    "crates/quest-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/depinquest/quest"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+blake3 = "1"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "compression-br", "fs"] }
+bytes = "1"
+futures = "0.3"
+async-trait = "0.1"
+url = "2"
+directories = "5"
+sysinfo = "0.32"
+
+# Internal crates
+quest-proto = { path = "crates/quest-proto" }
+quest-store = { path = "crates/quest-store" }
+quest-net = { path = "crates/quest-net" }
+quest-transcode = { path = "crates/quest-transcode" }
+quest-gateway = { path = "crates/quest-gateway" }
+quest-verify = { path = "crates/quest-verify" }
+quest-update = { path = "crates/quest-update" }
+quest-doctor = { path = "crates/quest-doctor" }
+quest-api = { path = "crates/quest-api" }
+quest-core = { path = "crates/quest-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

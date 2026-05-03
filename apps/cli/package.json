@@ -1,0 +1,22 @@
+{
+  "name": "@p2p-one/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "p2p-one": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "bun run dist/cli.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "@p2p-one/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}
