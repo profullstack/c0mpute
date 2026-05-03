@@ -257,6 +257,7 @@ dependencies = [
  "c0mpute-core",
  "c0mpute-doctor",
  "c0mpute-proto",
+ "c0mpute-update",
  "clap",
  "serde_json",
  "tokio",

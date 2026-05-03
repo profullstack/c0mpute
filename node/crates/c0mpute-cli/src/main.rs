@@ -93,6 +93,31 @@ enum Cmd {
         args: Vec<String>,
     },
 
+    /// Check for and install a newer c0mpute release.
+    #[command(alias = "upgrade")]
+    Update {
+        /// Only check; don't apply the upgrade even if available.
+        #[arg(long)]
+        check: bool,
+        /// Override the release-feed URL (defaults to the c0mpute.com one).
+        #[arg(long)]
+        feed: Option<String>,
+    },
+
+    /// Uninstall the c0mpute binary (and optionally peer binaries).
+    #[command(alias = "remove")]
+    Uninstall {
+        /// Also remove `coinpay` and `infernet` from `~/.c0mpute/bin`.
+        #[arg(long)]
+        all: bool,
+        /// Also remove the c0mpute config dir (`~/.config/c0mpute`).
+        #[arg(long)]
+        purge: bool,
+        /// Skip the y/N confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Print the c0mpute binary version.
     Version,
 }
@@ -146,7 +171,8 @@ enum PluginCmd {
     Enable { id: String },
     /// Disable a plugin without uninstalling.
     Disable { id: String },
-    /// Uninstall a plugin.
+    /// Uninstall a plugin (alias: `delete`, `remove`).
+    #[command(alias = "delete", alias = "remove")]
     Uninstall { id: String },
 }
 
@@ -193,6 +219,8 @@ async fn main() -> Result<()> {
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
         Cmd::Tui { args } => delegate("c0mpute-tui", &args),
+        Cmd::Update { check, feed } => run_update(check, feed).await,
+        Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
         Cmd::Infernet { mut args } => {
             // Default the network to c0mpute when caller didn't specify.
@@ -415,6 +443,78 @@ fn resolve_plugin_target(target: &str) -> String {
     // c0mpute marketplace. The route at c0mpute.com/plugins/<id>/install.sh
     // serves the manifest-checked-in install script for that plugin.
     format!("https://c0mpute.com/plugins/{t}/install.sh")
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// update / uninstall (alias: upgrade / remove)
+// ────────────────────────────────────────────────────────────────────────
+
+async fn run_update(check_only: bool, feed: Option<String>) -> Result<()> {
+    let feed = feed.unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
+    let current = env!("CARGO_PKG_VERSION");
+    let outcome = c0mpute_update::try_upgrade(current, &feed).await?;
+    match outcome {
+        c0mpute_update::UpgradeOutcome::AlreadyLatest { current } => {
+            println!("c0mpute {current} — already latest");
+        }
+        c0mpute_update::UpgradeOutcome::Available { current, latest } => {
+            if check_only {
+                println!("update available: {current} → {latest}");
+            } else {
+                println!("update available: {current} → {latest}");
+                println!(
+                    "(downloading + signature-verified swap is stubbed; \
+                     reinstall via: curl -fsSL https://c0mpute.com/install.sh | sh -s -- --force)"
+                );
+            }
+        }
+        c0mpute_update::UpgradeOutcome::Upgraded { from, to } => {
+            println!("upgraded {from} → {to}; restart to apply");
+        }
+    }
+    Ok(())
+}
+
+fn run_uninstall(all: bool, purge: bool, yes: bool) -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let bin_dir = std::path::PathBuf::from(&home).join(".c0mpute/bin");
+
+    let mut targets: Vec<std::path::PathBuf> = vec![bin_dir.join("c0mpute")];
+    if all {
+        for peer in ["coinpay", "infernet", "c0mpute-tui"] {
+            targets.push(bin_dir.join(peer));
+        }
+    }
+    if purge {
+        targets.push(std::path::PathBuf::from(&home).join(".config/c0mpute"));
+    }
+
+    println!("Will remove:");
+    for t in &targets {
+        println!("  {}", t.display());
+    }
+    if !yes {
+        print!("Proceed? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let a = answer.trim();
+        if a != "y" && a != "Y" {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    for t in &targets {
+        if t.is_file() || t.is_symlink() {
+            std::fs::remove_file(t).ok();
+        } else if t.is_dir() {
+            std::fs::remove_dir_all(t).ok();
+        }
+    }
+    println!("uninstalled. (PATH entries in shell rc files left in place)");
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────

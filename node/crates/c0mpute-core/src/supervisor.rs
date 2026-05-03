@@ -50,6 +50,23 @@ impl Supervisor {
             });
         }
 
+        if self.config.update_auto {
+            let feed = self
+                .config
+                .update_feed_url
+                .clone()
+                .unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
+            let interval =
+                std::time::Duration::from_secs(self.config.update_interval_secs.max(60));
+            let current = env!("CARGO_PKG_VERSION").to_string();
+            info!(
+                interval_secs = interval.as_secs(),
+                feed = %feed,
+                "auto-upgrade poller starting"
+            );
+            tokio::spawn(c0mpute_update::poll_loop(current, feed, interval));
+        }
+
         // Hold open until ctrl-c.
         tokio::signal::ctrl_c().await?;
         info!("ctrl-c received; shutting down");

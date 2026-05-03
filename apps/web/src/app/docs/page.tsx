@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CodeBlock as Code } from "@/components/CodeBlock";
 
 export const metadata = { title: "docs — c0mpute" };
 
@@ -287,10 +288,6 @@ function P({ children }: { children: React.ReactNode }) {
   return <p className="text-sm leading-6">{children}</p>;
 }
 
-function Code({ children }: { children: string }) {
-  return (
-    <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-xs leading-5 whitespace-pre">
-      <code>{children}</code>
-    </pre>
-  );
-}
+// Code = re-export of CodeBlock from "@/components/CodeBlock" via the
+// import alias above. Kept as `Code` here for diff-quietness — the page
+// has many <Code>...</Code> uses.

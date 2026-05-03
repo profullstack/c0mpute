@@ -13,6 +13,7 @@ path = "src/main.rs"
 c0mpute-core = { workspace = true }
 c0mpute-doctor = { workspace = true }
 c0mpute-proto = { workspace = true }
+c0mpute-update = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

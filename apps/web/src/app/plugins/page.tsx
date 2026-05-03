@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { CodeBlock } from "@/components/CodeBlock";
 import {
   loadAllPlugins,
   tagline,
@@ -97,9 +98,7 @@ function PluginCard({ p }: { p: PluginManifest }) {
         </p>
       )}
 
-      <pre className="bg-[var(--color-bg)] border border-[var(--color-rule)] rounded p-3 text-xs overflow-x-auto">
-        <code className="prompt">{installCommand(p)}</code>
-      </pre>
+      <CodeBlock>{`$ ${installCommand(p)}`}</CodeBlock>
 
       <footer className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-dim)]">
         {p.surfaces?.cli && (

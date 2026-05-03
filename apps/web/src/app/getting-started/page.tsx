@@ -1,3 +1,5 @@
+import { CodeBlock } from "@/components/CodeBlock";
+
 export const metadata = { title: "getting-started — c0mpute" };
 
 export default function GettingStartedPage() {
@@ -9,22 +11,18 @@ export default function GettingStartedPage() {
       </header>
 
       <Section number="1" label="install the cli stack">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <span className="prompt">curl -fsSL https://c0mpute.com/install.sh | sh</span>
-        </pre>
+        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
           Installs three binaries into <code>~/.c0mpute/bin</code>:{" "}
           <span className="accent">c0mpute</span>,{" "}
           <span className="accent">coinpay</span>,{" "}
-          <span className="accent">infernet</span>. No sudo. Self-upgrades on
-          its own schedule.
+          <span className="accent">infernet</span>. No sudo. The worker
+          self-upgrades every 5 minutes.
         </p>
       </Section>
 
       <Section number="2" label="create a coinpay did">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <span className="prompt">c0mpute coinpay did create</span>
-        </pre>
+        <CodeBlock>{`$ c0mpute coinpay did create`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
           Generates a key + registers <code>did:coinpay:user:&lt;id&gt;</code>.
           The DID anchors your reputation, payments, and signed receipts.
@@ -32,49 +30,34 @@ export default function GettingStartedPage() {
       </Section>
 
       <Section number="3" label="run a worker">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          {[
-            "c0mpute coinpay did create --role worker",
-            "c0mpute worker register",
-            "c0mpute worker start --gpu",
-          ]
-            .map((c, i) => (
-              <span key={i}>
-                <span className="prompt">{c}</span>
-                {"\n"}
-              </span>
-            ))}
-        </pre>
+        <CodeBlock>{`$ c0mpute coinpay did create --role worker
+$ c0mpute worker register
+$ c0mpute worker start --gpu`}</CodeBlock>
       </Section>
 
       <Section number="4" label="submit a job">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          {[
-            "c0mpute transcode submit input.mov --preset hls --max-price 1.25",
-            "c0mpute infernet run prompts.jsonl --model qwen",
-            "c0mpute job status <job-id>",
-          ].map((c, i) => (
-            <span key={i}>
-              <span className="prompt">{c}</span>
-              {"\n"}
-            </span>
-          ))}
-        </pre>
+        <CodeBlock>{`$ c0mpute transcode submit input.mov --preset hls --max-price 1.25
+$ c0mpute infernet run prompts.jsonl --model qwen
+$ c0mpute job status <job-id>`}</CodeBlock>
       </Section>
 
       <Section number="5" label="interactive tui">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <span className="prompt">c0mpute tui</span>
-        </pre>
+        <CodeBlock>{`$ c0mpute tui`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
           Live worker / job dashboard, terminal-native (react-blessed).
         </p>
       </Section>
 
-      <Section number="6" label="check the stack">
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <span className="prompt">c0mpute doctor</span>
-        </pre>
+      <Section number="6" label="upgrade & uninstall">
+        <CodeBlock>{`$ c0mpute update              # check for + apply new release
+$ c0mpute upgrade --check     # alias; just check, don't apply
+$ c0mpute uninstall           # remove c0mpute
+$ c0mpute uninstall --all     # remove c0mpute, coinpay, infernet
+$ c0mpute uninstall --purge   # also remove ~/.config/c0mpute`}</CodeBlock>
+      </Section>
+
+      <Section number="7" label="check the stack">
+        <CodeBlock>{`$ c0mpute doctor`}</CodeBlock>
       </Section>
     </div>
   );

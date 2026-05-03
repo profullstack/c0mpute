@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CodeBlock } from "@/components/CodeBlock";
 
 export default function HomePage() {
   return (
@@ -17,40 +18,31 @@ export default function HomePage() {
 
       <section className="space-y-3">
         <p className="comment">// install — Linux, macOS (x86_64 / aarch64)</p>
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm">
-          <code className="prompt">curl -fsSL https://c0mpute.com/install.sh | sh</code>
-        </pre>
+        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh`}</CodeBlock>
       </section>
 
       <section className="space-y-3">
         <p className="comment">// run a worker</p>
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <code>
-            <span className="prompt">c0mpute coinpay did create --role worker</span>
-            {"\n"}
-            <span className="prompt">c0mpute worker register</span>
-            {"\n"}
-            <span className="prompt">c0mpute worker start --gpu</span>
-          </code>
-        </pre>
+        <CodeBlock>{`$ c0mpute coinpay did create --role worker
+$ c0mpute worker register
+$ c0mpute worker start --gpu`}</CodeBlock>
       </section>
 
       <section className="space-y-3">
         <p className="comment">// submit a job</p>
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm leading-6">
-          <code>
-            <span className="prompt">c0mpute transcode submit input.mov --preset hls</span>
-            {"\n"}
-            <span className="prompt">c0mpute infernet run prompts.jsonl --model qwen</span>
-          </code>
-        </pre>
+        <CodeBlock>{`$ c0mpute transcode submit input.mov --preset hls
+$ c0mpute infernet run prompts.jsonl --model qwen`}</CodeBlock>
       </section>
 
       <section className="space-y-3">
         <p className="comment">// interactive dashboard</p>
-        <pre className="bg-[var(--color-card)] border border-[var(--color-rule)] rounded p-4 overflow-x-auto text-sm">
-          <code className="prompt">c0mpute tui</code>
-        </pre>
+        <CodeBlock>{`$ c0mpute tui`}</CodeBlock>
+      </section>
+
+      <section className="space-y-3">
+        <p className="comment">// upgrade or remove</p>
+        <CodeBlock>{`$ c0mpute update              # check for + apply new release
+$ c0mpute uninstall --all     # remove c0mpute and peer binaries`}</CodeBlock>
       </section>
 
       <section className="space-y-3 rule pt-8">
@@ -58,6 +50,7 @@ export default function HomePage() {
         <ul className="space-y-1 text-sm">
           <li>→ <Link href="/getting-started">getting-started</Link></li>
           <li>→ <Link href="/docs">docs</Link></li>
+          <li>→ <Link href="/plugins">plugins</Link></li>
           <li>→ <a href="https://github.com/profullstack/c0mpute">github.com/profullstack/c0mpute</a></li>
         </ul>
       </section>
