@@ -86,7 +86,7 @@ function loadOne(id: string): PluginManifest | null {
 }
 
 /**
- * Tagline shown on plugin cards. Falls back to description.first sentence.
+ * Tagline shown on plugin cards. Falls back to description's first sentence.
  */
 export function tagline(p: PluginManifest): string {
   const first = p.description.split(/[.!?](?:\s|$)/)[0];
@@ -94,16 +94,11 @@ export function tagline(p: PluginManifest): string {
 }
 
 /**
- * Install command shown on each plugin card.
- *
- * In-process plugins ship as part of the c0mpute binary itself —
- * installing c0mpute installs them. Subprocess plugins install via
- * `c0mpute plugin install <id>`, which resolves to
- * `https://c0mpute.com/plugins/<id>/install.sh`.
+ * Install command shown on each plugin card. Uniform across plugins:
+ * `c0mpute plugin install <id>`. The CLI resolves the id to
+ * `https://c0mpute.com/plugins/<id>/install.sh`. For in-process plugins
+ * (transcode) the script informs the user it's built into c0mpute.
  */
 export function installCommand(p: PluginManifest): string {
-  if (p.dispatch?.mode === "in-process") {
-    return "curl -fsSL https://c0mpute.com/install.sh | sh";
-  }
   return `c0mpute plugin install ${p.id}`;
 }

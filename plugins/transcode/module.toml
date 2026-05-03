@@ -12,7 +12,6 @@ kind        = "workload"
 description = "Decentralized audio/video transcoding via FFmpeg with hardware acceleration (NVENC, QSV, AMF, VideoToolbox, AV1)."
 author      = "Profullstack"
 license     = "MIT"
-homepage    = "https://c0mpute.com"
 source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/transcode"
 keywords    = ["ffmpeg", "transcode", "video", "audio", "hls", "av1"]
 
