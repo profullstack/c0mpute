@@ -92,7 +92,29 @@ install_c0mpute() {
   tmp=$(mktemp -d)
 
   say "downloading c0mpute ${C0MPUTE_VERSION}"
-  curl -fsSL "$url" -o "$tmp/$artifact" || { rm -rf "$tmp"; die "could not download $url"; }
+  http_code=$(curl -sSL -o "$tmp/$artifact" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  if [ "$http_code" != "200" ]; then
+    rm -rf "$tmp"
+    cat <<EOF >&2
+
+✗ no prebuilt c0mpute binary at ${url} (HTTP ${http_code}).
+
+  We don't have a release pipeline publishing binaries yet. While we
+  set that up, install from source:
+
+      git clone https://github.com/profullstack/c0mpute.git
+      cd c0mpute
+      cargo build --release --bin c0mpute
+      mkdir -p ~/.c0mpute/bin
+      cp target/release/c0mpute ~/.c0mpute/bin/c0mpute
+      export PATH="\$HOME/.c0mpute/bin:\$PATH"
+
+  Track release availability at:
+      https://github.com/profullstack/c0mpute/releases
+
+EOF
+    exit 1
+  fi
   curl -fsSL "$sig_url" -o "$tmp/$artifact.minisig" 2>/dev/null \
     || warn "no signature published for c0mpute yet; continuing"
 
