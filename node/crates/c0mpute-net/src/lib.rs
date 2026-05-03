@@ -1,12 +1,14 @@
-//! libp2p networking layer for Quest.
+//! libp2p networking layer for c0mpute.
 //!
-//! Scope: peer discovery (Kad-DHT under `/quest/kad/1.0.0`), capability
-//! announcement, chunk request/response transport, parallel-fetch racing.
-//! See PRD §14.
+//! Scope: peer discovery (Kad-DHT under `/c0mpute/kad/1.0.0`), capability
+//! announcement (gossipsub), chunk request/response transport, parallel-
+//! fetch racing. See c0mpute v1 PRD + DIP-0010 (bootstrap seed nodes).
 //!
-//! Status: scaffold. The real libp2p stack lands in M0/M1; for now this crate
-//! exposes the trait surface the rest of the node will program against, plus
-//! an in-process `Loopback` impl used in unit tests of higher layers.
+//! Status: SCAFFOLD. This crate is currently ~56 lines: a `Network` trait
+//! + an in-memory `Loopback` impl for tests. The real libp2p stack hasn't
+//! been wired up yet — that's the load-bearing piece blocking the network
+//! actually existing. See DIP-0010 for the bootstrap design that lands
+//! alongside the libp2p implementation.
 
 use std::sync::Arc;
 
