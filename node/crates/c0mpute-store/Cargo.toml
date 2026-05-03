@@ -3,7 +3,7 @@ name = "c0mpute-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Local content-addressed chunk store for Quest nodes."
+description = "Local content-addressed chunk store for c0mpute nodes."
 
 [dependencies]
 c0mpute-proto = { workspace = true }

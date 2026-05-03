@@ -3,7 +3,7 @@ name = "c0mpute-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Coordinator API client used by Quest nodes."
+description = "Coordinator API client used by c0mpute nodes."
 
 [dependencies]
 c0mpute-proto = { workspace = true }

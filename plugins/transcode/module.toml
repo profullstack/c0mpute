@@ -2,7 +2,7 @@
 #
 # transcode is the only first-party in-tree plugin: its workload code is
 # compiled INTO the c0mpute binary itself (mode = "in-process"). The
-# implementation lives at node/crates/quest-transcode in this repo.
+# implementation lives at node/crates/c0mpute-transcode in this repo.
 
 [module]
 id          = "transcode"
@@ -11,7 +11,7 @@ version     = "0.1.0"
 kind        = "workload"
 description = "Decentralized audio/video transcoding via FFmpeg with hardware acceleration (NVENC, QSV, AMF, VideoToolbox, AV1)."
 author      = "Profullstack"
-license     = "Apache-2.0 OR MIT"
+license     = "MIT"
 homepage    = "https://c0mpute.com"
 keywords    = ["ffmpeg", "transcode", "video", "audio", "hls", "av1"]
 

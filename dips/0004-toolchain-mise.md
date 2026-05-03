@@ -18,7 +18,7 @@ Two install paths, two audiences:
 
 1. **Operators** running `depin video start` on a homelab/datacenter box.
    They get a single static binary via `curl | sh` from
-   `https://depin.quest/video/install.sh`. No runtime, no toolchain
+   `https://c0mpute.com/install.sh`. No runtime, no toolchain
    manager, no Node, no Cargo. The static Rust binary is the whole story.
 
 2. **Contributors** working in this repo. They run `scripts/dev-setup.sh`
@@ -34,7 +34,7 @@ prototyping.
 
 `infernet-protocol` showed us that mise-bootstrapping in the user installer
 is excellent for a Node-based CLI (their CLI *is* JavaScript and needs
-Node). Quest's CLI is a static Rust binary — operators don't need a
+Node). the c0mpute CLI is a static Rust binary — operators don't need a
 toolchain at all.
 
 But contributors absolutely do. Today the repo wants a specific Rust, a
@@ -104,7 +104,7 @@ that's a follow-up DIP. Don't sneak it in.
 
 **Bundle mise into the operator installer.** This is what infernet does,
 and it's the right call for them — their CLI is JS and *needs* a Node
-runtime. Quest's CLI doesn't, so adding mise to operator installs is dead
+runtime. the c0mpute CLI doesn't, so adding mise to operator installs is dead
 weight that ages badly (mise version drift, surprise file writes under
 `~/.local`).
 

@@ -3,7 +3,7 @@ name = "c0mpute-update"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Self-upgrade machinery for the Quest node."
+description = "Self-upgrade machinery for the c0mpute node."
 
 [dependencies]
 anyhow = { workspace = true }

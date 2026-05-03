@@ -1,7 +1,7 @@
 //! Self-upgrade: poll the release manifest, verify signatures, swap binary.
 //!
 //! Status: scaffold. The real implementation pulls from
-//! `https://depin.quest/video/api/v1/releases/latest`, verifies a minisign
+//! `https://c0mpute.com/api/v1/releases/latest`, verifies a minisign
 //! signature, and uses an atomic rename to swap the binary in place. For now
 //! we only model the manifest types and the version-comparison logic.
 

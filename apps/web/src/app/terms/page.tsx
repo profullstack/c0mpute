@@ -19,7 +19,7 @@ export default function TermsPage() {
       <Block title="open source">
         <p>
           The c0mpute, coinpay, and infernet binaries are released under the
-          dual <code>MIT OR Apache-2.0</code> license. Your rights and
+          dual <code>MIT</code> license. Your rights and
           obligations under those licenses apply to the code itself.
         </p>
       </Block>

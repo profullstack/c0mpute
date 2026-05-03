@@ -3,7 +3,7 @@ name = "c0mpute-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Quest node core: config loading, role dispatch, supervisor."
+description = "c0mpute node core: config loading, role dispatch, supervisor."
 
 [dependencies]
 c0mpute-proto = { workspace = true }

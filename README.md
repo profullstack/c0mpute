@@ -3,7 +3,7 @@
 > Decentralized compute network. CLI-first. Three modules out of the box:
 > **transcode** (FFmpeg), **coinpay** (DID + escrow), **infernet** (AI inference).
 
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg?logo=rust)](https://www.rust-lang.org/)
 [![Bun](https://img.shields.io/badge/bun-1.3%2B-fbf0df.svg?logo=bun)](https://bun.sh)
 [![GitHub stars](https://img.shields.io/github/stars/profullstack/c0mpute?style=social)](https://github.com/profullstack/c0mpute)
@@ -83,7 +83,7 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 .
 ├── docs/
 │   ├── c0mpute-v1.md                  # v1 PRD (current source of truth)
-│   └── PRD.md                         # original Quest PRD (transcode internals)
+│   └── PRD.md                         # original PRD (transcode internals)
 ├── dips/                              # design proposals
 ├── node/
 │   └── crates/                        # all Rust source — host + transcode workload
@@ -160,5 +160,4 @@ cargo build --bin c0mpute
 
 ## License
 
-`MIT OR Apache-2.0` — pick whichever you prefer. Matches the Rust
-ecosystem convention and our actual dependency tree.
+[MIT](LICENSE)

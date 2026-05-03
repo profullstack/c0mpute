@@ -3,7 +3,7 @@ name = "c0mpute-doctor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Self-diagnostics and self-heal for the Quest node."
+description = "Self-diagnostics and self-heal for the c0mpute node."
 
 [dependencies]
 anyhow = { workspace = true }

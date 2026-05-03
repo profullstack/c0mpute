@@ -25,7 +25,7 @@ impl CoordinatorClient {
     }
 
     fn url(&self, path: &str) -> Result<Url> {
-        // base is e.g. https://depin.quest/video; we always join into
+        // base is e.g. https://c0mpute.com; we always join into
         // `/video/api/v1/...` so the caller passes a relative path like
         // "providers/heartbeat".
         let joined = self

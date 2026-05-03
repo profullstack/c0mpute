@@ -58,7 +58,7 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root: data_dir().unwrap_or_else(|| PathBuf::from("./quest-data")),
+            root: data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")),
             cap_bytes: None,
         }
     }

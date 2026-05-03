@@ -3,7 +3,7 @@ name = "c0mpute-transcode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "FFmpeg-based transcode worker for Quest."
+description = "FFmpeg-based transcode worker for c0mpute."
 
 [dependencies]
 c0mpute-proto = { workspace = true }

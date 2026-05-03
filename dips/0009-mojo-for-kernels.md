@@ -96,7 +96,7 @@ as we use for FFmpeg today.
 ### License compatibility
 
 Mojo's compiler is closed-source today. Our code under
-`MIT OR Apache-2.0` (per the licensing decision in the project
+MIT (per the licensing decision in the project
 README) is unaffected — Mojo source we write stays under our license;
 only the toolchain is currently proprietary. If Modular doesn't open-
 source the compiler on a reasonable timeline, we re-evaluate this DIP.

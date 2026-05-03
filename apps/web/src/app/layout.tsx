@@ -58,7 +58,7 @@ export default function RootLayout({
             >
               github
             </a>
-            <span className="ml-auto">Apache-2.0 / MIT</span>
+            <span className="ml-auto">MIT</span>
           </div>
         </footer>
       </body>

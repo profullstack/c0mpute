@@ -62,7 +62,7 @@ version = "0.1.0"                    # semver
 kind = "workload"                    # workload | service | sdk
 description = "..."
 author = "Profullstack"
-license = "Apache-2.0"
+license = "MIT"
 homepage = "https://c0mpute.com/modules/transcode"
 
 [module.requirements]

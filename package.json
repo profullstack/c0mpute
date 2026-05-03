@@ -3,8 +3,7 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "packages/*",
-    "plugins/*/web"
+    "packages/*"
   ],
   "scripts": {
     "dev:web": "bun run --filter=c0mpute dev",

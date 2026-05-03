@@ -1,8 +1,5 @@
 //! Shared types for everything that crosses a process or network boundary in
-//! Quest: chunks, jobs, peer announcements, transcode specs, payouts.
-//!
-//! These types are mirrored in TypeScript inside `packages/shared` so the
-//! coordinator (Bun) and the dashboard (Next.js) talk the same shape.
+//! c0mpute: chunks, jobs, peer announcements, transcode specs, payouts.
 
 use std::fmt;
 
@@ -32,9 +29,9 @@ impl Hash {
         Ok(Self(arr))
     }
 
-    /// Format as the canonical `quest://blake3:<hex>` URL.
-    pub fn to_quest_url(&self) -> String {
-        format!("quest://blake3:{}", self.to_hex())
+    /// Format as the canonical `c0mpute://blake3:<hex>` URL.
+    pub fn to_c0mpute_url(&self) -> String {
+        format!("c0mpute://blake3:{}", self.to_hex())
     }
 }
 
@@ -71,7 +68,7 @@ pub enum ProtoError {
     UnknownCodec(String),
 }
 
-/// Video codec families supported by Quest workers.
+/// Video codec families supported by c0mpute workers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Codec {
@@ -188,16 +185,16 @@ mod tests {
 
     #[test]
     fn hash_roundtrip_hex() {
-        let h = Hash::of(b"hello quest");
+        let h = Hash::of(b"hello c0mpute");
         let s = h.to_hex();
         let h2 = Hash::from_hex(&s).unwrap();
         assert_eq!(h, h2);
     }
 
     #[test]
-    fn quest_url_format() {
-        let h = Hash::of(b"hello quest");
-        assert!(h.to_quest_url().starts_with("quest://blake3:"));
+    fn c0mpute_url_format() {
+        let h = Hash::of(b"hello c0mpute");
+        assert!(h.to_c0mpute_url().starts_with("c0mpute://blake3:"));
     }
 
     #[test]

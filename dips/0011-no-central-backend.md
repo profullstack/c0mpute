@@ -172,7 +172,7 @@ Things that move forward:
   of them disappear (auth, sessions, user-specific lists). The few
   that need a p2p replacement (job submit, claim, complete, fail) are
   designed in DIP-0006 + the v1 PRD.
-- Whether to keep the original Quest PRD's data model (`docs/PRD.md`
+- Whether to keep the original PRD's data model (`docs/PRD.md`
   §13) as architectural reference. It's still a useful representation
   of what the system tracks; it just doesn't represent a hosted DB
   schema anymore.

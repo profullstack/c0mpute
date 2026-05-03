@@ -3,7 +3,7 @@ name = "c0mpute-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "libp2p networking for Quest: Kad-DHT, gossipsub, chunk transport."
+description = "libp2p networking for c0mpute: Kad-DHT, gossipsub, chunk transport."
 
 [dependencies]
 c0mpute-proto = { workspace = true }

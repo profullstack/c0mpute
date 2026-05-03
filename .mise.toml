@@ -1,7 +1,7 @@
 # Contributor toolchain pin. See dips/0004-toolchain-mise.md.
 #
 # Operators DO NOT need this — they install the static `depin` binary via
-# `curl https://depin.quest/video/install.sh | sh`. This file is for people
+# `curl https://c0mpute.com/install.sh | sh`. This file is for people
 # building from source.
 #
 # Bootstrap a fresh checkout with: scripts/dev-setup.sh

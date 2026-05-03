@@ -14,8 +14,8 @@ superseded-by:
 
 ## Summary
 
-The project rebrands from depin.quest/video (Quest) to **c0mpute.com**, a
-generic decentralized compute marketplace. The video product becomes the
+The project rebrands to **c0mpute.com**, a generic decentralized compute
+marketplace. The original video-only product becomes the
 **transcode module** — one of three v1 modules alongside **infernet**
 (AI inference) and **coinpay** (DID + payments + reputation).
 
@@ -43,7 +43,7 @@ Install layout:
 
 ## Motivation
 
-We were aiming the work at depin.quest/video as a single video product.
+We were aiming the work at c0mpute.com as a single video product.
 Spending a week on the architecture revealed:
 
 1. The same network shape (workers + buyers + validators + escrow + DID +
@@ -53,11 +53,11 @@ Spending a week on the architecture revealed:
    want too — making it a `depin video` subcommand under-sells it.
 3. Infernet Protocol already exists and has its own brand and CLI.
    Subordinating it to a `depin` namespace creates conflict, not clarity.
-4. "depin.quest/video" reads as a single product. "c0mpute.com" reads as
+4. "c0mpute.com" reads as a single product. "c0mpute.com" reads as
    infrastructure other things plug into. The latter is what we're
    actually building.
 
-So we move the parent brand to c0mpute.com, fold Quest's domain expertise
+So we move the parent brand to c0mpute.com, fold FFmpeg-specific knowledge
 in as the ffmpeg-transcode module, and treat coinpay + infernet as
 first-class peer modules rather than internal subcommands.
 
@@ -138,12 +138,12 @@ crates/
 ├── infernet-cli/     # produces `infernet` binary (delegates to upstream when available)
 ├── c0mpute-core/     # shared: job manifest types, scheduler client, etc.
 ├── coinpay-sdk/      # DID + signed-request envelope + escrow client
-└── (existing quest-* crates retained as transcode-module internals)
+└── (host crates: c0mpute-net, c0mpute-store, c0mpute-gateway, ...)
 ```
 
-Existing `quest-*` crates (`c0mpute-store`, `c0mpute-transcode`, `c0mpute-net`,
-etc.) keep their names internally — they're the transcode module's
-implementation, not a user-visible brand.
+The `c0mpute-*` crate prefix matches the brand. The transcode workload
+runs in-process inside the `c0mpute` binary; networking, storage, and
+gateway responsibilities are split across sibling crates.
 
 ### CLI subcommand surface
 
@@ -219,7 +219,7 @@ Better to have first-class brands.
 **Separate repos from day one.** Splits a small team across three repos
 prematurely. Hold the line on monorepo until growth forces the split.
 
-**Keep depin.quest/video as the brand.** Doesn't survive the realization
+**Keep c0mpute.com as the brand.** Doesn't survive the realization
 that we're building infrastructure for multiple workload types, not one
 video product.
 
@@ -238,10 +238,7 @@ This is a pre-launch rebrand — no real users to migrate. Concrete steps:
 6. Update `apps/web` to drop the `basePath: "/video"` and rebrand.
 7. Update README + dev-setup script to reference the new CLI names.
 
-The `quest-*` Rust crates **keep their names** — they're the transcode
-module's internals, not user-visible. Renaming them to `c0mpute-transcode-*`
-or `transcode-module-*` is busywork and we already pay the cost of
-whatever name confusion exists once.
+All Rust crates use the `c0mpute-*` prefix matching the brand.
 
 ## Open questions
 

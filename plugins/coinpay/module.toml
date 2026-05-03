@@ -11,7 +11,7 @@ version     = "0.1.0"
 kind        = "service"
 description = "Decentralized identifiers, wallet linking, escrow, signed receipts, and worker reputation. The trust spine of the c0mpute network."
 author      = "Profullstack"
-license     = "Apache-2.0 OR MIT"
+license     = "MIT"
 homepage    = "https://coinpay.com"
 keywords    = ["did", "identity", "escrow", "payments", "reputation"]
 

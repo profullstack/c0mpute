@@ -18,7 +18,7 @@ use tracing::info;
 pub fn init_tracing() -> Result<()> {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,quest=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,c0mpute=debug"));
     fmt().with_env_filter(filter).try_init().ok();
     info!("tracing initialised");
     Ok(())

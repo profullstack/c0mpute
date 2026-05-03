@@ -3,7 +3,7 @@ name = "c0mpute-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared protocol types for the Quest network."
+description = "Shared protocol types for the c0mpute network."
 
 [dependencies]
 serde = { workspace = true }

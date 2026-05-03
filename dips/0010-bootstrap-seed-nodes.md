@@ -105,7 +105,7 @@ The DHT protocol id is `/c0mpute/kad/1.0.0`. This isolates us from the
 public IPFS network (which uses `/ipfs/kad/1.0.0`). Random IPFS peers
 won't accidentally end up in our DHT or vice versa.
 
-Was `/quest/kad/1.0.0` in the original Quest PRD — renamed during the
+Was `/c0mpute/kad/1.0.0` in the original PRD — renamed during the
 c0mpute rebrand (DIP-0005).
 
 ### Trust boundary
