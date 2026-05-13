@@ -125,10 +125,30 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read config {}", path.display()))?;
+
+        // Canonicalize path to resolve symlinks and ".." components, preventing
+        // path traversal attacks.
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("canonicalize config path {}", path.display()))?;
+
+        // Validate the canonical path is within the expected config directory.
+        if let Some(cfg_dir) = config_dir() {
+            if let Ok(canonical_cfg_dir) = cfg_dir.canonicalize() {
+                if !canonical.starts_with(&canonical_cfg_dir) {
+                    anyhow::bail!(
+                        "config path {} is outside allowed directory {}",
+                        canonical.display(),
+                        canonical_cfg_dir.display()
+                    );
+                }
+            }
+        }
+
+        let text = std::fs::read_to_string(&canonical)
+            .with_context(|| format!("read config {}", canonical.display()))?;
         let cfg: Config = toml::from_str(&text)
-            .with_context(|| format!("parse config {}", path.display()))?;
+            .with_context(|| format!("parse config {}", canonical.display()))?;
         Ok(cfg)
     }
 
