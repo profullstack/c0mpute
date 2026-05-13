@@ -135,6 +135,7 @@ async fn run_transcode_job(
 }
 
 async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
+    validate_url(url)?;
     let resp = reqwest::get(url).await.context("GET input_url")?;
     if !resp.status().is_success() {
         bail!("input fetch returned {}", resp.status());
@@ -142,6 +143,70 @@ async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
     let bytes = resp.bytes().await?;
     fs::write(path, &bytes).await?;
     Ok(())
+}
+
+/// Validate URL to prevent SSRF attacks.
+/// Only allows http/https schemes and rejects private/internal addresses.
+fn validate_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).context("invalid URL")?;
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => bail!("disallowed URL scheme: {}", scheme),
+    }
+
+    let host = parsed.host_str().context("URL missing host")?;
+
+    // Reject localhost variants
+    if host == "localhost" || host.ends_with(".localhost") {
+        bail!("localhost URLs are not allowed");
+    }
+
+    // Parse as IP and reject private/internal ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if !is_public_ip(ip) {
+            bail!("private or internal IP addresses are not allowed");
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is publicly routable (not private, loopback, link-local, etc.)
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            !ipv4.is_loopback()           // 127.0.0.0/8
+                && !ipv4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                && !ipv4.is_link_local()  // 169.254.0.0/16 (includes cloud metadata)
+                && !ipv4.is_broadcast()   // 255.255.255.255
+                && !ipv4.is_unspecified() // 0.0.0.0
+                && !ipv4.is_documentation() // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                && !is_shared_nat(ipv4)   // 100.64.0.0/10 (Carrier-grade NAT)
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            !ipv6.is_loopback()           // ::1
+                && !ipv6.is_unspecified() // ::
+                && !is_ipv6_private_or_local(&ipv6)
+        }
+    }
+}
+
+fn is_shared_nat(ip: std::net::Ipv4Addr) -> bool {
+    // 100.64.0.0/10 - Shared address space (RFC 6598)
+    let octets = ip.octets();
+    octets[0] == 100 && (octets[1] & 0xC0) == 64
+}
+
+fn is_ipv6_private_or_local(ip: &std::net::Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // fc00::/7 - Unique local addresses
+    (segments[0] & 0xfe00) == 0xfc00
+        // fe80::/10 - Link-local addresses
+        || (segments[0] & 0xffc0) == 0xfe80
+        // ::ffff:0:0/96 - IPv4-mapped addresses (check the mapped IPv4)
+        || (segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
 }
 
 async fn publish_receipt(
