@@ -10,6 +10,10 @@
   --color-accent-dim: #166534;
   --color-rule: #1f2937;
   --color-card: #111114;
+  --color-panel: #0f0f13;
+  --color-line: #1c1c22;
+  --color-muted: #555561;
+  --color-warn: #f6c177;
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Consolas, monospace;
 }
 

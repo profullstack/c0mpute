@@ -22,9 +22,9 @@ run = "bun install"
 [tasks.test]
 description = "Run all tests (Rust unit tests + TS typechecks)"
 run = [
-  "cargo test --manifest-path node/Cargo.toml",
-  "bun run --cwd apps/coordinator lint",
-  "bunx --cwd apps/web tsc --noEmit",
+  "cargo test",
+  "bun run --cwd apps/web lint",
+  "bunx --cwd apps/tui tsc --noEmit",
 ]
 
 [tasks.fmt]

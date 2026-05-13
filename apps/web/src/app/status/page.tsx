@@ -1,131 +1,152 @@
 import Link from "next/link";
+import DashboardShell from "@/components/dashboard-shell";
+import OverviewGrid from "@/components/overview-grid";
+import type { OverviewCard } from "@/components/overview-grid";
+import ResourceTable from "@/components/resource-table";
+import LiveBadge from "@/components/live-badge";
+import { getStatusPayload } from "@/lib/status";
+import type { StatusPayload } from "@/lib/status";
 
 export const metadata = { title: "status — c0mpute" };
-export const revalidate = 30; // serve cached version up to 30s
-
-interface StatusPayload {
-  ok: boolean;
-  generated_at: string;
-  network: {
-    workers_online: number;
-    workers_with_role: Record<string, number>;
-    jobs_in_flight: number;
-    jobs_completed_24h: number;
-    avg_job_latency_seconds: number | null;
-  };
-  source: "aggregator" | "stub";
-}
-
-async function fetchStatus(): Promise<StatusPayload | null> {
-  // Same-origin fetch to /api/status. revalidate caches it.
-  try {
-    const r = await fetch(
-      `${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/status`,
-      { next: { revalidate: 30 } },
-    );
-    if (!r.ok) return null;
-    return (await r.json()) as StatusPayload;
-  } catch {
-    return null;
-  }
-}
+export const revalidate = 30;
 
 export default async function StatusPage() {
-  const status = await fetchStatus();
+  const status: StatusPayload = await getStatusPayload();
+  const { network } = status;
+
+  const overviewCards: OverviewCard[] = [
+    {
+      label: "Workers online",
+      value: network.workers_online,
+      note: `${Object.values(network.workers_with_role).reduce((a: number, b: number) => a + b, 0)} roles assigned`,
+    },
+    {
+      label: "Jobs in flight",
+      value: network.jobs_in_flight,
+      note: "active now",
+    },
+    {
+      label: "Jobs completed (24h)",
+      value: network.jobs_completed_24h.toLocaleString(),
+      note: "rolling 24h",
+    },
+    {
+      label: "Avg job latency",
+      value:
+        network.avg_job_latency_seconds === null
+          ? "\u2014"
+          : `${network.avg_job_latency_seconds.toFixed(1)}s`,
+      note: "per workload",
+    },
+  ];
+
+  const roleRows = Object.entries(network.workers_with_role)
+    .sort(([, a], [, b]) => b - a)
+    .map(([role, count]) => {
+      const total = Object.values(network.workers_with_role).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      const share =
+        total > 0 ? `${((count / total) * 100).toFixed(0)}%` : "\u2014";
+      return { id: role, role, count, share };
+    });
+
+  const tagRows = Object.entries(network.workers_with_tag)
+    .sort(([, a], [, b]) => b - a)
+    .map(([tag, count]) => {
+      const label = tag.replace(/^c0mpute:/, "");
+      return { id: tag, tag: label, count };
+    });
+
+  const workloadRows = Object.entries(network.workload_types)
+    .sort(([, a], [, b]) => b.jobs_in_flight - a.jobs_in_flight)
+    .map(([type, stats]) => ({
+      id: type,
+      type,
+      in_flight: stats.jobs_in_flight,
+      completed_24h: stats.jobs_completed_24h.toLocaleString(),
+      latency:
+        stats.avg_latency_seconds === null
+          ? "\u2014"
+          : `${stats.avg_latency_seconds.toFixed(1)}s`,
+    }));
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-bold accent">status</h1>
-        <p className="comment">// public network health · aggregates only · no private data</p>
-      </header>
+    <DashboardShell>
+      <div className="flex items-center justify-between">
+        {status.source === "stub" && (
+          <span className="text-xs text-[var(--color-warn)]">
+            aggregator not deployed &mdash; showing placeholder data
+          </span>
+        )}
+        {status.source === "aggregator" && <span />}
+        <LiveBadge />
+      </div>
 
-      {!status ? (
-        <p className="text-sm text-[var(--color-dim)]">
-          status temporarily unavailable
+      <OverviewGrid cards={overviewCards} />
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <ResourceTable
+          title="[ workers by role ]"
+          description="Workers online, grouped by their configured role."
+          columns={[
+            { key: "role", label: "Role" },
+            { key: "count", label: "Workers" },
+            { key: "share", label: "Share" },
+          ]}
+          rows={roleRows}
+          emptyMessage="No workers online."
+        />
+
+        <ResourceTable
+          title="[ workload types ]"
+          description="Job throughput by workload type."
+          columns={[
+            { key: "type", label: "Workload" },
+            { key: "in_flight", label: "In flight" },
+            { key: "completed_24h", label: "Completed (24h)" },
+            { key: "latency", label: "Avg latency" },
+          ]}
+          rows={workloadRows}
+          emptyMessage="No workload activity."
+        />
+      </div>
+
+      <ResourceTable
+        title="[ capability tags ]"
+        description="Workers advertising each capability tag. Tags are colon-separated and hierarchical (c0mpute:role:storage, c0mpute:gpu:nvidia, etc.)."
+        columns={[
+          { key: "tag", label: "Capability" },
+          { key: "count", label: "Workers" },
+        ]}
+        rows={tagRows}
+        emptyMessage="No capability advertisements received."
+      />
+
+      <footer className="text-xs text-[var(--color-dim)] space-y-2 pt-6 rule">
+        <p>
+          All values are aggregates across the full p2p network. No individual
+          worker, job, customer, DID, IP address, or job input/output data is
+          displayed. See{" "}
+          <a href="https://github.com/profullstack/c0mpute/blob/master/dips/0014-status-aggregator.md">
+            DIP-0014
+          </a>{" "}
+          for the privacy model and aggregator design.
         </p>
-      ) : (
-        <>
-          <Section title="[ network ]">
-            <Row label="workers online" value={status.network.workers_online} />
-            <Row
-              label="jobs in flight"
-              value={status.network.jobs_in_flight}
-            />
-            <Row
-              label="jobs completed (24h)"
-              value={status.network.jobs_completed_24h}
-            />
-            <Row
-              label="avg job latency"
-              value={
-                status.network.avg_job_latency_seconds === null
-                  ? "—"
-                  : `${status.network.avg_job_latency_seconds.toFixed(1)}s`
-              }
-            />
-          </Section>
-
-          <Section title="[ workers by role ]">
-            {Object.entries(status.network.workers_with_role).map(
-              ([role, count]) => (
-                <Row key={role} label={role} value={count} />
-              ),
-            )}
-          </Section>
-
-          <Section title="[ data source ]">
-            <p className="text-sm">
-              {status.source === "aggregator"
-                ? "live · pulled from a c0mpute verifier aggregator"
-                : "placeholder · the aggregator service hasn't been deployed yet"}
-            </p>
-            <p className="text-xs text-[var(--color-dim)]">
-              generated at {status.generated_at}
-            </p>
-          </Section>
-
-          <p className="text-xs text-[var(--color-dim)] rule pt-6">
-            All values are aggregates across the full network. We do not
-            display individual workers, jobs, customers, DIDs, IP
-            addresses, or job inputs/outputs. See{" "}
-            <a href="https://github.com/profullstack/c0mpute/blob/master/dips/0014-status-aggregator.md">
-              DIP-0014
-            </a>{" "}
-            for the privacy model and aggregator design.
+        {status.source === "aggregator" && (
+          <p>
+            generated at {status.generated_at} &middot; source:{" "}
+            <span className="text-[var(--color-accent)]">aggregator</span>
           </p>
-        </>
-      )}
-
-      <p className="text-xs text-[var(--color-dim)] rule pt-6">
-        →{" "}
-        <Link href="/getting-started">getting-started</Link> ·{" "}
-        <Link href="/docs">docs</Link>
-      </p>
-    </div>
-  );
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="space-y-2">
-      <h2 className="text-base accent">{title}</h2>
-      <div className="pl-5 space-y-1 text-sm">{children}</div>
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex justify-between font-mono">
-      <span className="text-[var(--color-dim)]">{label}</span>
-      <span className="text-[var(--color-fg)]">{value}</span>
-    </div>
+        )}
+        <p>
+          &rarr;{" "}
+          <Link href="/getting-started">getting-started</Link> &middot;{" "}
+          <Link href="/docs">docs</Link> &middot;{" "}
+          <Link href="/plugins">plugins</Link>
+        </p>
+      </footer>
+    </DashboardShell>
   );
 }

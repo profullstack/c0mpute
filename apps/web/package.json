@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "bunx next dev",
     "build": "bunx next build",
-    "start": "bunx next start"
+    "start": "bunx next start",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "next": "^16.0.0",
