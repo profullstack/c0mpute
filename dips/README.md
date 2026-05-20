@@ -109,6 +109,7 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0013 | Position: GPU batch-compute marketplace; 5–8× cheaper niche      | Accepted   |
 | 0014 | Public /status page + status-aggregator service                  | Accepted   |
 | 0015 | Hosting vertical: censorship-resistant static sites              | Draft      |
+| 0017 | Streaming reads: progressive RS reconstruction for sequential workloads | Draft |
 
 ### v2.x (`dips/v2.x/`)
 
