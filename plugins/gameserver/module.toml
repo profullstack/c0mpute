@@ -1,0 +1,42 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Continuous-reservation game server hosting. NOT job-shaped: the
+#   contract shape is closer to DIP-0015's hosting vertical than to
+#   the transcode auction — multi-replica placement (cold + hot),
+#   epoch settlement, proof-of-serve (player heartbeat / RCON ping),
+#   slashable collateral. Supported games defined by sub-image set,
+#   e.g. minecraft-paper, factorio-headless, valheim, terraria.
+#   Persistent world state lives in the storage plugin (DIP-0012)
+#   so a replica swap doesn't lose progress.
+
+[module]
+id          = "gameserver"
+name        = "Game server — Minecraft / Factorio / Valheim"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Continuous-reservation hosting for game servers. Multi-replica placement, persistent world state on c0mpute storage, proof-of-serve settlement."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["gameserver", "minecraft", "factorio", "valheim", "hosting", "continuous"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["container-runtime", "network:ingress", "continuous-reservation"]
+
+[module.workloads]
+"gameserver.run" = { command = "run", validation = "proof_of_serve_heartbeat" }
+
+[module.dispatch]
+mode  = "container"
+image = "ghcr.io/c0mpute/gameserver-runner:candidate"
+
+[module.surfaces]
+cli = "c0mpute gameserver"
+
+[module.config.defaults]
+replicas       = 2
+heartbeat_secs = 30

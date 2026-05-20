@@ -1,0 +1,40 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Document OCR. Suggested upstreams: Tesseract (lean, broad-lang),
+#   PaddleOCR (better on real-world scans), docTR (HF, GPU-friendly).
+#   Inputs: PDF or image (PNG/JPG/TIFF). Outputs: searchable PDF +
+#   per-page JSON {blocks: [{bbox, text, conf}]}.
+#   Validation: schema + word-level edit-distance spot-check on a
+#   sampled page against a second worker.
+
+[module]
+id          = "ocr"
+name        = "OCR — document text extraction"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized OCR for PDFs and scanned documents (Tesseract, PaddleOCR, docTR) with CPU or GPU runners."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["ocr", "tesseract", "paddleocr", "doctr", "pdf", "documents"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["gpu:nvidia?"]
+
+[module.workloads]
+"ocr.extract" = { command = "extract", validation = "schema_and_edit_distance_spotcheck" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-ocr"
+
+[module.surfaces]
+cli = "c0mpute ocr"
+
+[module.config.defaults]
+engine    = "tesseract"
+languages = ["eng"]

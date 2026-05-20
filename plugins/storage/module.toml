@@ -1,0 +1,45 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — manifest stub for the DIP-0012 storage role.
+# Brief for the implementer:
+#   Reed-Solomon (k=10, n=14) shard storage and HTTP shard endpoints.
+#   Auto-repair re-shards on node failure. Compute-locality is the
+#   value prop — reads from c0mpute storage into a c0mpute worker
+#   are internal-egress-free. First-party in-tree: erasure coding
+#   already lives in c0mpute-store; this stub wires the marketplace
+#   surface (manifest + dashboard listing + capability tag).
+
+[module]
+id          = "storage"
+name        = "Storage — Reed-Solomon shard service"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Reed-Solomon 10/14 shard storage with auto-repair. Compute-locality, E2E encryption, content-addressed, pay-as-you-go. See DIP-0012."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/storage"
+keywords    = ["storage", "erasure-coding", "reed-solomon", "shards", "content-addressed"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["disk:1tb+?", "network:ingress"]
+
+[module.workloads]
+"storage.put"  = { command = "put",  validation = "shard_hash_agreement" }
+"storage.get"  = { command = "get",  validation = "shard_hash_agreement" }
+"storage.repair" = { command = "repair", validation = "repaired_set_hash" }
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute storage"
+# web = "c0mpute.com/storage"   # planned
+
+[module.config.defaults]
+k             = 10
+n             = 14
+heartbeat_secs = 60

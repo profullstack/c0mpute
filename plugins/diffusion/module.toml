@@ -1,0 +1,43 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Containerized image-generation workload. Suggested upstreams:
+#   ComfyUI (graph-defined pipelines), stable-diffusion.cpp (lean
+#   inference), or Diffusers (HF reference). Container ships with a
+#   pinned model set; jobs may request additional model hashes which
+#   the runner pulls from the c0mpute storage plugin (DIP-0012). Output
+#   is one or more PNG/WebP files plus a metadata sidecar.
+#   Validation: schema + perceptual-hash spot-check against a small
+#   deterministic reference seed.
+
+[module]
+id          = "diffusion"
+name        = "Diffusion — image generation"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized image generation (Stable Diffusion, SDXL, Flux) on consumer/prosumer GPUs."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["diffusion", "stable-diffusion", "sdxl", "flux", "image", "txt2img", "img2img"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
+
+[module.workloads]
+"diffusion.txt2img" = { command = "txt2img", validation = "schema_and_phash_spotcheck" }
+"diffusion.img2img" = { command = "img2img", validation = "schema_and_phash_spotcheck" }
+
+[module.dispatch]
+mode  = "container"
+image = "ghcr.io/c0mpute/diffusion-runner:candidate"
+
+[module.surfaces]
+cli = "c0mpute diffusion"
+
+[module.config.defaults]
+sampler = "dpmpp_2m"
+steps   = 25

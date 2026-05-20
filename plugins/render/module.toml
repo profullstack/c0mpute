@@ -1,0 +1,41 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Distributed 3D rendering, SheepIt-style. Wrap Blender headless
+#   (`blender -b scene.blend -o out_#### -f N`) as a per-frame
+#   subprocess workload. Jobs ship a .blend (content-addressed), a
+#   frame range, and render settings. Outputs are PNG/EXR per frame.
+#   Future: tile-based rendering for very heavy single frames.
+#   Validation: file exists + dimensions match + sample-pixel hash
+#   against a second worker.
+
+[module]
+id          = "render"
+name        = "Render — Blender 3D rendering"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized 3D rendering using Blender headless (Cycles/Eevee) across consumer GPUs and CPUs."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["blender", "3d", "render", "cycles", "eevee", "vfx"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["blender", "gpu:nvidia?", "gpu:amd?", "gpu:apple?"]
+
+[module.workloads]
+"blender.render-frame" = { command = "render-frame", validation = "schema_and_pixel_spotcheck" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-render"
+
+[module.surfaces]
+cli = "c0mpute render"
+
+[module.config.defaults]
+engine = "CYCLES"
+device = "AUTO"

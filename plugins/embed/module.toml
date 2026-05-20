@@ -1,0 +1,41 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Bulk embedding generation. Suggested upstreams: sentence-transformers,
+#   BGE, Nomic, or llama.cpp's embedding mode. Input is a JSONL of
+#   {id, text}; output is a JSONL of {id, vector[]} or a binary
+#   parquet/npy artifact for large batches. CPU-only is acceptable;
+#   GPU is a price/throughput improvement, not a requirement.
+#   Validation: shape + cosine-similarity spot-check on a fixed seed
+#   string against a second worker.
+
+[module]
+id          = "embed"
+name        = "Embeddings — vector generation"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Bulk text-embedding generation (sentence-transformers, BGE, Nomic) with CPU fallback and optional GPU acceleration."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["embeddings", "vectors", "sentence-transformers", "bge", "nomic", "rag"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["gpu:nvidia?", "gpu:apple?"]
+
+[module.workloads]
+"embed.text" = { command = "embed-text", validation = "shape_and_cosine_spotcheck" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-embed"
+
+[module.surfaces]
+cli = "c0mpute embed"
+
+[module.config.defaults]
+model      = "bge-small-en-v1.5"
+batch_size = 64

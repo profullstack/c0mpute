@@ -1,0 +1,41 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Text-to-speech synthesis. Suggested upstreams: Piper (fastest CPU,
+#   per-voice ONNX), Coqui XTTS (multilingual, voice-cloning), Kokoro
+#   (high quality, small). Input: {text, voice, format}. Output: WAV or
+#   OGG/Opus. Validation is hard — propose duration-bounds check + a
+#   second worker re-synth + perceptual-audio-hash agreement, or just
+#   single-worker with reputation slashing on user dispute.
+
+[module]
+id          = "tts"
+name        = "TTS — text-to-speech"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized text-to-speech synthesis (Piper, Coqui XTTS, Kokoro) for narration, audiobooks, and accessibility."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["tts", "piper", "xtts", "kokoro", "synthesis", "audio"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["gpu:nvidia?", "gpu:apple?"]
+
+[module.workloads]
+"tts.synthesize" = { command = "synthesize", validation = "duration_bounds_and_phash" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-tts"
+
+[module.surfaces]
+cli = "c0mpute tts"
+
+[module.config.defaults]
+engine = "piper"
+voice  = "en_US-lessac-medium"
+format = "wav"

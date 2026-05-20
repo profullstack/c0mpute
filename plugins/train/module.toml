@@ -1,0 +1,42 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Containerized fine-tuning. Suggested upstreams: axolotl (config-
+#   driven), unsloth (memory-efficient LoRA/QLoRA), torchtune. Inputs:
+#   base-model hash + dataset (JSONL or parquet) + training config.
+#   Outputs: LoRA/QLoRA adapter weights (safetensors) + training-log
+#   sidecar. Longer-running jobs; settlement is checkpoint-based with
+#   intermediate receipts so a worker can fail-forward without losing
+#   the whole reward.
+
+[module]
+id          = "train"
+name        = "Fine-tune — LoRA/QLoRA training"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized model fine-tuning (LoRA, QLoRA) on consumer/prosumer GPUs using axolotl or unsloth."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["train", "finetune", "lora", "qlora", "axolotl", "unsloth"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux"]
+arch         = ["x86_64"]
+capabilities = ["gpu:nvidia", "vram:24gb+", "container-runtime"]
+
+[module.workloads]
+"train.lora"  = { command = "train-lora",  validation = "loss_curve_and_checkpoint_hash" }
+"train.qlora" = { command = "train-qlora", validation = "loss_curve_and_checkpoint_hash" }
+
+[module.dispatch]
+mode  = "container"
+image = "ghcr.io/c0mpute/train-runner:candidate"
+
+[module.surfaces]
+cli = "c0mpute train"
+
+[module.config.defaults]
+framework = "unsloth"
+precision = "bf16"

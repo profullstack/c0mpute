@@ -1,0 +1,38 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Wrap whisper.cpp (https://github.com/ggerganov/whisper.cpp) as a
+#   subprocess workload. Accepts audio inputs (any format ffmpeg can
+#   decode), emits JSON {text, segments[{t0, t1, text}], language}.
+#   Validation: schema check + spot-check N seconds re-transcribed by a
+#   second worker for receipt agreement.
+
+[module]
+id          = "whisper"
+name        = "Whisper — speech-to-text"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized speech-to-text transcription via whisper.cpp with optional GPU acceleration (CUDA, Metal, Vulkan)."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["whisper", "stt", "transcription", "speech", "audio", "subtitles"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["ffmpeg", "gpu:nvidia?", "gpu:apple?", "gpu:vulkan?"]
+
+[module.workloads]
+"whisper.transcribe" = { command = "transcribe", validation = "schema_and_spotcheck" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-whisper"
+
+[module.surfaces]
+cli = "c0mpute whisper"
+
+[module.config.defaults]
+model = "base.en"

@@ -1,0 +1,44 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# Brief for the implementer:
+#   Distributed web fetching. Suggested upstreams: a Rust HTTP fetcher
+#   (reqwest + scraper) for static pages, plus Playwright/Chromium
+#   sidecar for JS-rendered pages. Jobs declare URL set + render mode +
+#   robots.txt policy. Outputs: WARC or per-URL {status, headers, body,
+#   final_url, fetched_at} JSON. This is also the canonical worker
+#   pool for the CrawlProof demand generator.
+#   Validation: status-code + content-hash agreement across two workers
+#   for a sample of the URL set (re-fetched independently).
+
+[module]
+id          = "crawl"
+name        = "Crawl — distributed web fetching"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Decentralized web crawling and page-rendering pool. Static fetches and JS-rendered pages, robots-aware, WARC-capable."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["crawl", "scrape", "fetch", "warc", "playwright", "crawlproof"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:egress", "browser:chromium?"]
+
+[module.workloads]
+"crawl.fetch"  = { command = "fetch",  validation = "status_and_content_hash_spotcheck" }
+"crawl.render" = { command = "render", validation = "status_and_dom_hash_spotcheck" }
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "c0mpute-crawl"
+
+[module.surfaces]
+cli = "c0mpute crawl"
+
+[module.config.defaults]
+respect_robots = true
+user_agent     = "c0mpute-crawl/0.0 (+https://c0mpute.com/plugins/crawl)"
+concurrency    = 8

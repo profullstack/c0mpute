@@ -1,0 +1,43 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — manifest stub for the DIP-0015 hosting vertical.
+# Brief for the implementer:
+#   Censorship-resistant static-site hosting. Built on the storage
+#   plugin (DIP-0012, RS-10/14 shards) plus continuous reservations
+#   (DIP-0015). Differentiates on takedown resistance and replica
+#   diversity as contract terms — NOT on $/GB. First-party in-tree:
+#   should compile into the c0mpute binary alongside transcode.
+#   Live code will land at node/crates/c0mpute-hosting.
+
+[module]
+id          = "hosting"
+name        = "Hosting — censorship-resistant static sites"
+version     = "0.0.1-candidate"
+kind        = "workload"
+description = "Static-site hosting with multi-replica placement, mutable naming, epoch settlement, and slashable proof-of-serve. See DIP-0015."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/hosting"
+keywords    = ["hosting", "static", "censorship-resistant", "ipfs-alt", "dweb"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["storage-role", "network:ingress", "continuous-reservation"]
+
+[module.workloads]
+"hosting.serve" = { command = "serve", validation = "proof_of_serve_challenge" }
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute hosting"
+# web = "c0mpute.com/hosting"   # planned
+
+[module.config.defaults]
+replicas        = 4
+epoch_secs      = 3600
+challenge_quota = 12
