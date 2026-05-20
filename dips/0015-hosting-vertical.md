@@ -389,12 +389,11 @@ follow.
 ## Open questions
 
 - **Abuse policy.** "Can't be taken down" forces a CSAM / abuse
-  stance up front. Storj and Filecoin both got hit late and
-  improvised badly. Proposed default: a network-maintained hash
-  blocklist with per-worker opt-in/out, and a public log of
-  blocklisted hashes (without rehosting the content). Needs a DIP of
-  its own before launch — not in scope here, but **must** be
-  resolved before the vertical exits Phase 1.
+  stance. Now drafted as DIP-0016 (Draft, targets v2). v1
+  (Phases 1–3) can ship as a hash-only beta without public
+  takedown-resistance marketing; DIP-0016 must be Accepted and
+  implemented before the v2 surface (public marketing, name
+  registry, browser extension) goes live.
 - **Browser story.** Gateway-mediated HTTPS works on day one but
   centralizes resolution. Browser extension is the long-term answer;
   pinning down extension UX (does it transparently rewrite URLs?
@@ -424,5 +423,5 @@ follow.
   DIP-0014 privacy model.
 - Storage of large binary blobs without a serving guarantee — that's
   the existing DIP-0012 v3 storage primitive, not this vertical.
-- CSAM / abuse policy specifics — separate DIP required before
-  Phase 1 exits.
+- CSAM / abuse policy specifics — see DIP-0016 (targets v2; must
+  land before public takedown-resistance marketing).

@@ -43,18 +43,26 @@ Draft  →  Review  →  Accepted  →  Final
 - **Rejected / Withdrawn / Superseded** — kept on disk; the *why* is part of
   the record.
 
-## Numbering
+## Numbering & directory layout
 
 Four-digit zero-padded, monotonically increasing, no gaps: `0001`, `0002`,
 `0003`. The number is assigned when a DIP enters Review (i.e. opens a PR).
-Use the next free number — don't reserve in advance.
+Use the next free number — don't reserve in advance. Numbering stays
+globally sequential across all directories — moving a DIP from v1.x to
+v2.x scope doesn't renumber it.
 
 The filename is `NNNN-short-slug.md`, e.g.
 `0003-libp2p-protocol-versioning.md`.
 
+DIPs are grouped by major product version. v1.x DIPs live at the top of
+`dips/`. v2.x DIPs live in `dips/v2.x/`. Future major versions get their
+own subdirectory (`dips/v3.x/`, etc.); v1.x stays flat for historical
+reasons.
+
 ## Authoring flow
 
-1. Copy `0000-template.md` to `NNNN-your-slug.md` (next free NNNN).
+1. Copy `0000-template.md` to `NNNN-your-slug.md` (next free NNNN). Place
+   it in `dips/` for v1.x scope, or `dips/v2.x/` for v2.x scope.
 2. Fill in the frontmatter and body.
 3. Open a PR titled `DIP-NNNN: <title>`.
 4. Status starts at `Draft`. Move to `Review` when you want feedback.
@@ -82,6 +90,8 @@ superseded-by: <DIP-NNNN if this gets replaced>
 
 ## Index
 
+### v1.x
+
 | #    | Title                                                            | Status     |
 |------|------------------------------------------------------------------|------------|
 | 0001 | URL namespace under `/video`                                     | Superseded by 0005 |
@@ -99,3 +109,9 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0013 | Position: GPU batch-compute marketplace; 5–8× cheaper niche      | Accepted   |
 | 0014 | Public /status page + status-aggregator service                  | Accepted   |
 | 0015 | Hosting vertical: censorship-resistant static sites              | Draft      |
+
+### v2.x (`dips/v2.x/`)
+
+| #    | Title                                                            | Status     |
+|------|------------------------------------------------------------------|------------|
+| 0016 | Abuse policy: CSAM hash blocklist, per-worker opt-in             | Draft      |
