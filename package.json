@@ -17,5 +17,8 @@
   },
   "devDependencies": {
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "postcss": "^8.5.15"
   }
 }
