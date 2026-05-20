@@ -98,3 +98,4 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0012 | c0mpute is compute-only; storage is BYOS                         | Accepted   |
 | 0013 | Position: GPU batch-compute marketplace; 5–8× cheaper niche      | Accepted   |
 | 0014 | Public /status page + status-aggregator service                  | Accepted   |
+| 0015 | Hosting vertical: censorship-resistant static sites              | Draft      |
