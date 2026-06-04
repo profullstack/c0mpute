@@ -1,0 +1,68 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0022-podcast-plugins.md for the full PRD.
+#
+# Brief for the implementer:
+#   Consumer/listener side of the c0mpute podcast platform.
+#   Owns: show discovery via DHT index (SHA256("podcast-index:" + category)),
+#   RSS subscription management (c0mpute shows + any external RSS URL),
+#   episode inbox, p2p episode download/streaming (from storage plugin swarm),
+#   live show playback (audio-only HLS from live-stream plugin), play position
+#   tracking, OPML import/export, local HTTP server on :9090 for compatibility
+#   with external podcast apps, CoinPay tips and subscription payments,
+#   value-for-value streaming micropayments per minute listened.
+#   Also seeds already-downloaded episodes back to the p2p swarm (opt-in,
+#   earns a small bandwidth rebate via storage plugin).
+#   First-party in-tree target: node/crates/c0mpute-podcasts
+
+[module]
+id          = "podcasts"
+name        = "Podcasts — p2p podcast listener"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Discover, subscribe to, and play podcasts hosted on the c0mpute network or any standard RSS feed. Stream live episodes, tip creators directly via CoinPay, and participate in value-for-value streaming payments. Works alongside any existing podcast app via OPML export and local RSS proxy."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/podcasts"
+keywords    = ["podcast", "listen", "subscribe", "rss", "audio", "p2p", "podcasting2", "value4value"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:egress"]
+
+[module.requirements.plugins]
+coinpay = ">=0.2.0"   # DIP-0007: tips, subscriptions, value-for-value payments
+
+[module.workloads]
+# No one-shot workloads. podcasts is a continuous service (local RSS proxy,
+# inbox polling, p2p seeding of downloaded episodes).
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute podcasts"
+# web = "c0mpute.com/podcasts"   # planned: browse + embedded player
+
+[module.config.defaults]
+# Local RSS proxy port (for external podcast app compatibility).
+local_proxy_port       = 9090
+
+# How often to poll RSS feeds for new episodes (seconds).
+feed_poll_interval_s   = 3600   # 1 hour
+
+# Max local episode cache size before oldest eps are evicted.
+cache_max_bytes        = 10_737_418_240   # 10 GB
+
+# Seed already-downloaded episodes back to the p2p swarm (earns rebate).
+seeding_enabled        = false
+
+# Value-for-value: stream micropayments per minute listened (USDC).
+# Set to 0 to disable. Apps in podcasting apps override this per-show.
+v4v_rate_usd_per_min   = 0.01
+
+# Notify on new episodes from subscribed shows.
+notify_new_episodes    = true

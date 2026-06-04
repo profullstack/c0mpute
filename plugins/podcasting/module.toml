@@ -1,0 +1,74 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0022-podcast-plugins.md for the full PRD.
+#
+# Brief for the implementer:
+#   Publisher/creator side of the c0mpute podcast platform.
+#   Owns: show + episode CRUD, RSS 2.0 feed generation (iTunes + Podcasting
+#   2.0 namespaces), audio upload → storage plugin, live episode streaming
+#   (audio-only via live-stream plugin, <podcast:liveItem> in feed), auto-
+#   transcription via whisper plugin, audio format conversion via transcode
+#   plugin, monetisation (CoinPay subscriptions / pay-per-episode / tips /
+#   value-for-value <podcast:value> block / ads-manager audio ads).
+#   Show records DHT-announced: SHA256("podcast-show:" + show_id).
+#   RSS feed endpoint: GET /podcasting/<show_id>/rss.xml (served by any node
+#   with this plugin enabled).
+#   Ed25519 feed signing via podcaster's CoinPay DID key.
+#   First-party in-tree target: node/crates/c0mpute-podcasting
+
+[module]
+id          = "podcasting"
+name        = "Podcasting — p2p podcast publishing"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Censorship-resistant podcast hosting on the c0mpute network. Upload episodes, stream live shows, auto-transcribe, and monetise via CoinPay subscriptions, pay-per-episode, value-for-value, and audio ads — with zero platform cut. RSS 2.0 + Podcasting 2.0 compatible with all major podcast apps."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/podcasting"
+keywords    = ["podcast", "podcasting", "rss", "audio", "live", "publishing", "censorship-resistant", "podcasting2"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress", "network:egress", "storage:ephemeral"]
+
+[module.requirements.plugins]
+coinpay     = ">=0.2.0"   # DIP-0007: DID identity, subscriptions, tips, value-for-value
+storage     = ">=0.0.1"   # DIP-0012: episode audio, artwork, chapters, transcripts
+transcode   = ">=0.2.0"   # audio format conversion + bitrate normalisation
+live-stream = ">=0.0.1"   # DIP-0019: live episode streaming (audio-only HLS)
+whisper     = ">=0.0.1"   # auto-transcription of episodes → VTT
+ads-manager = ">=0.0.1"   # DIP-0021: audio ad injection + revenue settlement (optional)
+
+[module.workloads]
+# Podcasting is a continuous service for RSS serving + live streaming.
+# One-shot jobs (transcription, transcode) are delegated to their plugins.
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute podcasting"
+# web = "c0mpute.com/podcasting"   # planned: publisher dashboard
+
+[module.config.defaults]
+# Audio formats produced for each episode upload.
+audio_formats          = ["mp3", "aac"]
+
+# Auto-transcribe episodes on publish (requires whisper plugin).
+transcribe_auto        = false
+transcribe_model       = "base.en"
+
+# Default episode type when not specified.
+default_episode_type   = "full"
+
+# RSS feed max episodes returned (older eps still accessible by direct URL).
+feed_max_items         = 300
+
+# Live stream: automatically archive recording when live episode ends.
+live_archive_auto      = true
+
+# Value-for-value: default protocol fee split (basis points out of 10000).
+v4v_protocol_split_bps = 500   # 5% to c0mpute protocol, 95% to podcaster
