@@ -14,7 +14,8 @@
     "cargo:build": "cargo build --bins",
     "cargo:run": "cargo run --bin c0mpute --",
     "cargo:test": "cargo test --workspace",
-    "newsletter": "bun bin/send-newsletter.ts"
+    "newsletter": "bun bin/send-newsletter.ts",
+    "migrate:cloud": "bun bin/migrate-to-cloud.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.0"
