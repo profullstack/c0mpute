@@ -8,33 +8,16 @@ import { blogPosts } from "./schema";
 
 type Db = ReturnType<typeof drizzle<{ blogPosts: typeof blogPosts }>>;
 
-let _client: Database | null = null;
 let _db: Db | null = null;
 
-const CONNECTION_ERRORS = new Set([
-  "ERR_CONNECTION_NOT_ESTABLISHED",
-  "ERR_SOCKET_CONNECTION_TIMEOUT",
-  "ERR_CONNECTION_CLOSED",
-]);
-
-function isConnectionError(e: unknown): boolean {
-  const code = (e as { errorCode?: string; cause?: { errorCode?: string } })?.errorCode
-    ?? (e as { cause?: { errorCode?: string } })?.cause?.errorCode;
-  return !!code && CONNECTION_ERRORS.has(code);
-}
-
-function resetConnection() {
-  try { (_client as Database & { disconnect?: () => void })?.disconnect?.(); } catch {}
-  _client = null;
-  _db = null;
-}
-
-async function makeConnection(): Promise<{ client: Database; db: Db }> {
+async function getDb(): Promise<Db> {
+  if (_db) return _db;
   const url = process.env.SQLITE_CLOUD_URL;
   if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
 
   const client = new Database(url);
 
+  // Ensure table + indexes exist (drizzle-kit migrations not yet wired to cloud)
   await client.sql`
     CREATE TABLE IF NOT EXISTS blog_posts (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +41,7 @@ async function makeConnection(): Promise<{ client: Database; db: Db }> {
   // Wire @sqlitecloud/drivers into drizzle's sqlite-proxy.
   // The proxy callback must return rows as value arrays (not objects) because
   // drizzle's mapResultRow indexes by column position.
-  const db = drizzle(
+  _db = drizzle(
     async (sql, params, method) => {
       if (method === "run") {
         await client.sql({ query: sql, parameters: params });
@@ -72,28 +55,7 @@ async function makeConnection(): Promise<{ client: Database; db: Db }> {
     { schema: { blogPosts } }
   );
 
-  return { client, db };
-}
-
-async function getDb(): Promise<Db> {
-  if (_db) return _db;
-  const { client, db } = await makeConnection();
-  _client = client;
-  _db = db;
-  return db;
-}
-
-// Runs `fn` and if it fails with a connection error, resets and retries once.
-async function withReconnect<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e) {
-    if (isConnectionError(e)) {
-      resetConnection();
-      return fn();
-    }
-    throw e;
-  }
+  return _db;
 }
 
 // ── Redis cache ───────────────────────────────────────────────────────────────
@@ -177,26 +139,24 @@ function hydrate(row: typeof blogPosts.$inferSelect): BlogPost {
 // ── Exported functions ────────────────────────────────────────────────────────
 
 export async function upsertPost(post: NewPost): Promise<void> {
+  const db = await getDb();
   const tagsJson = JSON.stringify(post.tags);
-  await withReconnect(async () => {
-    const db = await getDb();
-    await db
-      .insert(blogPosts)
-      .values({ ...post, tags: tagsJson })
-      .onConflictDoUpdate({
-        target: [blogPosts.source, blogPosts.source_id],
-        set: {
-          slug: post.slug,
-          title: post.title,
-          content_html: post.content_html,
-          content_markdown: post.content_markdown ?? null,
-          meta_description: post.meta_description ?? null,
-          image_url: post.image_url ?? null,
-          tags: tagsJson,
-          published_at: post.published_at,
-        },
-      });
-  });
+  await db
+    .insert(blogPosts)
+    .values({ ...post, tags: tagsJson })
+    .onConflictDoUpdate({
+      target: [blogPosts.source, blogPosts.source_id],
+      set: {
+        slug: post.slug,
+        title: post.title,
+        content_html: post.content_html,
+        content_markdown: post.content_markdown ?? null,
+        meta_description: post.meta_description ?? null,
+        image_url: post.image_url ?? null,
+        tags: tagsJson,
+        published_at: post.published_at,
+      },
+    });
   await Promise.all([cacheDel(`blog:post:${post.slug}`), cacheDelListKeys()]);
 }
 
@@ -205,17 +165,14 @@ export async function listPosts(limit = 50, offset = 0): Promise<BlogPost[]> {
   const cached = await cacheGet<BlogPost[]>(cacheKey);
   if (cached) return cached;
 
-  const posts = await withReconnect(async () => {
-    const db = await getDb();
-    const rows = await db
-      .select()
-      .from(blogPosts)
-      .orderBy(desc(blogPosts.published_at))
-      .limit(limit)
-      .offset(offset);
-    return rows.map(hydrate);
-  });
-
+  const db = await getDb();
+  const rows = await db
+    .select()
+    .from(blogPosts)
+    .orderBy(desc(blogPosts.published_at))
+    .limit(limit)
+    .offset(offset);
+  const posts = rows.map(hydrate);
   await cacheSet(cacheKey, posts);
   return posts;
 }
@@ -225,16 +182,13 @@ export async function getPost(slug: string): Promise<BlogPost | null> {
   const cached = await cacheGet<BlogPost>(cacheKey);
   if (cached) return cached;
 
-  const post = await withReconnect(async () => {
-    const db = await getDb();
-    const rows = await db
-      .select()
-      .from(blogPosts)
-      .where(eq(blogPosts.slug, slug))
-      .limit(1);
-    return rows[0] ? hydrate(rows[0]) : null;
-  });
-
+  const db = await getDb();
+  const rows = await db
+    .select()
+    .from(blogPosts)
+    .where(eq(blogPosts.slug, slug))
+    .limit(1);
+  const post = rows[0] ? hydrate(rows[0]) : null;
   if (post) await cacheSet(cacheKey, post);
   return post;
 }
