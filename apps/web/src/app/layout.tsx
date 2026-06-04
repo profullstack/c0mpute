@@ -68,6 +68,8 @@ export default function RootLayout({
           <div className="max-w-3xl mx-auto px-6 py-6 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--color-dim)]">
             <span>c0mpute.com</span>
             <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
+            <Link href="/about" className="!border-0 hover:text-[var(--color-accent)]">about</Link>
+            <Link href="/pricing" className="!border-0 hover:text-[var(--color-accent)]">pricing</Link>
             <Link href="/terms" className="!border-0 hover:text-[var(--color-accent)]">terms</Link>
             <Link href="/privacy" className="!border-0 hover:text-[var(--color-accent)]">privacy</Link>
             <a
