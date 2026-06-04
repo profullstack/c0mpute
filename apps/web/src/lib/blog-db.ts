@@ -1,8 +1,10 @@
 import Database from "better-sqlite3";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { mkdirSync } from "node:fs";
 
 // Default to ./blog.db; set BLOG_DB_PATH to a Railway volume mount for persistence.
 const DB_PATH = process.env.BLOG_DB_PATH ?? resolve(process.cwd(), "blog.db");
+mkdirSync(dirname(DB_PATH), { recursive: true });
 
 let _db: Database.Database | null = null;
 
