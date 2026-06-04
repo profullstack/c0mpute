@@ -21,3 +21,4 @@ subscribers.txt
 .vscode/
 pnpm-lock.yaml
 blog.db
+.claude/
