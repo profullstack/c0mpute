@@ -1,0 +1,76 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0019-live-stream-plugin.md for the full PRD.
+#
+# Inspired by Acestream / SopCast: BitTorrent-style p2p live streaming.
+# Open-source, permissionless, and backed by the c0mpute marketplace.
+#
+# Brief for the implementer:
+#   Three node roles: ingest (RTMP/SRT in, FFmpeg HLS segmenter), relay
+#   (swarm segments via DHT, serve HLS to viewers), viewer-client (fetch
+#   + optional reseed). Segments are content-addressed (SHA-256); DHT key
+#   is SHA256("live-stream-seg:" + stream_id + ":" + variant + ":" + seq).
+#   Payment: CoinPay per-GB epoch settlement (60s epochs, signed receipts).
+#   Ingest: RTMP/SRT → FFmpeg (-f hls, 4s segments, mpegts) → announce.
+#   Gossip message types: 0x30 STREAM_DESCRIPTOR, 0x31 SEGMENT_AVAILABLE,
+#   0x32 SEGMENT_REQUEST.
+#   Low-Latency HLS (LL-HLS) is opt-in (partial segments, 0.5–1s parts).
+#   DVR/replay: persisted segments via storage plugin (DIP-0012).
+#   VOD archive: post-broadcast repackage via transcode plugin.
+#   First-party in-tree target: node/crates/c0mpute-live-stream
+
+[module]
+id          = "live-stream"
+name        = "Live Stream — p2p HLS live streaming"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Decentralized live video streaming via BitTorrent-style HLS segment swarming. Broadcaster pushes RTMP/SRT; c0mpute nodes swarm segments to viewers. No central CDN. Censorship-resistant. Per-GB micropayments via CoinPay."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/live-stream"
+keywords    = ["live", "streaming", "hls", "m3u8", "p2p", "bittorrent", "rtmp", "srt", "sports", "video"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+# ffmpeg required for ingest role only; relay role is ffmpeg-free
+capabilities = ["network:ingress", "network:egress", "ffmpeg?", "gpu:nvidia?", "gpu:intel?", "gpu:amd?"]
+
+[module.workloads]
+# No one-shot workloads. live-stream is a continuous service.
+# Segment production/relay are driven by the gossip layer and RTMP ingest,
+# not the workload dispatcher.
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute stream"
+# web = "c0mpute.com/stream"   # planned (hls.js player, broadcaster dashboard, browse grid)
+
+[module.config.defaults]
+# HLS segment duration in seconds. Shorter = lower latency, higher DHT pressure.
+segment_duration_secs  = 4
+
+# Default adaptive bitrate variants produced by the ingest node.
+# Operators with GPU can enable all; CPU-only ingest should limit to 1-2.
+default_variants       = ["1080p", "720p", "480p"]
+
+# Number of ingest node peers to push-gossip each new segment to immediately.
+push_fanout            = 5
+
+# How long relay nodes keep a segment in cache after the live window passes.
+# Set > 0 to enable DVR (requires storage plugin).
+dvr_window_secs        = 0
+
+# Epoch length for per-GB CoinPay settlement receipts.
+settlement_epoch_secs  = 60
+
+# Maximum bytes a relay node caches per active stream (all variants combined).
+relay_cache_bytes      = 5_368_709_120   # 5 GB
+
+# Rate limit: max concurrent ingest connections per node.
+max_ingest_streams     = 4
