@@ -54,3 +54,24 @@ a {
 a:hover {
   border-bottom-color: var(--color-accent);
 }
+
+/* Blog article content */
+.prose p          { margin-bottom: 1.25em; line-height: 1.75; }
+.prose h2         { font-size: 1.25rem; font-weight: 700; color: var(--color-fg); margin: 2em 0 .75em; }
+.prose h3         { font-size: 1.1rem;  font-weight: 600; color: var(--color-fg); margin: 1.5em 0 .5em; }
+.prose h4         { font-size: 1rem;    font-weight: 600; color: var(--color-fg); margin: 1.25em 0 .5em; }
+.prose ul, .prose ol { padding-left: 1.5em; margin-bottom: 1.25em; }
+.prose ul         { list-style: disc; }
+.prose ol         { list-style: decimal; }
+.prose li         { margin-bottom: .4em; line-height: 1.7; }
+.prose li > ul, .prose li > ol { margin-bottom: 0; margin-top: .4em; }
+.prose code       { font-family: var(--font-mono); font-size: .875em; background: var(--color-card); padding: .1em .35em; border-radius: .25em; }
+.prose pre        { background: var(--color-card); padding: 1em; border-radius: .375em; overflow-x: auto; margin-bottom: 1.25em; }
+.prose pre code   { background: none; padding: 0; }
+.prose blockquote { border-left: 3px solid var(--color-accent-dim); padding-left: 1em; color: var(--color-dim); margin: 1.25em 0; }
+.prose hr         { border-color: var(--color-rule); margin: 2em 0; }
+.prose a          { color: var(--color-accent); }
+.prose strong     { color: var(--color-fg); font-weight: 600; }
+.prose table      { width: 100%; border-collapse: collapse; margin-bottom: 1.25em; font-size: .875rem; }
+.prose th, .prose td { border: 1px solid var(--color-rule); padding: .5em .75em; text-align: left; }
+.prose th         { background: var(--color-card); color: var(--color-fg); font-weight: 600; }
