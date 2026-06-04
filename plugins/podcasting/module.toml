@@ -40,7 +40,8 @@ storage     = ">=0.0.1"   # DIP-0012: episode audio, artwork, chapters, transcri
 transcode   = ">=0.2.0"   # audio format conversion + bitrate normalisation
 live-stream = ">=0.0.1"   # DIP-0019: live episode streaming (audio-only HLS)
 whisper     = ">=0.0.1"   # auto-transcription of episodes → VTT
-ads-manager = ">=0.0.1"   # DIP-0021: audio ad injection + revenue settlement (optional)
+# Ad monetisation is NOT a required dep. Install podcast-ads plugin (DIP-0023)
+# separately; it layers on top of podcasting without touching this manifest.
 
 [module.workloads]
 # Podcasting is a continuous service for RSS serving + live streaming.

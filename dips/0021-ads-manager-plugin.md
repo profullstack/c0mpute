@@ -26,6 +26,23 @@ This follows the same plugin composition pattern as `storage` (DIP-0012) and
 `coinpay` (DIP-0007) — a shared primitive that vertical plugins consume rather
 than each reinventing independently.
 
+## User roles — buyer, seller, or both
+
+Every c0mpute node running `ads-manager` participates as **publisher (seller)**,
+**advertiser (buyer)**, or both at the same time:
+
+| Role | What they do |
+|---|---|
+| **Publisher / seller** | Register ad inventory (channels, podcast shows, streams), set floor CPMs, choose ad formats, receive CoinPay settlement per impression |
+| **Advertiser / buyer** | Create campaigns, upload creatives, set budgets and bids, target inventory, view reporting |
+
+The two sides share the same plugin, the same escrow wallet, and the same
+dashboard. A podcaster who also runs promotional campaigns for their own brand
+manages everything from one place — `c0mpute ads` — without switching plugins
+or accounts.
+
+---
+
 ## Motivation
 
 Without a shared layer, every ad format plugin would have to re-implement:

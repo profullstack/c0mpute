@@ -1,0 +1,78 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0023-podcast-ads-plugin.md for the full PRD.
+#
+# Brief for the implementer:
+#   Audio ad format layer on top of ads-manager (DIP-0021).
+#   Owns: DAAST 1.0 XML assembly and endpoint, IAB audio impression
+#   tracking (start/firstQuartile/midpoint/thirdQuartile/complete),
+#   <podcast:value> split injection into RSS feeds (Podcasting 2.0),
+#   dynamic ad insertion (DAI) hook into the podcasting plugin's episode
+#   serve path, host-read ad slot management, and per-listen micropayment
+#   settlement via CoinPay.
+#   Gossip message types: 0x50 AUDIO_BID_REQUEST, 0x51 AUDIO_BID_RESPONSE,
+#   0x52 AUDIO_WIN_NOTIFY, 0x53 AUDIO_BEACON.
+#   DAAST endpoint: GET /podcast-ads/daast?pub=<did>&slot=<preroll|midroll|postroll>&...
+#   All campaign/creative/reporting/escrow operations delegated to ads-manager.
+#   Both sides supported: publishers list ad slots for sale; advertisers run
+#   audio campaigns — both managed through ads-manager's unified dashboard.
+#   First-party in-tree target: node/crates/c0mpute-podcast-ads
+
+[module]
+id          = "podcast-ads"
+name        = "Podcast Ads — audio ad marketplace"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Decentralised audio advertising for c0mpute-hosted podcasts. DAAST 1.0 endpoint, dynamic ad insertion, Podcasting 2.0 <podcast:value> revenue splits, and CoinPay settlement. Publishers sell ad slots; advertisers run campaigns — zero platform cut beyond protocol split."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/podcast-ads"
+keywords    = ["podcast", "audio", "ads", "advertising", "daast", "dai", "podcasting2", "value4value", "programmatic"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress", "network:egress"]
+
+[module.requirements.plugins]
+ads-manager = ">=0.0.1"   # DIP-0021: campaign CRUD, auction, CoinPay escrow, reporting
+podcasting  = ">=0.0.1"   # DIP-0022: DAI hook into episode serve path + RSS feed patching
+coinpay     = ">=0.2.0"   # DIP-0007: DID identity + per-listen micropayment settlement
+
+[module.workloads]
+# No one-shot workloads. podcast-ads is a continuous service.
+# Auction, DAI, and beacon handling are event-driven.
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute podcast-ads"
+# web = "c0mpute.com/podcast-ads"   # planned: publisher slot manager + advertiser campaign UI
+
+[module.config.defaults]
+# Default ad slot durations supported (seconds).
+supported_durations    = [15, 30, 60]
+
+# Minimum CPM floor (USD) for audio inventory this node will serve.
+default_floor_cpm      = 0.50
+
+# Dynamic ad insertion: stitch ads into episode audio on-the-fly (requires transcode plugin).
+dai_enabled            = false
+
+# Host-read ad slots: publisher records their own read; matched to campaigns manually.
+host_read_enabled      = true
+
+# Podcasting 2.0 <podcast:value> auto-injection into RSS feeds for v4v ad splits.
+value_block_injection  = true
+
+# Revenue split for ad-supported episodes (basis points, must sum to 10000).
+split_publisher_bps    = 6000   # 60% to podcaster
+split_ad_nodes_bps     = 2000   # 20% to auction/serving nodes
+split_protocol_bps     = 1000   # 10% to c0mpute protocol
+split_advertiser_bps   = 1000   # 10% back to advertiser (performance rebate)
+
+# Anti-fraud beacon replay bloom filter TTL (seconds).
+beacon_bloom_ttl_secs  = 300

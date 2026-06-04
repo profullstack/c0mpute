@@ -50,6 +50,14 @@ mode = "in-process"
 cli = "c0mpute ads"
 # web = "c0mpute.com/ads"   # planned (advertiser + publisher dashboards)
 
+[module.requirements.optional_plugins]
+# Format-specific ad plugins that ads-manager can install on demand.
+# These are NOT required — ads-manager works without them.
+# Install with: c0mpute plugin install ctv-ads   (adds CTV/VAST support)
+#               c0mpute plugin install podcast-ads (adds DAAST audio ad support)
+ctv-ads     = ">=0.0.1"   # DIP-0020: CTV/streaming video ads (VAST 4.x, OpenRTB video)
+podcast-ads = ">=0.0.1"   # DIP-0023: audio/podcast ads (DAAST, Podcasting 2.0 <podcast:value>)
+
 [module.config.defaults]
 # OpenRTB bid deadline (ms). Nodes that miss this are excluded from auction.
 bid_timeout_ms         = 120
