@@ -1,11 +1,6 @@
 import { Database } from "@sqlitecloud/drivers";
 import Redis from "ioredis";
 
-const SQLITE_CLOUD_URL = process.env.SQLITE_CLOUD_URL;
-if (!SQLITE_CLOUD_URL) {
-  throw new Error("SQLITE_CLOUD_URL env var is required");
-}
-
 const CACHE_TTL = 30 * 60; // 30 minutes in seconds
 
 // ── SQLite Cloud ──────────────────────────────────────────────────────────────
@@ -14,7 +9,9 @@ let _db: Database | null = null;
 
 async function getDb(): Promise<Database> {
   if (_db) return _db;
-  _db = new Database(SQLITE_CLOUD_URL!);
+  const url = process.env.SQLITE_CLOUD_URL;
+  if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
+  _db = new Database(url);
   await _db.sql`
     CREATE TABLE IF NOT EXISTS blog_posts (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
