@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { listPosts } from "@/lib/blog-db";
 
 const BASE = "https://c0mpute.com";
 
@@ -17,8 +18,25 @@ const staticPages: MetadataRoute.Sitemap = [
 ];
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return staticPages.map((p) => ({
-    ...p,
-    lastModified: new Date().toISOString(),
+  const now = new Date().toISOString();
+
+  const posts = (() => {
+    try {
+      return listPosts(1000);
+    } catch {
+      return [];
+    }
+  })();
+
+  const blogPages: MetadataRoute.Sitemap = posts.map((post) => ({
+    url: `${BASE}/blog/${post.slug}`,
+    lastModified: post.published_at,
+    priority: 0.7,
+    changeFrequency: "monthly" as const,
   }));
+
+  return [
+    ...staticPages.map((p) => ({ ...p, lastModified: now })),
+    ...blogPages,
+  ];
 }
