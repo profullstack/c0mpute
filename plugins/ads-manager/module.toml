@@ -1,0 +1,67 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0021-ads-manager-plugin.md for the full PRD.
+#
+# Brief for the implementer:
+#   Shared ad operations layer consumed by all ad format plugins.
+#   Owns: campaign CRUD + CoinPay escrow lifecycle, creative registry
+#   (upload → transcode plugin → CDN DHT announcement), publisher inventory
+#   DHT, OpenRTB 2.6 BidRequest/BidResponse primitives and second-price
+#   auction, signed impression receipt indexing, and unified reporting.
+#   Also owns the SSAI (server-side ad insertion) hook into the live-stream
+#   plugin (DIP-0019) so broadcasters can monetise their streams automatically.
+#   Format-specific plugins (ctv-ads, display-ads, audio-ads) declare this
+#   as a required dependency and call into it for everything non-format-specific.
+#   First-party in-tree target: node/crates/c0mpute-ads-manager
+
+[module]
+id          = "ads-manager"
+name        = "Ads Manager — shared ad operations layer"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Unified ad operations for the c0mpute network: campaign management, creative registry, publisher inventory, OpenRTB auction primitives, CoinPay escrow, and reporting. Required dependency for ctv-ads and all future ad format plugins."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/ads-manager"
+keywords    = ["ads", "advertising", "campaigns", "openrtb", "programmatic", "ctv", "publisher", "creative"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress", "network:egress", "storage:ephemeral"]
+
+# Required peer plugins
+[module.requirements.plugins]
+coinpay   = ">=0.2.0"   # DID identity + escrow + payments
+transcode = ">=0.2.0"   # creative transcoding (mp4 → variants)
+storage   = ">=0.0.1"   # receipt log persistence (optional but recommended)
+
+[module.workloads]
+# No one-shot workloads. ads-manager is a continuous service.
+# Auction, escrow, and reporting are event-driven via gossip.
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute ads"
+# web = "c0mpute.com/ads"   # planned (advertiser + publisher dashboards)
+
+[module.config.defaults]
+# OpenRTB bid deadline (ms). Nodes that miss this are excluded from auction.
+bid_timeout_ms         = 120
+
+# Epoch length for CoinPay batch settlement of impression receipts.
+settlement_epoch_secs  = 300
+
+# Max receipt log size per campaign on this node before offloading to storage plugin.
+receipt_log_max_bytes  = 104_857_600   # 100 MB
+
+# Default revenue split for ad-supported live streams (basis points, must sum to 10000).
+split_broadcaster_bps  = 5500   # 55%
+split_ad_nodes_bps     = 2000   # 20%
+split_cdn_bps          = 1500   # 15%
+split_protocol_bps     = 1000   # 10%

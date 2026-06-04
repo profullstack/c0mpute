@@ -1,0 +1,74 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0020-ctv-ads-plugin.md for the full PRD.
+#
+# Brief for the implementer:
+#   CTV-specific layer on top of ads-manager (DIP-0021).
+#   Owns: VAST 4.x XML assembly and endpoint, OpenRTB video imp object,
+#   quartile beacon handling (impression/firstQuartile/midpoint/thirdQuartile/
+#   complete), anti-fraud beacon validation (timing + replay bloom filter),
+#   SCTE-35 cue detection and SSAI splice coordination with live-stream plugin,
+#   and signed impression receipt production.
+#   Gossip message types: 0x40 CTV_BID_REQUEST, 0x41 CTV_BID_RESPONSE,
+#   0x42 CTV_WIN_NOTIFY, 0x43 CTV_BEACON.
+#   VAST endpoint: GET /ctv/vast?pub=<did>&slot=<preroll|midroll|postroll>&...
+#   Creative CDN: same p2p swarm transport as live-stream (DIP-0019).
+#   All campaign/creative/reporting/escrow operations delegated to ads-manager.
+#   First-party in-tree target: node/crates/c0mpute-ctv-ads
+
+[module]
+id          = "ctv-ads"
+name        = "CTV Ads — Connected TV ad marketplace"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "Decentralised Connected TV advertising on the c0mpute network. VAST 4.x endpoint, OpenRTB real-time auction, cryptographically verified impressions, CoinPay settlement. Supports Roku, Fire TV, Apple TV, Smart TVs, and FAST channels. Live-stream integration for ad-monetised broadcasts."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/ctv-ads"
+keywords    = ["ctv", "connected-tv", "advertising", "vast", "openrtb", "streaming", "fast", "roku", "programmatic"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress", "network:egress"]
+
+# Required peer plugins
+[module.requirements.plugins]
+ads-manager = ">=0.0.1"   # DIP-0021: campaign, creative, auction, reporting
+live-stream = ">=0.0.1"   # DIP-0019: SSAI integration + creative CDN swarm
+coinpay     = ">=0.2.0"   # DIP-0007: DID identity + escrow
+
+[module.workloads]
+# No one-shot workloads. ctv-ads is a continuous service.
+# SSP (auction), DSP (bidding), CDN, and measurement are event-driven roles.
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute ctv"
+# web = "c0mpute.com/ctv"   # planned (VAST tag generator, publisher/advertiser portal)
+
+[module.config.defaults]
+# Default VAST ad slot durations supported (seconds).
+supported_durations    = [15, 30, 60]
+
+# Minimum CPM floor (USD) for inventory this node will serve.
+default_floor_cpm      = 1.00
+
+# Node roles this instance plays. Operators enable roles explicitly.
+# ssp = true      # run auction, serve VAST responses
+# dsp = false     # hold campaigns, submit bids
+# cdn = true      # cache and serve ad creatives
+# measure = true  # validate beacons, sign impression receipts
+
+# SSAI: automatically insert ad breaks into live-stream plugin broadcasts.
+ssai_enabled           = false
+ssai_break_interval_s  = 900   # 15 minutes between ad breaks
+ssai_break_duration_s  = 30    # 30-second breaks
+
+# Anti-fraud beacon replay bloom filter TTL (seconds).
+beacon_bloom_ttl_secs  = 300
