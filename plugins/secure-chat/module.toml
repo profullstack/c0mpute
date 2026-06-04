@@ -1,0 +1,60 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# CANDIDATE plugin — implementation not yet scaffolded.
+# See dips/0018-secure-chat-plugin.md for the full PRD.
+#
+# Brief for the implementer:
+#   E2E encrypted p2p messaging, no central database.
+#   Crypto stack: X25519 + Ed25519 (derived from a single seed),
+#   NaCl crypto_box for DMs, XChaCha20-Poly1305 for group keys,
+#   Argon2id-AES256-GCM for password-encrypted key backups.
+#   Transport: c0mpute gossip (message type 0x20) + WebSocket relay.
+#   Store-and-forward: nodes hold encrypted envelopes up to TTL (max 7d).
+#   Public key discovery: DHT keyed on SHA256("secure-chat-key:" + did).
+#   Identity: CoinPay DID (DIP-0007) is the canonical identity.
+#   First-party in-tree; compile into the c0mpute binary alongside transcode.
+#   Implementation target: node/crates/c0mpute-secure-chat
+
+[module]
+id          = "secure-chat"
+name        = "Secure Chat — E2E encrypted p2p messaging"
+version     = "0.0.1-candidate"
+kind        = "service"
+description = "End-to-end encrypted peer-to-peer messaging across the c0mpute network. No central server. Keys stay with the user. Identity and reputation via CoinPay DID. Group chats, sealed-sender mode, and offline store-and-forward included."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/secure-chat"
+keywords    = ["chat", "messaging", "e2e", "encryption", "p2p", "did", "privacy"]
+
+[module.requirements]
+c0mpute      = ">=0.1.0"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress", "network:egress", "storage:ephemeral"]
+
+[module.workloads]
+# No one-shot workloads. secure-chat is a continuous service role.
+# Node-side operations (relay, DHT key lookup) are triggered by the
+# gossip layer, not the workload dispatcher.
+
+[module.dispatch]
+mode = "in-process"
+# First-party in-tree, compiled into the c0mpute binary.
+
+[module.surfaces]
+cli = "c0mpute chat"
+# web = "c0mpute.com/chat"   # planned (Next.js, key material in sessionStorage only)
+# tui = "chat panel"         # planned (real-time WebSocket panel in apps/tui)
+
+[module.config.defaults]
+# Maximum time a relay node holds an envelope for an offline recipient.
+offline_ttl_secs   = 86400      # 24 hours default, max 604800 (7 days)
+
+# Maximum encrypted storage per recipient DID on a relay node.
+max_queue_bytes    = 10_485_760 # 10 MB
+
+# DHT key announcement refresh interval.
+announce_interval_secs = 43200  # 12 hours
+
+# Rate limit: max messages per sender DID per minute (node-enforced).
+rate_limit_per_min = 60
