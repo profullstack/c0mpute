@@ -29,6 +29,7 @@ use c0mpute_core::{
     run_register,
 };
 use c0mpute_proto::Role;
+use c0mpute_secure_chat as chat;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -83,6 +84,12 @@ enum Cmd {
         /// Arguments forwarded to `infernet`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Secure chat — E2E encrypted p2p messaging (DIP-0018).
+    Chat {
+        #[command(subcommand)]
+        cmd: ChatCmd,
     },
 
     /// Launch the interactive TUI (worker / job / module dashboard).
@@ -204,6 +211,48 @@ enum PresetCmd {
     List,
 }
 
+#[derive(Subcommand, Debug)]
+enum ChatCmd {
+    /// Generate a new keypair and write the encrypted keyfile.
+    Keygen,
+    /// Key management subcommands.
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+    /// Restore a keypair from a backup JSON file.
+    Restore {
+        #[arg(long = "from-backup")]
+        from_backup: PathBuf,
+    },
+    /// Send an encrypted DM to a recipient DID. [v0.2: transport not yet live]
+    Send {
+        to: String,
+        message: String,
+        /// Hide sender identity from relay nodes.
+        #[arg(long)]
+        sealed: bool,
+    },
+    /// Fetch queued messages from the relay. [v0.2: relay not yet live]
+    Pull,
+    /// Resolve a DID to its chat public key. [v0.2: DHT not yet live]
+    Lookup { did: String },
+    /// List saved contacts.
+    Contacts,
+    /// Block a DID (messages dropped locally).
+    Block { did: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum KeyCmd {
+    /// Print the public key, fingerprint, and DID.
+    Show,
+    /// Re-export the encrypted backup JSON (pipe to a file for safe storage).
+    Export,
+    /// Generate a new keypair and re-announce (old key still valid until revoked).
+    Rotate,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing()?;
@@ -221,6 +270,7 @@ async fn main() -> Result<()> {
         Cmd::Plugin { cmd } => run_plugin(cmd),
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
+        Cmd::Chat { cmd } => run_chat(cmd),
         Cmd::Tui { args } => delegate("c0mpute-tui", &args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
@@ -430,6 +480,140 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             println!("OK   ffmpeg presence (delegated to top-level doctor)");
             Ok(())
         }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// secure-chat plugin (in-process)
+// ────────────────────────────────────────────────────────────────────────
+
+fn run_chat(cmd: ChatCmd) -> Result<()> {
+    match cmd {
+        ChatCmd::Keygen => {
+            let path = chat::key_file_path()?;
+            if path.exists() {
+                eprintln!(
+                    "A keyfile already exists at {}.\n\
+                     Use `c0mpute chat key rotate` to generate a new one, or\n\
+                     delete the file manually to start fresh.",
+                    path.display()
+                );
+                anyhow::bail!("keyfile already exists");
+            }
+            let key = chat::ChatKey::generate();
+            let password = prompt_new_password()?;
+            let kf = key.encrypt_to_keyfile(&password, None)?;
+            chat::save_keyfile(&path, &kf)?;
+
+            println!("keypair generated");
+            println!("  enc pubkey  : {}", kf.pubkey_enc);
+            println!("  sig pubkey  : {}", kf.pubkey_sig);
+            println!("  fingerprint : {}", key.fingerprint());
+            println!("  keyfile     : {}", path.display());
+            println!();
+            println!("── encrypted backup (save this somewhere safe) ──");
+            println!("{}", serde_json::to_string_pretty(&kf)?);
+            println!("─────────────────────────────────────────────────");
+            println!();
+            println!("restore with: c0mpute chat restore --from-backup <file>");
+            Ok(())
+        }
+
+        ChatCmd::Key { cmd } => match cmd {
+            KeyCmd::Show => {
+                let path = chat::key_file_path()?;
+                let kf = chat::load_keyfile(&path)?;
+                println!("enc pubkey  : {}", kf.pubkey_enc);
+                println!("sig pubkey  : {}", kf.pubkey_sig);
+                if let Some(did) = &kf.did {
+                    println!("did         : {did}");
+                }
+                // Fingerprint needs decryption — show pubkey hash instead
+                use base64::prelude::*;
+                let enc_bytes = BASE64_URL_SAFE_NO_PAD.decode(&kf.pubkey_enc)?;
+                let fingerprint: String = enc_bytes[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                println!("fingerprint : {fingerprint}");
+                Ok(())
+            }
+            KeyCmd::Export => {
+                let path = chat::key_file_path()?;
+                let kf = chat::load_keyfile(&path)?;
+                println!("{}", serde_json::to_string_pretty(&kf)?);
+                Ok(())
+            }
+            KeyCmd::Rotate => {
+                println!("[v0.2] key rotation requires DHT re-announcement (not yet live)");
+                println!("       Generate a new keypair manually:");
+                println!("         1. Delete ~/.config/c0mpute/chat.key");
+                println!("         2. Run: c0mpute chat keygen");
+                Ok(())
+            }
+        },
+
+        ChatCmd::Restore { from_backup } => {
+            let dest = chat::key_file_path()?;
+            if dest.exists() {
+                eprintln!(
+                    "A keyfile already exists at {}. Remove it first.",
+                    dest.display()
+                );
+                anyhow::bail!("keyfile already exists");
+            }
+            let raw = std::fs::read_to_string(&from_backup)?;
+            let kf: chat::KeyFile = serde_json::from_str(&raw)?;
+            let password = rpassword::prompt_password("Password: ")?;
+            // Verify the password decrypts correctly before saving.
+            chat::decrypt_keyfile(&kf, &password)?;
+            chat::save_keyfile(&dest, &kf)?;
+            println!("keyfile restored to {}", dest.display());
+            Ok(())
+        }
+
+        ChatCmd::Send { to, message: _, sealed: _ } => {
+            println!("[v0.2] direct send to {to} requires p2p transport (not yet live)");
+            println!("       DHT key lookup and gossip relay land in v0.2.");
+            Ok(())
+        }
+
+        ChatCmd::Pull => {
+            println!("[v0.2] pull requires relay node support (not yet live)");
+            Ok(())
+        }
+
+        ChatCmd::Lookup { did } => {
+            println!("[v0.2] DHT lookup for {did} not yet live");
+            Ok(())
+        }
+
+        ChatCmd::Contacts => {
+            println!("[v0.2] contact list not yet implemented");
+            Ok(())
+        }
+
+        ChatCmd::Block { did } => {
+            println!("[v0.2] block list for {did} not yet implemented");
+            Ok(())
+        }
+    }
+}
+
+fn prompt_new_password() -> Result<String> {
+    loop {
+        let pw = rpassword::prompt_password("New password (min 10 chars): ")?;
+        if pw.len() < 10 {
+            eprintln!("password too short — must be at least 10 characters");
+            continue;
+        }
+        let confirm = rpassword::prompt_password("Confirm password: ")?;
+        if pw != confirm {
+            eprintln!("passwords do not match, try again");
+            continue;
+        }
+        return Ok(pw);
     }
 }
 

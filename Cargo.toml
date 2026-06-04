@@ -15,6 +15,7 @@ members = [
     "node/crates/c0mpute-proto",
     "node/crates/c0mpute-api",
     "node/crates/c0mpute-transcode",    # in-process transcode workload (FFmpeg)
+    "node/crates/c0mpute-secure-chat",  # in-process E2E encrypted p2p messaging (DIP-0018)
 ]
 
 [workspace.package]
@@ -50,6 +51,18 @@ sysinfo = "0.32"
 reed-solomon-erasure = "6"
 libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "kad", "identify", "ping", "request-response", "macros", "tokio", "ed25519", "cbor", "gossipsub", "mdns"] }
 tempfile = "3"
+# secure-chat crypto stack (DIP-0018)
+argon2 = "0.5"
+aes-gcm = "0.10"
+crypto_box = "0.9"
+x25519-dalek = "2"
+ed25519-dalek = "2"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+rpassword = "7"
 
 c0mpute-proto = { path = "node/crates/c0mpute-proto" }
 c0mpute-store = { path = "node/crates/c0mpute-store" }
@@ -61,6 +74,7 @@ c0mpute-doctor = { path = "node/crates/c0mpute-doctor" }
 c0mpute-api = { path = "node/crates/c0mpute-api" }
 c0mpute-core = { path = "node/crates/c0mpute-core" }
 c0mpute-transcode = { path = "node/crates/c0mpute-transcode" }
+c0mpute-secure-chat = { path = "node/crates/c0mpute-secure-chat" }
 
 [profile.release]
 lto = "thin"

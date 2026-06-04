@@ -1,0 +1,25 @@
+[package]
+name = "c0mpute-secure-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "E2E encrypted p2p messaging for c0mpute (DIP-0018)."
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+directories = { workspace = true }
+# crypto stack
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+crypto_box = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
