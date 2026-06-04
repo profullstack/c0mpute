@@ -1,38 +1,103 @@
-import Database from "better-sqlite3";
-import { resolve, dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { Database } from "@sqlitecloud/drivers";
+import Redis from "ioredis";
 
-// Default to ./blog.db; set BLOG_DB_PATH to a Railway volume mount for persistence.
-const DB_PATH = process.env.BLOG_DB_PATH ?? resolve(process.cwd(), "blog.db");
-mkdirSync(dirname(DB_PATH), { recursive: true });
+const SQLITE_CLOUD_URL = process.env.SQLITE_CLOUD_URL;
+if (!SQLITE_CLOUD_URL) {
+  throw new Error("SQLITE_CLOUD_URL env var is required");
+}
 
-let _db: Database.Database | null = null;
+const CACHE_TTL = 30 * 60; // 30 minutes in seconds
 
-function getDb(): Database.Database {
-  if (!_db) {
-    _db = new Database(DB_PATH);
-    _db.exec(`
-      CREATE TABLE IF NOT EXISTS blog_posts (
-        id             INTEGER PRIMARY KEY AUTOINCREMENT,
-        source         TEXT NOT NULL DEFAULT 'crawlproof',
-        source_id      TEXT NOT NULL,
-        slug           TEXT NOT NULL,
-        title          TEXT NOT NULL,
-        content_html   TEXT NOT NULL,
-        content_markdown TEXT,
-        meta_description TEXT,
-        image_url      TEXT,
-        tags           TEXT NOT NULL DEFAULT '[]',
-        published_at   TEXT NOT NULL,
-        created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-        UNIQUE(source, source_id)
-      );
-      CREATE INDEX IF NOT EXISTS idx_posts_slug      ON blog_posts(slug);
-      CREATE INDEX IF NOT EXISTS idx_posts_published ON blog_posts(published_at DESC);
-    `);
-  }
+// ── SQLite Cloud ──────────────────────────────────────────────────────────────
+
+let _db: Database | null = null;
+
+async function getDb(): Promise<Database> {
+  if (_db) return _db;
+  _db = new Database(SQLITE_CLOUD_URL!);
+  await _db.sql`
+    CREATE TABLE IF NOT EXISTS blog_posts (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      source           TEXT NOT NULL DEFAULT 'crawlproof',
+      source_id        TEXT NOT NULL,
+      slug             TEXT NOT NULL,
+      title            TEXT NOT NULL,
+      content_html     TEXT NOT NULL,
+      content_markdown TEXT,
+      meta_description TEXT,
+      image_url        TEXT,
+      tags             TEXT NOT NULL DEFAULT '[]',
+      published_at     TEXT NOT NULL,
+      created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+      UNIQUE(source, source_id)
+    )
+  `;
+  await _db.sql`CREATE INDEX IF NOT EXISTS idx_posts_slug      ON blog_posts(slug)`;
+  await _db.sql`CREATE INDEX IF NOT EXISTS idx_posts_published ON blog_posts(published_at DESC)`;
   return _db;
 }
+
+// ── Redis cache ───────────────────────────────────────────────────────────────
+
+let _redis: Redis | null = null;
+
+function getRedis(): Redis | null {
+  if (_redis) return _redis;
+  const url = process.env.REDIS_URL;
+  if (!url) return null;
+  _redis = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1 });
+  _redis.on("error", () => {}); // prevent unhandled rejections when Redis is unreachable
+  return _redis;
+}
+
+async function cacheGet<T>(key: string): Promise<T | null> {
+  try {
+    const redis = getRedis();
+    if (!redis) return null;
+    const raw = await redis.get(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(key: string, value: unknown): Promise<void> {
+  try {
+    const redis = getRedis();
+    if (!redis) return;
+    await redis.set(key, JSON.stringify(value), "EX", CACHE_TTL);
+  } catch {
+    // non-fatal — fall through to the live DB
+  }
+}
+
+async function cacheDel(...keys: string[]): Promise<void> {
+  try {
+    const redis = getRedis();
+    if (!redis) return;
+    await redis.del(...keys);
+  } catch {
+    // non-fatal
+  }
+}
+
+// Deletes all list cache keys (pattern scan). Used after a write.
+async function cacheDelListKeys(): Promise<void> {
+  try {
+    const redis = getRedis();
+    if (!redis) return;
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", "blog:list:*", "COUNT", 100);
+      cursor = next;
+      if (keys.length > 0) await redis.del(...keys);
+    } while (cursor !== "0");
+  } catch {
+    // non-fatal
+  }
+}
+
+// ── Public types & helpers ────────────────────────────────────────────────────
 
 export interface BlogPost {
   id: number;
@@ -51,12 +116,25 @@ export interface BlogPost {
 
 type NewPost = Omit<BlogPost, "id" | "created_at">;
 
-export function upsertPost(post: NewPost): void {
-  getDb().prepare(`
+function hydrate(row: Record<string, unknown>): BlogPost {
+  return { ...row, tags: JSON.parse((row.tags as string) ?? "[]") } as BlogPost;
+}
+
+// ── Exported functions ────────────────────────────────────────────────────────
+
+export async function upsertPost(post: NewPost): Promise<void> {
+  const db = await getDb();
+  const tagsJson = JSON.stringify(post.tags);
+  await db.sql`
     INSERT INTO blog_posts
       (source, source_id, slug, title, content_html, content_markdown,
        meta_description, image_url, tags, published_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (
+      ${post.source}, ${post.source_id}, ${post.slug}, ${post.title},
+      ${post.content_html}, ${post.content_markdown ?? null},
+      ${post.meta_description ?? null}, ${post.image_url ?? null},
+      ${tagsJson}, ${post.published_at}
+    )
     ON CONFLICT(source, source_id) DO UPDATE SET
       slug             = excluded.slug,
       title            = excluded.title,
@@ -66,34 +144,39 @@ export function upsertPost(post: NewPost): void {
       image_url        = excluded.image_url,
       tags             = excluded.tags,
       published_at     = excluded.published_at
-  `).run(
-    post.source,
-    post.source_id,
-    post.slug,
-    post.title,
-    post.content_html,
-    post.content_markdown ?? null,
-    post.meta_description ?? null,
-    post.image_url ?? null,
-    JSON.stringify(post.tags),
-    post.published_at,
-  );
+  `;
+  // Invalidate: this post + all list pages
+  await Promise.all([
+    cacheDel(`blog:post:${post.slug}`),
+    cacheDelListKeys(),
+  ]);
 }
 
-function hydrate(row: Record<string, unknown>): BlogPost {
-  return { ...row, tags: JSON.parse((row.tags as string) ?? "[]") } as BlogPost;
+export async function listPosts(limit = 50, offset = 0): Promise<BlogPost[]> {
+  const cacheKey = `blog:list:${limit}:${offset}`;
+  const cached = await cacheGet<BlogPost[]>(cacheKey);
+  if (cached) return cached;
+
+  const db = await getDb();
+  const rows = (await db.sql`
+    SELECT * FROM blog_posts ORDER BY published_at DESC LIMIT ${limit} OFFSET ${offset}
+  `) as Record<string, unknown>[];
+  const posts = (rows ?? []).map(hydrate);
+  await cacheSet(cacheKey, posts);
+  return posts;
 }
 
-export function listPosts(limit = 50, offset = 0): BlogPost[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM blog_posts ORDER BY published_at DESC LIMIT ? OFFSET ?")
-    .all(limit, offset) as Record<string, unknown>[];
-  return rows.map(hydrate);
-}
+export async function getPost(slug: string): Promise<BlogPost | null> {
+  const cacheKey = `blog:post:${slug}`;
+  const cached = await cacheGet<BlogPost>(cacheKey);
+  if (cached) return cached;
 
-export function getPost(slug: string): BlogPost | null {
-  const row = getDb()
-    .prepare("SELECT * FROM blog_posts WHERE slug = ? LIMIT 1")
-    .get(slug) as Record<string, unknown> | null;
-  return row ? hydrate(row) : null;
+  const db = await getDb();
+  const rows = (await db.sql`
+    SELECT * FROM blog_posts WHERE slug = ${slug} LIMIT 1
+  `) as Record<string, unknown>[];
+  const row = rows?.[0] ?? null;
+  const post = row ? hydrate(row) : null;
+  if (post) await cacheSet(cacheKey, post);
+  return post;
 }

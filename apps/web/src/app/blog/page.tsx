@@ -4,8 +4,8 @@ import { listPosts } from "@/lib/blog-db";
 export const metadata = { title: "blog — c0mpute" };
 export const dynamic = "force-dynamic";
 
-export default function BlogPage() {
-  const posts = listPosts(50);
+export default async function BlogPage() {
+  const posts = await listPosts(50);
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-8">

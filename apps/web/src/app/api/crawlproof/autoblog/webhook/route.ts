@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    upsertPost({
+    await upsertPost({
       source:           "crawlproof",
       source_id:        String(source_id),
       slug:             String(slug),

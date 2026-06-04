@@ -10,11 +10,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@c0mpute/shared": "workspace:*",
+    "@sqlitecloud/drivers": "^1.0.880",
+    "ioredis": "^5.11.1",
     "next": "^16.2.6",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "@c0mpute/shared": "workspace:*",
-    "better-sqlite3": "^11.0.0"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@iarna/toml": "^2.2.5",
@@ -22,7 +23,6 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@types/better-sqlite3": "^7.6.0",
     "postcss": "^8.5.10",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.8.0"

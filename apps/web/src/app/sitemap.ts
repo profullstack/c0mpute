@@ -17,16 +17,10 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: `${BASE}/privacy`,            priority: 0.3,  changeFrequency: "yearly"  },
 ];
 
-export default function sitemap(): MetadataRoute.Sitemap {
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const now = new Date().toISOString();
 
-  const posts = (() => {
-    try {
-      return listPosts(1000);
-    } catch {
-      return [];
-    }
-  })();
+  const posts = await listPosts(1000).catch(() => []);
 
   const blogPages: MetadataRoute.Sitemap = posts.map((post) => ({
     url: `${BASE}/blog/${post.slug}`,

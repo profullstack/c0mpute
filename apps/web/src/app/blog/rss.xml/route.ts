@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 const SITE = "https://c0mpute.com";
 
 export async function GET() {
-  const posts = listPosts(50);
+  const posts = await listPosts(50);
 
   const items = posts
     .map((p) => {
