@@ -3,16 +3,30 @@ import Link from "next/link";
 import "./globals.css";
 import Script from "next/script";
 
+const SITE = "https://c0mpute.com";
+const DESCRIPTION =
+  "Decentralized compute marketplace. CLI-first. Three modules: transcode (FFmpeg), coinpay (DID + payments), infernet (AI inference).";
+
 export const metadata: Metadata = {
   title: "c0mpute — decentralized compute network",
-  description:
-    "Decentralized compute marketplace. CLI-first. Three modules: transcode (FFmpeg), coinpay (DID + payments), infernet (AI inference).",
+  description: DESCRIPTION,
   manifest: "/manifest.json",
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: "default",
-    title: "c0mpute",
+  appleWebApp: { capable: true, statusBarStyle: "default", title: "c0mpute" },
+  openGraph: {
+    type: "website",
+    siteName: "c0mpute",
+    title: "c0mpute — decentralized compute network",
+    description: DESCRIPTION,
+    url: SITE,
+    images: [{ url: `${SITE}/og-image.png`, width: 1200, height: 630, alt: "c0mpute" }],
   },
+  twitter: {
+    card: "summary_large_image",
+    title: "c0mpute — decentralized compute network",
+    description: DESCRIPTION,
+    images: [`${SITE}/og-image.png`],
+  },
+  alternates: { canonical: SITE },
 };
 
 export const viewport: Viewport = {
@@ -66,6 +80,35 @@ export default function RootLayout({
           </div>
         </footer>
               <Script data-site="130ff3f6-f531-4f4b-b732-73a3f0d072b1" src="https://crawlproof.com/stats.js" strategy="afterInteractive" />
+              <script
+                type="application/ld+json"
+                dangerouslySetInnerHTML={{
+                  __html: JSON.stringify([
+                    {
+                      "@context": "https://schema.org",
+                      "@type": "Organization",
+                      name: "c0mpute",
+                      url: "https://c0mpute.com",
+                      description: DESCRIPTION,
+                      license: "https://opensource.org/licenses/MIT",
+                      sameAs: ["https://github.com/profullstack/c0mpute"],
+                    },
+                    {
+                      "@context": "https://schema.org",
+                      "@type": "SoftwareApplication",
+                      name: "c0mpute",
+                      applicationCategory: "DeveloperApplication",
+                      operatingSystem: "Linux, macOS",
+                      downloadUrl: "https://c0mpute.com/install.sh",
+                      softwareVersion: "0.2.0",
+                      license: "https://opensource.org/licenses/MIT",
+                      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+                      description: DESCRIPTION,
+                      url: "https://c0mpute.com",
+                    },
+                  ]),
+                }}
+              />
       </body>
     </html>
   );

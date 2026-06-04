@@ -1,6 +1,10 @@
 import { CodeBlock } from "@/components/CodeBlock";
 
-export const metadata = { title: "getting-started — c0mpute" };
+export const metadata = {
+  title: "getting-started — c0mpute",
+  description: "Get up and running with c0mpute in minutes. Install the CLI, create your CoinPay DID, register as a worker, and submit your first GPU compute job.",
+  alternates: { canonical: "https://c0mpute.com/getting-started" },
+};
 
 export default function GettingStartedPage() {
   return (

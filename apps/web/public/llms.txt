@@ -1,0 +1,25 @@
+# c0mpute
+
+> Decentralized compute marketplace. CLI-first. Pay workers with spare GPUs to run your jobs. Run your own GPU and earn. MIT-licensed, open source.
+
+## Getting Started
+
+- [Install](https://c0mpute.com/getting-started): One-line install via `curl -fsSL https://c0mpute.com/install.sh | sh`. Supports Linux and macOS (x86_64, aarch64).
+
+## Docs
+
+- [CLI Reference & Cookbook](https://c0mpute.com/docs): Full CLI walkthrough — identity/wallet, workers, transcode jobs, AI inference, reputation, plugins, health checks.
+
+## Modules
+
+- [Plugins](https://c0mpute.com/plugins): Three core modules — transcode (FFmpeg-based video encoding), coinpay (DID identity + escrow payments), infernet (AI LLM inference).
+
+## Blog
+
+- [Blog](https://c0mpute.com/blog): Project updates and articles.
+
+## Project
+
+- [GitHub](https://github.com/profullstack/c0mpute): Source code, design proposals (DIPs), and releases. MIT license.
+- [Status](https://c0mpute.com/status): Live network metrics.
+- [Contact](https://c0mpute.com/contact): hello@c0mpute.com · security@c0mpute.com · GitHub Issues.

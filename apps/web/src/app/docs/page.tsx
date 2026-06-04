@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { CodeBlock as Code } from "@/components/CodeBlock";
 
-export const metadata = { title: "docs — c0mpute" };
+export const metadata = {
+  title: "docs — c0mpute",
+  description: "CLI reference and cookbook for c0mpute: install, identity, workers, transcode jobs, AI inference, reputation, plugins, and health checks.",
+  alternates: { canonical: "https://c0mpute.com/docs" },
+};
 
 export default function DocsPage() {
   return (

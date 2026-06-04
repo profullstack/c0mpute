@@ -8,7 +8,11 @@ import {
   type PluginManifest,
 } from "@/lib/plugins";
 
-export const metadata = { title: "plugins — c0mpute" };
+export const metadata = {
+  title: "plugins — c0mpute",
+  description: "c0mpute plugin ecosystem: transcode (FFmpeg GPU video encoding), coinpay (DID identity + escrow payments), and infernet (AI LLM inference). MIT-licensed.",
+  alternates: { canonical: "https://c0mpute.com/plugins" },
+};
 
 export default function PluginsPage() {
   const plugins = loadAllPlugins();

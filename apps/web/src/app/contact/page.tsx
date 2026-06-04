@@ -1,4 +1,8 @@
-export const metadata = { title: "contact — c0mpute" };
+export const metadata = {
+  title: "contact — c0mpute",
+  description: "Reach the c0mpute project: GitHub Issues for bugs and features, hello@c0mpute.com for general inquiries, security@c0mpute.com for vulnerability disclosure.",
+  alternates: { canonical: "https://c0mpute.com/contact" },
+};
 
 export default function ContactPage() {
   return (
