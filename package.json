@@ -15,7 +15,8 @@
     "cargo:run": "cargo run --bin c0mpute --",
     "cargo:test": "cargo test --workspace",
     "newsletter": "bun bin/send-newsletter.ts",
-    "migrate:cloud": "bun bin/migrate-to-cloud.ts"
+    "migrate:cloud": "bun bin/migrate-to-cloud.ts",
+    "export:cloud": "$HOME/.bun/bin/bun bin/export-from-cloud.ts"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -24,6 +25,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "@sqlitecloud/drivers": "^1.0.880",
     "drizzle-orm": "^0.45.2",
     "postcss": "^8.5.15"
   }
