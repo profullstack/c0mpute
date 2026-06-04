@@ -1,18 +1,24 @@
 import { Database } from "@sqlitecloud/drivers";
+import { drizzle } from "drizzle-orm/sqlite-proxy";
+import { desc, eq } from "drizzle-orm";
 import Redis from "ioredis";
+import { blogPosts } from "./schema";
 
-const CACHE_TTL = 30 * 60; // 30 minutes in seconds
+// ── SQLite Cloud + Drizzle ────────────────────────────────────────────────────
 
-// ── SQLite Cloud ──────────────────────────────────────────────────────────────
+type Db = ReturnType<typeof drizzle<{ blogPosts: typeof blogPosts }>>;
 
-let _db: Database | null = null;
+let _db: Db | null = null;
 
-async function getDb(): Promise<Database> {
+async function getDb(): Promise<Db> {
   if (_db) return _db;
   const url = process.env.SQLITE_CLOUD_URL;
   if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
-  const db = new Database(url);
-  await db.sql`
+
+  const client = new Database(url);
+
+  // Ensure table + indexes exist (drizzle-kit migrations not yet wired to cloud)
+  await client.sql`
     CREATE TABLE IF NOT EXISTS blog_posts (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
       source           TEXT NOT NULL DEFAULT 'crawlproof',
@@ -29,9 +35,26 @@ async function getDb(): Promise<Database> {
       UNIQUE(source, source_id)
     )
   `;
-  await db.sql`CREATE INDEX IF NOT EXISTS idx_posts_slug      ON blog_posts(slug)`;
-  await db.sql`CREATE INDEX IF NOT EXISTS idx_posts_published ON blog_posts(published_at DESC)`;
-  _db = db;
+  await client.sql`CREATE INDEX IF NOT EXISTS idx_posts_slug      ON blog_posts(slug)`;
+  await client.sql`CREATE INDEX IF NOT EXISTS idx_posts_published ON blog_posts(published_at DESC)`;
+
+  // Wire @sqlitecloud/drivers into drizzle's sqlite-proxy.
+  // The proxy callback must return rows as value arrays (not objects) because
+  // drizzle's mapResultRow indexes by column position.
+  _db = drizzle(
+    async (sql, params, method) => {
+      if (method === "run") {
+        await client.sql({ query: sql, parameters: params });
+        return { rows: [] };
+      }
+      const result = await client.sql({ query: sql, parameters: params });
+      const raw = Array.isArray(result) ? result : result ? [result] : [];
+      const rows = raw.map((row: Record<string, unknown>) => Object.values(row));
+      return { rows };
+    },
+    { schema: { blogPosts } }
+  );
+
   return _db;
 }
 
@@ -44,7 +67,7 @@ function getRedis(): Redis | null {
   const url = process.env.REDIS_URL;
   if (!url) return null;
   _redis = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1 });
-  _redis.on("error", () => {}); // prevent unhandled rejections when Redis is unreachable
+  _redis.on("error", () => {});
   return _redis;
 }
 
@@ -64,9 +87,7 @@ async function cacheSet(key: string, value: unknown): Promise<void> {
     const redis = getRedis();
     if (!redis) return;
     await redis.set(key, JSON.stringify(value), "EX", CACHE_TTL);
-  } catch {
-    // non-fatal — fall through to the live DB
-  }
+  } catch {}
 }
 
 async function cacheDel(...keys: string[]): Promise<void> {
@@ -74,12 +95,9 @@ async function cacheDel(...keys: string[]): Promise<void> {
     const redis = getRedis();
     if (!redis) return;
     await redis.del(...keys);
-  } catch {
-    // non-fatal
-  }
+  } catch {}
 }
 
-// Deletes all list cache keys (pattern scan). Used after a write.
 async function cacheDelListKeys(): Promise<void> {
   try {
     const redis = getRedis();
@@ -90,10 +108,10 @@ async function cacheDelListKeys(): Promise<void> {
       cursor = next;
       if (keys.length > 0) await redis.del(...keys);
     } while (cursor !== "0");
-  } catch {
-    // non-fatal
-  }
+  } catch {}
 }
+
+const CACHE_TTL = 30 * 60;
 
 // ── Public types & helpers ────────────────────────────────────────────────────
 
@@ -114,8 +132,8 @@ export interface BlogPost {
 
 type NewPost = Omit<BlogPost, "id" | "created_at">;
 
-function hydrate(row: Record<string, unknown>): BlogPost {
-  return { ...row, tags: JSON.parse((row.tags as string) ?? "[]") } as BlogPost;
+function hydrate(row: typeof blogPosts.$inferSelect): BlogPost {
+  return { ...row, tags: JSON.parse((row.tags as string) ?? "[]") };
 }
 
 // ── Exported functions ────────────────────────────────────────────────────────
@@ -123,31 +141,23 @@ function hydrate(row: Record<string, unknown>): BlogPost {
 export async function upsertPost(post: NewPost): Promise<void> {
   const db = await getDb();
   const tagsJson = JSON.stringify(post.tags);
-  await db.sql`
-    INSERT INTO blog_posts
-      (source, source_id, slug, title, content_html, content_markdown,
-       meta_description, image_url, tags, published_at)
-    VALUES (
-      ${post.source}, ${post.source_id}, ${post.slug}, ${post.title},
-      ${post.content_html}, ${post.content_markdown ?? null},
-      ${post.meta_description ?? null}, ${post.image_url ?? null},
-      ${tagsJson}, ${post.published_at}
-    )
-    ON CONFLICT(source, source_id) DO UPDATE SET
-      slug             = excluded.slug,
-      title            = excluded.title,
-      content_html     = excluded.content_html,
-      content_markdown = excluded.content_markdown,
-      meta_description = excluded.meta_description,
-      image_url        = excluded.image_url,
-      tags             = excluded.tags,
-      published_at     = excluded.published_at
-  `;
-  // Invalidate: this post + all list pages
-  await Promise.all([
-    cacheDel(`blog:post:${post.slug}`),
-    cacheDelListKeys(),
-  ]);
+  await db
+    .insert(blogPosts)
+    .values({ ...post, tags: tagsJson })
+    .onConflictDoUpdate({
+      target: [blogPosts.source, blogPosts.source_id],
+      set: {
+        slug: post.slug,
+        title: post.title,
+        content_html: post.content_html,
+        content_markdown: post.content_markdown ?? null,
+        meta_description: post.meta_description ?? null,
+        image_url: post.image_url ?? null,
+        tags: tagsJson,
+        published_at: post.published_at,
+      },
+    });
+  await Promise.all([cacheDel(`blog:post:${post.slug}`), cacheDelListKeys()]);
 }
 
 export async function listPosts(limit = 50, offset = 0): Promise<BlogPost[]> {
@@ -156,10 +166,13 @@ export async function listPosts(limit = 50, offset = 0): Promise<BlogPost[]> {
   if (cached) return cached;
 
   const db = await getDb();
-  const rows = (await db.sql`
-    SELECT * FROM blog_posts ORDER BY published_at DESC LIMIT ${limit} OFFSET ${offset}
-  `) as Record<string, unknown>[];
-  const posts = (rows ?? []).map(hydrate);
+  const rows = await db
+    .select()
+    .from(blogPosts)
+    .orderBy(desc(blogPosts.published_at))
+    .limit(limit)
+    .offset(offset);
+  const posts = rows.map(hydrate);
   await cacheSet(cacheKey, posts);
   return posts;
 }
@@ -170,11 +183,12 @@ export async function getPost(slug: string): Promise<BlogPost | null> {
   if (cached) return cached;
 
   const db = await getDb();
-  const rows = (await db.sql`
-    SELECT * FROM blog_posts WHERE slug = ${slug} LIMIT 1
-  `) as Record<string, unknown>[];
-  const row = rows?.[0] ?? null;
-  const post = row ? hydrate(row) : null;
+  const rows = await db
+    .select()
+    .from(blogPosts)
+    .where(eq(blogPosts.slug, slug))
+    .limit(1);
+  const post = rows[0] ? hydrate(rows[0]) : null;
   if (post) await cacheSet(cacheKey, post);
   return post;
 }
