@@ -41,6 +41,7 @@ export default function RootLayout({
               <Link href="/getting-started" className="!border-0 hover:text-[var(--color-accent)]">getting-started</Link>
               <Link href="/plugins" className="!border-0 hover:text-[var(--color-accent)]">plugins</Link>
               <Link href="/docs" className="!border-0 hover:text-[var(--color-accent)]">docs</Link>
+              <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
               <Link href="/status" className="!border-0 hover:text-[var(--color-accent)]">status</Link>
               <Link href="/contact" className="!border-0 hover:text-[var(--color-accent)]">contact</Link>
             </div>
@@ -52,6 +53,7 @@ export default function RootLayout({
         <footer className="border-t border-[var(--color-rule)] mt-16">
           <div className="max-w-3xl mx-auto px-6 py-6 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--color-dim)]">
             <span>c0mpute.com</span>
+            <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
             <Link href="/terms" className="!border-0 hover:text-[var(--color-accent)]">terms</Link>
             <Link href="/privacy" className="!border-0 hover:text-[var(--color-accent)]">privacy</Link>
             <a

@@ -13,7 +13,8 @@
     "start": "bun run --filter=c0mpute start",
     "cargo:build": "cargo build --bins",
     "cargo:run": "cargo run --bin c0mpute --",
-    "cargo:test": "cargo test --workspace"
+    "cargo:test": "cargo test --workspace",
+    "newsletter": "bun bin/send-newsletter.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

@@ -6,6 +6,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // bun:sqlite is a Bun built-in; exclude it from the webpack bundle so it's
+  // resolved at runtime by Bun's module system.
+  serverExternalPackages: ["bun:sqlite"],
   // c0mpute.com landing — served at the apex. Per-plugin dashboards
   // (transcode, coinpay, infernet) will mount as separate Next apps
   // under /transcode, /coinpay, /infernet once we build them; for v1

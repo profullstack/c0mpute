@@ -13,6 +13,9 @@ out
 # Rust
 target/
 
+# Newsletter — contains real emails, never commit
+subscribers.txt
+
 # Editors
 .idea/
 .vscode/
