@@ -18,6 +18,8 @@
     "migrate:cloud": "bun bin/migrate-to-cloud.ts"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.0",
     "drizzle-kit": "^0.31.10",
     "typescript": "^5.8.0"
   },
