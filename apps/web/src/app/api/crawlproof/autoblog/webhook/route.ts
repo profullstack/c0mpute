@@ -37,8 +37,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // Accept CloudEvents 1.0 envelope ({ data: { ...post } }) or raw post object.
-  const post = (body as Record<string, unknown>)?.data ?? body;
+  // CloudEvents 1.0 envelope from @profullstack/autoblog: { data: { post: {...} } }
+  // Fall back through data.post → data → raw body for forward-compat.
+  const envelope = body as Record<string, unknown>;
+  const dataField = envelope?.data as Record<string, unknown> | undefined;
+  const post = dataField?.post ?? dataField ?? body;
   const p = post as Record<string, unknown>;
 
   const source_id  = p.id    as string | undefined;
