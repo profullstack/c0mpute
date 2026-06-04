@@ -11,14 +11,7 @@ async function getDb(): Promise<Database> {
   if (_db) return _db;
   const url = process.env.SQLITE_CLOUD_URL;
   if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
-
-  // Strip any database path from the URL so the initial connection succeeds
-  // even if blog.db doesn't exist yet — we create it explicitly below.
-  const baseUrl = url.replace(/\/[^/?]+(\?|$)/, "$1");
-  const db = new Database(baseUrl);
-
-  await db.sql`CREATE DATABASE IF NOT EXISTS blog`;
-  await db.sql`USE DATABASE blog`;
+  const db = new Database(url);
   await db.sql`
     CREATE TABLE IF NOT EXISTS blog_posts (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
