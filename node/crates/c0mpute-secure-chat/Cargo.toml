@@ -11,10 +11,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
-# crypto stack
+# crypto stack — hybrid classical + post-quantum (NIST FIPS 203/204)
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }
-crypto_box = { workspace = true }
 x25519-dalek = { workspace = true }
 ed25519-dalek = { workspace = true }
 hkdf = { workspace = true }
@@ -23,3 +22,7 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+# ML-KEM-768 (NIST FIPS 203) — getrandom feature for no-RNG-arg encapsulate()
+ml-kem = { version = "0.3.2", features = ["getrandom"] }
+# ML-DSA-65 (NIST FIPS 204)
+ml-dsa = "0.1.0"

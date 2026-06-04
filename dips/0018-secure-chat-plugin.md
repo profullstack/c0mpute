@@ -51,17 +51,29 @@ plugin release cycle rather than the core binary.
 
 ### 1. Cryptographic primitives
 
-| Purpose | Algorithm |
-|---|---|
-| Key derivation (seed → keypairs) | HKDF-SHA256 from a 32-byte random seed |
-| Encryption keypair | X25519 (Curve25519 ECDH) |
-| Signing keypair | Ed25519 |
-| Message encryption | NaCl `crypto_box` (X25519 + XSalsa20-Poly1305) |
-| Symmetric group key encryption | XChaCha20-Poly1305 |
-| Private key backup encryption | Argon2id → AES-256-GCM |
-| Key fingerprint | SHA-256 truncated to 16 bytes, displayed as 8 hex pairs |
+| Purpose | Algorithm | Quantum resistance |
+|---|---|---|
+| Key derivation (seed → keypairs) | HKDF-SHA256 from a 32-byte random seed | ✓ (symmetric, 256-bit) |
+| Classical KEM keypair | X25519 (Curve25519 ECDH) | ✗ (classical half of hybrid) |
+| Post-quantum KEM keypair | ML-KEM-768 (NIST FIPS 203) | ✓ |
+| Classical signing keypair | Ed25519 | ✗ (classical half of hybrid) |
+| Post-quantum signing keypair | ML-DSA-65 (NIST FIPS 204) | ✓ |
+| Message encryption | Hybrid KEM → AES-256-GCM | ✓ (256-bit key, Grover-safe) |
+| Hybrid KEM shared-secret combination | HKDF-SHA256 over ECDH‖ML-KEM shared secrets | ✓ |
+| Symmetric group key encryption | XChaCha20-Poly1305 | ✓ (256-bit key) |
+| Private key backup encryption | Argon2id → AES-256-GCM | ✓ (256-bit key) |
+| Key fingerprint | SHA-256 truncated to 16 bytes, displayed as 8 hex pairs | ✓ |
 
-Both keypairs are derived from a single 32-byte seed so the user only ever
+**Hybrid KEM design:** Both X25519 (classical) and ML-KEM-768 (post-quantum) run
+in parallel. Their shared secrets are concatenated and fed into HKDF to derive
+the AES-256-GCM symmetric key. An attacker must break BOTH algorithms to
+compromise confidentiality — the classical algorithm protects against today's
+threats, and ML-KEM-768 protects against future quantum computers.
+
+**Hybrid signing:** Both Ed25519 and ML-DSA-65 signatures are attached to every
+envelope. Both must verify for a message to be accepted.
+
+All four keypairs are derived from a single 32-byte seed so the user only ever
 backs up one secret. The seed itself is never stored unencrypted.
 
 ### 2. Key lifecycle
@@ -74,22 +86,27 @@ c0mpute chat keygen
 
 Steps:
 1. Generate 32 random bytes → `seed`
-2. Derive X25519 encryption keypair via `HKDF(seed, "secure-chat-enc")`
-3. Derive Ed25519 signing keypair via `HKDF(seed, "secure-chat-sig")`
-4. Prompt for password (twice; min 10 chars)
-5. `Argon2id(password, random_salt, t=3, m=65536, p=4)` → `kek` (key-encryption key)
-6. `AES-256-GCM(kek, nonce, seed)` → `ciphertext`
-7. Write `~/.config/c0mpute/chat.key` (JSON, chmod 600):
+2. Derive X25519 keypair via `HKDF(seed, "secure-chat-x25519-v2")`
+3. Derive ML-KEM-768 keypair via `HKDF(seed, "secure-chat-ml-kem-768-v2")` → 64-byte (d‖z) seed per FIPS 203
+4. Derive Ed25519 keypair via `HKDF(seed, "secure-chat-ed25519-v2")`
+5. Derive ML-DSA-65 keypair via `HKDF(seed, "secure-chat-ml-dsa-65-v2")` → 32-byte seed per FIPS 204
+6. Prompt for password (twice; min 10 chars)
+7. `Argon2id(password, random_salt, t=3, m=65536, p=4)` → `kek` (key-encryption key)
+8. `AES-256-GCM(kek, nonce, seed)` → `ciphertext`
+9. Write `~/.config/c0mpute/chat.key` (JSON, chmod 600):
 
 ```json
 {
-  "v": 1,
-  "alg": "argon2id-aes256gcm",
-  "argon2": { "t": 3, "m": 65536, "p": 4, "salt": "<base64url>" },
+  "v": 2,
+  "alg": "argon2id-aes256gcm-hybrid-pqc-v2",
+  "argon2_mem_kib": 65536, "argon2_iters": 3, "argon2_para": 4,
+  "salt": "<base64url>",
   "enc_nonce": "<base64url>",
-  "ciphertext": "<base64url>",
-  "pubkey_enc": "<base64url(X25519 pubkey)>",
-  "pubkey_sig": "<base64url(Ed25519 pubkey)>",
+  "ciphertext": "<base64url(AES-256-GCM(seed))>",
+  "pubkey_enc":    "<base64url(X25519 pubkey, 32 bytes)>",
+  "pubkey_kem":    "<base64url(ML-KEM-768 encapsulation key, 1184 bytes)>",
+  "pubkey_sig":    "<base64url(Ed25519 verifying key, 32 bytes)>",
+  "pubkey_ml_dsa": "<base64url(ML-DSA-65 verifying key, 1952 bytes)>",
   "did": "did:coinpay:user:<id>",
   "created_at": 1748995200
 }
@@ -183,20 +200,32 @@ Every message is a signed, encrypted JSON envelope:
 
 ```json
 {
-  "v": 1,
-  "id": "<sha256(canonical_fields)>",
+  "v": 2,
+  "id": "<sha256(from|to|created_at|enc_nonce)>",
   "kind": "dm",
   "from": "did:coinpay:user:abc123",
   "to":   "did:coinpay:user:def456",
-  "ciphertext": "<base64url>",
-  "enc_nonce":  "<base64url(random 24 bytes)>",
+  "ciphertext": "<base64url(AES-256-GCM ciphertext)>",
+  "enc_nonce":  "<base64url(random 12-byte AES-GCM nonce)>",
+  "ml_kem_ct":  "<base64url(ML-KEM-768 ciphertext, 1088 bytes)>",
   "created_at": 1748995200,
   "ttl":        86400,
-  "sig": "<base64url(Ed25519 sig over id || created_at || to)>"
+  "sig":        "<base64url(Ed25519 sig, 64 bytes, over id)>",
+  "ml_dsa_sig": "<base64url(ML-DSA-65 sig, 3309 bytes, over id)>"
 }
 ```
 
-`ciphertext` is `crypto_box(plaintext, nonce, recipient_X25519_pubkey, sender_X25519_privkey)`.
+**Encryption process (sender):**
+1. `ecdh_ss = X25519(sender_x25519_secret, recipient_x25519_public)` — 32 bytes
+2. `(ml_kem_ct, ml_kem_ss) = ML-KEM-768.encapsulate(recipient_ml_kem_ek)` — ct: 1088 bytes, ss: 32 bytes
+3. `sym_key = HKDF-SHA256(ecdh_ss ‖ ml_kem_ss, "hybrid-dm-key-v2")` — 32 bytes
+4. `ciphertext = AES-256-GCM(sym_key, nonce, json(plaintext))`
+
+**Decryption process (recipient):**
+1. `ecdh_ss = X25519(recipient_x25519_secret, sender_x25519_public)`
+2. `ml_kem_ss = ML-KEM-768.decapsulate(recipient_ml_kem_dk, ml_kem_ct)`
+3. `sym_key = HKDF-SHA256(ecdh_ss ‖ ml_kem_ss, "hybrid-dm-key-v2")`
+4. `plaintext = AES-256-GCM.decrypt(sym_key, nonce, ciphertext)`
 The plaintext itself is a JSON object:
 
 ```json
@@ -343,12 +372,14 @@ store-and-forward envelopes within TTL, and participate in DHT key lookups.
 | Threat | Mitigation |
 |---|---|
 | Node reads message content | Messages encrypted before leaving sender; nodes see only opaque ciphertext |
+| Quantum computer breaks encryption | Hybrid X25519 + ML-KEM-768: attacker must break both simultaneously |
+| Quantum computer forges signatures | Hybrid Ed25519 + ML-DSA-65: both must be forged simultaneously |
 | Attacker steals key backup file | File contains only Argon2id-encrypted seed; useless without password |
-| Replay attack | `message_id = SHA256(from \|\| to \|\| created_at \|\| nonce)` is unique; nodes reject duplicate IDs within TTL window |
-| Sender impersonation | Ed25519 sig over message ID verified against sender's DID-registered pubkey |
+| Replay attack | `message_id = SHA256(from‖to‖created_at‖nonce)` is unique; nodes reject duplicate IDs within TTL window |
+| Sender impersonation | Ed25519 + ML-DSA-65 signatures verified against sender's DID-registered pubkeys |
 | Spam / DoS | Messages require valid DID sig; nodes rate-limit by sender DID; reputation cost on reports |
 | Metadata correlation (sender visible) | Sealed-sender mode hides from-DID from relays |
-| Key compromise | Key rotation command re-announces new pubkey; old pubkey revoked with DID-signed revocation record |
+| Key compromise | Key rotation command re-announces new pubkeys; old pubkeys revoked with DID-signed revocation record |
 | Node collusion (traffic analysis) | Out of scope for v1; onion routing considered in §Alternatives |
 | Weak passwords | Argon2id with high memory cost; minimum password entropy enforced at keygen |
 
