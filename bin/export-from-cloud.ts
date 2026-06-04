@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Export blog_posts from SQLite Cloud → local blog.db (for drizzle-kit studio).
+ * Export blog_posts from SQLite Cloud → local blogs.db (for drizzle-kit studio).
  *
  * Usage:
  *   node --experimental-strip-types bin/export-from-cloud.ts
@@ -50,7 +50,7 @@ if (!CLOUD_URL) {
   process.exit(1);
 }
 
-const LOCAL_PATH = values.db ?? process.env.BLOG_DB_PATH ?? resolve(ROOT, "blog.db");
+const LOCAL_PATH = values.db ?? process.env.BLOG_DB_PATH ?? resolve(ROOT, "blogs.db");
 
 // ── Fetch from cloud ──────────────────────────────────────────────────────────
 

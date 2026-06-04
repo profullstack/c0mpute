@@ -4,11 +4,11 @@
  *
  * Usage:
  *   bun bin/migrate-to-cloud.ts
- *   bun bin/migrate-to-cloud.ts --db /path/to/blog.db   # custom local path
+ *   bun bin/migrate-to-cloud.ts --db /path/to/blogs.db   # custom local path
  *   bun bin/migrate-to-cloud.ts --dry-run               # print rows, skip upload
  *
  * Requires SQLITE_CLOUD_URL in .env (already set from c0mpute setup).
- * Local DB path defaults to BLOG_DB_PATH env var or ./blog.db.
+ * Local DB path defaults to BLOG_DB_PATH env var or ./blogs.db.
  */
 
 import { parseArgs } from "node:util";
@@ -46,7 +46,7 @@ if (values.help) {
   process.exit(0);
 }
 
-const LOCAL_PATH = values.db ?? process.env.BLOG_DB_PATH ?? resolve(ROOT, "blog.db");
+const LOCAL_PATH = values.db ?? process.env.BLOG_DB_PATH ?? resolve(ROOT, "blogs.db");
 
 if (!existsSync(LOCAL_PATH)) {
   console.error(`Local DB not found: ${LOCAL_PATH}`);
