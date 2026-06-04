@@ -18,9 +18,11 @@
     "migrate:cloud": "bun bin/migrate-to-cloud.ts"
   },
   "devDependencies": {
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "postcss": "^8.5.15"
   }
 }
