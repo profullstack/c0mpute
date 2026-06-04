@@ -13,7 +13,8 @@
     "next": "^16.2.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "@c0mpute/shared": "workspace:*"
+    "@c0mpute/shared": "workspace:*",
+    "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
     "@iarna/toml": "^2.2.5",
@@ -21,9 +22,9 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/better-sqlite3": "^7.6.0",
     "postcss": "^8.5.10",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.8.0",
-    "bun-types": "latest"
+    "typescript": "^5.8.0"
   }
 }

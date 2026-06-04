@@ -1,14 +1,14 @@
-import { Database } from "bun:sqlite";
+import Database from "better-sqlite3";
 import { resolve } from "node:path";
 
 // Default to ./blog.db; set BLOG_DB_PATH to a Railway volume mount for persistence.
 const DB_PATH = process.env.BLOG_DB_PATH ?? resolve(process.cwd(), "blog.db");
 
-let _db: InstanceType<typeof Database> | null = null;
+let _db: Database.Database | null = null;
 
-function getDb(): InstanceType<typeof Database> {
+function getDb(): Database.Database {
   if (!_db) {
-    _db = new Database(DB_PATH, { create: true });
+    _db = new Database(DB_PATH);
     _db.exec(`
       CREATE TABLE IF NOT EXISTS blog_posts (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
