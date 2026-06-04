@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
+import Script from "next/script";
 
 export const metadata: Metadata = {
   title: "c0mpute — decentralized compute network",
@@ -62,6 +63,7 @@ export default function RootLayout({
             <span className="ml-auto">MIT</span>
           </div>
         </footer>
+              <Script data-site="130ff3f6-f531-4f4b-b732-73a3f0d072b1" src="https://crawlproof.com/stats.js" strategy="afterInteractive" />
       </body>
     </html>
   );
