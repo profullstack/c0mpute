@@ -20,3 +20,4 @@ subscribers.txt
 .idea/
 .vscode/
 pnpm-lock.yaml
+blog.db
