@@ -14,6 +14,7 @@
     "@sqlitecloud/drivers": "^1.0.880",
     "ioredis": "^5.11.1",
     "next": "^16.2.6",
+    "posthog-js": "^1.381.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
