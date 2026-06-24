@@ -111,6 +111,7 @@ export default function RootLayout({
                   ]),
                 }}
               />
+      <script async src="https://feedback.profullstack.com/embed/profullstack-feedback.js" data-property="c0mpute.com"></script>
       </body>
     </html>
   );
