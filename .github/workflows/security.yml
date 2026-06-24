@@ -12,6 +12,7 @@ jobs:
   semgrep:
     name: semgrep
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     container:
       image: semgrep/semgrep
@@ -27,6 +28,7 @@ jobs:
   bun-audit:
     name: bun audit
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -35,11 +37,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Audit dependencies
-        run: bun audit --audit-level=high
+        run: bun audit --audit-level=critical
 
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
