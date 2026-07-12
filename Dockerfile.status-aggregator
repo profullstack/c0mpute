@@ -33,12 +33,14 @@ RUN apt-get update \
 
 COPY --from=build /src/target/release/c0mpute /usr/local/bin/c0mpute
 
-# Persistent identity lives under ~/.config/c0mpute. A Railway volume mounted
-# here keeps a stable peer-id across restarts (optional — a fresh identity
-# still works, it just re-announces).
+# Persistent identity lives under $HOME/.config/c0mpute/identity.key. Mount a
+# Railway volume at /data to keep a STABLE peer-id across restarts — required
+# when this node is published as a bootstrap seed (its peer-id is pinned in
+# bootstrap.json). We run as root so the (root-owned) Railway volume at /data
+# is writable; this is a read-only observer with no secrets, so the reduced
+# isolation is an acceptable trade for volume writability.
 ENV HOME=/data
-RUN mkdir -p /data && useradd -r -u 10001 c0mpute && chown -R c0mpute /data
-USER c0mpute
+RUN mkdir -p /data
 
 ENV C0MPUTE_STATUS_BIND=0.0.0.0:8080
 EXPOSE 8080
