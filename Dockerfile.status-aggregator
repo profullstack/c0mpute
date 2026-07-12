@@ -1,0 +1,48 @@
+# Status aggregator service (DIP-0014).
+#
+# A read-only observer c0mpute node that crawls the Kad-DHT + listens on the
+# public gossipsub topics and serves aggregate network health as JSON. This
+# is the service behind c0mpute.com/status.
+#
+# Deploy on Railway (Phase 3 of DIP-0014):
+#   1. New service in the c0mpute project, "Deploy from repo".
+#   2. Build → Dockerfile path: Dockerfile.status-aggregator (context = repo root).
+#   3. It serves on :8080 (override with C0MPUTE_STATUS_BIND). Healthcheck: /healthz
+#   4. On the c0mpute.com web service, set:
+#        STATUS_AGGREGATOR_URL = http://<this-service>.railway.internal:8080
+#      (Railway private network) — the web /status + /api/status proxy to it.
+#
+# Build context is the repo root so the whole cargo workspace is available.
+
+# ── build stage ───────────────────────────────────────────────────────────
+FROM rust:1.92-bookworm AS build
+WORKDIR /src
+
+# Copy the full workspace and build only the CLI binary in release mode.
+COPY . .
+RUN cargo build --release --bin c0mpute
+
+# ── runtime stage ─────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+# The aggregator is an observer: no ffmpeg, no GPU, no chunk store. It only
+# needs CA certs (bootstrap.json fetch is HTTPS via rustls).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/c0mpute /usr/local/bin/c0mpute
+
+# Persistent identity lives under ~/.config/c0mpute. A Railway volume mounted
+# here keeps a stable peer-id across restarts (optional — a fresh identity
+# still works, it just re-announces).
+ENV HOME=/data
+RUN mkdir -p /data && useradd -r -u 10001 c0mpute && chown -R c0mpute /data
+USER c0mpute
+
+ENV C0MPUTE_STATUS_BIND=0.0.0.0:8080
+EXPOSE 8080
+
+# libp2p also needs its p2p listen port reachable for inbound peers; Railway
+# exposes the HTTP port. Gossipsub/Kad work outbound + via bootstrap regardless.
+ENTRYPOINT ["c0mpute", "status-aggregator"]

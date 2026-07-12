@@ -10,6 +10,7 @@ pub mod config;
 pub mod dispatch;
 pub mod register;
 pub mod runner;
+pub mod status_aggregator;
 pub mod supervisor;
 
 pub use buyer::{AuctionOutcome, JobAuction, run_auction};

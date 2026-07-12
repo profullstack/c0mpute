@@ -128,6 +128,20 @@ enum Cmd {
         yes: bool,
     },
 
+    /// Run the read-only status aggregator (DIP-0014).
+    ///
+    /// Boots an observer libp2p node that crawls the Kad-DHT and listens on
+    /// the public gossipsub topics, then serves aggregate network health as
+    /// JSON over HTTP. No roles are advertised — it never poses as a worker,
+    /// and no private data is ever exposed. This is the service behind
+    /// c0mpute.com/status; anyone can run their own and get the same numbers.
+    #[command(name = "status-aggregator", alias = "aggregator")]
+    StatusAggregator {
+        /// Address to serve the status JSON on (`GET /`, plus `/healthz`).
+        #[arg(long, env = "C0MPUTE_STATUS_BIND", default_value = "0.0.0.0:8080")]
+        bind: std::net::SocketAddr,
+    },
+
     /// Print the c0mpute binary version.
     Version,
 }
@@ -265,6 +279,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Doctor => run_doctor().await,
+        Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
         Cmd::Plugin { cmd } => run_plugin(cmd),

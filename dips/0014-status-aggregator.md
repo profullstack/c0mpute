@@ -7,7 +7,7 @@ authors:
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: apps/web/src/app/status (page + /api/status); aggregator service deferred
+implementation: apps/web/src/app/status (page + /api/status); aggregator = `c0mpute status-aggregator` (c0mpute-core/src/status_aggregator.rs) + Dockerfile.status-aggregator
 supersedes:
 superseded-by:
 ---
@@ -237,21 +237,36 @@ Phase 1 (this commit):
   payload until the aggregator is deployed.
 - DIP locks the JSON contract + privacy model.
 
-Phase 2 (follow-up):
-- `c0mpute --status-aggregator-mode` flag in c0mpute-cli.
-- Implement the **DHT crawler**: every ~30s, generate a few random
-  Kad keys and run `get_closest_peers` on each. Harvest peer-ids +
-  addrs from the responses; merge into the in-memory peer set with
-  a last-seen timestamp.
-- Implement the **JobTracker** (subscribes to JobOffer/Accept/Receipt
-  on c0mpute/jobs/*, maintains counters).
-- Compose with the existing Registry for worker counts.
-- HTTP JSON endpoint at `/`.
+Phase 2 (follow-up) — **DONE**:
+- `c0mpute status-aggregator` subcommand in c0mpute-cli (`--bind`,
+  env `C0MPUTE_STATUS_BIND`; alias `aggregator`). Shipped instead of
+  the `--status-aggregator-mode` flag form — a subcommand matches the
+  rest of the CLI surface.
+- **DHT crawler**: every 30s the aggregator generates a random Kad key
+  and runs `kad_find_node` (`get_closest_peers`) to warm the routing
+  table + gossipsub mesh, surfacing peers we'd miss on gossipsub alone.
+- **JobTracker**: subscribes to `c0mpute/jobs/<type>`, correlates
+  `JobAccept` → `JobReceipt` by job_id for in-flight / completed-24h /
+  avg-latency counters (latency = receipt.completed_at_ms −
+  accept.published_at_ms; stale in-flight evicted after 1h; completions
+  rolled over a 24h window).
+- Composes with the existing `Registry` for worker/role/tag counts.
+- HTTP JSON at `GET /` (shape mirrors `apps/web/src/lib/status.ts`),
+  plus `GET /healthz`.
+- Observer only: boots with no roles, so it never advertises as a
+  worker and exposes no private data.
 
-Phase 3:
-- Deploy on Railway as a sibling to c0mpute.com. Use Railway's
-  private network for the proxy fetch.
-- Set `STATUS_AGGREGATOR_URL` on the c0mpute.com service.
+Phase 3 — deploy (operator step):
+- `Dockerfile.status-aggregator` builds the observer image.
+- Deploy on Railway as a sibling to c0mpute.com; use the private
+  network for the proxy fetch.
+- Set `STATUS_AGGREGATOR_URL` on the c0mpute.com service to
+  `http://<service>.railway.internal:8080`.
+- NOTE: real counts require the aggregator to actually reach the
+  network. Today `c0mpute.com/bootstrap.json` 404s (DIP-0010 seed
+  nodes not yet deployed), so a WAN aggregator finds no peers. Stand
+  up bootstrap seed nodes (or co-locate with a worker for mDNS) for
+  non-zero numbers.
 
 ## Open questions
 
