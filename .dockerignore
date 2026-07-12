@@ -1,0 +1,17 @@
+# Keep the build context (and image layers) lean. The build stages regenerate
+# node_modules (bun install) and .next / target (build), so none of these
+# should be copied in from the context.
+.git
+target
+node_modules
+**/node_modules
+.next
+**/.next
+dist
+**/dist
+*.log
+.claude
+.env
+.env.*
+tmp
+**/.DS_Store

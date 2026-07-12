@@ -8,7 +8,11 @@ import { getStatusPayload } from "@/lib/status";
 import type { StatusPayload } from "@/lib/status";
 
 export const metadata = { title: "status — c0mpute" };
-export const revalidate = 30;
+// Always render fresh against the aggregator. A live status surface must not
+// serve a stale build-time snapshot — with ISR (`revalidate`) the page could
+// be frozen as the "aggregator not deployed" stub even after the aggregator is
+// up. The aggregator read is a cheap loopback call that serves in-memory data.
+export const dynamic = "force-dynamic";
 
 export default async function StatusPage() {
   const status: StatusPayload = await getStatusPayload();
