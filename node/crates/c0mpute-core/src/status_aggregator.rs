@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::get};
 use c0mpute_net::topics::{HEARTBEAT_TOPIC, JobAccept, JobReceipt, JobStatus, job_topic};
-use c0mpute_net::{GossipMessage, Libp2pNetwork, NetworkConfig, bootstrap};
+use c0mpute_net::{GossipMessage, Libp2pNetwork, Multiaddr, NetworkConfig, bootstrap};
 use serde::Serialize;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, warn};
@@ -386,7 +386,27 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
 
     // Observer node: no local chunk source, no roles → never advertises as a
     // worker (the advertise loop is simply not spawned).
-    let net_cfg = NetworkConfig::for_dir(identity_dir).with_bootstrap(bootstrap_addrs);
+    let mut net_cfg = NetworkConfig::for_dir(identity_dir).with_bootstrap(bootstrap_addrs);
+
+    // Seed mode (DIP-0010): when C0MPUTE_P2P_PORT is set, listen on that fixed
+    // TCP port instead of a random one, so a Railway TCP proxy (or any stable
+    // public address) can front it and the aggregator can be published as a
+    // bootstrap seed. Paired with a persistent identity volume for a stable
+    // peer-id, this lets the aggregator be the network's first reachable peer —
+    // workers that bootstrap to it join the mesh and get counted.
+    if let Ok(raw) = std::env::var("C0MPUTE_P2P_PORT") {
+        match raw.parse::<u16>() {
+            Ok(port) => match format!("/ip4/0.0.0.0/tcp/{port}").parse::<Multiaddr>() {
+                Ok(addr) => {
+                    net_cfg = net_cfg.with_listen(vec![addr]);
+                    info!(port, "aggregator: seed mode — libp2p on fixed p2p port");
+                }
+                Err(e) => warn!(err = %e, "invalid C0MPUTE_P2P_PORT addr; using random port"),
+            },
+            Err(e) => warn!(err = %e, raw, "C0MPUTE_P2P_PORT not a u16; using random port"),
+        }
+    }
+
     let net: Arc<Libp2pNetwork> = Arc::new(Libp2pNetwork::spawn(net_cfg).await?);
     info!(peer_id = %net.peer_id(), "aggregator: libp2p network up");
 
