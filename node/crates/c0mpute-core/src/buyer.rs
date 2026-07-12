@@ -124,6 +124,14 @@ pub async fn run_auction(
                     if bid.job_id == job_id
                         && bid.bidder_peer_id != offer.buyer_peer_id
                     {
+                        if !source_matches_claim(&msg, &bid.bidder_peer_id) {
+                            warn!(
+                                %job_id,
+                                claimed = %bid.bidder_peer_id,
+                                "buyer: discarding bid, gossip source does not match claimed bidder_peer_id"
+                            );
+                            continue;
+                        }
                         debug!(
                             %job_id,
                             bidder = %bid.bidder_peer_id,
@@ -185,6 +193,14 @@ pub async fn run_auction(
                     if receipt.job_id == job_id
                         && receipt.worker_peer_id == winner.bidder_peer_id
                     {
+                        if !source_matches_claim(&msg, &receipt.worker_peer_id) {
+                            warn!(
+                                %job_id,
+                                claimed = %receipt.worker_peer_id,
+                                "buyer: discarding receipt, gossip source does not match claimed worker_peer_id"
+                            );
+                            continue;
+                        }
                         info!(
                             %job_id,
                             status = ?receipt.status,
@@ -233,6 +249,19 @@ async fn publish_json<T: serde::Serialize>(
         }
     }
     net.publish(topic, bytes).await
+}
+
+/// Gossipsub gives us a cryptographically-authenticated `source: Option<PeerId>`
+/// (see `c0mpute_net::GossipMessage`) that cannot be forged by another peer —
+/// `capabilities.rs`'s ad registry already keys off it for the same reason.
+/// `JobBid.bidder_peer_id` / `JobReceipt.worker_peer_id` are just self-reported
+/// strings inside the signed-later-but-not-yet payload, so without this check
+/// any peer can claim to be any other peer_id in a bid or completion receipt.
+fn source_matches_claim(msg: &GossipMessage, claimed_peer_id: &str) -> bool {
+    match &msg.source {
+        Some(source) => source.to_base58() == claimed_peer_id,
+        None => false,
+    }
 }
 
 fn unix_ms() -> u64 {
