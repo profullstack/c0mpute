@@ -20,7 +20,7 @@
 [module]
 id          = "podcasting"
 name        = "Podcasting — p2p podcast publishing"
-version     = "0.0.1-candidate"
+version     = "0.2.1"
 kind        = "service"
 description = "Censorship-resistant podcast hosting on the c0mpute network. Upload episodes, stream live shows, auto-transcribe, and monetise via CoinPay subscriptions, pay-per-episode, value-for-value, and audio ads — with zero platform cut. RSS 2.0 + Podcasting 2.0 compatible with all major podcast apps."
 author      = "Profullstack"

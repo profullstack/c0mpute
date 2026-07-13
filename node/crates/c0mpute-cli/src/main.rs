@@ -44,7 +44,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -273,7 +273,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.unwrap_or_else(config::default_config_path);
 
-    match cli.command {
+    // No subcommand: open the interactive menu in a terminal, else print help
+    // (keeps piped/non-TTY and CI usage unchanged).
+    let Some(command) = cli.command else {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            return run_menu();
+        }
+        use clap::CommandFactory;
+        Cli::command().print_help()?;
+        println!();
+        return Ok(());
+    };
+
+    match command {
         Cmd::Version => {
             println!("c0mpute {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -821,6 +834,87 @@ fn parse_role(s: &str) -> Option<Role> {
             None
         }
     }
+}
+
+/// Interactive command menu shown when `c0mpute` is run with no subcommand in a
+/// TTY: browse the command tree, drill into subcommands, and run — spawning a
+/// child `c0mpute` so the real handlers run unchanged.
+fn run_menu() -> Result<()> {
+    use clap::CommandFactory;
+    use dialoguer::{theme::ColorfulTheme, Select};
+
+    let root = Cli::command();
+    let mut path: Vec<String> = Vec::new();
+
+    loop {
+        // Resolve the current node by descending `path` from the root each pass
+        // (avoids holding a borrow of `root` across mutations of `path`).
+        let mut node = &root;
+        for p in &path {
+            match node.find_subcommand(p) {
+                Some(sc) => node = sc,
+                None => break,
+            }
+        }
+
+        let subs: Vec<(String, String)> = node
+            .get_subcommands()
+            .filter(|c| c.get_name() != "help" && !c.is_hide_set())
+            .map(|c| {
+                (
+                    c.get_name().to_string(),
+                    c.get_about().map(|s| s.to_string()).unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        if subs.is_empty() {
+            break; // leaf — run the accumulated path
+        }
+
+        let mut labels: Vec<String> = subs
+            .iter()
+            .map(|(n, a)| if a.is_empty() { n.clone() } else { format!("{n:<12} {a}") })
+            .collect();
+        let has_extra = !path.is_empty();
+        if has_extra {
+            labels.push(format!("▶ run: c0mpute {}", path.join(" ")));
+            labels.push("↩ back".to_string());
+        }
+
+        let prompt = if path.is_empty() {
+            "c0mpute — pick a command".to_string()
+        } else {
+            format!("c0mpute {}", path.join(" "))
+        };
+
+        let Some(idx) = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .items(&labels)
+            .default(0)
+            .interact_opt()?
+        else {
+            return Ok(()); // Esc / Ctrl-C
+        };
+
+        if has_extra && idx == subs.len() {
+            break; // "▶ run" the current path
+        }
+        if has_extra && idx == subs.len() + 1 {
+            path.pop(); // "↩ back"
+            continue;
+        }
+        path.push(subs[idx].0.clone());
+    }
+
+    if path.is_empty() {
+        return Ok(());
+    }
+
+    // Re-exec `c0mpute <path…>` so the real command handlers run.
+    let exe = std::env::current_exe()?;
+    let status = std::process::Command::new(exe).args(&path).status()?;
+    std::process::exit(status.code().unwrap_or(0));
 }
 
 fn delegate(bin: &str, args: &[String]) -> Result<()> {

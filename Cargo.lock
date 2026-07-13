@@ -476,7 +476,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "c0mpute-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -501,6 +501,7 @@ dependencies = [
  "c0mpute-secure-chat",
  "c0mpute-update",
  "clap",
+ "dialoguer",
  "hex",
  "rpassword",
  "serde_json",
@@ -511,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -544,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -556,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -574,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -591,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "hex",
@@ -603,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -626,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -641,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -653,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -665,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -816,6 +817,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "console"
+version = "0.15.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "054ccb5b10f9f2cbf51eb355ca1d05c2d279ce1804688d0db74b4733a5aeafd8"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "once_cell",
+ "unicode-width",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1059,6 +1073,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialoguer"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
+dependencies = [
+ "console",
+ "shell-words",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1146,6 +1173,12 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "enum-as-inner"
@@ -3629,6 +3662,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4204,6 +4243,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unicode-xid"
