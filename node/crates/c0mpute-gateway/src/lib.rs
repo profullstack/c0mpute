@@ -28,7 +28,7 @@ pub struct GatewayState {
 pub fn router(state: GatewayState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/chunks/:hash", get(chunk_handler))
+        .route("/chunks/{hash}", get(chunk_handler))
         .with_state(state)
 }
 
