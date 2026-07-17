@@ -71,6 +71,33 @@ c0mpute worker stop`}
         </Code>
       </Section>
 
+      <Section h="networking" title="[ networking &amp; firewall ]">
+        <P>
+          To be dialable by other nodes — <strong>required</strong> for a
+          bootstrap seed, recommended for a worker so it can receive jobs —
+          open your libp2p p2p port. Pin it with{" "}
+          <code>C0MPUTE_P2P_PORT=&lt;port&gt;</code> (otherwise a random port is
+          used); <code>46337</code> is the convention. If your host has a{" "}
+          <em>cloud</em> firewall (DigitalOcean, AWS SG, GCP), open the port
+          there <strong>and</strong> in the host firewall — a cloud firewall
+          drops traffic before ufw ever sees it.
+        </P>
+        <Code>
+{`# host firewall (ufw)
+sudo ufw allow 46337/tcp
+
+# DigitalOcean cloud firewall (doctl)
+doctl compute firewall add-rules <firewall-id> \\
+  --inbound-rules "protocol:tcp,ports:46337,address:0.0.0.0/0,address:::/0"
+
+# Railway: no host firewall — add a TCP Proxy (Settings -> Networking),
+# or (per DIP-0010) run the seed on a droplet with a stable public IP.
+
+# verify from OUTSIDE the box (not localhost):
+#   https://check-host.net/check-tcp?host=<public-ip>:46337`}
+        </Code>
+      </Section>
+
       <Section h="transcode" title="[ submit a transcode job ]">
         <P>
           The transcode plugin handles FFmpeg workloads — H.264 / HEVC /

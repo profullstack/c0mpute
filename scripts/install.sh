@@ -636,6 +636,17 @@ Next steps:
   c0mpute doctor
   c0mpute worker start
 
+Networking — to be dialable by other nodes (required for a bootstrap seed,
+recommended for a worker so it can receive jobs), open your libp2p p2p port.
+Pin it with C0MPUTE_P2P_PORT=<port> (default is a random port); 46337 is the
+convention. Open it at BOTH layers if your host has a cloud firewall:
+  ufw:       sudo ufw allow 46337/tcp
+  DO CLI:    doctl compute firewall add-rules <firewall-id> \\
+               --inbound-rules "protocol:tcp,ports:46337,address:0.0.0.0/0,address:::/0"
+  Railway:   no host firewall — add a TCP Proxy (Settings → Networking) or,
+             per DIP-0010, run the seed on a droplet with a stable public IP.
+Verify from outside the box: https://check-host.net/check-tcp?host=<ip>:46337
+
 Docs: https://c0mpute.com/docs
 EOF
 
