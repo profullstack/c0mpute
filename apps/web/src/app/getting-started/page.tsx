@@ -25,17 +25,18 @@ export default function GettingStartedPage() {
         </p>
       </Section>
 
-      <Section number="2" label="create a coinpay did">
-        <CodeBlock>{`$ c0mpute coinpay did create`}</CodeBlock>
+      <Section number="2" label="sign in to coinpay">
+        <CodeBlock>{`$ c0mpute coinpay login`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
-          Generates a key + registers <code>did:coinpay:user:&lt;id&gt;</code>.
-          The DID anchors your reputation, payments, and signed receipts.
+          Links your payable DID to your coinpay account. The DID anchors your
+          reputation, payments, and signed receipts —{" "}
+          <code>c0mpute worker register</code> sets it up automatically (uses
+          your existing DID or creates one).
         </p>
       </Section>
 
       <Section number="3" label="run a worker">
-        <CodeBlock>{`$ c0mpute coinpay did create --role worker
-$ c0mpute worker register
+        <CodeBlock>{`$ c0mpute worker register
 $ c0mpute worker start --gpu`}</CodeBlock>
       </Section>
 

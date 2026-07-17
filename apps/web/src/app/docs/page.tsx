@@ -41,13 +41,14 @@ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --force`}
 
       <Section h="identity" title="[ identity & wallet ]">
         <P>
-          Every actor on the network has a CoinPay DID. Create one before
-          submitting jobs or registering a worker.
+          Every actor on the network has a CoinPay DID. Sign in to coinpay;{" "}
+          <code>c0mpute worker register</code> then sets up the DID
+          automatically (uses your existing one or creates it).
         </P>
         <Code>
-{`c0mpute coinpay did create                  # creates did:coinpay:user:<id>
-c0mpute coinpay did create --role worker    # creates a worker DID
-c0mpute coinpay did status                  # show active DID + key fingerprint
+{`c0mpute coinpay login                       # sign in (links your payable DID)
+c0mpute coinpay reputation did setup        # use existing DID or create one
+c0mpute coinpay reputation did me           # show active DID + key fingerprint
 c0mpute coinpay wallet status               # linked addresses + balances`}
         </Code>
       </Section>
