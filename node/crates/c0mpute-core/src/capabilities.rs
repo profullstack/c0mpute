@@ -47,7 +47,9 @@ pub const MAX_AD_AGE: Duration = Duration::from_secs(5 * 60);
 /// CapabilityAd this often so receivers' TTLs don't expire.
 pub const DEFAULT_ADVERTISE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Build a default capability-tag set from config.
+/// Build a default capability-tag set from config: one `c0mpute:role:*` per
+/// configured role, plus exactly one hardware tag so schedulers can match
+/// GPU-only work (transcode/inference) to GPU boxes.
 pub fn tags_from_config(config: &Config) -> Vec<String> {
     let mut tags = Vec::new();
     for role in &config.roles {
@@ -59,7 +61,50 @@ pub fn tags_from_config(config: &Config) -> Vec<String> {
         };
         tags.push(role_tag.to_string());
     }
+    tags.push(detect_hardware_tag());
     tags
+}
+
+/// Detect the host's compute hardware and return the matching capability tag.
+/// Exactly one is returned; a box with no usable accelerator advertises
+/// `c0mpute:cpu`. Runs once at startup (the tag set is built then passed to
+/// the advertise loop), so a one-off `nvidia-smi`/`rocm-smi` probe is cheap.
+pub fn detect_hardware_tag() -> String {
+    // Apple Silicon — Metal GPU on macOS aarch64.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return "c0mpute:gpu:apple".to_string();
+    }
+    if nvidia_present() {
+        return "c0mpute:gpu:nvidia".to_string();
+    }
+    if amd_present() {
+        return "c0mpute:gpu:amd".to_string();
+    }
+    "c0mpute:cpu".to_string()
+}
+
+/// NVIDIA GPU present — a device node or a working `nvidia-smi -L`.
+fn nvidia_present() -> bool {
+    if std::path::Path::new("/dev/nvidia0").exists() {
+        return true;
+    }
+    std::process::Command::new("nvidia-smi")
+        .arg("-L")
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// AMD ROCm GPU present — the KFD device node or a working `rocm-smi`.
+fn amd_present() -> bool {
+    if std::path::Path::new("/dev/kfd").exists() {
+        return true;
+    }
+    std::process::Command::new("rocm-smi")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Build the per-host hardware blob attached to capability ads. Today
@@ -318,5 +363,33 @@ mod tests {
             registry.find_with_tag("c0mpute:role:storage").await;
         assert_eq!(storage_workers.len(), 1);
         assert_eq!(storage_workers[0].0, net_a.peer_id());
+    }
+
+    #[test]
+    fn detect_hardware_tag_returns_one_known_tag() {
+        let tag = super::detect_hardware_tag();
+        assert!(
+            [
+                "c0mpute:gpu:nvidia",
+                "c0mpute:gpu:amd",
+                "c0mpute:gpu:apple",
+                "c0mpute:cpu",
+            ]
+            .contains(&tag.as_str()),
+            "unexpected hardware tag: {tag}"
+        );
+    }
+
+    #[test]
+    fn tags_from_config_includes_roles_and_exactly_one_hardware_tag() {
+        let cfg = Config::default(); // roles: storage, gateway, verifier
+        let tags = super::tags_from_config(&cfg);
+        assert!(tags.contains(&"c0mpute:role:storage".to_string()));
+        assert!(tags.contains(&"c0mpute:role:gateway".to_string()));
+        let hw: Vec<_> = tags
+            .iter()
+            .filter(|t| t.starts_with("c0mpute:gpu:") || t.as_str() == "c0mpute:cpu")
+            .collect();
+        assert_eq!(hw.len(), 1, "expected exactly one hardware tag, got {hw:?}");
     }
 }
