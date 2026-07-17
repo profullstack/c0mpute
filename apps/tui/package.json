@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.tsx",
-    "build": "bun build src/index.tsx --outfile=dist/c0mpute-tui --target=bun --compile",
+    "start": "bun run src/index.tsx",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

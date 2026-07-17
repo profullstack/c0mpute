@@ -16,6 +16,7 @@
 #   --no-coinpay    Skip CoinPay CLI
 #   --no-infernet   Skip Infernet CLI
 #   --no-transcode  Skip transcode plugin's system deps (ffmpeg)
+#   --no-tui        Skip the c0mpute-tui terminal UI
 #   --worker        Add Docker / FFmpeg readiness checks
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
@@ -45,6 +46,7 @@ INSTALL_C0MPUTE=1
 INSTALL_COINPAY=1
 INSTALL_INFERNET=1
 INSTALL_TRANSCODE=1
+INSTALL_TUI=1
 WORKER_MODE=0
 DEVELOPER_MODE=0
 FORCE=0
@@ -56,10 +58,11 @@ ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --minimal)      INSTALL_COINPAY=0; INSTALL_INFERNET=0; INSTALL_TRANSCODE=0 ;;
+    --minimal)      INSTALL_COINPAY=0; INSTALL_INFERNET=0; INSTALL_TRANSCODE=0; INSTALL_TUI=0 ;;
     --no-coinpay)   INSTALL_COINPAY=0 ;;
     --no-infernet)  INSTALL_INFERNET=0 ;;
     --no-transcode) INSTALL_TRANSCODE=0 ;;
+    --no-tui)       INSTALL_TUI=0 ;;
     --worker)       WORKER_MODE=1 ;;
     --developer)    DEVELOPER_MODE=1 ;;
     --force)        FORCE=1 ;;
@@ -282,6 +285,81 @@ install_transcode_deps() {
 }
 
 # ────────────────────────────────────────────────────────────────────────
+# c0mpute-tui (Bun/blessed terminal UI)
+#
+# `c0mpute tui` subprocess-launches a `c0mpute-tui` binary on PATH. The TUI
+# is a Bun + blessed app; blessed loads its widgets via computed
+# `require('./widgets/'+name)`, which `bun build --compile` CANNOT bundle
+# (the standalone binary dies with "Cannot find module './widgets/node'").
+# So we install it as SOURCE run through Bun, wrapped by a small launcher —
+# NOT a compiled binary. Source comes from the in-repo copy when running
+# in-tree, otherwise the repo tarball on GitHub. Optional: any failure warns
+# and continues (the rest of c0mpute works without the TUI).
+# ────────────────────────────────────────────────────────────────────────
+install_tui() {
+  bun_bin="$(command -v bun || true)"
+  [ -x "$HOME/.bun/bin/bun" ] && bun_bin="${bun_bin:-$HOME/.bun/bin/bun}"
+  if [ -z "$bun_bin" ]; then
+    warn "bun not available; skipping c0mpute-tui (run: c0mpute tui after installing bun)"
+    return 1
+  fi
+
+  wrapper="$C0MPUTE_HOME/bin/c0mpute-tui"
+  if [ -x "$wrapper" ] && [ "$FORCE" -eq 0 ]; then
+    say "c0mpute-tui already installed at $wrapper (use --force to reinstall)"
+    return 0
+  fi
+
+  dest="$C0MPUTE_HOME/tui"
+
+  # Locate the TUI source: in-repo copy first, else fetch the repo tarball.
+  local_tui="$(dirname "$0")/../apps/tui"
+  src=""
+  cleanup_tmp=""
+  if [ -d "$local_tui/src" ]; then
+    src="$local_tui"
+  else
+    say "fetching c0mpute-tui source"
+    tmp=$(mktemp -d)
+    cleanup_tmp="$tmp"
+    ref="${C0MPUTE_TUI_REF:-master}"
+    tarball="https://github.com/profullstack/c0mpute/archive/refs/heads/${ref}.tar.gz"
+    if curl -fsSL "$tarball" | tar -xz -C "$tmp" 2>/dev/null; then
+      src=$(find "$tmp" -maxdepth 2 -type d -path '*/apps/tui' 2>/dev/null | head -1)
+    fi
+    if [ -z "$src" ] || [ ! -d "$src/src" ]; then
+      warn "couldn't fetch c0mpute-tui source; skipping (run: c0mpute tui later to retry)"
+      [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
+      return 1
+    fi
+  fi
+
+  say "installing c0mpute-tui → $dest"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp -R "$src/src" "$src/package.json" "$src/tsconfig.json" "$dest/" 2>/dev/null
+
+  # Materialise a self-contained node_modules (the monorepo hoists deps, so a
+  # copied node_modules would be dangling symlinks).
+  if ! ( cd "$dest" && "$bun_bin" install --no-save >/dev/null 2>&1 ); then
+    warn "c0mpute-tui dependency install failed; skipping"
+    [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
+    return 1
+  fi
+
+  cat > "$wrapper" <<EOF
+#!/usr/bin/env sh
+# c0mpute-tui launcher: runs the Bun/blessed TUI from source.
+# (bun --compile can't bundle blessed's dynamic widget requires, so we run source.)
+BUN="\$(command -v bun || echo "\$HOME/.bun/bin/bun")"
+exec "\$BUN" run "$dest/src/index.tsx" "\$@"
+EOF
+  chmod +x "$wrapper"
+  [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
+  ok "installed c0mpute-tui → $wrapper"
+}
+
+# ────────────────────────────────────────────────────────────────────────
 # PATH + diagnostics
 # ────────────────────────────────────────────────────────────────────────
 
@@ -330,6 +408,9 @@ print_versions() {
   echo
   if [ -x "$C0MPUTE_HOME/bin/c0mpute" ]; then
     printf 'c0mpute installed:  %s\n'  "$("$C0MPUTE_HOME/bin/c0mpute" version 2>/dev/null | tail -1)"
+  fi
+  if [ -x "$C0MPUTE_HOME/bin/c0mpute-tui" ]; then
+    printf 'c0mpute-tui:        installed (run: c0mpute tui)\n'
   fi
   if command -v coinpay >/dev/null 2>&1; then
     printf 'coinpay installed:  %s\n'  "$(coinpay --version 2>/dev/null || coinpay version 2>/dev/null | tail -1)"
@@ -473,6 +554,9 @@ main() {
   # transcode is built into the c0mpute binary, but its system dep
   # (ffmpeg) lives in the plugin's installer.
   if [ "$INSTALL_TRANSCODE" -eq 1 ]; then install_transcode_deps; fi
+
+  # c0mpute-tui: Bun/blessed terminal UI launched by `c0mpute tui`.
+  if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
 
   if [ "$WORKER_MODE" -eq 1 ]; then worker_checks; fi
 
