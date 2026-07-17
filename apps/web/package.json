@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
+    "@profullstack/stack": "^0.1.0",
     "@sqlitecloud/drivers": "^1.0.880",
     "ioredis": "^5.11.1",
     "next": "^16.2.6",

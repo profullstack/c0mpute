@@ -632,9 +632,11 @@ main() {
 
   cat <<EOF
 Next steps:
+  c0mpute login             # sign in to coinpay + infernet (ties this node to your accounts)
   c0mpute worker register   # registers the node + sets up your payable DID
   c0mpute doctor
-  c0mpute worker start
+  c0mpute worker start      # add --gpu to serve transcode/inference jobs
+  c0mpute infernet setup    # (optional) also serve AI inference on infernet
 
 Networking — to be dialable by other nodes (required for a bootstrap seed,
 recommended for a worker so it can receive jobs), open your libp2p p2p port.

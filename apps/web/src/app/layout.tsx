@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 import Script from "next/script";
+import { FeedbackWidget } from "@profullstack/stack/feedback";
 
 const SITE = "https://c0mpute.com";
 const DESCRIPTION =
@@ -111,7 +112,7 @@ export default function RootLayout({
                   ]),
                 }}
               />
-      <script async src="https://feedback.profullstack.com/embed/profullstack-feedback.js" data-property="c0mpute.com"></script>
+      <FeedbackWidget property="c0mpute.com" />
       </body>
     </html>
   );

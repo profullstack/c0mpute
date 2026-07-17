@@ -86,6 +86,9 @@ enum Cmd {
         args: Vec<String>,
     },
 
+    /// Sign in to every c0mpute network (coinpay + infernet), one at a time.
+    Login,
+
     /// Secure chat — E2E encrypted p2p messaging (DIP-0018).
     Chat {
         #[command(subcommand)]
@@ -303,6 +306,7 @@ async fn main() -> Result<()> {
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
+        Cmd::Login => run_login(),
         Cmd::Infernet { mut args } => {
             // Default the network to c0mpute when caller didn't specify.
             if matches!(args.first().map(String::as_str), Some("run"))
@@ -383,6 +387,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             ensure_coinpay_did();
             println!();
             println!("next:");
+            println!("  c0mpute login          # sign in to coinpay + infernet (ties this node to your accounts)");
             println!("  c0mpute worker start   # join the swarm");
             Ok(())
         }
@@ -957,6 +962,31 @@ fn ensure_coinpay_did() {
             "  (not set up — are you logged in? run `c0mpute coinpay login`, then `c0mpute coinpay reputation did setup`)"
         ),
         Err(e) => println!("  (couldn't run coinpay: {e})"),
+    }
+}
+
+/// `c0mpute login` — sign in to every network this node participates in, one
+/// at a time: coinpay (payments / payable DID) then infernet (ties the node to
+/// your infernetprotocol.com account). Each is a browser device-code flow.
+/// Best-effort per service — one failing/declined login doesn't abort the rest.
+fn run_login() -> Result<()> {
+    println!("Signing in to your c0mpute accounts (coinpay + infernet)...\n");
+    login_one("coinpay", "payments + payable DID");
+    login_one("infernet", "ties this node to your infernetprotocol.com account");
+    println!("Done. Next: c0mpute worker register  →  c0mpute worker start");
+    Ok(())
+}
+
+/// Run `<bin> login`, inheriting stdio so its browser device-code flow works.
+fn login_one(bin: &str, why: &str) {
+    println!("── {bin} ── ({why})");
+    match which_on_path(bin) {
+        Some(path) => match Command::new(path).arg("login").status() {
+            Ok(s) if s.success() => println!("  ✓ {bin} signed in\n"),
+            Ok(_) => println!("  ! {bin} login did not complete — re-run `c0mpute login`\n"),
+            Err(e) => println!("  ! couldn't run {bin}: {e}\n"),
+        },
+        None => println!("  ! {bin} not installed — skipping\n"),
     }
 }
 

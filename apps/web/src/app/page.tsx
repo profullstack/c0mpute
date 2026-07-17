@@ -22,8 +22,9 @@ export default function HomePage() {
       </section>
 
       <section className="space-y-3">
-        <p className="comment">// run a worker (register sets up your payable DID automatically)</p>
-        <CodeBlock>{`$ c0mpute worker register
+        <p className="comment">// run a worker (login ties it to your accounts; register mints your DID)</p>
+        <CodeBlock>{`$ c0mpute login
+$ c0mpute worker register
 $ c0mpute worker start --gpu`}</CodeBlock>
       </section>
 

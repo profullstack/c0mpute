@@ -25,13 +25,13 @@ export default function GettingStartedPage() {
         </p>
       </Section>
 
-      <Section number="2" label="sign in to coinpay">
-        <CodeBlock>{`$ c0mpute coinpay login`}</CodeBlock>
+      <Section number="2" label="sign in everywhere">
+        <CodeBlock>{`$ c0mpute login`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
-          Links your payable DID to your coinpay account. The DID anchors your
-          reputation, payments, and signed receipts —{" "}
-          <code>c0mpute worker register</code> sets it up automatically (uses
-          your existing DID or creates one).
+          Signs in to coinpay (payments + your payable DID) and infernet (ties
+          this node to your infernetprotocol.com account), one at a time.{" "}
+          <code>c0mpute worker register</code> then sets up the DID
+          automatically (uses your existing one or creates it).
         </p>
       </Section>
 
