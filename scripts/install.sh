@@ -314,9 +314,17 @@ install_tui() {
   fi
 
   wrapper="$C0MPUTE_HOME/bin/c0mpute-tui"
-  if [ -x "$wrapper" ] && [ "$FORCE" -eq 0 ]; then
+  # Only skip if the existing file is actually OUR bun launcher. Earlier
+  # installers shipped a `bun build --compile` binary that crashes at runtime
+  # ("Cannot find module './widgets/node'" — blessed's dynamic requires can't
+  # be bundled); those must be replaced even without --force. Detect our
+  # wrapper by its `bun run` marker (a compiled binary won't match under grep).
+  if [ -x "$wrapper" ] && [ "$FORCE" -eq 0 ] && grep -q 'bun run' "$wrapper" 2>/dev/null; then
     say "c0mpute-tui already installed at $wrapper (use --force to reinstall)"
     return 0
+  fi
+  if [ -e "$wrapper" ] && ! grep -q 'bun run' "$wrapper" 2>/dev/null; then
+    warn "replacing stale c0mpute-tui (old compiled build crashes) with the source launcher"
   fi
 
   dest="$C0MPUTE_HOME/tui"
@@ -624,8 +632,8 @@ main() {
 
   cat <<EOF
 Next steps:
-  c0mpute coinpay did create
   c0mpute worker register
+  c0mpute coinpay reputation did claim   # mint a payable DID (auto-generates)
   c0mpute doctor
   c0mpute worker start
 

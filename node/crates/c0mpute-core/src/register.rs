@@ -13,7 +13,7 @@
 //! This is purely local. The on-network registration (announcing the
 //! peer-id + capabilities + DID to the swarm) happens when the supervisor
 //! boots, and the CoinPay-side DID/registration is a separate flow
-//! (`c0mpute coinpay did create --role worker`).
+//! (`c0mpute coinpay reputation did claim`).
 
 use std::path::{Path, PathBuf};
 

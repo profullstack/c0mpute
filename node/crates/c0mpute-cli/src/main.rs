@@ -36,7 +36,7 @@ use c0mpute_secure_chat as chat;
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay did create\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet run prompts.jsonl --model qwen"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet run prompts.jsonl --model qwen"
 )]
 struct Cli {
     /// Override the config file location.
@@ -377,8 +377,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             println!("  storage   : {}", r.storage_root.display());
             println!();
             println!("next:");
-            println!("  c0mpute coinpay did create --role worker  # mint a payable DID");
-            println!("  c0mpute worker start                       # join the swarm");
+            println!("  c0mpute coinpay reputation did claim  # mint a payable DID (auto-generates)");
+            println!("  c0mpute worker start                  # join the swarm");
             Ok(())
         }
         WorkerCmd::Status => {
