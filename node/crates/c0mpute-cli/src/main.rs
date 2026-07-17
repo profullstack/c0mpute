@@ -973,8 +973,35 @@ fn run_login() -> Result<()> {
     println!("Signing in to your c0mpute accounts (coinpay + infernet)...\n");
     login_one("coinpay", "payments + payable DID");
     login_one("infernet", "ties this node to your infernetprotocol.com account");
+    login_hf();
     println!("Done. Next: c0mpute worker register  →  c0mpute worker start");
     Ok(())
+}
+
+/// HuggingFace sign-in — for model downloads (only strictly required for gated
+/// models; public ones need nothing). Runs like the other providers: prefer the
+/// new `hf auth login`, else legacy `huggingface-cli login`. Best-effort — a
+/// skip/Ctrl-C just moves on, and HF_TOKEN in the env counts as signed in.
+fn login_hf() {
+    println!("── huggingface ── (model downloads; token-based — no OAuth device flow)");
+    if std::env::var_os("HF_TOKEN").is_some() {
+        println!("  ✓ HF_TOKEN already set in the environment\n");
+        return;
+    }
+    let (bin, args): (&str, &[&str]) = if which_on_path("hf").is_some() {
+        ("hf", &["auth", "login"])
+    } else if which_on_path("huggingface-cli").is_some() {
+        ("huggingface-cli", &["login"])
+    } else {
+        println!("  ! huggingface CLI not installed — skip (installed with vLLM on NVIDIA nodes)\n");
+        return;
+    };
+    let path = which_on_path(bin).unwrap();
+    match Command::new(path).args(args).status() {
+        Ok(s) if s.success() => println!("  ✓ huggingface signed in\n"),
+        Ok(_) => println!("  ! huggingface login skipped/failed (fine unless you use gated models)\n"),
+        Err(e) => println!("  ! couldn't run {bin}: {e}\n"),
+    }
 }
 
 /// Run `<bin> login`, inheriting stdio so its browser device-code flow works.
