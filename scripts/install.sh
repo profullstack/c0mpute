@@ -369,6 +369,14 @@ ensure_path() {
   # duplicate lines on re-run.
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [ -f "$rc" ] || continue
+    # Must be writable. An rc file created root-owned by a prior sudo install
+    # (common on cloud GPU images) makes `>> "$rc"` fail with a raw shell-level
+    # "cannot create ...: Permission denied" that 2>/dev/null can't suppress.
+    # Pre-check and skip — the ~/.c0mpute/bin symlink already handles PATH.
+    if [ ! -w "$rc" ]; then
+      warn "$rc not writable (try: sudo chown \$USER:\$USER $rc) — skipping PATH append"
+      continue
+    fi
 
     if ! grep -q '\.c0mpute/bin' "$rc"; then
       {
