@@ -376,9 +376,14 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             );
             println!("  storage   : {}", r.storage_root.display());
             println!();
+            // Auto-mint the payable DID so the operator never has to run a
+            // separate coinpay command. Idempotent (coinpay returns the
+            // existing DID) and best-effort — a worker runs fine without it,
+            // so a missing/logged-out coinpay must not fail registration.
+            ensure_coinpay_did();
+            println!();
             println!("next:");
-            println!("  c0mpute coinpay reputation did claim  # mint a payable DID (auto-generates)");
-            println!("  c0mpute worker start                  # join the swarm");
+            println!("  c0mpute worker start   # join the swarm");
             Ok(())
         }
         WorkerCmd::Status => {
@@ -928,6 +933,31 @@ fn delegate(bin: &str, args: &[String]) -> Result<()> {
         anyhow::bail!("{bin} exited {status}");
     }
     Ok(())
+}
+
+/// Ensure the operator has a payable CoinPay DID, as part of `worker register`.
+///
+/// Runs `coinpay reputation did setup`, which discovers an existing DID and
+/// confirms its use, or offers to create one — interactively when a terminal
+/// is attached, and non-interactively (sensible default) under `curl | sh`.
+/// Best-effort: a worker runs without a DID, so a missing or logged-out
+/// coinpay must never fail registration — we just point the operator at it.
+fn ensure_coinpay_did() {
+    let Some(coinpay) = which_on_path("coinpay") else {
+        println!("payable DID: `coinpay` not installed — run `c0mpute coinpay reputation did setup` later to set one up.");
+        return;
+    };
+    println!("payable DID:");
+    match Command::new(coinpay)
+        .args(["reputation", "did", "setup"])
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(_) => println!(
+            "  (not set up — are you logged in? run `c0mpute coinpay login`, then `c0mpute coinpay reputation did setup`)"
+        ),
+        Err(e) => println!("  (couldn't run coinpay: {e})"),
+    }
 }
 
 fn which_on_path(bin: &str) -> Option<PathBuf> {

@@ -632,8 +632,7 @@ main() {
 
   cat <<EOF
 Next steps:
-  c0mpute worker register
-  c0mpute coinpay reputation did claim   # mint a payable DID (auto-generates)
+  c0mpute worker register   # registers the node + sets up your payable DID
   c0mpute doctor
   c0mpute worker start
 
