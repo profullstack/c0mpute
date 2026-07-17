@@ -9,9 +9,9 @@
 [tools]
 rust = "1.92"
 # Runtime is bun (all tasks below run on bun/bunx); node is only a fallback for
-# tooling that needs it, so track the latest LTS rather than a pinned major.
+# tooling that needs it — pin the current LTS (24), not an EOL major.
 bun = "1.3"
-node = "lts"
+node = "24"
 
 [env]
 # Local defaults so `bun run dev:coordinator` Just Works without an .env.
