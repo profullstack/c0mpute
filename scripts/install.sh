@@ -56,6 +56,15 @@ warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 
+# Privilege escalation helper for system-wide steps (the /usr/local/bin
+# symlink + /etc/profile.d hook). Empty when already root or when sudo isn't
+# available; callers try a direct write first and fall back to $SUDO.
+if [ "$(id -u 2>/dev/null || echo 0)" != "0" ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  SUDO=""
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --minimal)      INSTALL_COINPAY=0; INSTALL_INFERNET=0; INSTALL_TRANSCODE=0; INSTALL_TUI=0 ;;
@@ -363,6 +372,44 @@ EOF
 # PATH + diagnostics
 # ────────────────────────────────────────────────────────────────────────
 
+# Make `c0mpute` reachable no matter the shell config. Shell rc files
+# (ensure_path) only help NEW shells and silently do nothing when they're
+# root-owned (cloud GPU images) — that's how you get `c0mpute: command not
+# found` right after a "successful" install. Mirror infernet's installer:
+#   1. Symlink the binary into a system bin dir (already on every PATH), so it
+#      works in the CURRENT shell immediately.
+#   2. Write /etc/profile.d so future login shells also see ~/.c0mpute/bin —
+#      which is where the peer binaries (coinpay, infernet) and c0mpute-tui
+#      live; the single symlink only covers the main binary.
+# Both try a direct write first, then $SUDO. All best-effort.
+link_system_bin() {
+  target="$C0MPUTE_HOME/bin/c0mpute"
+  [ -x "$target" ] || return 0  # nothing installed to link
+
+  linked=""
+  for sysbin in /usr/local/bin /usr/bin /opt/bin; do
+    [ -d "$sysbin" ] || continue
+    if ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
+      linked="$sysbin/c0mpute"; ok "symlinked $linked → $target"; break
+    fi
+    if [ -n "$SUDO" ] && $SUDO ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
+      linked="$sysbin/c0mpute"; ok "symlinked $linked → $target (via sudo)"; break
+    fi
+  done
+  [ -n "$linked" ] || warn "no writable system bin dir — relying on shell rc / profile.d for PATH"
+
+  if [ -d /etc/profile.d ]; then
+    line='export PATH="$HOME/.c0mpute/bin:$HOME/.local/bin:$PATH"'
+    if printf '# Added by c0mpute installer\n%s\n' "$line" > /etc/profile.d/c0mpute.sh 2>/dev/null; then
+      ok "wrote /etc/profile.d/c0mpute.sh"
+    elif [ -n "$SUDO" ] && printf '# Added by c0mpute installer\n%s\n' "$line" \
+        | $SUDO tee /etc/profile.d/c0mpute.sh >/dev/null 2>&1; then
+      ok "wrote /etc/profile.d/c0mpute.sh (via sudo)"
+    fi
+  fi
+  unset target linked sysbin line
+}
+
 ensure_path() {
   # Bash / Zsh / sh-style profile. Each rc file gets the PATH line +
   # the right `mise activate <shell>` invocation. Idempotent — won't
@@ -372,7 +419,8 @@ ensure_path() {
     # Must be writable. An rc file created root-owned by a prior sudo install
     # (common on cloud GPU images) makes `>> "$rc"` fail with a raw shell-level
     # "cannot create ...: Permission denied" that 2>/dev/null can't suppress.
-    # Pre-check and skip — the ~/.c0mpute/bin symlink already handles PATH.
+    # Pre-check and skip — link_system_bin() already put c0mpute on PATH via
+    # the /usr/local/bin symlink + /etc/profile.d hook, so this is best-effort.
     if [ ! -w "$rc" ]; then
       warn "$rc not writable (try: sudo chown \$USER:\$USER $rc) — skipping PATH append"
       continue
@@ -557,6 +605,9 @@ main() {
   # NO_STORAGE_RELOCATE=1. Same approach as infernet's installer.
   detect_storage_volume || true
 
+  # System-wide PATH (symlink + profile.d) FIRST — works even when the shell
+  # rc files below are root-owned/unwritable. Prevents `command not found`.
+  link_system_bin
   ensure_path
 
   # transcode is built into the c0mpute binary, but its system dep
