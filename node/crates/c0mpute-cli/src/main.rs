@@ -1796,13 +1796,28 @@ fn build_llama_rpc_background() {
     let _ = std::fs::write(&lock, b"");
     tracing::info!("building llama.cpp (rpc-server/llama-server) in background for infernet RPC serving");
     let script = "set -e\n\
+         # Ensure a build toolchain (cmake + C/C++ compiler + git) — not present\n\
+         # on a fresh node by default.\n\
+         if ! command -v cmake >/dev/null 2>&1; then\n\
+           if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y cmake build-essential git\n\
+           elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y cmake gcc-c++ make git\n\
+           elif command -v yum >/dev/null 2>&1; then sudo yum install -y cmake gcc-c++ make git\n\
+           elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm cmake base-devel git\n\
+           elif command -v zypper >/dev/null 2>&1; then sudo zypper install -y cmake gcc-c++ make git\n\
+           elif command -v apk >/dev/null 2>&1; then sudo apk add cmake build-base git\n\
+           elif command -v brew >/dev/null 2>&1; then brew install cmake git\n\
+           fi\n\
+         fi\n\
+         command -v cmake >/dev/null 2>&1 || { echo 'cmake unavailable and could not be installed automatically; install cmake + a C/C++ toolchain' >&2; exit 1; }\n\
          D=\"$HOME/.c0mpute/llama.cpp\"\n\
          [ -d \"$D/.git\" ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp \"$D\"\n\
          cd \"$D\" && (git pull --ff-only 2>/dev/null || true)\n\
          cmake -B build -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release >/dev/null\n\
-         cmake --build build -j --target rpc-server llama-server\n\
+         cmake --build build -j --target ggml-rpc-server llama-server\n\
          mkdir -p \"$HOME/.c0mpute/bin\"\n\
-         ln -sf \"$D/build/bin/rpc-server\" \"$HOME/.c0mpute/bin/rpc-server\"\n\
+         # llama.cpp names the RPC server binary `ggml-rpc-server`; infernet\n\
+         # looks for `rpc-server` on PATH, so link it under that name.\n\
+         ln -sf \"$D/build/bin/ggml-rpc-server\" \"$HOME/.c0mpute/bin/rpc-server\"\n\
          ln -sf \"$D/build/bin/llama-server\" \"$HOME/.c0mpute/bin/llama-server\"\n";
     let logf = std::fs::File::create(PathBuf::from(&home).join(".c0mpute/llama-build.log")).ok();
     let mut cmd = Command::new("sh");
@@ -1825,18 +1840,22 @@ fn ensure_llama_rpc(want_primary: bool) -> bool {
     if ready() {
         return true;
     }
-    // A previous build may be present but not symlinked onto PATH yet.
+    // A previous build may be present but not symlinked onto PATH yet. The RPC
+    // server binary is `ggml-rpc-server`; infernet expects `rpc-server`.
     if let (Some(build), Ok(home)) = (llama_build_bin_dir(), std::env::var("HOME")) {
-        if build.join("rpc-server").exists() {
+        if build.join("ggml-rpc-server").exists() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::symlink;
                 let dst = PathBuf::from(&home).join(".c0mpute/bin");
                 let _ = std::fs::create_dir_all(&dst);
-                for b in ["rpc-server", "llama-server"] {
-                    if build.join(b).exists() {
-                        let _ = std::fs::remove_file(dst.join(b));
-                        let _ = symlink(build.join(b), dst.join(b));
+                for (src, link) in [
+                    ("ggml-rpc-server", "rpc-server"),
+                    ("llama-server", "llama-server"),
+                ] {
+                    if build.join(src).exists() {
+                        let _ = std::fs::remove_file(dst.join(link));
+                        let _ = symlink(build.join(src), dst.join(link));
                     }
                 }
             }
