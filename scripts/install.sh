@@ -635,8 +635,16 @@ Next steps:
   c0mpute login             # sign in to coinpay + infernet (ties this node to your accounts)
   c0mpute worker register   # registers the node + sets up your payable DID
   c0mpute doctor
-  c0mpute worker start      # add --gpu to serve transcode/inference jobs
+  c0mpute worker start      # foreground; add --gpu to serve transcode/inference jobs
   c0mpute infernet setup    # (optional) also serve AI inference on infernet
+
+Run the worker in the background:
+  c0mpute worker start -d   # detach as a daemon (PID file + log under ~/.local/share/c0mpute)
+  c0mpute worker start -a   # start + stream the log; press Ctrl-D to detach, worker keeps running
+  c0mpute worker status     # is it running?
+  c0mpute worker stop       # stop the daemon
+  For a managed service, install the systemd unit:
+    scripts/systemd/c0mpute-worker.service  (see its header for setup)
 
 Networking — to be dialable by other nodes (required for a bootstrap seed,
 recommended for a worker so it can receive jobs), open your libp2p p2p port.
