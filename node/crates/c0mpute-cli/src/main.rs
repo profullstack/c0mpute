@@ -1503,33 +1503,36 @@ fn tool_version(bin: &str) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
-    let line = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut line = raw.lines().next().unwrap_or("").trim();
+    // Normalize e.g. "infernet v0.1.45" → "0.1.45": drop a redundant leading
+    // binary name and a leading "v" before the number.
+    if let Some(rest) = line.strip_prefix(bin) {
+        line = rest.trim();
+    }
+    if let Some(rest) = line.strip_prefix('v') {
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            line = rest;
+        }
+    }
     Some(if line.is_empty() {
-        "installed (no --version)".to_string()
+        "installed".to_string()
     } else {
-        line
+        line.to_string()
     })
 }
 
-/// Print c0mpute's version plus every installed plugin / peer CLI.
+/// Print c0mpute's version plus every installed plugin (transcode built-in;
+/// coinpay + infernet peer CLIs). `c0mpute tui` is a subcommand, not a plugin,
+/// so it isn't listed here.
 fn print_all_versions() {
     println!("{:<10} {}", "c0mpute", env!("CARGO_PKG_VERSION"));
-    println!("{:<10} built-in (in-process)", "transcode");
+    println!("{:<10} built-in", "transcode");
     for bin in ["coinpay", "infernet"] {
         match tool_version(bin) {
             Some(v) => println!("{bin:<10} {v}"),
             None => println!("{bin:<10} not installed"),
         }
-    }
-    // c0mpute-tui has no --version (it launches the dashboard) — report presence.
-    match which_on_path("c0mpute-tui") {
-        Some(_) => println!("{:<10} installed", "c0mpute-tui"),
-        None => println!("{:<10} not installed", "c0mpute-tui"),
     }
 }
 
