@@ -67,6 +67,29 @@ c0mpute worker stop
 c0mpute worker start -a
 ```
 
+### Serve models for "Distribute across all nodes" (infernet RPC)
+
+To make a node count toward infernet's distributed inference for a model, the
+worker can auto-serve it over llama.cpp RPC (IPIP-0033). This is opt-in via env
+because the model and (for a primary) its GGUF are operator choices. c0mpute
+builds the llama.cpp `rpc-server`/`llama-server` binaries in the background on
+first run, then runs `infernet inference serve`/`primary` and the daemon
+advertises it:
+
+```sh
+# slice nodes (≥2): donate compute for a model
+C0MPUTE_RPC_MODELS="qwen2.5:72b" c0mpute worker start -d
+
+# primary node (1): must hold the model's GGUF locally
+C0MPUTE_RPC_PRIMARY="qwen2.5:72b=/abs/path/model.gguf" c0mpute worker start -d
+```
+
+Needs `git` + `cmake` + a C/C++ toolchain for the one-time llama.cpp build
+(watch `~/.c0mpute/llama-build.log`). "Distribute across all nodes" lights up
+once ≥2 slices + 1 primary are serving that model and heartbeating.
+
+### Run the worker as a service
+
 For a long-running node, prefer systemd (restart-on-crash, journald logs).
 A ready-to-use **user** unit ships at
 [`scripts/systemd/c0mpute-worker.service`](scripts/systemd/c0mpute-worker.service):

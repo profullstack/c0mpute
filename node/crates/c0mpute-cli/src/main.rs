@@ -569,9 +569,13 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             let interval_secs = cfg.update_interval_secs.max(60);
             bootstrap_infernet_first_run();
             ensure_infernet_daemon();
+            // Opt-in: serve configured models over infernet RPC (builds llama.cpp
+            // in the background on first run, then serves once ready).
+            let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc);
             // Check every surface for upgrades on the poll cadence (default 5m):
             // c0mpute self-updates in the supervisor's poll loop; here we refresh
-            // the plugins on the same interval. First tick fires immediately.
+            // the plugins and (re)attempt RPC serving on the same interval. First
+            // tick fires immediately.
             if auto {
                 let interval = std::time::Duration::from_secs(interval_secs);
                 tokio::spawn(async move {
@@ -579,6 +583,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     loop {
                         ticker.tick().await;
                         let _ = tokio::task::spawn_blocking(refresh_plugins).await;
+                        let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc).await;
                     }
                 });
             }
@@ -1748,6 +1753,140 @@ fn ensure_infernet_daemon() {
     }
     tracing::info!("ensuring infernet node daemon is running");
     let _ = infernet_cmd(&["start"]);
+}
+
+// ── infernet federated RPC serving (IPIP-0033) — opt-in ─────────────────────
+//
+// A node only counts toward "Distribute across all nodes" for a model by
+// SERVING it over llama.cpp RPC: ≥2 slices (`infernet inference serve --backend
+// rpc`) + a primary holding the GGUF (`infernet inference primary`). infernet
+// provisions neither the llama.cpp binaries nor the GGUF, so c0mpute builds the
+// binaries and drives the serve — config-driven, since the model + GGUF are
+// operator choices:
+//
+//   C0MPUTE_RPC_MODELS="qwen2.5:72b,llama3:70b"          # serve as RPC slice
+//   C0MPUTE_RPC_PRIMARY="qwen2.5:72b=/abs/model.gguf"    # host as primary
+//
+// The infernet daemon heartbeat advertises specs.rpc / specs.rpc_primary once
+// the serve processes are up.
+
+/// Built llama.cpp binary dir under ~/.c0mpute.
+fn llama_build_bin_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".c0mpute/llama.cpp/build/bin"))
+}
+
+/// Kick off a background llama.cpp (RPC-enabled) build; single-flight via a lock
+/// marker. Symlinks rpc-server + llama-server into ~/.c0mpute/bin when done.
+fn build_llama_rpc_background() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let lock = PathBuf::from(&home).join(".c0mpute/.llama-build.lock");
+    if let Ok(Ok(e)) = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed())
+    {
+        if e < std::time::Duration::from_secs(3600) {
+            return; // a build was started recently
+        }
+    }
+    if let Some(p) = lock.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let _ = std::fs::write(&lock, b"");
+    tracing::info!("building llama.cpp (rpc-server/llama-server) in background for infernet RPC serving");
+    let script = "set -e\n\
+         D=\"$HOME/.c0mpute/llama.cpp\"\n\
+         [ -d \"$D/.git\" ] || git clone --depth 1 https://github.com/ggml-org/llama.cpp \"$D\"\n\
+         cd \"$D\" && (git pull --ff-only 2>/dev/null || true)\n\
+         cmake -B build -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release >/dev/null\n\
+         cmake --build build -j --target rpc-server llama-server\n\
+         mkdir -p \"$HOME/.c0mpute/bin\"\n\
+         ln -sf \"$D/build/bin/rpc-server\" \"$HOME/.c0mpute/bin/rpc-server\"\n\
+         ln -sf \"$D/build/bin/llama-server\" \"$HOME/.c0mpute/bin/llama-server\"\n";
+    let logf = std::fs::File::create(PathBuf::from(&home).join(".c0mpute/llama-build.log")).ok();
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script).stdin(std::process::Stdio::null());
+    if let Some(f) = logf {
+        if let Ok(err) = f.try_clone() {
+            cmd.stdout(f).stderr(err);
+        }
+    }
+    let _ = cmd.spawn();
+}
+
+/// True if llama.cpp RPC binaries are ready (symlinking a prior build onto PATH
+/// if needed); otherwise starts a background build and returns false.
+fn ensure_llama_rpc(want_primary: bool) -> bool {
+    let ready = || {
+        which_on_path("rpc-server").is_some()
+            && (!want_primary || which_on_path("llama-server").is_some())
+    };
+    if ready() {
+        return true;
+    }
+    // A previous build may be present but not symlinked onto PATH yet.
+    if let (Some(build), Ok(home)) = (llama_build_bin_dir(), std::env::var("HOME")) {
+        if build.join("rpc-server").exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::symlink;
+                let dst = PathBuf::from(&home).join(".c0mpute/bin");
+                let _ = std::fs::create_dir_all(&dst);
+                for b in ["rpc-server", "llama-server"] {
+                    if build.join(b).exists() {
+                        let _ = std::fs::remove_file(dst.join(b));
+                        let _ = symlink(build.join(b), dst.join(b));
+                    }
+                }
+            }
+            if ready() {
+                return true;
+            }
+        }
+    }
+    build_llama_rpc_background();
+    false
+}
+
+/// Opt-in: serve configured models over infernet RPC so the node counts toward
+/// "Distribute across all nodes". Idempotent-ish — `infernet inference
+/// serve/primary` records state and the daemon heartbeat advertises it.
+fn bootstrap_infernet_rpc() {
+    let slices = std::env::var("C0MPUTE_RPC_MODELS").unwrap_or_default();
+    let primaries = std::env::var("C0MPUTE_RPC_PRIMARY").unwrap_or_default();
+    let slice_models: Vec<&str> = slices.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let primary_entries: Vec<&str> = primaries.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if slice_models.is_empty() && primary_entries.is_empty() {
+        return;
+    }
+    if which_on_path("infernet").is_none() || !infernet_initialized() {
+        return;
+    }
+    if !ensure_llama_rpc(!primary_entries.is_empty()) {
+        tracing::info!(
+            "infernet RPC serving deferred until llama.cpp finishes building (~/.c0mpute/llama-build.log)"
+        );
+        return;
+    }
+    for entry in primary_entries {
+        match entry.split_once('=') {
+            Some((model, gguf)) if std::path::Path::new(gguf.trim()).exists() => {
+                tracing::info!(model = model.trim(), "infernet: hosting RPC primary");
+                let _ = infernet_cmd(&[
+                    "inference", "primary", "--model", model.trim(), "--gguf", gguf.trim(),
+                ]);
+            }
+            _ => tracing::warn!(
+                entry,
+                "infernet RPC primary needs `model=/abs/model.gguf` with an existing GGUF; skipping"
+            ),
+        }
+    }
+    for model in slice_models {
+        tracing::info!(model, "infernet: serving RPC slice");
+        let _ = infernet_cmd(&["inference", "serve", "--backend", "rpc", "--model", model]);
+    }
 }
 
 /// (binary, self-update args) for the peer-CLI plugins c0mpute manages.
