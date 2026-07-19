@@ -2002,15 +2002,16 @@ fn bootstrap_infernet_rpc() {
     };
     let active = rpc_slice_active_models();
     let vram = gpu_vram_bytes();
+    let ram = system_ram_bytes();
     let mut port = 50052;
     let mut runnable_primaries: Vec<String> = Vec::new();
     for model in &models {
         // Primary: only advertise if this node can actually run the model — its
-        // GGUF fits in GPU VRAM (with headroom). A CPU-only or too-small node
-        // would be picked and crawl, so it serves as a slice only.
+        // GGUF fits in GPU VRAM (fast) or RAM (CPU). A node that can't hold it
+        // serves as a slice only (donates compute to a bigger sharded model).
         if let Some(gguf) = resolve_ollama_gguf(model) {
-            if node_can_run(&gguf, vram) {
-                tracing::info!(model, "infernet: registering RPC primary (fits in VRAM)");
+            if node_can_run(&gguf, vram, ram) {
+                tracing::info!(model, "infernet: registering RPC primary (fits VRAM/RAM)");
                 let _ = Command::new(&infernet)
                     .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
                     .stdin(std::process::Stdio::null())
@@ -2115,14 +2116,14 @@ fn gpu_vram_bytes() -> Option<u64> {
 
 /// Whether the node can hold `gguf` as an RPC primary: it fits in GPU VRAM with
 /// ~20% headroom for KV cache/context. No GPU → false (slice only).
-fn node_can_run(gguf: &std::path::Path, vram: Option<u64>) -> bool {
-    let Some(vram) = vram else {
-        return false;
-    };
+fn node_can_run(gguf: &std::path::Path, vram: Option<u64>, ram: Option<u64>) -> bool {
     let Ok(size) = std::fs::metadata(gguf).map(|m| m.len()) else {
         return false;
     };
-    vram >= size + size / 5
+    let need = size + size / 5; // ~20% headroom
+    // Fits in GPU VRAM (fast) OR in system RAM (CPU) — a CPU node can be a
+    // primary for a model that fits its RAM, so CPU-only fleets can distribute.
+    vram.map(|v| v >= need).unwrap_or(false) || ram.map(|r| r >= need).unwrap_or(false)
 }
 
 /// Prune `rpc_primary` in the inference state down to models this node can run,
