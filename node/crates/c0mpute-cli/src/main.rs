@@ -2000,17 +2000,26 @@ fn bootstrap_infernet_rpc() {
         return;
     };
     let active = rpc_slice_active_models();
+    let vram = gpu_vram_bytes();
     let mut port = 50052;
+    let mut runnable_primaries: Vec<String> = Vec::new();
     for model in &models {
-        // Primary: register with the resolved GGUF (accumulates in state; cheap).
+        // Primary: only advertise if this node can actually run the model — its
+        // GGUF fits in GPU VRAM (with headroom). A CPU-only or too-small node
+        // would be picked and crawl, so it serves as a slice only.
         if let Some(gguf) = resolve_ollama_gguf(model) {
-            tracing::info!(model, "infernet: registering RPC primary");
-            let _ = Command::new(&infernet)
-                .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+            if node_can_run(&gguf, vram) {
+                tracing::info!(model, "infernet: registering RPC primary (fits in VRAM)");
+                let _ = Command::new(&infernet)
+                    .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                runnable_primaries.push(model.clone());
+            } else {
+                tracing::debug!(model, "infernet: not a primary (no GPU VRAM to fit it); slice only");
+            }
         }
         // Slice: run an rpc-server unless one is already advertising this model.
         if !active.contains(model) {
@@ -2025,6 +2034,77 @@ fn bootstrap_infernet_rpc() {
                 .stderr(std::process::Stdio::null())
                 .spawn(); // stays foreground supervising rpc-server → detach
             port += 1;
+        }
+    }
+    // Drop any stale rpc_primary the node can no longer run (e.g. it registered
+    // for everything before this gate existed).
+    prune_rpc_primaries(&runnable_primaries);
+}
+
+/// Total GPU VRAM in bytes (NVIDIA via nvidia-smi), or None if there's no GPU.
+fn gpu_vram_bytes() -> Option<u64> {
+    let out = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mib: u64 = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .sum();
+    (mib > 0).then(|| mib * 1024 * 1024)
+}
+
+/// Whether the node can hold `gguf` as an RPC primary: it fits in GPU VRAM with
+/// ~20% headroom for KV cache/context. No GPU → false (slice only).
+fn node_can_run(gguf: &std::path::Path, vram: Option<u64>) -> bool {
+    let Some(vram) = vram else {
+        return false;
+    };
+    let Ok(size) = std::fs::metadata(gguf).map(|m| m.len()) else {
+        return false;
+    };
+    vram >= size + size / 5
+}
+
+/// Prune `rpc_primary` in the inference state down to models this node can run,
+/// so a node that registered for everything (pre-gate) stops advertising models
+/// it can't serve. Best-effort, atomic write.
+fn prune_rpc_primaries(keep: &[String]) {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(&home).join(".infernet/inference/state.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(primary) = json.get_mut("rpc_primary") else {
+        return;
+    };
+    let keep_set: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let mut changed = false;
+    if let Some(models) = primary.get_mut("models").and_then(|m| m.as_array_mut()) {
+        let before = models.len();
+        models.retain(|m| m.as_str().map(|s| keep_set.contains(s)).unwrap_or(false));
+        changed |= models.len() != before;
+    }
+    if let Some(paths) = primary.get_mut("gguf_paths").and_then(|p| p.as_object_mut()) {
+        let before = paths.len();
+        paths.retain(|k, _| keep_set.contains(k.as_str()));
+        changed |= paths.len() != before;
+    }
+    if changed {
+        if let Ok(out) = serde_json::to_string_pretty(&json) {
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, out).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }
