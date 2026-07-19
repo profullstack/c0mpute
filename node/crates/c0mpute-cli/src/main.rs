@@ -284,8 +284,64 @@ enum KeyCmd {
     Rotate,
 }
 
+/// Opportunistic self-update run at the start of any command. Throttled to once
+/// per 5 minutes (a marker under the data dir); when a newer release exists it
+/// downloads + verifies + swaps the binary and re-executes the same command on
+/// it. This keeps `c0mpute` current even when no worker is running — the
+/// worker's poll loop only updates while the worker is up. Opt out with
+/// `C0MPUTE_NO_AUTO_UPDATE=1`.
+#[cfg(unix)]
+fn maybe_self_update(cli: &Cli) {
+    // `update` handles this itself; don't double up. Opt-out for CI/scripts.
+    if matches!(cli.command, Some(Cmd::Update { .. }))
+        || std::env::var_os("C0MPUTE_NO_AUTO_UPDATE").is_some()
+    {
+        return;
+    }
+    let marker = config::data_dir().map(|d| d.join(".update-check"));
+    if let Some(m) = &marker {
+        if let Ok(Ok(elapsed)) = std::fs::metadata(m)
+            .and_then(|md| md.modified())
+            .map(|t| t.elapsed())
+        {
+            if elapsed < std::time::Duration::from_secs(300) {
+                return;
+            }
+        }
+        if let Some(parent) = m.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(m, b"");
+    }
+
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    if let Ok(c0mpute_update::UpgradeOutcome::Upgraded { .. }) =
+        rt.block_on(c0mpute_update::upgrade_now(current, c0mpute_update::DEFAULT_RELEASE_FEED))
+    {
+        use std::os::unix::process::CommandExt;
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("c0mpute"));
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        // exec only returns on failure; if it fails, fall through and run the
+        // requested command on the current (pre-swap) image.
+        let _ = std::process::Command::new(exe).args(args).exec();
+    }
+}
+
+#[cfg(not(unix))]
+fn maybe_self_update(_cli: &Cli) {}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Opportunistic self-update on any command (throttled), so c0mpute stays
+    // current even when no worker is running. May re-exec into the new binary.
+    maybe_self_update(&cli);
 
     // `-v` / `--versions`: full version report, no async runtime needed.
     if cli.versions {
