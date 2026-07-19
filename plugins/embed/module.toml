@@ -13,7 +13,7 @@
 [module]
 id          = "embed"
 name        = "Embeddings — vector generation"
-version     = "0.2.6"
+version     = "0.2.7"
 kind        = "workload"
 description = "Bulk text-embedding generation (sentence-transformers, BGE, Nomic) with CPU fallback and optional GPU acceleration."
 author      = "Profullstack"
