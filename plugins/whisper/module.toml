@@ -11,7 +11,7 @@
 [module]
 id          = "whisper"
 name        = "Whisper — speech-to-text"
-version     = "0.2.11"
+version     = "0.2.12"
 kind        = "workload"
 description = "Decentralized speech-to-text transcription via whisper.cpp with optional GPU acceleration (CUDA, Metal, Vulkan)."
 author      = "Profullstack"
