@@ -1107,26 +1107,37 @@ fn resolve_plugin_target(target: &str) -> String {
 // ────────────────────────────────────────────────────────────────────────
 
 async fn run_update(check_only: bool, feed: Option<String>) -> Result<()> {
+    use c0mpute_update::UpgradeOutcome;
     let feed = feed.unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
     let current = env!("CARGO_PKG_VERSION");
-    let outcome = c0mpute_update::try_upgrade(current, &feed).await?;
-    match outcome {
-        c0mpute_update::UpgradeOutcome::AlreadyLatest { current } => {
+
+    if check_only {
+        match c0mpute_update::try_upgrade(current, &feed).await? {
+            UpgradeOutcome::AlreadyLatest { current } => {
+                println!("c0mpute {current} — already latest")
+            }
+            UpgradeOutcome::Available { current, latest } => {
+                println!("update available: {current} → {latest} (run `c0mpute update` to install)")
+            }
+            UpgradeOutcome::Upgraded { .. } => unreachable!("try_upgrade never swaps"),
+        }
+        return Ok(());
+    }
+
+    match c0mpute_update::upgrade_now(current, &feed).await {
+        Ok(UpgradeOutcome::AlreadyLatest { current }) => {
             println!("c0mpute {current} — already latest");
         }
-        c0mpute_update::UpgradeOutcome::Available { current, latest } => {
-            if check_only {
-                println!("update available: {current} → {latest}");
-            } else {
-                println!("update available: {current} → {latest}");
-                println!(
-                    "(downloading + signature-verified swap is stubbed; \
-                     reinstall via: curl -fsSL https://c0mpute.com/install.sh | sh -s -- --force)"
-                );
-            }
+        Ok(UpgradeOutcome::Upgraded { from, to }) => {
+            println!("upgraded {from} → {to}");
+            println!("restart any running worker to apply: c0mpute worker stop && c0mpute worker start -d");
         }
-        c0mpute_update::UpgradeOutcome::Upgraded { from, to } => {
-            println!("upgraded {from} → {to}; restart to apply");
+        Ok(UpgradeOutcome::Available { .. }) => unreachable!("upgrade_now applies or errors"),
+        Err(e) => {
+            println!("update failed: {e:#}");
+            println!(
+                "reinstall manually: curl -fsSL https://c0mpute.com/install.sh | sh -s -- --force"
+            );
         }
     }
     Ok(())

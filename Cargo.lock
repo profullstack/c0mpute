@@ -659,9 +659,11 @@ name = "c0mpute-update"
 version = "0.2.7"
 dependencies = [
  "anyhow",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
 ]

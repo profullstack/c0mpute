@@ -86,10 +86,11 @@ pub async fn fetch_latest(release_feed_url: &str) -> Result<ReleaseManifest> {
     Ok(m)
 }
 
-/// One pass of the upgrade flow:
+/// One *check* pass:
 ///   1. Fetch the latest release manifest.
 ///   2. Compare against the running binary's version.
-///   3. If newer, download + verify + swap (stubbed today — prints the plan).
+///   3. Report `AlreadyLatest` or `Available` — never swaps. Used by the
+///      auto-upgrade poll loop and by `c0mpute update --check`.
 pub async fn try_upgrade(current_version: &str, release_feed_url: &str) -> Result<UpgradeOutcome> {
     let manifest = fetch_latest(release_feed_url).await?;
     if !should_upgrade(current_version, &manifest)? {
@@ -104,15 +105,191 @@ pub async fn try_upgrade(current_version: &str, release_feed_url: &str) -> Resul
         "newer release available"
     );
 
-    // The actual swap is stubbed: the production version downloads the
-    // platform-matching artifact, verifies sha256 + minisign, and uses
-    // an atomic rename to swap the binary in place. Until we have a
-    // signed release pipeline, just report "available" and let the
-    // operator run `c0mpute update` interactively.
     Ok(UpgradeOutcome::Available {
         current: current_version.to_string(),
         latest: manifest.version,
     })
+}
+
+/// Check, then actually apply the upgrade: download the platform artifact,
+/// verify its sha256, and atomically swap the running binary in place. Returns
+/// `AlreadyLatest` when nothing to do, `Upgraded` on success; errors bubble up
+/// so the caller can fall back to a manual reinstall.
+pub async fn upgrade_now(current_version: &str, release_feed_url: &str) -> Result<UpgradeOutcome> {
+    let manifest = fetch_latest(release_feed_url).await?;
+    if !should_upgrade(current_version, &manifest)? {
+        return Ok(UpgradeOutcome::AlreadyLatest {
+            current: current_version.to_string(),
+        });
+    }
+    perform_upgrade(&manifest).await?;
+    Ok(UpgradeOutcome::Upgraded {
+        from: current_version.to_string(),
+        to: manifest.version,
+    })
+}
+
+/// Map the compile-time target to the release artifact's os/arch tokens
+/// (matching `.github/workflows/release.yml` naming).
+fn target_os_arch() -> Result<(&'static str, &'static str)> {
+    let os = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "darwin",
+        "windows" => "windows",
+        other => anyhow::bail!("self-update unsupported on OS: {other}"),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => anyhow::bail!("self-update unsupported on arch: {other}"),
+    };
+    Ok((os, arch))
+}
+
+/// Resolve the download URL and expected sha256 for this platform. Prefers a
+/// feed-provided artifact (its `sha256_hex` is served from a different origin
+/// than the binary, a stronger integrity anchor); otherwise falls back to the
+/// stable pinned-version URL and its companion `.sha256`.
+async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String, String)> {
+    let (os, arch) = target_os_arch()?;
+    let artifact = format!("c0mpute-{os}-{arch}.tar.gz");
+
+    if let Some(a) = manifest
+        .artifacts
+        .iter()
+        .find(|a| a.os == os && a.arch == arch)
+    {
+        if !a.url.is_empty() && !a.sha256_hex.is_empty() {
+            return Ok((a.url.clone(), a.sha256_hex.to_lowercase(), artifact));
+        }
+    }
+
+    // Release tags are `v<version>` (see .github/workflows/release.yml +
+    // bump-version.sh); the /releases/<tag>/ rewrite passes the tag through to
+    // GitHub verbatim, so the bare version 404s.
+    let tag = format!("v{}", manifest.version.trim_start_matches('v'));
+    let url = format!("https://c0mpute.com/releases/{tag}/{artifact}");
+    let sha_body = http_client()?
+        .get(format!("{url}.sha256"))
+        .send()
+        .await
+        .with_context(|| format!("GET {url}.sha256"))?
+        .error_for_status()?
+        .text()
+        .await?;
+    // Format: "<hex>  <filename>".
+    let expected = sha_body
+        .split_whitespace()
+        .next()
+        .context("empty checksum file")?
+        .to_lowercase();
+    Ok((url, expected, artifact))
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
+/// Download the artifact, verify its checksum, and swap it into place.
+async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
+    let (url, expected_sha, artifact) = resolve_artifact(manifest).await?;
+
+    info!(%url, "downloading update");
+    let bytes = http_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let actual_sha = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        hex::encode(h.finalize())
+    };
+    if actual_sha != expected_sha {
+        anyhow::bail!("checksum mismatch for {artifact}: expected {expected_sha}, got {actual_sha}");
+    }
+    info!("checksum verified; swapping binary");
+
+    // Extraction + filesystem swap is blocking work — keep it off the reactor.
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || extract_and_swap(&bytes, &artifact))
+        .await
+        .context("join extract/swap task")??;
+    Ok(())
+}
+
+/// Extract `c0mpute` from the tarball and atomically rename it over the running
+/// binary. Renaming over a running executable is safe on Unix — the live
+/// process keeps the old inode; the next launch gets the new one.
+fn extract_and_swap(tarball: &[u8], artifact: &str) -> Result<()> {
+    let current = std::env::current_exe().context("locate current executable")?;
+    let dir = current
+        .parent()
+        .context("current executable has no parent directory")?;
+
+    let tmp_tar = dir.join(format!(".{artifact}.download"));
+    let extract_dir = dir.join(".c0mpute-update-extract");
+    let staged = dir.join(".c0mpute.new");
+
+    // Best-effort cleanup of any prior interrupted run.
+    let _ = std::fs::remove_file(&tmp_tar);
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    let _ = std::fs::remove_file(&staged);
+
+    let cleanup = |extra: Option<&std::path::Path>| {
+        let _ = std::fs::remove_file(&tmp_tar);
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        if let Some(p) = extra {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+
+    std::fs::write(&tmp_tar, tarball).context("write downloaded archive")?;
+    std::fs::create_dir_all(&extract_dir).context("create extract dir")?;
+
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&tmp_tar)
+        .arg("-C")
+        .arg(&extract_dir)
+        .status()
+        .context("run tar (is it installed?)")?;
+    if !status.success() {
+        cleanup(None);
+        anyhow::bail!("tar extraction failed for {artifact}");
+    }
+
+    let new_bin = extract_dir.join("c0mpute");
+    if !new_bin.exists() {
+        cleanup(None);
+        anyhow::bail!("archive did not contain a c0mpute binary");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_bin, std::fs::Permissions::from_mode(0o755))
+            .context("chmod new binary")?;
+    }
+
+    // Move into the target dir (same filesystem → rename is atomic), then swap.
+    std::fs::rename(&new_bin, &staged)
+        .or_else(|_| std::fs::copy(&new_bin, &staged).map(|_| ()))
+        .context("stage new binary")?;
+    if let Err(e) = std::fs::rename(&staged, &current) {
+        cleanup(Some(&staged));
+        return Err(e).context(format!("swap new binary into {}", current.display()));
+    }
+
+    cleanup(None);
+    Ok(())
 }
 
 /// Long-running background poller. Calls `try_upgrade` every `interval`
