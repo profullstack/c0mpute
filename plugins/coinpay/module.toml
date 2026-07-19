@@ -7,7 +7,7 @@
 [module]
 id          = "coinpay"
 name        = "CoinPay — DID, payments, escrow, reputation"
-version     = "0.2.17"
+version     = "0.2.18"
 kind        = "service"
 description = "Decentralized identifiers, wallet linking, escrow, signed receipts, and worker reputation. The trust spine of the c0mpute network."
 author      = "Profullstack"
