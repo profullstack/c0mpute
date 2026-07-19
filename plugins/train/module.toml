@@ -13,7 +13,7 @@
 [module]
 id          = "train"
 name        = "Fine-tune — LoRA/QLoRA training"
-version     = "0.2.15"
+version     = "0.2.16"
 kind        = "workload"
 description = "Decentralized model fine-tuning (LoRA, QLoRA) on consumer/prosumer GPUs using axolotl or unsloth."
 author      = "Profullstack"

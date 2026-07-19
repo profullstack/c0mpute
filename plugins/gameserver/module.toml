@@ -14,7 +14,7 @@
 [module]
 id          = "gameserver"
 name        = "Game server — Minecraft / Factorio / Valheim"
-version     = "0.2.15"
+version     = "0.2.16"
 kind        = "workload"
 description = "Continuous-reservation hosting for game servers. Multi-replica placement, persistent world state on c0mpute storage, proof-of-serve settlement."
 author      = "Profullstack"
