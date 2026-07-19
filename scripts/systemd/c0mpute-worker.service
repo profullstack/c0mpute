@@ -1,0 +1,50 @@
+# c0mpute worker — systemd *user* unit.
+#
+# Runs `c0mpute worker start` in the foreground under systemd (NOT `-d`):
+# systemd owns the process lifecycle, restarts it on crash, and captures
+# stdout/stderr into the journal. The built-in `--daemon` flag is for running
+# detached WITHOUT systemd — don't combine the two.
+#
+# Install (per-user, no root; matches the ~/.c0mpute/bin install layout):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/systemd/c0mpute-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now c0mpute-worker
+#   loginctl enable-linger "$USER"        # keep running after logout / across reboots
+#
+#   systemctl --user status c0mpute-worker
+#   journalctl --user -u c0mpute-worker -f
+#   systemctl --user restart c0mpute-worker
+#   systemctl --user disable --now c0mpute-worker
+#
+# Customize roles/GPU without editing this file (survives updates):
+#
+#   systemctl --user edit c0mpute-worker
+#   # then, in the drop-in:
+#   #   [Service]
+#   #   ExecStart=
+#   #   ExecStart=%h/.c0mpute/bin/c0mpute worker start --gpu --roles storage,gateway
+#
+# For a system-wide install instead, drop this in /etc/systemd/system/,
+# add `User=<user>`, and swap `%h` for that user's home (e.g. /home/<user>).
+
+[Unit]
+Description=c0mpute worker (p2p compute node)
+Documentation=https://c0mpute.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Foreground start — systemd manages the process, so no --daemon here.
+ExecStart=%h/.c0mpute/bin/c0mpute worker start
+Restart=on-failure
+RestartSec=5
+# Give in-flight jobs a moment to wind down on stop before SIGKILL.
+TimeoutStopSec=30
+# Peer CLIs (coinpay, infernet) also install under ~/.c0mpute/bin.
+Environment=PATH=%h/.c0mpute/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

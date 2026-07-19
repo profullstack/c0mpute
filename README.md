@@ -53,6 +53,31 @@ c0mpute coinpay reputation inspect did:coinpay:worker:abc123
 The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 `c0mpute.com/coinpay`, `c0mpute.com/infernet`.
 
+### Run the worker in the background
+
+```sh
+# quick, self-managed daemon: detaches, writes ~/.local/share/c0mpute/worker.{pid,log}
+c0mpute worker start -d
+c0mpute worker status
+c0mpute worker stop
+```
+
+For a long-running node, prefer systemd (restart-on-crash, journald logs).
+A ready-to-use **user** unit ships at
+[`scripts/systemd/c0mpute-worker.service`](scripts/systemd/c0mpute-worker.service):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/c0mpute-worker.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now c0mpute-worker
+loginctl enable-linger "$USER"        # survive logout / reboot
+journalctl --user -u c0mpute-worker -f
+```
+
+Under systemd the worker runs in the foreground (no `-d`) — systemd owns the
+lifecycle. See the unit header for GPU/role customization via `systemctl --user edit`.
+
 ## Architecture at a glance
 
 ```
