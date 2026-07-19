@@ -564,8 +564,6 @@ fn run_attached_worker(passthrough: Vec<String>) -> Result<()> {
     }
 
     let (_pid_file, log_file) = worker_runtime_paths();
-    // Only replay output produced from the moment we attach.
-    let start_len = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
 
     // Attach to an already-running worker, or spawn a detached one. The spawned
     // child does the fork-before-runtime itself, so nothing unsafe happens here.
@@ -604,28 +602,79 @@ fn run_attached_worker(passthrough: Vec<String>) -> Result<()> {
         }
     }
 
-    // Trip DETACH on Ctrl-C / SIGTERM …
+    // Replay recent history so attaching isn't a blank screen — a settled
+    // worker is nearly silent, so tailing only *new* output shows nothing.
+    const HISTORY_BYTES: u64 = 16 * 1024;
+    let end = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
+    if end == 0 {
+        println!(
+            "(no output at {} yet — if the worker runs under systemd, follow it with: \
+             journalctl --user -u c0mpute-worker -f)",
+            log_file.display()
+        );
+    } else if let Ok(mut f) = std::fs::File::open(&log_file) {
+        let from = end.saturating_sub(HISTORY_BYTES);
+        if f.seek(SeekFrom::Start(from)).is_ok() {
+            let mut buf = Vec::new();
+            if f.read_to_end(&mut buf).is_ok() {
+                // Drop a partial first line when we started mid-file.
+                let slice: &[u8] = match (from > 0, buf.iter().position(|&b| b == b'\n')) {
+                    (true, Some(i)) => &buf[i + 1..],
+                    _ => &buf,
+                };
+                let out = std::io::stdout();
+                let _ = out.lock().write_all(slice);
+            }
+        }
+    }
+
+    // Detach on Ctrl-D (0x04) or Ctrl-C (0x03). Put the terminal in raw mode so
+    // we catch the keystroke itself rather than relying on canonical-mode EOF
+    // (which only fires on an empty line and proved unreliable across terminals).
+    // Only c_lflag is touched, so OPOST newline translation still renders the
+    // streamed log correctly.
+    struct RawGuard {
+        fd: libc::c_int,
+        orig: libc::termios,
+    }
+    impl Drop for RawGuard {
+        fn drop(&mut self) {
+            unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig) };
+        }
+    }
+    let mut raw_guard: Option<RawGuard> = None;
+    if std::io::stdin().is_terminal() {
+        unsafe {
+            let fd = libc::STDIN_FILENO;
+            let mut orig: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut orig) == 0 {
+                let mut raw = orig;
+                raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+                raw.c_cc[libc::VMIN] = 1;
+                raw.c_cc[libc::VTIME] = 0;
+                if libc::tcsetattr(fd, libc::TCSANOW, &raw) == 0 {
+                    raw_guard = Some(RawGuard { fd, orig });
+                }
+            }
+        }
+        std::thread::spawn(|| {
+            let mut b = [0u8; 1];
+            loop {
+                let n =
+                    unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
+                // EOF/error, Ctrl-D, or Ctrl-C → detach.
+                if n <= 0 || b[0] == 0x04 || b[0] == 0x03 {
+                    DETACH.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        });
+    }
+    // Safety net for `kill -INT/-TERM` (and Ctrl-C when raw mode was unavailable).
     let handler = on_signal as extern "C" fn(libc::c_int);
     unsafe {
         libc::signal(libc::SIGINT, handler as usize as libc::sighandler_t);
         libc::signal(libc::SIGTERM, handler as usize as libc::sighandler_t);
-    }
-    // … and on Ctrl-D (EOF on an interactive stdin). Skip when stdin isn't a
-    // terminal, or a piped/closed stdin would detach us instantly.
-    if std::io::stdin().is_terminal() {
-        std::thread::spawn(|| {
-            let mut buf = [0u8; 256];
-            let mut stdin = std::io::stdin();
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => {
-                        DETACH.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    Ok(_) => {} // ignore anything typed before Ctrl-D
-                }
-            }
-        });
     }
 
     // Follow the log until detached.
@@ -647,12 +696,13 @@ fn run_attached_worker(passthrough: Vec<String>) -> Result<()> {
         at
     };
 
-    let mut pos = start_len;
+    let mut pos = end;
     while !DETACH.load(Ordering::SeqCst) {
         pos = drain(pos);
         std::thread::sleep(Duration::from_millis(150));
     }
     drain(pos); // final flush
+    drop(raw_guard); // restore cooked terminal before the final line + shell prompt
 
     match read_worker_pid().filter(|p| pid_alive(*p)) {
         Some(p) => {
