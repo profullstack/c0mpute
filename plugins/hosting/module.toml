@@ -12,7 +12,7 @@
 [module]
 id          = "hosting"
 name        = "Hosting — censorship-resistant static sites"
-version     = "0.2.10"
+version     = "0.2.11"
 kind        = "workload"
 description = "Static-site hosting with multi-replica placement, mutable naming, epoch settlement, and slashable proof-of-serve. See DIP-0015."
 author      = "Profullstack"

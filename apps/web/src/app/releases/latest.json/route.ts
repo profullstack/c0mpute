@@ -28,7 +28,7 @@ export const dynamic = "force-dynamic";
  * this in sync with the workspace version in `Cargo.toml` on each release so a
  * freshly built CLI reports "already latest" rather than a phantom upgrade.
  */
-const FALLBACK_VERSION = "0.2.10";
+const FALLBACK_VERSION = "0.2.11";
 const FALLBACK_MIN_REQUIRED = "0.0.1";
 
 type Channel = "stable" | "beta" | "nightly";
