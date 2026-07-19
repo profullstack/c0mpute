@@ -23,7 +23,7 @@
 [module]
 id          = "live-stream"
 name        = "Live Stream — p2p HLS live streaming"
-version     = "0.2.20"
+version     = "0.2.21"
 kind        = "service"
 description = "Decentralized live video streaming via BitTorrent-style HLS segment swarming. Broadcaster pushes RTMP/SRT; c0mpute nodes swarm segments to viewers. No central CDN. Censorship-resistant. Per-GB micropayments via CoinPay."
 author      = "Profullstack"

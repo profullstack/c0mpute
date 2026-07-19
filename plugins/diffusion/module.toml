@@ -14,7 +14,7 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.2.20"
+version     = "0.2.21"
 kind        = "workload"
 description = "Decentralized image generation (Stable Diffusion, SDXL, Flux) on consumer/prosumer GPUs."
 author      = "Profullstack"
