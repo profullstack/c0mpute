@@ -50,6 +50,7 @@ INSTALL_TUI=1
 WORKER_MODE=0
 DEVELOPER_MODE=0
 FORCE=0
+NO_START=0
 
 say()  { printf '\033[1;36m→\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
@@ -72,6 +73,7 @@ while [ $# -gt 0 ]; do
     --no-infernet)  INSTALL_INFERNET=0 ;;
     --no-transcode) INSTALL_TRANSCODE=0 ;;
     --no-tui)       INSTALL_TUI=0 ;;
+    --no-start)     NO_START=1 ;;
     --worker)       WORKER_MODE=1 ;;
     --developer)    DEVELOPER_MODE=1 ;;
     --force)        FORCE=1 ;;
@@ -589,6 +591,60 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────────────────
+# Auto-start the worker so a node self-onboards on install/upgrade. Prefers a
+# systemd system service (survives reboots, restarts on crash); falls back to a
+# background daemon. Idempotent: restarts onto the freshly installed binary.
+# ────────────────────────────────────────────────────────────────────────
+start_worker() {
+  [ "$NO_START" -eq 1 ] && return 0
+  bin="$C0MPUTE_HOME/bin/c0mpute"
+  [ -x "$bin" ] || return 0
+  say "starting the c0mpute worker (auto-registers + serves its models)"
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] \
+     && { [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; }; then
+    tmp=$(mktemp)
+    cat > "$tmp" <<UNIT
+[Unit]
+Description=c0mpute worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$(id -un)
+Environment=HOME=$HOME
+Environment=PATH=$C0MPUTE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$bin worker start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    if $SUDO cp "$tmp" /etc/systemd/system/c0mpute-worker.service 2>/dev/null; then
+      rm -f "$tmp"
+      $SUDO systemctl daemon-reload 2>/dev/null
+      $SUDO systemctl enable c0mpute-worker >/dev/null 2>&1
+      if $SUDO systemctl restart c0mpute-worker 2>/dev/null; then
+        ok "worker running as a systemd service (auto-starts on boot, restarts on crash)"
+        return 0
+      fi
+    fi
+    rm -f "$tmp"
+    warn "systemd setup failed; falling back to a background daemon"
+  fi
+
+  # Fallback: detached daemon. Restart onto the new binary on upgrade.
+  "$bin" worker stop >/dev/null 2>&1
+  if "$bin" worker start -d >/dev/null 2>&1; then
+    ok "worker started (background daemon)"
+  else
+    warn "couldn't auto-start the worker — run: c0mpute worker start -d"
+  fi
+}
+
+# ────────────────────────────────────────────────────────────────────────
 # main
 # ────────────────────────────────────────────────────────────────────────
 
@@ -632,13 +688,19 @@ main() {
   print_versions
   run_doctor
 
+  # Auto-start the worker so the node self-onboards (init + register + serve +
+  # distribute) with no manual step. Opt out with --no-start.
+  start_worker
+
   cat <<EOF
-Next steps:
-  c0mpute login             # sign in to coinpay + infernet (ties this node to your accounts)
-  c0mpute worker register   # registers the node + sets up your payable DID
-  c0mpute doctor
-  c0mpute worker start      # foreground; add --gpu to serve transcode/inference jobs
-  c0mpute infernet setup    # (optional) also serve AI inference on infernet
+Your node is starting up automatically — it registers itself and serves its
+models to the network (distributed inference load-balances across nodes that
+have the model). Check it with:
+  c0mpute worker status     # running? + which models are eligible to distribute
+  c0mpute -v                # versions
+
+Optional — claim this node under your account (for the dashboard + earnings;
+NOT required to serve): c0mpute login && infernet pubkey link
 
 Run the worker in the background:
   c0mpute worker start -d   # detach as a daemon (PID file + log under ~/.local/share/c0mpute)
