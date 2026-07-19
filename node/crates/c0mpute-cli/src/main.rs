@@ -1985,12 +1985,31 @@ fn bootstrap_infernet_rpc() {
     if models.is_empty() {
         return;
     }
-    // rpc-server is needed to serve slices + advertise now; llama-server is only
-    // used when a primary actually executes a request, so build it in the
-    // background without blocking advertisement.
+
+    let vram = gpu_vram_bytes();
+    let ram = system_ram_bytes();
+    // RPC sharding is ONLY for models too big to serve on a single node. Models
+    // that fit (VRAM or RAM) are served single-node and distributed via
+    // served_models load-balancing — so they need no llama.cpp build, no
+    // rpc-servers, and don't clutter the RPC census.
+    let oversized: Vec<(String, PathBuf)> = models
+        .iter()
+        .filter_map(|m| resolve_ollama_gguf(m).map(|g| (m.clone(), g)))
+        .filter(|(_, gguf)| !node_can_run(gguf, vram, ram))
+        .collect();
+    if oversized.is_empty() {
+        // Everything fits a single node → served_models handles distribution.
+        // Clear any stale rpc_primary left by earlier versions that RPC-served
+        // fitting models.
+        prune_rpc_primaries(&[]);
+        return;
+    }
+
+    // rpc-server is needed to shard now; llama-server (primary request
+    // execution) builds in the background without blocking advertisement.
     if !ensure_llama_rpc(false) {
         tracing::info!(
-            "infernet RPC serving deferred until rpc-server finishes building (~/.c0mpute/llama-build.log)"
+            "infernet RPC sharding deferred until rpc-server finishes building (~/.c0mpute/llama-build.log)"
         );
         return;
     }
@@ -2001,31 +2020,21 @@ fn bootstrap_infernet_rpc() {
         return;
     };
     let active = rpc_slice_active_models();
-    let vram = gpu_vram_bytes();
-    let ram = system_ram_bytes();
     let mut port = 50052;
-    let mut runnable_primaries: Vec<String> = Vec::new();
-    for model in &models {
-        // Primary: only advertise if this node can actually run the model — its
-        // GGUF fits in GPU VRAM (fast) or RAM (CPU). A node that can't hold it
-        // serves as a slice only (donates compute to a bigger sharded model).
-        if let Some(gguf) = resolve_ollama_gguf(model) {
-            if node_can_run(&gguf, vram, ram) {
-                tracing::info!(model, "infernet: registering RPC primary (fits VRAM/RAM)");
-                let _ = Command::new(&infernet)
-                    .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                runnable_primaries.push(model.clone());
-            } else {
-                tracing::debug!(model, "infernet: not a primary (no GPU VRAM to fit it); slice only");
-            }
-        }
-        // Slice: run an rpc-server unless one is already advertising this model.
+    let mut primaries: Vec<String> = Vec::new();
+    for (model, gguf) in &oversized {
+        // Too big for any single node: this node holds the GGUF and shards
+        // layers across slices at request time (primary), and donates compute
+        // (slice).
+        tracing::info!(model, "infernet: RPC-sharding oversized model");
+        let _ = Command::new(&infernet)
+            .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        primaries.push(model.clone());
         if !active.contains(model) {
-            tracing::info!(model, port, "infernet: serving RPC slice");
             let _ = Command::new(&infernet)
                 .args([
                     "inference", "serve", "--backend", "rpc", "--model", model, "--port",
@@ -2034,13 +2043,11 @@ fn bootstrap_infernet_rpc() {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn(); // stays foreground supervising rpc-server → detach
+                .spawn();
             port += 1;
         }
     }
-    // Drop any stale rpc_primary the node can no longer run (e.g. it registered
-    // for everything before this gate existed).
-    prune_rpc_primaries(&runnable_primaries);
+    prune_rpc_primaries(&primaries);
 }
 
 /// Total system RAM in bytes (Linux /proc/meminfo).
