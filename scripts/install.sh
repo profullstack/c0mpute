@@ -264,14 +264,16 @@ chain_install() {
   name="$1"
   url="$2"
 
-  if command -v "$name" >/dev/null 2>&1 && [ "$FORCE" -eq 0 ]; then
-    say "$name already on PATH at $(command -v "$name") (use --force to reinstall)"
-    return 0
+  # Always run the upstream installer so `curl | sh` upgrades plugins in place —
+  # the coinpay/infernet installers are idempotent and update an existing
+  # install. (Previously we skipped when already on PATH, so plugins went stale.)
+  if command -v "$name" >/dev/null 2>&1; then
+    say "upgrading $name (via $url)"
+  else
+    say "installing $name (via $url)"
   fi
-
-  say "installing $name (via $url)"
   if ! curl -fsSL "$url" | sh; then
-    warn "$name install failed (continuing without it)"
+    warn "$name install/upgrade failed (continuing without it)"
     return 1
   fi
 }

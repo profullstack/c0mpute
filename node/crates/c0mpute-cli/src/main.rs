@@ -510,6 +510,9 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // picks up jobs (model pulls, inference). Both best-effort; c0mpute
             // drives the plugins so the operator doesn't run them by hand.
             bootstrap_infernet_first_run();
+            // Keep all managed plugins current (self-heals a stuck infernet too),
+            // then make sure the infernet node daemon is up. Both non-blocking.
+            refresh_plugins();
             ensure_infernet_daemon();
             let sup = Supervisor::boot(cfg).await?;
             sup.run().await
@@ -1170,6 +1173,8 @@ async fn run_update(check_only: bool, feed: Option<String>) -> Result<()> {
             );
         }
     }
+    // `c0mpute update` always brings the plugins along too.
+    upgrade_plugins_foreground();
     Ok(())
 }
 
@@ -1564,6 +1569,69 @@ fn ensure_infernet_daemon() {
     }
     tracing::info!("ensuring infernet node daemon is running");
     let _ = infernet_cmd(&["start"]);
+}
+
+/// (binary, self-update args) for the peer-CLI plugins c0mpute manages.
+const PLUGIN_UPDATERS: &[(&str, &[&str])] = &[
+    ("coinpay", &["self", "update"]),
+    ("infernet", &["update"]),
+];
+
+/// Upgrade every installed plugin in the foreground, streaming their output.
+/// Used by `c0mpute update` so a manual update always brings plugins along.
+fn upgrade_plugins_foreground() {
+    for (bin, args) in PLUGIN_UPDATERS {
+        if let Some(path) = which_on_path(bin) {
+            println!("→ upgrading {bin}…");
+            match Command::new(path).args(*args).status() {
+                Ok(s) if s.success() => println!("  ✓ {bin} up to date"),
+                Ok(_) => println!("  ! {bin} update reported a problem"),
+                Err(e) => println!("  ! couldn't run {bin}: {e}"),
+            }
+        }
+    }
+}
+
+/// Keep managed plugins current in the background so operators never update each
+/// node by hand — c0mpute drives the plugins. Throttled to once per interval via
+/// a marker under the data dir, and fully non-blocking. This also self-heals a
+/// stuck infernet, whose crashing old daemon can't run its own auto-update.
+fn refresh_plugins() {
+    use std::time::Duration;
+    const INTERVAL: Duration = Duration::from_secs(12 * 3600);
+
+    let marker = config::data_dir().map(|d| d.join(".plugins-refreshed"));
+    let due = match marker.as_ref().and_then(|m| std::fs::metadata(m).ok()) {
+        Some(meta) => meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|e| e > INTERVAL)
+            .unwrap_or(true),
+        None => true, // never refreshed → due
+    };
+    if !due {
+        return;
+    }
+
+    for (bin, args) in PLUGIN_UPDATERS {
+        if let Some(path) = which_on_path(bin) {
+            tracing::info!(plugin = bin, "refreshing plugin in background");
+            let _ = Command::new(path)
+                .args(*args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+
+    if let Some(marker) = marker {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, b"");
+    }
 }
 
 fn which_on_path(bin: &str) -> Option<PathBuf> {
