@@ -151,6 +151,14 @@ enum Cmd {
 
     /// Print the c0mpute binary version.
     Version,
+
+    /// Show the live infernet distribution pool: how many nodes are serving
+    /// each model right now (from the control plane's peer list). Pass a model
+    /// id to see just that model + which nodes.
+    Pool {
+        /// Model id to filter on (substring match, e.g. `9b`). Omit for all.
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -423,6 +431,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             print_all_versions();
             Ok(())
         }
+        Cmd::Pool { model } => run_pool(model),
         Cmd::Doctor => run_doctor().await,
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
@@ -1496,6 +1505,90 @@ fn install_tui() -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
+/// Infernet control-plane base URL from its config, or the default.
+fn infernet_control_plane_url() -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".config/infernet/config.json");
+        if let Ok(text) = std::fs::read_to_string(p) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(url) = json
+                    .get("controlPlane")
+                    .and_then(|c| c.get("url"))
+                    .and_then(|u| u.as_str())
+                {
+                    return url.trim_end_matches('/').to_string();
+                }
+            }
+        }
+    }
+    "https://infernetprotocol.com".to_string()
+}
+
+/// `c0mpute pool [model]` — how many nodes are serving each model right now, per
+/// the control plane's live peer list (specs.served_models). This is the number
+/// that actually decides how a fits-one-node model distributes.
+fn run_pool(model: Option<String>) -> Result<()> {
+    let base = infernet_control_plane_url();
+    let url = format!("{base}/api/peers?limit=1000");
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "12", &url])
+        .output()
+        .map_err(|e| anyhow::anyhow!("run curl: {e}"))?;
+    if !out.status.success() {
+        anyhow::bail!("failed to fetch {url}");
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| anyhow::anyhow!("parse peers from {url}: {e}"))?;
+    let peers: Vec<serde_json::Value> = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .or_else(|| json.as_array().cloned())
+        .unwrap_or_default();
+
+    println!("infernet pool @ {base} — {} live nodes", peers.len());
+
+    let served = |p: &serde_json::Value| -> Vec<String> {
+        p.get("served_models")
+            .and_then(|s| s.as_array())
+            .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+
+    match model {
+        Some(filter) => {
+            let f = filter.to_lowercase();
+            let matched: Vec<&serde_json::Value> = peers
+                .iter()
+                .filter(|p| served(p).iter().any(|m| m.to_lowercase().contains(&f)))
+                .collect();
+            println!("nodes serving a model matching \"{filter}\": {}", matched.len());
+            for p in matched {
+                let pk = p.get("pubkey").and_then(|v| v.as_str()).unwrap_or("?");
+                let short = pk.get(..12).unwrap_or(pk);
+                let gpu = p.get("gpu_model").and_then(|v| v.as_str()).unwrap_or("");
+                let seen = p.get("last_seen").and_then(|v| v.as_str()).unwrap_or("");
+                println!("  {short}…  {:<30.30}  last_seen {seen}", gpu);
+            }
+        }
+        None => {
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for p in &peers {
+                for m in served(p) {
+                    *counts.entry(m).or_default() += 1;
+                }
+            }
+            let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            println!("nodes per model:");
+            for (m, n) in rows {
+                println!("  {n:>3}  {m}");
+            }
+        }
     }
     Ok(())
 }
