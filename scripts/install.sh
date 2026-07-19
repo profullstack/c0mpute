@@ -344,7 +344,7 @@ install_tui() {
     ref="${C0MPUTE_TUI_REF:-master}"
     tarball="https://github.com/profullstack/c0mpute/archive/refs/heads/${ref}.tar.gz"
     if curl -fsSL "$tarball" | tar -xz -C "$tmp" 2>/dev/null; then
-      src=$(find "$tmp" -maxdepth 2 -type d -path '*/apps/tui' 2>/dev/null | head -1)
+      src=$(find "$tmp" -type d -path '*/apps/tui' 2>/dev/null | head -1)
     fi
     if [ -z "$src" ] || [ ! -d "$src/src" ]; then
       warn "couldn't fetch c0mpute-tui source; skipping (run: c0mpute tui later to retry)"

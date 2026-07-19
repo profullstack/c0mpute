@@ -375,7 +375,7 @@ async fn run_app(cli: Cli) -> Result<()> {
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
         Cmd::Chat { cmd } => run_chat(cmd),
-        Cmd::Tui { args } => delegate("c0mpute-tui", &args),
+        Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
@@ -1316,6 +1316,83 @@ fn run_menu() -> Result<()> {
     let exe = std::env::current_exe()?;
     let status = std::process::Command::new(exe).args(&path).status()?;
     std::process::exit(status.code().unwrap_or(0));
+}
+
+/// `c0mpute tui` — launch the terminal UI, installing it on demand the first
+/// time. The TUI is a Bun app (react-blessed), not part of the Rust binary, so
+/// `c0mpute tui` fetches the source, runs `bun install`, and writes a launcher —
+/// the user never has to know about the underlying `c0mpute-tui` binary.
+fn run_tui(args: &[String]) -> Result<()> {
+    if which_on_path("c0mpute-tui").is_none() {
+        install_tui()?;
+    }
+    delegate("c0mpute-tui", args)
+}
+
+fn install_tui() -> Result<()> {
+    println!("c0mpute tui: installing the terminal UI (one-time)…");
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    let bun = which_on_path("bun")
+        .or_else(|| {
+            let p = home.join(".bun/bin/bun");
+            p.exists().then_some(p)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "bun is required for the TUI. Install it, then rerun `c0mpute tui`:\n  \
+                 curl -fsSL https://bun.sh/install | bash"
+            )
+        })?;
+
+    let tui_dir = home.join(".c0mpute/tui");
+    let wrapper = home.join(".c0mpute/bin/c0mpute-tui");
+    let tmp = std::env::temp_dir().join("c0mpute-tui-install");
+    let git_ref = std::env::var("C0MPUTE_TUI_REF").unwrap_or_else(|_| "master".into());
+
+    // Fetch the repo, copy apps/tui into ~/.c0mpute/tui, and materialise deps.
+    let script = format!(
+        "set -e\n\
+         rm -rf '{tmp}' && mkdir -p '{tmp}'\n\
+         curl -fsSL 'https://github.com/profullstack/c0mpute/archive/refs/heads/{git_ref}.tar.gz' | tar -xz -C '{tmp}'\n\
+         src=$(find '{tmp}' -type d -path '*/apps/tui' | head -1)\n\
+         [ -d \"$src/src\" ] || {{ echo 'TUI source not found' >&2; exit 1; }}\n\
+         rm -rf '{tui}' && mkdir -p '{tui}'\n\
+         cp -R \"$src/src\" \"$src/package.json\" \"$src/tsconfig.json\" '{tui}/'\n\
+         cd '{tui}' && '{bun}' install --no-save >/dev/null 2>&1\n\
+         rm -rf '{tmp}'\n",
+        tmp = tmp.display(),
+        git_ref = git_ref,
+        tui = tui_dir.display(),
+        bun = bun.display(),
+    );
+    let ok = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!("failed to fetch/build the TUI (need network + bun)");
+    }
+
+    // Launcher — runs the Bun source (bun --compile can't bundle blessed's
+    // dynamic widget requires).
+    let body = format!(
+        "#!/usr/bin/env sh\n\
+         # c0mpute-tui launcher (installed on demand by `c0mpute tui`).\n\
+         BUN=\"$(command -v bun || echo \"$HOME/.bun/bin/bun\")\"\n\
+         exec \"$BUN\" run \"{}/src/index.tsx\" \"$@\"\n",
+        tui_dir.display()
+    );
+    std::fs::write(&wrapper, body).map_err(|e| anyhow::anyhow!("write launcher: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
 }
 
 fn delegate(bin: &str, args: &[String]) -> Result<()> {
