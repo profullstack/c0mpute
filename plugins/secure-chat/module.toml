@@ -18,7 +18,7 @@
 [module]
 id          = "secure-chat"
 name        = "Secure Chat — E2E encrypted p2p messaging"
-version     = "0.2.22"
+version     = "0.2.23"
 kind        = "service"
 description = "End-to-end encrypted peer-to-peer messaging across the c0mpute network. No central server. Keys stay with the user. Identity and reputation via CoinPay DID. Group chats, sealed-sender mode, and offline store-and-forward included."
 author      = "Profullstack"
