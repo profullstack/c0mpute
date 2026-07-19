@@ -12,7 +12,7 @@
 [module]
 id          = "tts"
 name        = "TTS — text-to-speech"
-version     = "0.2.7"
+version     = "0.2.8"
 kind        = "workload"
 description = "Decentralized text-to-speech synthesis (Piper, Coqui XTTS, Kokoro) for narration, audiobooks, and accessibility."
 author      = "Profullstack"
