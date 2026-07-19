@@ -19,7 +19,7 @@
 [module]
 id          = "podcasts"
 name        = "Podcasts — p2p podcast listener"
-version     = "0.2.21"
+version     = "0.2.22"
 kind        = "service"
 description = "Discover, subscribe to, and play podcasts hosted on the c0mpute network or any standard RSS feed. Stream live episodes, tip creators directly via CoinPay, and participate in value-for-value streaming payments. Works alongside any existing podcast app via OPML export and local RSS proxy."
 author      = "Profullstack"
