@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long, env = "C0MPUTE_CONFIG", global = true)]
     config: Option<PathBuf>,
 
+    /// Print c0mpute + every installed plugin/peer-CLI version, then exit.
+    #[arg(short = 'v', long = "versions", global = true)]
+    versions: bool,
+
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -283,6 +287,12 @@ enum KeyCmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // `-v` / `--versions`: full version report, no async runtime needed.
+    if cli.versions {
+        print_all_versions();
+        return Ok(());
+    }
+
     // Attach mode: launch the worker as a detached daemon (or find the one
     // already running) and follow its log until Ctrl-D / Ctrl-C. This is a
     // plain supervisor + file tail — it never builds the async runtime, so it
@@ -354,7 +364,7 @@ async fn run_app(cli: Cli) -> Result<()> {
 
     match command {
         Cmd::Version => {
-            println!("c0mpute {}", env!("CARGO_PKG_VERSION"));
+            print_all_versions();
             Ok(())
         }
         Cmd::Doctor => run_doctor().await,
@@ -494,6 +504,13 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
             }
+            // First run: auto-configure the infernet peer (init + register, plus
+            // token login if INFERNET_TOKEN is set) so the node shows up on the
+            // infernet control plane. Then make sure its node daemon is up so it
+            // picks up jobs (model pulls, inference). Both best-effort; c0mpute
+            // drives the plugins so the operator doesn't run them by hand.
+            bootstrap_infernet_first_run();
+            ensure_infernet_daemon();
             let sup = Supervisor::boot(cfg).await?;
             sup.run().await
         }
@@ -1341,6 +1358,12 @@ fn ensure_coinpay_did() {
 fn run_login() -> Result<()> {
     println!("Signing in to your c0mpute accounts (coinpay + infernet)...\n");
     login_one("coinpay", "payments + payable DID");
+    // infernet login needs a configured control plane — init + register first,
+    // otherwise `infernet login` errors with "no control plane configured".
+    if which_on_path("infernet").is_some() && !infernet_initialized() {
+        println!("── infernet ── initializing node (init + register)…");
+        ensure_infernet_initialized();
+    }
     login_one("infernet", "ties this node to your infernetprotocol.com account");
     login_hf();
     println!("Done. Next: c0mpute worker register  →  c0mpute worker start");
@@ -1384,6 +1407,153 @@ fn login_one(bin: &str, why: &str) {
         },
         None => println!("  ! {bin} not installed — skipping\n"),
     }
+}
+
+/// Path to infernet's config (`$XDG_CONFIG_HOME`/`~/.config` + infernet/config.json).
+fn infernet_config_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .map(|base| base.join("infernet").join("config.json"))
+}
+
+/// True once infernet has been initialized on this machine.
+fn infernet_initialized() -> bool {
+    infernet_config_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Run `infernet <args…>` inheriting stdio; returns whether it succeeded.
+fn infernet_cmd(args: &[&str]) -> bool {
+    match which_on_path("infernet") {
+        Some(bin) => Command::new(bin)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// A human-readable node name for infernet — the machine hostname, falling
+/// back to a constant.
+fn infernet_node_name() -> String {
+    Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "c0mpute-node".to_string())
+}
+
+/// Idempotently configure infernet as a provider node: `init` (generates a
+/// Nostr identity) + `register` (announces to the control plane). No-op if
+/// infernet isn't installed or is already initialized. Login is intentionally
+/// NOT run here — it's a device-code flow.
+///
+/// `init` prompts for URL / name / firewall unless every flag is supplied, so
+/// we pass them all and close stdin — a stray prompt must never hang a headless
+/// worker. Control-plane URL is overridable via `INFERNET_URL`.
+fn ensure_infernet_initialized() -> bool {
+    let Some(bin) = which_on_path("infernet") else {
+        return false;
+    };
+    if infernet_initialized() {
+        return false;
+    }
+    let url =
+        std::env::var("INFERNET_URL").unwrap_or_else(|_| "https://infernetprotocol.com".to_string());
+    let name = infernet_node_name();
+    // "Always accept": every prompt is supplied as a flag, and we pipe a stream
+    // of "y" so any remaining prompt (e.g. the firewall rule, which opens the
+    // P2P port) is auto-accepted — while never blocking a headless worker.
+    if let Ok(mut child) = Command::new(&bin)
+        .args(["init", "--url", &url, "--role", "provider", "--name", &name])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all("y\n".repeat(20).as_bytes());
+        }
+        let _ = child.wait();
+    }
+    let _ = infernet_cmd(&["register"]);
+    true
+}
+
+/// Best-effort version string for a peer CLI on PATH. Runs `<bin> --version`
+/// with stdin closed (so tools that otherwise read a prompt can't hang) and
+/// reads the first stdout line. Returns None if the binary isn't installed.
+fn tool_version(bin: &str) -> Option<String> {
+    let path = which_on_path(bin)?;
+    let out = Command::new(&path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some(if line.is_empty() {
+        "installed (no --version)".to_string()
+    } else {
+        line
+    })
+}
+
+/// Print c0mpute's version plus every installed plugin / peer CLI.
+fn print_all_versions() {
+    println!("{:<10} {}", "c0mpute", env!("CARGO_PKG_VERSION"));
+    println!("{:<10} built-in (in-process)", "transcode");
+    for bin in ["coinpay", "infernet"] {
+        match tool_version(bin) {
+            Some(v) => println!("{bin:<10} {v}"),
+            None => println!("{bin:<10} not installed"),
+        }
+    }
+    // c0mpute-tui has no --version (it launches the dashboard) — report presence.
+    match which_on_path("c0mpute-tui") {
+        Some(_) => println!("{:<10} installed", "c0mpute-tui"),
+        None => println!("{:<10} not installed", "c0mpute-tui"),
+    }
+}
+
+/// First-run infernet bootstrap for `worker start`: init + register, then a
+/// non-interactive token login when `INFERNET_TOKEN` is set (device-code login
+/// can't run unattended, so it's skipped otherwise). Best-effort and idempotent
+/// — a worker runs fine without infernet.
+fn bootstrap_infernet_first_run() {
+    if which_on_path("infernet").is_none() || infernet_initialized() {
+        return;
+    }
+    tracing::info!("first run: bootstrapping infernet (init + register)");
+    ensure_infernet_initialized();
+    match std::env::var("INFERNET_TOKEN") {
+        Ok(token) if !token.is_empty() => {
+            tracing::info!("infernet: logging in with INFERNET_TOKEN");
+            let _ = infernet_cmd(&["login", "--token", &token]);
+        }
+        _ => tracing::info!(
+            "infernet: login skipped (set INFERNET_TOKEN, or run `c0mpute login` for device-code auth)"
+        ),
+    }
+}
+
+/// Best-effort: make sure the infernet node daemon is running so the node picks
+/// up pending jobs (model pulls, inference). Runs on every `worker start` once
+/// infernet is initialized; `infernet start` detaches and is a no-op if the
+/// daemon is already up. A worker runs fine if this fails — the infernet daemon
+/// is infernet's own process, with its own lifecycle and health.
+fn ensure_infernet_daemon() {
+    if which_on_path("infernet").is_none() || !infernet_initialized() {
+        return;
+    }
+    tracing::info!("ensuring infernet node daemon is running");
+    let _ = infernet_cmd(&["start"]);
 }
 
 fn which_on_path(bin: &str) -> Option<PathBuf> {
