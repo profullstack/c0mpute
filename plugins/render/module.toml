@@ -13,7 +13,7 @@
 [module]
 id          = "render"
 name        = "Render — Blender 3D rendering"
-version     = "0.2.13"
+version     = "0.2.14"
 kind        = "workload"
 description = "Decentralized 3D rendering using Blender headless (Cycles/Eevee) across consumer GPUs and CPUs."
 author      = "Profullstack"

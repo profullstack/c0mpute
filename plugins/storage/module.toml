@@ -12,7 +12,7 @@
 [module]
 id          = "storage"
 name        = "Storage — Reed-Solomon shard service"
-version     = "0.2.13"
+version     = "0.2.14"
 kind        = "service"
 description = "Reed-Solomon 10/14 shard storage with auto-repair. Compute-locality, E2E encryption, content-addressed, pay-as-you-go. See DIP-0012."
 author      = "Profullstack"
