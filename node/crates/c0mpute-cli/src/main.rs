@@ -161,6 +161,10 @@ enum WorkerCmd {
         storage: Option<String>,
         #[arg(long)]
         gpu: bool,
+        /// Detach and run in the background as a daemon (writes a PID file and
+        /// redirects output to a log). Use `worker stop` / `worker status`.
+        #[arg(short = 'd', long)]
+        daemon: bool,
     },
     /// Stop a running worker.
     Stop,
@@ -270,10 +274,29 @@ enum KeyCmd {
     Rotate,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing()?;
+fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Daemonize BEFORE the async runtime starts. Forking is unsafe once the
+    // multi-threaded Tokio runtime has spawned worker threads, so this must
+    // happen while the process is still single-threaded. Only `worker start
+    // --daemon` detaches; every other command runs in the foreground.
+    if let Some(Cmd::Worker {
+        cmd: WorkerCmd::Start { daemon: true, .. },
+    }) = &cli.command
+    {
+        daemonize_worker()?;
+    }
+
+    init_tracing()?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run_app(cli))
+}
+
+async fn run_app(cli: Cli) -> Result<()> {
     let config_path = cli.config.unwrap_or_else(config::default_config_path);
 
     // No subcommand: open the interactive menu in a terminal, else print help
@@ -392,18 +415,23 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             Ok(())
         }
         WorkerCmd::Status => {
+            match read_worker_pid() {
+                Some(pid) if pid_alive(pid) => println!("worker: running (pid {pid})"),
+                Some(pid) => println!("worker: not running (stale pid {pid})"),
+                None => println!("worker: not running"),
+            }
             let cfg = Config::load_or_default(config_path)?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
-        WorkerCmd::Stop => {
-            println!("[stub] no running worker to stop");
-            Ok(())
-        }
+        WorkerCmd::Stop => stop_worker(),
         WorkerCmd::Start {
             roles,
             storage: _,
             gpu,
+            // Already handled in `main` before the runtime started; at this
+            // point we are the (possibly detached) worker process.
+            daemon: _,
         } => {
             let mut cfg = Config::load_or_default(config_path)?;
             if let Some(rs) = roles {
@@ -416,6 +444,111 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             sup.run().await
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// worker daemon: detach, PID file, stop/status
+// ────────────────────────────────────────────────────────────────────────
+
+/// `(pid_file, log_file)` for the background worker, under the data dir
+/// (`~/.local/share/c0mpute` on Linux), falling back to the cwd.
+fn worker_runtime_paths() -> (PathBuf, PathBuf) {
+    let dir = config::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    (dir.join("worker.pid"), dir.join("worker.log"))
+}
+
+fn read_worker_pid() -> Option<i32> {
+    let (pid_file, _) = worker_runtime_paths();
+    std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+}
+
+/// Fork into the background, redirect stdout/stderr to the worker log, and
+/// write a locked PID file. Runs before the Tokio runtime starts, so the
+/// process is still single-threaded when it forks.
+#[cfg(unix)]
+fn daemonize_worker() -> Result<()> {
+    use std::fs::OpenOptions;
+
+    let (pid_file, log_file) = worker_runtime_paths();
+    if let Some(parent) = pid_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new().create(true).append(true).open(&log_file)?;
+    let stderr = stdout.try_clone()?;
+
+    // Print to the launching terminal *before* forking — once detached,
+    // stdout points at the log file.
+    println!("c0mpute worker starting in background");
+    println!("  pid file: {}", pid_file.display());
+    println!("  logs:     {}", log_file.display());
+    println!("  stop:     c0mpute worker stop");
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    daemonize::Daemonize::new()
+        .pid_file(&pid_file)
+        .working_directory(cwd)
+        .stdout(stdout)
+        .stderr(stderr)
+        .start()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to start worker daemon: {e} \
+                 (already running? check `c0mpute worker status`)"
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn daemonize_worker() -> Result<()> {
+    anyhow::bail!("`worker start --daemon` is only supported on Unix platforms")
+}
+
+/// True if a process with this PID exists (signal 0 probes without delivering).
+#[cfg(unix)]
+fn pid_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn stop_worker() -> Result<()> {
+    match read_worker_pid() {
+        Some(pid) if pid_alive(pid) => {
+            if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                println!("sent SIGTERM to worker (pid {pid})");
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "failed to signal worker pid {pid}: {}",
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
+        Some(pid) => {
+            // Stale PID file — the flock is released, so the next `start`
+            // will reclaim it. Clean it up so `status` reads true.
+            let (pid_file, _) = worker_runtime_paths();
+            let _ = std::fs::remove_file(pid_file);
+            println!("no running worker (cleared stale pid {pid})");
+            Ok(())
+        }
+        None => {
+            println!("no running worker");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_worker() -> Result<()> {
+    anyhow::bail!("`worker stop` is only supported on Unix platforms")
 }
 
 // ────────────────────────────────────────────────────────────────────────
