@@ -455,12 +455,25 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             Ok(())
         }
         WorkerCmd::Status => {
+            println!("version: c0mpute {}", env!("CARGO_PKG_VERSION"));
             match read_worker_pid() {
                 Some(pid) if pid_alive(pid) => println!("worker: running (pid {pid})"),
                 Some(pid) => println!("worker: not running (stale pid {pid})"),
                 None => println!("worker: not running"),
             }
             let cfg = Config::load_or_default(config_path)?;
+            if cfg.update_auto {
+                let feed = cfg
+                    .update_feed_url
+                    .clone()
+                    .unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
+                println!(
+                    "auto-update: on — checks {} every {}s, applies in place",
+                    feed, cfg.update_interval_secs
+                );
+            } else {
+                println!("auto-update: off");
+            }
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
