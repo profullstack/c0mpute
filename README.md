@@ -60,6 +60,11 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 c0mpute worker start -d
 c0mpute worker status
 c0mpute worker stop
+
+# or start attached and watch the log live, then press Ctrl-D (or Ctrl-C) to
+# detach — the worker keeps running in the background. Re-running -a while a
+# worker is already up just re-attaches to it.
+c0mpute worker start -a
 ```
 
 For a long-running node, prefer systemd (restart-on-crash, journald logs).

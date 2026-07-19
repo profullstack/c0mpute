@@ -161,6 +161,12 @@ enum WorkerCmd {
         storage: Option<String>,
         #[arg(long)]
         gpu: bool,
+        /// Start the worker as a background daemon, then stay attached and
+        /// stream its log. Press Ctrl-D or Ctrl-C to detach — the worker keeps
+        /// running (use `worker stop` to stop it). Attaches to an already
+        /// running worker if there is one.
+        #[arg(short = 'a', long, conflicts_with = "daemon")]
+        attach: bool,
         /// Detach and run in the background as a daemon (writes a PID file and
         /// redirects output to a log). Use `worker stop` / `worker status`.
         #[arg(short = 'd', long)]
@@ -276,6 +282,40 @@ enum KeyCmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Attach mode: launch the worker as a detached daemon (or find the one
+    // already running) and follow its log until Ctrl-D / Ctrl-C. This is a
+    // plain supervisor + file tail — it never builds the async runtime, so it
+    // can hand off to the daemon and return your shell without killing it.
+    if let Some(Cmd::Worker {
+        cmd:
+            WorkerCmd::Start {
+                attach: true,
+                roles,
+                storage,
+                gpu,
+                daemon: _,
+            },
+    }) = &cli.command
+    {
+        let mut passthrough = Vec::new();
+        if let Some(rs) = roles {
+            passthrough.push("--roles".to_string());
+            passthrough.push(rs.join(","));
+        }
+        if let Some(s) = storage {
+            passthrough.push("--storage".to_string());
+            passthrough.push(s.clone());
+        }
+        if *gpu {
+            passthrough.push("--gpu".to_string());
+        }
+        if let Some(cfg) = &cli.config {
+            passthrough.push("--config".to_string());
+            passthrough.push(cfg.display().to_string());
+        }
+        return run_attached_worker(passthrough);
+    }
 
     // Daemonize BEFORE the async runtime starts. Forking is unsafe once the
     // multi-threaded Tokio runtime has spawned worker threads, so this must
@@ -429,8 +469,9 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             roles,
             storage: _,
             gpu,
-            // Already handled in `main` before the runtime started; at this
-            // point we are the (possibly detached) worker process.
+            // Both handled in `main` before the runtime started; at this point
+            // we are the (possibly detached) worker process itself.
+            attach: _,
             daemon: _,
         } => {
             let mut cfg = Config::load_or_default(config_path)?;
@@ -504,6 +545,127 @@ fn daemonize_worker() -> Result<()> {
 #[cfg(not(unix))]
 fn daemonize_worker() -> Result<()> {
     anyhow::bail!("`worker start --daemon` is only supported on Unix platforms")
+}
+
+/// Attach mode (`worker start -a`): make sure a background worker is running
+/// (launch one via `worker start -d` if not), then stream its log to the
+/// terminal until the user detaches with Ctrl-D (stdin EOF) or Ctrl-C. The
+/// worker is a standalone daemon the whole time, so detaching just stops the
+/// viewer — it never touches the worker.
+#[cfg(unix)]
+fn run_attached_worker(passthrough: Vec<String>) -> Result<()> {
+    use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    static DETACH: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_sig: libc::c_int) {
+        DETACH.store(true, Ordering::SeqCst);
+    }
+
+    let (_pid_file, log_file) = worker_runtime_paths();
+    // Only replay output produced from the moment we attach.
+    let start_len = std::fs::metadata(&log_file).map(|m| m.len()).unwrap_or(0);
+
+    // Attach to an already-running worker, or spawn a detached one. The spawned
+    // child does the fork-before-runtime itself, so nothing unsafe happens here.
+    let pid = if let Some(p) = read_worker_pid().filter(|p| pid_alive(*p)) {
+        println!("worker already running (pid {p}); attaching");
+        Some(p)
+    } else {
+        let exe = std::env::current_exe()?;
+        let mut args = vec!["worker".to_string(), "start".to_string(), "-d".to_string()];
+        args.extend(passthrough);
+        let status = Command::new(&exe)
+            .args(&args)
+            .stdout(std::process::Stdio::null()) // we print our own banner
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("worker failed to start");
+        }
+        // The daemon writes its PID file just after forking — poll briefly.
+        let mut pid = None;
+        for _ in 0..50 {
+            pid = read_worker_pid().filter(|p| pid_alive(*p));
+            if pid.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        pid
+    };
+
+    match pid {
+        Some(p) => println!(
+            "attached to worker (pid {p}) — Ctrl-D or Ctrl-C to detach; the worker keeps running"
+        ),
+        None => {
+            println!("attached to worker — Ctrl-D or Ctrl-C to detach; the worker keeps running")
+        }
+    }
+
+    // Trip DETACH on Ctrl-C / SIGTERM …
+    let handler = on_signal as extern "C" fn(libc::c_int);
+    unsafe {
+        libc::signal(libc::SIGINT, handler as usize as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handler as usize as libc::sighandler_t);
+    }
+    // … and on Ctrl-D (EOF on an interactive stdin). Skip when stdin isn't a
+    // terminal, or a piped/closed stdin would detach us instantly.
+    if std::io::stdin().is_terminal() {
+        std::thread::spawn(|| {
+            let mut buf = [0u8; 256];
+            let mut stdin = std::io::stdin();
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        DETACH.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(_) => {} // ignore anything typed before Ctrl-D
+                }
+            }
+        });
+    }
+
+    // Follow the log until detached.
+    let drain = |from: u64| -> u64 {
+        let mut at = from;
+        if let Ok(mut f) = std::fs::File::open(&log_file) {
+            let len = f.metadata().map(|m| m.len()).unwrap_or(at);
+            if len > at && f.seek(SeekFrom::Start(at)).is_ok() {
+                let mut chunk = Vec::new();
+                if f.take(len - at).read_to_end(&mut chunk).is_ok() {
+                    let out = std::io::stdout();
+                    let mut h = out.lock();
+                    let _ = h.write_all(&chunk);
+                    let _ = h.flush();
+                    at = len;
+                }
+            }
+        }
+        at
+    };
+
+    let mut pos = start_len;
+    while !DETACH.load(Ordering::SeqCst) {
+        pos = drain(pos);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    drain(pos); // final flush
+
+    match read_worker_pid().filter(|p| pid_alive(*p)) {
+        Some(p) => {
+            println!("\ndetached — worker still running (pid {p}); stop with: c0mpute worker stop")
+        }
+        None => println!("\ndetached"),
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_attached_worker(_passthrough: Vec<String>) -> Result<()> {
+    anyhow::bail!("`worker start --attach` is only supported on Unix platforms")
 }
 
 /// True if a process with this PID exists (signal 0 probes without delivering).
