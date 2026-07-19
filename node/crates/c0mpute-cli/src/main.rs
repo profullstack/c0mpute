@@ -540,6 +540,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             } else {
                 println!("auto-update: off");
             }
+            print_served_models_eligibility();
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
@@ -2039,6 +2040,60 @@ fn bootstrap_infernet_rpc() {
     // Drop any stale rpc_primary the node can no longer run (e.g. it registered
     // for everything before this gate existed).
     prune_rpc_primaries(&runnable_primaries);
+}
+
+/// Total system RAM in bytes (Linux /proc/meminfo).
+fn system_ram_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// Show, per model on the node, whether it's eligible for the infernet
+/// distribution pool (`served_models`) — i.e. whether it fits this node's GPU
+/// VRAM (fast) or RAM (CPU). The control plane load-balances chat requests
+/// across every node whose `served_models` includes the model, so this answers
+/// "why is / isn't this model being distributed to me".
+fn print_served_models_eligibility() {
+    if which_on_path("infernet").is_none() {
+        return;
+    }
+    let models = infernet_models();
+    if models.is_empty() {
+        return;
+    }
+    let vram = gpu_vram_bytes();
+    let ram = system_ram_bytes();
+    let gib = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+    println!(
+        "distribution pool (served_models) — GPU VRAM {}, RAM {}:",
+        vram.map(gib).unwrap_or_else(|| "none".into()),
+        ram.map(gib).unwrap_or_else(|| "?".into()),
+    );
+    for m in &models {
+        let size = resolve_ollama_gguf(m)
+            .and_then(|g| std::fs::metadata(g).ok())
+            .map(|md| md.len());
+        match size {
+            Some(sz) => {
+                let need = sz + sz / 5; // ~20% headroom
+                let verdict = if vram.map(|v| v >= need).unwrap_or(false) {
+                    "eligible (GPU)"
+                } else if ram.map(|r| r >= need).unwrap_or(false) {
+                    "eligible (CPU — slower)"
+                } else {
+                    "TOO BIG for this node — not in the pool"
+                };
+                println!("  {:<34} {:>8}  {}", m, gib(sz), verdict);
+            }
+            None => println!("  {:<34} {:>8}  (size unknown)", m, "?"),
+        }
+    }
 }
 
 /// Total GPU VRAM in bytes (NVIDIA via nvidia-smi), or None if there's no GPU.
