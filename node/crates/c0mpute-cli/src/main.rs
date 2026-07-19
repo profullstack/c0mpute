@@ -509,11 +509,23 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // infernet control plane. Then make sure its node daemon is up so it
             // picks up jobs (model pulls, inference). Both best-effort; c0mpute
             // drives the plugins so the operator doesn't run them by hand.
+            let auto = cfg.update_auto;
+            let interval_secs = cfg.update_interval_secs.max(60);
             bootstrap_infernet_first_run();
-            // Keep all managed plugins current (self-heals a stuck infernet too),
-            // then make sure the infernet node daemon is up. Both non-blocking.
-            refresh_plugins();
             ensure_infernet_daemon();
+            // Check every surface for upgrades on the poll cadence (default 5m):
+            // c0mpute self-updates in the supervisor's poll loop; here we refresh
+            // the plugins on the same interval. First tick fires immediately.
+            if auto {
+                let interval = std::time::Duration::from_secs(interval_secs);
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(interval);
+                    loop {
+                        ticker.tick().await;
+                        let _ = tokio::task::spawn_blocking(refresh_plugins).await;
+                    }
+                });
+            }
             let sup = Supervisor::boot(cfg).await?;
             sup.run().await
         }
@@ -1329,22 +1341,50 @@ fn run_tui(args: &[String]) -> Result<()> {
     delegate("c0mpute-tui", args)
 }
 
+/// Locate a usable `bun`, installing it via mise if needed. bun may be on PATH,
+/// under ~/.bun, or managed by mise (which the c0mpute installer uses, sometimes
+/// with a relocated data dir) — so a plain `which bun` isn't enough.
+fn ensure_bun() -> Option<PathBuf> {
+    if let Some(p) = which_on_path("bun") {
+        return Some(p);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".bun/bin/bun");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let mise = which_on_path("mise")?;
+    let mise_which = |m: &std::path::Path| -> Option<PathBuf> {
+        let out = Command::new(m).args(["which", "bun"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        p.exists().then_some(p)
+    };
+    if let Some(p) = mise_which(&mise) {
+        return Some(p);
+    }
+    // Not installed yet — install it via mise.
+    println!("installing bun via mise…");
+    let _ = Command::new(&mise)
+        .args(["use", "--global", "bun@latest"])
+        .status();
+    mise_which(&mise).or_else(|| which_on_path("bun"))
+}
+
 fn install_tui() -> Result<()> {
     println!("c0mpute tui: installing the terminal UI (one-time)…");
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .map_err(|_| anyhow::anyhow!("HOME not set"))?;
-    let bun = which_on_path("bun")
-        .or_else(|| {
-            let p = home.join(".bun/bin/bun");
-            p.exists().then_some(p)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "bun is required for the TUI. Install it, then rerun `c0mpute tui`:\n  \
-                 curl -fsSL https://bun.sh/install | bash"
-            )
-        })?;
+    let bun = ensure_bun().ok_or_else(|| {
+        anyhow::anyhow!(
+            "bun is required for the TUI and couldn't be installed via mise. \
+             Install it, then rerun `c0mpute tui`:\n  curl -fsSL https://bun.sh/install | bash"
+        )
+    })?;
 
     let tui_dir = home.join(".c0mpute/tui");
     let wrapper = home.join(".c0mpute/bin/c0mpute-tui");
@@ -1382,7 +1422,10 @@ fn install_tui() -> Result<()> {
     let body = format!(
         "#!/usr/bin/env sh\n\
          # c0mpute-tui launcher (installed on demand by `c0mpute tui`).\n\
-         BUN=\"$(command -v bun || echo \"$HOME/.bun/bin/bun\")\"\n\
+         BUN=\"$(command -v bun 2>/dev/null || true)\"\n\
+         [ -z \"$BUN\" ] && [ -x \"$HOME/.bun/bin/bun\" ] && BUN=\"$HOME/.bun/bin/bun\"\n\
+         [ -z \"$BUN\" ] && command -v mise >/dev/null 2>&1 && BUN=\"$(mise which bun 2>/dev/null || true)\"\n\
+         [ -n \"$BUN\" ] || {{ echo 'bun not found; run: mise use --global bun@latest' >&2; exit 1; }}\n\
          exec \"$BUN\" run \"{}/src/index.tsx\" \"$@\"\n",
         tui_dir.display()
     );
@@ -1672,45 +1715,22 @@ fn upgrade_plugins_foreground() {
     }
 }
 
-/// Keep managed plugins current in the background so operators never update each
-/// node by hand — c0mpute drives the plugins. Throttled to once per interval via
-/// a marker under the data dir, and fully non-blocking. This also self-heals a
-/// stuck infernet, whose crashing old daemon can't run its own auto-update.
+/// Run each managed plugin's self-update once, waiting for each to finish so the
+/// periodic loop never starts two overlapping (potentially heavy) updates.
+/// Output is discarded; c0mpute drives the plugins so operators never update
+/// nodes by hand. Also self-heals a stuck infernet whose old daemon can't
+/// update itself. Runs on the background poll cadence.
 fn refresh_plugins() {
-    use std::time::Duration;
-    const INTERVAL: Duration = Duration::from_secs(12 * 3600);
-
-    let marker = config::data_dir().map(|d| d.join(".plugins-refreshed"));
-    let due = match marker.as_ref().and_then(|m| std::fs::metadata(m).ok()) {
-        Some(meta) => meta
-            .modified()
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .map(|e| e > INTERVAL)
-            .unwrap_or(true),
-        None => true, // never refreshed → due
-    };
-    if !due {
-        return;
-    }
-
     for (bin, args) in PLUGIN_UPDATERS {
         if let Some(path) = which_on_path(bin) {
-            tracing::info!(plugin = bin, "refreshing plugin in background");
+            tracing::debug!(plugin = bin, "checking plugin for upgrades");
             let _ = Command::new(path)
                 .args(*args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
+                .status();
         }
-    }
-
-    if let Some(marker) = marker {
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&marker, b"");
     }
 }
 
