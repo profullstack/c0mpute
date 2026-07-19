@@ -65,6 +65,30 @@ p.write_text(text)
 print('  updated Cargo.toml')
 PY
 
+# Release-feed fallback version. apps/web serves /releases/latest.json from
+# this constant whenever the C0MPUTE_LATEST_VERSION env var is unset (the prod
+# default), and that feed is what `c0mpute update` + the auto-upgrade poller
+# read. Bump it in lockstep or a fresh release never gets advertised.
+python3 - "$NEW" <<'PY'
+import re, pathlib, sys
+new = sys.argv[1]
+p = pathlib.Path('apps/web/src/app/releases/latest.json/route.ts')
+if p.exists():
+    text = p.read_text()
+    text2 = re.sub(
+        r'(const FALLBACK_VERSION = ")[^"]+(")',
+        r'\g<1>' + new + r'\g<2>',
+        text, count=1,
+    )
+    if text2 != text:
+        p.write_text(text2)
+        print(f'  updated {p}')
+    else:
+        print(f'  ! FALLBACK_VERSION not found in {p} (feed may not advertise {new})')
+else:
+    print(f'  ! {p} missing (skipped feed fallback bump)')
+PY
+
 # Plugin manifests
 for f in plugins/*/module.toml; do
   python3 -c "
