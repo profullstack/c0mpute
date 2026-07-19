@@ -1868,43 +1868,164 @@ fn ensure_llama_rpc(want_primary: bool) -> bool {
     false
 }
 
-/// Opt-in: serve configured models over infernet RPC so the node counts toward
-/// "Distribute across all nodes". Idempotent-ish — `infernet inference
-/// serve/primary` records state and the daemon heartbeat advertises it.
-fn bootstrap_infernet_rpc() {
-    let slices = std::env::var("C0MPUTE_RPC_MODELS").unwrap_or_default();
-    let primaries = std::env::var("C0MPUTE_RPC_PRIMARY").unwrap_or_default();
-    let slice_models: Vec<&str> = slices.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    let primary_entries: Vec<&str> = primaries.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if slice_models.is_empty() && primary_entries.is_empty() {
-        return;
+/// Models pulled on this node, from `infernet model list` (the NAME column).
+fn infernet_models() -> Vec<String> {
+    let Some(bin) = which_on_path("infernet") else {
+        return Vec::new();
+    };
+    let Ok(out) = Command::new(bin)
+        .args(["model", "list"])
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|s| s.contains(':') && *s != "active:") // model:tag, not the footer
+        .map(str::to_string)
+        .collect()
+}
+
+/// Resolve an Ollama model id (`ns/name:tag` or `name:tag`) to its on-disk GGUF
+/// blob so this node can act as an RPC primary. The blobs are world-readable, so
+/// no copy/download is needed. None if not found/readable.
+fn resolve_ollama_gguf(model: &str) -> Option<PathBuf> {
+    let (repo, tag) = model.split_once(':').unwrap_or((model, "latest"));
+    let (ns, name) = match repo.split_once('/') {
+        Some((a, b)) => (a.to_string(), b.to_string()),
+        None => ("library".to_string(), repo.to_string()),
+    };
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Ok(h) = std::env::var("HOME") {
+        bases.push(PathBuf::from(h).join(".ollama/models"));
     }
+    if let Ok(m) = std::env::var("OLLAMA_MODELS") {
+        bases.push(PathBuf::from(m));
+    }
+    bases.push(PathBuf::from("/usr/share/ollama/.ollama/models"));
+    for base in bases {
+        let manifest = base.join(format!("manifests/registry.ollama.ai/{ns}/{name}/{tag}"));
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        for layer in json.get("layers").and_then(|l| l.as_array()).into_iter().flatten() {
+            if layer.get("mediaType").and_then(|m| m.as_str()).unwrap_or("").contains("model") {
+                if let Some(digest) = layer.get("digest").and_then(|d| d.as_str()) {
+                    let blob = base.join("blobs").join(digest.replace(':', "-"));
+                    if std::fs::File::open(&blob).is_ok() {
+                        return Some(blob);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Models already advertised as a live RPC slice (from the inference state), so
+/// the periodic loop doesn't re-spawn rpc-servers it already started.
+fn rpc_slice_active_models() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Ok(home) = std::env::var("HOME") else {
+        return set;
+    };
+    let path = PathBuf::from(home).join(".infernet/inference/state.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return set;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return set;
+    };
+    if let Some(slice) = json.get("rpc_slice") {
+        let alive = slice
+            .get("pid")
+            .and_then(|p| p.as_i64())
+            .map(|pid| pid_alive(pid as i32))
+            .unwrap_or(false);
+        if alive {
+            for m in slice.get("models").and_then(|m| m.as_array()).into_iter().flatten() {
+                if let Some(s) = m.as_str() {
+                    set.insert(s.to_string());
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Fully automatic, no roles: every node serves each model it has over infernet
+/// RPC — registers as a primary (the GGUF is a world-readable Ollama blob) AND
+/// runs an rpc-server slice. The control plane picks a primary + slices per
+/// request, so at any scale nobody assigns masters/slaves. Idempotent (skips
+/// models already serving) so the 5-min loop is safe. `infernet inference serve`
+/// stays foreground supervising rpc-server, so it's spawned detached.
+fn bootstrap_infernet_rpc() {
     if which_on_path("infernet").is_none() || !infernet_initialized() {
         return;
     }
-    if !ensure_llama_rpc(!primary_entries.is_empty()) {
+    let mut models = infernet_models();
+    // Optional explicit additions (e.g. slice for a model this node hasn't pulled).
+    for m in std::env::var("C0MPUTE_RPC_MODELS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !models.iter().any(|x| x == m) {
+            models.push(m.to_string());
+        }
+    }
+    if models.is_empty() {
+        return;
+    }
+    // rpc-server is needed to serve slices + advertise now; llama-server is only
+    // used when a primary actually executes a request, so build it in the
+    // background without blocking advertisement.
+    if !ensure_llama_rpc(false) {
         tracing::info!(
-            "infernet RPC serving deferred until llama.cpp finishes building (~/.c0mpute/llama-build.log)"
+            "infernet RPC serving deferred until rpc-server finishes building (~/.c0mpute/llama-build.log)"
         );
         return;
     }
-    for entry in primary_entries {
-        match entry.split_once('=') {
-            Some((model, gguf)) if std::path::Path::new(gguf.trim()).exists() => {
-                tracing::info!(model = model.trim(), "infernet: hosting RPC primary");
-                let _ = infernet_cmd(&[
-                    "inference", "primary", "--model", model.trim(), "--gguf", gguf.trim(),
-                ]);
-            }
-            _ => tracing::warn!(
-                entry,
-                "infernet RPC primary needs `model=/abs/model.gguf` with an existing GGUF; skipping"
-            ),
-        }
+    if which_on_path("llama-server").is_none() {
+        build_llama_rpc_background();
     }
-    for model in slice_models {
-        tracing::info!(model, "infernet: serving RPC slice");
-        let _ = infernet_cmd(&["inference", "serve", "--backend", "rpc", "--model", model]);
+    let Some(infernet) = which_on_path("infernet") else {
+        return;
+    };
+    let active = rpc_slice_active_models();
+    let mut port = 50052;
+    for model in &models {
+        // Primary: register with the resolved GGUF (accumulates in state; cheap).
+        if let Some(gguf) = resolve_ollama_gguf(model) {
+            tracing::info!(model, "infernet: registering RPC primary");
+            let _ = Command::new(&infernet)
+                .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        // Slice: run an rpc-server unless one is already advertising this model.
+        if !active.contains(model) {
+            tracing::info!(model, port, "infernet: serving RPC slice");
+            let _ = Command::new(&infernet)
+                .args([
+                    "inference", "serve", "--backend", "rpc", "--model", model, "--port",
+                    &port.to_string(),
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn(); // stays foreground supervising rpc-server → detach
+            port += 1;
+        }
     }
 }
 
