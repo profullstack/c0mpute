@@ -292,14 +292,16 @@ fn extract_and_swap(tarball: &[u8], artifact: &str) -> Result<()> {
     Ok(())
 }
 
-/// Long-running background poller. Calls `try_upgrade` every `interval`
-/// until cancelled. Logs failures rather than propagating — a flaky
-/// release feed shouldn't take down the worker.
-pub async fn poll_loop(
-    current_version: String,
-    release_feed_url: String,
-    interval: Duration,
-) {
+/// Long-running background poller. Every `interval` it checks the feed and, if
+/// a newer release exists, downloads + verifies + swaps the binary, then
+/// re-executes into it so the update applies without an operator restart.
+/// Failures are logged, never propagated — a flaky feed must not take down the
+/// worker.
+pub async fn poll_loop(current_version: String, release_feed_url: String, interval: Duration) {
+    // Path to re-exec captured up front — after a swap, current_exe() reports
+    // the now-unlinked inode ("… (deleted)"), which won't exec.
+    let exe = std::env::current_exe().ok();
+
     // Small initial jitter (0–60s) so 1000 nodes don't all hit at once.
     let jitter = fastish_jitter_secs();
     info!(secs = jitter, "auto-upgrade poll loop starting after jitter");
@@ -308,21 +310,47 @@ pub async fn poll_loop(
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
-        match try_upgrade(&current_version, &release_feed_url).await {
+        match upgrade_now(&current_version, &release_feed_url).await {
             Ok(UpgradeOutcome::AlreadyLatest { current }) => {
                 tracing::debug!(version = %current, "auto-upgrade: already latest");
             }
-            Ok(UpgradeOutcome::Available { current, latest }) => {
-                info!(%current, %latest, "auto-upgrade: newer release available (run `c0mpute update`)");
-            }
             Ok(UpgradeOutcome::Upgraded { from, to }) => {
-                info!(%from, %to, "auto-upgrade: upgraded; restart to apply");
+                info!(%from, %to, "auto-upgrade: installed new binary");
+                #[cfg(unix)]
+                if let Some(exe) = &exe {
+                    info!("auto-upgrade: re-executing into the new binary");
+                    // reexec only returns on failure (success replaces us).
+                    let e = reexec(exe);
+                    warn!(err = %e, "auto-upgrade: re-exec failed; staged update applies on next restart");
+                }
+                // Update installed (and, on Unix, re-exec was attempted). Stop
+                // polling so we don't re-download the same version while a
+                // failed re-exec leaves us on the old process.
+                return;
+            }
+            Ok(UpgradeOutcome::Available { .. }) => {
+                unreachable!("upgrade_now installs or errors")
             }
             Err(e) => {
                 warn!(err = %e, "auto-upgrade: poll failed");
             }
         }
     }
+}
+
+/// Replace the current process with the (freshly swapped) binary at `exe`,
+/// preserving PID, session, and the daemon's redirected stdio. Detach flags are
+/// dropped — we are already the detached worker, so re-running `-d`/`-a` would
+/// re-daemonize and orphan the PID file. Only returns (an error) on failure.
+#[cfg(unix)]
+fn reexec(exe: &std::path::Path) -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !matches!(a.as_str(), "-d" | "--daemon" | "-a" | "--attach"))
+        .collect();
+    let err = std::process::Command::new(exe).args(args).exec();
+    anyhow::anyhow!("exec {}: {err}", exe.display())
 }
 
 fn fastish_jitter_secs() -> u64 {

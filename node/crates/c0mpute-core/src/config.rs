@@ -101,7 +101,7 @@ fn default_auto_update() -> bool {
     true
 }
 fn default_update_interval_secs() -> u64 {
-    300 // 5 minutes
+    900 // 15 minutes
 }
 
 pub fn config_dir() -> Option<PathBuf> {
