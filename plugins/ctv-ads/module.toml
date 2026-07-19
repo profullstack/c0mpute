@@ -20,7 +20,7 @@
 [module]
 id          = "ctv-ads"
 name        = "CTV Ads — Connected TV ad marketplace"
-version     = "0.2.9"
+version     = "0.2.10"
 kind        = "service"
 description = "Decentralised Connected TV advertising on the c0mpute network. VAST 4.x endpoint, OpenRTB real-time auction, cryptographically verified impressions, CoinPay settlement. Supports Roku, Fire TV, Apple TV, Smart TVs, and FAST channels. Live-stream integration for ad-monetised broadcasts."
 author      = "Profullstack"
