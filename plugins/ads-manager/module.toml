@@ -18,7 +18,7 @@
 [module]
 id          = "ads-manager"
 name        = "Ads Manager — shared ad operations layer"
-version     = "0.2.12"
+version     = "0.2.13"
 kind        = "service"
 description = "Unified ad operations for the c0mpute network: campaign management, creative registry, publisher inventory, OpenRTB auction primitives, CoinPay escrow, and reporting. Required dependency for ctv-ads and all future ad format plugins."
 author      = "Profullstack"
