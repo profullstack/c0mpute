@@ -1365,6 +1365,12 @@ fn run_login() -> Result<()> {
         ensure_infernet_initialized();
     }
     login_one("infernet", "ties this node to your infernetprotocol.com account");
+    // Bind this node to the account so it shows on /dashboard and can be
+    // assigned models/jobs (best-effort; no-op if not installed or not authed).
+    if which_on_path("infernet").is_some() {
+        println!("── infernet ── linking node to your account…");
+        let _ = infernet_cmd(&["pubkey", "link"]);
+    }
     login_hf();
     println!("Done. Next: c0mpute worker register  →  c0mpute worker start");
     Ok(())
@@ -1534,11 +1540,15 @@ fn bootstrap_infernet_first_run() {
     ensure_infernet_initialized();
     match std::env::var("INFERNET_TOKEN") {
         Ok(token) if !token.is_empty() => {
-            tracing::info!("infernet: logging in with INFERNET_TOKEN");
+            tracing::info!("infernet: logging in with INFERNET_TOKEN + linking node to account");
             let _ = infernet_cmd(&["login", "--token", &token]);
+            // Bind the node's pubkey to the account so /dashboard lists it and
+            // can route models/jobs to it (registration alone only makes it
+            // "available", not owned by the account).
+            let _ = infernet_cmd(&["pubkey", "link"]);
         }
         _ => tracing::info!(
-            "infernet: login skipped (set INFERNET_TOKEN, or run `c0mpute login` for device-code auth)"
+            "infernet: login + account-link skipped (set INFERNET_TOKEN, or run `c0mpute login`)"
         ),
     }
 }
