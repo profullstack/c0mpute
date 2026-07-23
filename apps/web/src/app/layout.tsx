@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 import Script from "next/script";
+import { WebMcpProvider } from "@/components/webmcp-provider";
 
 const SITE = "https://c0mpute.com";
 const DESCRIPTION =
@@ -43,6 +44,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen flex flex-col">
+        <WebMcpProvider />
         <header className="border-b border-[var(--color-rule)]">
           <nav className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between text-sm">
             <Link
