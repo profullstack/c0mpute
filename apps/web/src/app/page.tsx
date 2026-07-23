@@ -45,6 +45,24 @@ $ c0mpute infernet run prompts.jsonl --model qwen`}</CodeBlock>
 $ c0mpute uninstall --all     # remove c0mpute and peer binaries`}</CodeBlock>
       </section>
 
+      <section className="space-y-2 rule pt-8">
+        <p className="comment">// for ai agents · webmcp</p>
+        <div className="border border-[var(--color-rule)] rounded-md px-4 py-3 text-sm leading-6">
+          <p>
+            This site speaks{" "}
+            <a href="https://webmachinelearning.github.io/webmcp/">WebMCP</a>. A
+            browser AI agent can call c0mpute tools directly —{" "}
+            <code>c0mpute_list_plugins</code>,{" "}
+            <code>c0mpute_network_status</code>,{" "}
+            <code>c0mpute_latest_release</code>,{" "}
+            <code>c0mpute_install_command</code> — no scraping.
+          </p>
+          <p className="mt-1 text-[var(--color-dim)]">
+            → <Link href="/docs#agents">docs / ai agents</Link>
+          </p>
+        </div>
+      </section>
+
       <section className="space-y-3 rule pt-8">
         <p className="comment">// next</p>
         <ul className="space-y-1 text-sm">
