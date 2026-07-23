@@ -3,7 +3,7 @@ import { CodeBlock as Code } from "@/components/CodeBlock";
 
 export const metadata = {
   title: "docs — c0mpute",
-  description: "CLI reference and cookbook for c0mpute: install, identity, workers, transcode jobs, AI inference, reputation, plugins, and health checks.",
+  description: "CLI reference and cookbook for c0mpute: install, identity, workers, transcode jobs, AI inference, reputation, plugins, WebMCP tools for AI agents, and health checks.",
   alternates: { canonical: "https://c0mpute.com/docs" },
 };
 
@@ -239,6 +239,42 @@ c0mpute plugin uninstall my-plugin`}
 {`c0mpute doctor                         # full report
 c0mpute doctor --fix                   # auto-apply known remediations
 c0mpute doctor --report                # send anonymized telemetry`}
+        </Code>
+      </Section>
+
+      <Section h="agents" title="[ ai agents / webmcp ]">
+        <P>
+          c0mpute.com speaks{" "}
+          <a href="https://webmachinelearning.github.io/webmcp/">WebMCP</a> — a
+          browser AI agent visiting the site can call its tools directly instead
+          of scraping the page. Tools register on{" "}
+          <code>document.modelContext</code> and are a no-op in browsers that
+          don&apos;t implement the (draft) spec.
+        </P>
+        <P>Tools exposed on every page:</P>
+        <ul className="space-y-1 pl-5 text-sm leading-6">
+          <li>
+            <code>c0mpute_list_plugins</code> — the plugin catalogue with install
+            commands (also at <Link href="/api/plugins">/api/plugins</Link>)
+          </li>
+          <li>
+            <code>c0mpute_network_status</code> — live workers, jobs in flight,
+            24h throughput, latency (also at <code>/api/status</code>)
+          </li>
+          <li>
+            <code>c0mpute_latest_release</code> — CLI release manifest &amp;
+            per-platform artifacts
+          </li>
+          <li>
+            <code>c0mpute_install_command</code> — install command for the CLI or
+            a plugin by id
+          </li>
+        </ul>
+        <P>Any WebMCP-capable client can enumerate them:</P>
+        <Code>
+{`// in a page context on c0mpute.com
+const tools = await document.modelContext.getTools();
+const status = await document.modelContext.callTool("c0mpute_network_status", {});`}
         </Code>
       </Section>
 
