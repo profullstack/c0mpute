@@ -150,6 +150,99 @@ async function cacheDelListKeys(): Promise<void> {
 
 const CACHE_TTL = 30 * 60;
 
+// How long a last-known-good copy is kept to serve when SQLite Cloud is
+// unreachable. Long, because its only job is to cover an outage: a week-old
+// post list is a far better answer than a 500.
+const STALE_TTL = 7 * 24 * 60 * 60;
+
+// Deliberately NOT under `blog:list:` — cacheDelListKeys() wipes that prefix on
+// every publish, which would throw the safety net away at the exact moment the
+// site is being written to.
+function staleKey(key: string): string {
+  return `blog:stale:${key}`;
+}
+
+async function staleSet(key: string, value: unknown): Promise<void> {
+  try {
+    const redis = getRedis();
+    if (!redis) return;
+    await redis.set(staleKey(key), JSON.stringify(value), "EX", STALE_TTL);
+  } catch {}
+}
+
+async function staleGet<T>(key: string): Promise<T | null> {
+  try {
+    const redis = getRedis();
+    if (!redis) return null;
+    const raw = await redis.get(staleKey(key));
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Last-known-good, in this process.
+//
+// REDIS_URL is referenced exactly once in this repository — by getRedis(), a
+// few lines above — and is set nowhere: no .env.example, no deploy config, no
+// documentation. So every Redis path here is a no-op in production, and a
+// last-known-good copy that lives only in Redis would never once be read.
+//
+// `next start` is a long-running server, so a plain Map outlives any number of
+// requests and covers exactly the failure this is for: a database that works,
+// then briefly does not, then works again.
+//
+// Used ONLY on the failure path, never as the happy-path cache. Publishing
+// invalidates through cacheDelListKeys(), which can only reach Redis; an
+// in-process *fresh* cache would therefore hide new posts for a full TTL.
+const lastGood = new Map<string, unknown>();
+
+// Enough for every (limit, offset) a page or feed asks for, bounded so a
+// hostile or buggy caller cannot grow it without end.
+const LAST_GOOD_MAX = 64;
+
+function rememberGood(key: string, value: unknown): void {
+  if (!lastGood.has(key) && lastGood.size >= LAST_GOOD_MAX) {
+    const oldest = lastGood.keys().next().value;
+    if (oldest !== undefined) lastGood.delete(oldest);
+  }
+  lastGood.set(key, value);
+}
+
+/**
+ * Read through the cache, falling back to the last-known-good copy.
+ *
+ * The blog is served from SQLite Cloud, which intermittently refuses a
+ * connection — c0mpute.com/blog and its feed were observed returning 500 and
+ * 200 minutes apart with no deploy in between. withReconnect() already retries
+ * once, but when the retry fails too the error reaches the route and Next
+ * answers 500, and a feed that 500s is one every reader eventually treats as
+ * dead. So an outage degrades to slightly stale content rather than to none.
+ *
+ * If nothing has ever succeeded in this process, the error is rethrown: an
+ * empty feed served as 200 would claim the blog has no posts, which is worse
+ * than an honest failure.
+ */
+async function readCached<T>(cacheKey: string, load: () => Promise<T>): Promise<T> {
+  const cached = await cacheGet<T>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const fresh = await load();
+    await cacheSet(cacheKey, fresh);
+    await staleSet(cacheKey, fresh);
+    rememberGood(cacheKey, fresh);
+    return fresh;
+  } catch (e) {
+    const stale = (lastGood.get(cacheKey) as T | undefined) ?? (await staleGet<T>(cacheKey));
+    if (stale) {
+      console.error(`blog-db: ${cacheKey} failed, serving last known good —`, e);
+      return stale;
+    }
+    throw e;
+  }
+}
+
 // ── Public types & helpers ────────────────────────────────────────────────────
 
 export interface BlogPost {
@@ -200,23 +293,18 @@ export async function upsertPost(post: NewPost): Promise<void> {
 }
 
 export async function listPosts(limit = 50, offset = 0): Promise<BlogPost[]> {
-  const cacheKey = `blog:list:${limit}:${offset}`;
-  const cached = await cacheGet<BlogPost[]>(cacheKey);
-  if (cached) return cached;
-
-  const posts = await withReconnect(async () => {
-    const db = await getDb();
-    const rows = await db
-      .select()
-      .from(blogPosts)
-      .orderBy(desc(blogPosts.published_at))
-      .limit(limit)
-      .offset(offset);
-    return rows.map(hydrate);
-  });
-
-  await cacheSet(cacheKey, posts);
-  return posts;
+  return readCached(`blog:list:${limit}:${offset}`, () =>
+    withReconnect(async () => {
+      const db = await getDb();
+      const rows = await db
+        .select()
+        .from(blogPosts)
+        .orderBy(desc(blogPosts.published_at))
+        .limit(limit)
+        .offset(offset);
+      return rows.map(hydrate);
+    }),
+  );
 }
 
 export async function getPost(slug: string): Promise<BlogPost | null> {
