@@ -19,6 +19,7 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod peers;
 mod storage;
 
 use std::path::PathBuf;
@@ -356,6 +357,15 @@ fn maybe_self_update(cli: &Cli) {
 fn maybe_self_update(_cli: &Cli) {}
 
 fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so writing to a closed pipe returns EPIPE and the
+    // stdlib panics on it. For a CLI that prints lists that is a crash on
+    // `c0mpute storage ls | head`, which is ordinary shell usage. Restore the
+    // default disposition so the process exits quietly instead.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     // Opportunistic self-update on any command (throttled), so c0mpute stays
