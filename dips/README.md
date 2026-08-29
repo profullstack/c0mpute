@@ -5,6 +5,13 @@ crosses a project-policy line, or is hard to undo once shipped. DIPs are
 where we record the *why* behind durable decisions so future contributors
 don't have to reverse-engineer them from git history.
 
+> **DIP or CIP?** A DIP records *why we decided something*. A
+> [CIP](../docs/prds/README.md) — c0mpute Improvement Protocol, in
+> `docs/prds/` — is a PRD for a shippable phase: scope, API surface,
+> acceptance criteria, estimate. A CIP implements a DIP and cites it. If a CIP
+> finds its governing DIP is wrong, the fix is a new DIP, not a CIP that
+> quietly contradicts one. Numbering is independent between the two.
+
 If a change is small, local, and obvious from the diff — just open a PR. DIPs
 are for the things you'd want to read about a year from now.
 
@@ -105,7 +112,8 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0009 | Mojo for GPU/kernel-shaped compute (when applicable)             | Accepted   |
 | 0010 | Operator-run seed nodes for libp2p Kad-DHT bootstrap             | Accepted   |
 | 0011 | No central backend; libp2p + CoinPay are source of truth         | Accepted   |
-| 0012 | c0mpute is compute-only; storage is BYOS                         | Accepted   |
+| 0012 | c0mpute hosts files: Reed-Solomon 10/14, compute-locality value   | Accepted   |
+| 0012 | ~~c0mpute is compute-only; storage is BYOS~~ (draft v1)           | Superseded by `0012-storage-plugin.md` |
 | 0013 | Position: GPU batch-compute marketplace; 5–8× cheaper niche      | Accepted   |
 | 0014 | Public /status page + status-aggregator service                  | Accepted   |
 | 0015 | Hosting vertical: censorship-resistant static sites              | Draft      |

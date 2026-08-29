@@ -136,8 +136,9 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 ```
 .
 ├── docs/
-│   └── c0mpute-v1.md                  # v1 PRD (source of truth)
-├── dips/                              # design proposals
+│   ├── c0mpute-v1.md                  # v1 PRD (source of truth)
+│   └── prds/                          # CIPs — per-phase PRDs (see prds/README.md)
+├── dips/                              # design proposals (the "why")
 ├── node/
 │   └── crates/                        # all Rust source — host + transcode workload
 │       ├── c0mpute-cli/                 # produces `c0mpute`

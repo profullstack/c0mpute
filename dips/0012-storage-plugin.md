@@ -258,6 +258,21 @@ egress as the differentiator. **No claim of "cheaper than R2."**
 
 ## Out of scope
 
-- Filesystem-style mutable objects. Content-addressed, immutable.
+- ~~Filesystem-style mutable objects. Content-addressed, immutable.~~
+  **Amended 2026-08-29:** c0mpute ships a read/write POSIX mount. See
+  [CIP-007](../docs/prds/007-c0mputefs-filesystem.md). The immutability
+  property is preserved where it matters — blocks, manifests, and snapshot
+  nodes are still content-addressed and immutable. Mutability is confined to
+  advancing one signed 32-byte root pointer per volume
+  ([CIP-004](../docs/prds/004-metadata-durability.md)); the filesystem is a
+  naming layer above that, not a change to the storage layer.
 - Permanent / Arweave-style storage.
 - IPFS interop — could add later as a read-only adapter.
+
+## Delivery plan
+
+Phases 1–5 above are elaborated as CIPs in
+[`docs/prds/`](../docs/prds/README.md). CIP-001 supersedes the pricing figures
+in this DIP: tiered pricing at $0.0035/GB-month for RS 10/14 `standard`, based
+on an expansion-factor advantage over Storj rather than on the $0.008 estimated
+here.
