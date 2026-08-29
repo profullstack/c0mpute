@@ -499,6 +499,7 @@ dependencies = [
  "c0mpute-core",
  "c0mpute-doctor",
  "c0mpute-gateway",
+ "c0mpute-placement",
  "c0mpute-proto",
  "c0mpute-secure-chat",
  "c0mpute-store",
@@ -508,7 +509,9 @@ dependencies = [
  "dialoguer",
  "hex",
  "libc",
+ "reqwest",
  "rpassword",
+ "serde",
  "serde_json",
  "tokio",
  "toml",
@@ -597,6 +600,26 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "c0mpute-placement"
+version = "0.2.26"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "c0mpute-gateway",
+ "c0mpute-placement",
+ "c0mpute-proto",
+ "c0mpute-store",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
