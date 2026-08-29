@@ -13,6 +13,7 @@ testing = []
 c0mpute-proto = { workspace = true }
 c0mpute-store = { workspace = true }
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }

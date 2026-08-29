@@ -109,6 +109,34 @@ pub fn score(peer: &PeerInfo) -> f32 {
     peer.reputation * peer.uptime_30d * (0.9 + 0.1 * latency_factor)
 }
 
+/// Placement that is already in place, which a new selection must respect.
+///
+/// Repair (CIP-005) regenerates a few shards of a block whose other shards are
+/// still healthy somewhere. Selecting for those replacements as though the
+/// block were empty would let a block drift into a single failure domain one
+/// repair at a time — each repair individually satisfying the cap, the block as
+/// a whole quietly losing the independence its durability depends on.
+#[derive(Clone, Debug, Default)]
+pub struct PlacementContext {
+    /// Peers already holding a shard of this block. Never reuse one: two
+    /// shards on one host is one host, not two.
+    pub exclude_peers: std::collections::HashSet<String>,
+    /// Domains the surviving shards already occupy, counted against the cap.
+    pub used_domains: HashMap<FailureDomain, usize>,
+}
+
+impl PlacementContext {
+    /// Build the context implied by the peers currently holding a block.
+    pub fn from_holders<'a>(holders: impl IntoIterator<Item = &'a PeerInfo>) -> Self {
+        let mut ctx = Self::default();
+        for p in holders {
+            ctx.exclude_peers.insert(p.peer_id.clone());
+            *ctx.used_domains.entry(p.domain()).or_insert(0) += 1;
+        }
+        ctx
+    }
+}
+
 /// Choose `n` peers for one block's shards.
 ///
 /// Greedy by score under a per-domain cap is **optimal here**, not just a
@@ -122,6 +150,35 @@ pub fn select(
     shard_bytes: u64,
     policy: &PlacementPolicy,
 ) -> Result<Vec<Assignment>, PlacementError> {
+    let peers = select_peers(
+        candidates,
+        n,
+        shard_bytes,
+        policy,
+        &PlacementContext::default(),
+    )?;
+    Ok(peers
+        .into_iter()
+        .enumerate()
+        .map(|(i, peer)| Assignment {
+            shard_index: i as u8,
+            peer,
+        })
+        .collect())
+}
+
+/// Choose `count` peers, respecting placement that already exists.
+///
+/// Returns peers rather than assignments: repair needs to map them onto
+/// specific missing shard indices, not onto `0..n`.
+pub fn select_peers(
+    candidates: &[PeerInfo],
+    count: usize,
+    shard_bytes: u64,
+    policy: &PlacementPolicy,
+    ctx: &PlacementContext,
+) -> Result<Vec<PeerInfo>, PlacementError> {
+    let n = count;
     let total = candidates.len();
     let mut below_bar = 0usize;
     let mut too_full = 0usize;
@@ -129,6 +186,9 @@ pub fn select(
 
     let mut eligible: Vec<&PeerInfo> = Vec::new();
     for p in candidates {
+        if ctx.exclude_peers.contains(&p.peer_id) {
+            continue;
+        }
         if p.reputation < policy.min_reputation || p.uptime_30d < policy.min_uptime_30d {
             below_bar += 1;
             continue;
@@ -162,7 +222,10 @@ pub fn select(
     // score from a malformed peer record should sort, not panic.
     eligible.sort_by(|a, b| score(b).total_cmp(&score(a)));
 
-    let mut per_domain: HashMap<FailureDomain, usize> = HashMap::new();
+    // Seeded with the domains surviving shards already occupy, so replacements
+    // are capped against the block as a whole rather than against this
+    // selection in isolation.
+    let mut per_domain: HashMap<FailureDomain, usize> = ctx.used_domains.clone();
     let mut chosen: Vec<&PeerInfo> = Vec::with_capacity(n);
     for p in &eligible {
         if chosen.len() == n {
@@ -192,14 +255,7 @@ pub fn select(
         });
     }
 
-    Ok(chosen
-        .into_iter()
-        .enumerate()
-        .map(|(i, p)| Assignment {
-            shard_index: i as u8,
-            peer: p.clone(),
-        })
-        .collect())
+    Ok(chosen.into_iter().cloned().collect())
 }
 
 #[cfg(test)]

@@ -28,10 +28,17 @@
 
 pub mod distributed;
 pub mod peer;
+pub mod repair;
 pub mod select;
 pub mod transport;
 
 pub use distributed::{BlockHealth, BlockState, DistributedConfig, DistributedStorage};
 pub use peer::{FailureDomain, PeerCatalog, PeerInfo};
-pub use select::{Assignment, PlacementError, PlacementPolicy, score, select};
+pub use repair::{
+    FailureTracker, RepairAttestation, RepairConfig, RepairPlan, RepairReport, Repairer,
+    elect_repairer,
+};
+pub use select::{
+    Assignment, PlacementContext, PlacementError, PlacementPolicy, score, select, select_peers,
+};
 pub use transport::{HttpTransport, ShardTransport};
