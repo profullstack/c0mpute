@@ -1,0 +1,25 @@
+[package]
+name = "c0mpute-volume"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Durable metadata for c0mpute storage: volumes, snapshots and the root pointer (CIP-004)."
+
+[features]
+testing = []
+
+[dependencies]
+c0mpute-proto = { workspace = true }
+c0mpute-store = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+c0mpute-volume = { path = ".", features = ["testing"] }

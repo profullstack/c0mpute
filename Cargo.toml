@@ -9,6 +9,7 @@ members = [
     "node/crates/c0mpute-net",
     "node/crates/c0mpute-store",
     "node/crates/c0mpute-placement",
+    "node/crates/c0mpute-volume",
     "node/crates/c0mpute-gateway",
     "node/crates/c0mpute-verify",
     "node/crates/c0mpute-update",
@@ -67,6 +68,7 @@ rpassword = "7"
 c0mpute-proto = { path = "node/crates/c0mpute-proto" }
 c0mpute-store = { path = "node/crates/c0mpute-store" }
 c0mpute-placement = { path = "node/crates/c0mpute-placement" }
+c0mpute-volume = { path = "node/crates/c0mpute-volume" }
 c0mpute-net = { path = "node/crates/c0mpute-net" }
 c0mpute-gateway = { path = "node/crates/c0mpute-gateway" }
 c0mpute-verify = { path = "node/crates/c0mpute-verify" }

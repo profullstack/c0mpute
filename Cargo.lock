@@ -496,6 +496,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "blake3",
  "c0mpute-core",
  "c0mpute-doctor",
  "c0mpute-gateway",
@@ -504,9 +505,11 @@ dependencies = [
  "c0mpute-secure-chat",
  "c0mpute-store",
  "c0mpute-update",
+ "c0mpute-volume",
  "clap",
  "daemonize",
  "dialoguer",
+ "ed25519-dalek",
  "hex",
  "libc",
  "reqwest",
@@ -710,6 +713,24 @@ dependencies = [
  "blake3",
  "c0mpute-proto",
  "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "c0mpute-volume"
+version = "0.2.26"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "blake3",
+ "c0mpute-proto",
+ "c0mpute-store",
+ "c0mpute-volume",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

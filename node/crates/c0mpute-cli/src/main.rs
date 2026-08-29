@@ -21,6 +21,7 @@
 
 mod peers;
 mod storage;
+mod volumes;
 
 use std::path::PathBuf;
 use std::process::Command;

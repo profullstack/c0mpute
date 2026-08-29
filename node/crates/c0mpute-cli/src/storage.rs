@@ -52,6 +52,14 @@ pub enum StorageCmd {
         #[command(subcommand)]
         cmd: PeerCmd,
     },
+    /// Named, durable datasets (CIP-004).
+    ///
+    /// A volume is where manifests live durably. Without one, losing the node
+    /// that ran a write orphans every shard it described.
+    Volume {
+        #[command(subcommand)]
+        cmd: crate::volumes::VolumeCmd,
+    },
     /// Fetch an object by hash.
     Get {
         hash: String,
@@ -172,6 +180,9 @@ pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
             insecure_ignore_diversity,
         } => put(config_path, file, &tier, local, insecure_ignore_diversity).await,
         StorageCmd::Peer { cmd } => peer(config_path, cmd).await,
+        StorageCmd::Volume { cmd } => {
+            crate::volumes::run(cmd, &storage_root(config_path)?).await
+        }
         StorageCmd::Get { hash, out, range } => get(config_path, &hash, out, range).await,
         StorageCmd::Ls { quiet } => ls(config_path, quiet).await,
         StorageCmd::Info { hash } => info(config_path, &hash).await,
