@@ -5,6 +5,9 @@
 //! The gateway is deliberately stateless beyond the local cache — every
 //! request is content-addressed, so any gateway can serve any chunk.
 
+pub mod auth;
+pub mod storage_api;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -30,6 +33,24 @@ pub fn router(state: GatewayState) -> Router {
         .route("/healthz", get(healthz))
         .route("/chunks/{hash}", get(chunk_handler))
         .with_state(state)
+}
+
+/// The gateway plus the storage API (CIP-002), for nodes running the
+/// `storage` role.
+pub fn router_with_storage(state: GatewayState, storage: storage_api::StorageApiState) -> Router {
+    router(state).merge(storage_api::router(storage))
+}
+
+pub async fn serve_with_storage(
+    state: GatewayState,
+    storage: storage_api::StorageApiState,
+    addr: SocketAddr,
+) -> Result<()> {
+    let app = router_with_storage(state, storage);
+    info!(%addr, "gateway listening (storage role enabled)");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 pub async fn serve(state: GatewayState, addr: SocketAddr) -> Result<()> {

@@ -19,6 +19,8 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod storage;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -64,6 +66,15 @@ enum Cmd {
     Job {
         #[command(subcommand)]
         cmd: JobCmd,
+    },
+    /// Erasure-coded object storage on this node (DIP-0012).
+    ///
+    /// Objects are content-addressed and split into Reed-Solomon shards. Run
+    /// `c0mpute storage tiers` for the redundancy and price table.
+    #[command(after_long_help = storage::unimplemented_note())]
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
     },
     /// Plugin management (list / install / enable / disable / uninstall).
     #[command(alias = "plugins")]
@@ -436,6 +447,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
+        Cmd::Storage { cmd } => storage::run(cmd, &config_path).await,
         Cmd::Plugin { cmd } => run_plugin(cmd),
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,

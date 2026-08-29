@@ -1,7 +1,7 @@
 ---
 cip: 001
 title: "Storage program: durability model, tiers, and economics"
-status: Draft
+status: In progress
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
@@ -9,7 +9,7 @@ updated: 2026-08-29
 implements: DIP-0012 (0012-storage-plugin.md)
 depends-on:
 blocks: 002, 003, 004, 005, 006, 007
-implementation:
+implementation: PR #21 (scripts/storage-durability-sim.py; tiers in c0mpute-store::tier)
 estimate: "1 week (analysis + simulation, no production code)"
 ---
 
