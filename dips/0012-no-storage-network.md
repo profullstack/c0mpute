@@ -1,16 +1,29 @@
 ---
 dip: 0012
 title: "c0mpute is compute-only; we don't run a storage network"
-status: Accepted
+status: Superseded
 authors:
   - anthony@profullstack.com
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-08-29
 discussion:
 implementation:
 supersedes:
-superseded-by:
+superseded-by: DIP-0012 (0012-storage-plugin.md)
 ---
+
+> **Superseded.** This is draft v1 of DIP-0012 and no longer describes the
+> project's position. It was withdrawn in favour of
+> [`0012-storage-plugin.md`](0012-storage-plugin.md), whose motivation table
+> records this draft and why it was dropped — the file simply never had its
+> status updated, leaving two `Accepted` DIP-0012s on disk asserting opposite
+> things.
+>
+> **c0mpute hosts files.** See the storage-plugin DIP for the current design,
+> and [`docs/prds/`](../docs/prds/README.md) (CIP-001 onward) for the delivery
+> plan. The cost analysis below is still worth reading: the five structural
+> overheads it identifies are real, and CIP-001 and CIP-005 are largely
+> answers to them.
 
 ## Summary
 
