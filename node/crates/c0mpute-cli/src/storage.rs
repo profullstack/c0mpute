@@ -16,18 +16,41 @@ use anyhow::{Context, Result, bail};
 use c0mpute_core::config;
 use c0mpute_gateway::auth::AllowAll;
 use c0mpute_gateway::storage_api::{self, Limits, StorageApiState};
+use c0mpute_placement::{DistributedStorage, HttpTransport, PlacementPolicy};
 use c0mpute_proto::Hash;
 use c0mpute_store::{ChunkStore, Storage, Tier};
 use clap::Subcommand;
+use tokio::sync::RwLock;
+
+use crate::peers;
 
 #[derive(Subcommand, Debug)]
 pub enum StorageCmd {
     /// Store a file and print its object hash.
+    ///
+    /// Placed across the network when storage peers are configured
+    /// (`c0mpute storage peer add`), otherwise stored on this node alone.
     Put {
         file: PathBuf,
         /// Redundancy tier: hot, standard (default) or critical.
         #[arg(long, default_value = "standard")]
         tier: String,
+        /// Keep every shard on this node even when peers are configured.
+        #[arg(long)]
+        local: bool,
+        /// Place without requiring failure-domain diversity.
+        ///
+        /// CIP-001's durability figures assume shard hosts fail
+        /// independently. Fourteen shards behind one ISP are one host wearing
+        /// fourteen hats, and nothing downstream can tell the difference.
+        /// Testnets only.
+        #[arg(long)]
+        insecure_ignore_diversity: bool,
+    },
+    /// Storage peers this node knows about.
+    Peer {
+        #[command(subcommand)]
+        cmd: PeerCmd,
     },
     /// Fetch an object by hash.
     Get {
@@ -49,6 +72,19 @@ pub enum StorageCmd {
     Info { hash: String },
     /// Re-read an object and verify every block against its hash.
     Verify { hash: String },
+    /// Rebuild shards lost to departed peers (CIP-005).
+    Repair {
+        /// Repair one object. Omit to sweep every object on this node.
+        hash: Option<String>,
+        /// Report what would be repaired without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Treat an unreachable peer as gone immediately, skipping the grace
+        /// window. The window exists so a rebooting node is not repaired away;
+        /// override it only when you know a peer is really gone.
+        #[arg(long)]
+        now: bool,
+    },
     /// Delete an object and its shards.
     Rm {
         hash: String,
@@ -68,6 +104,29 @@ pub enum StorageCmd {
         #[arg(long)]
         insecure_allow_anonymous_writes: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PeerCmd {
+    /// Register a storage peer.
+    Add {
+        peer_id: String,
+        /// Base URL of the peer's storage API, e.g. http://10.0.0.2:7780
+        endpoint: String,
+        /// Autonomous system number. Without it the failure domain falls back
+        /// to the peer's IP prefix, or is unknown for a DNS name — and
+        /// unknown-domain peers are excluded from placement.
+        #[arg(long)]
+        asn: Option<u32>,
+        #[arg(long)]
+        region: Option<String>,
+    },
+    /// List known peers and the failure domains they span.
+    Ls,
+    /// Forget a peer.
+    Rm { peer_id: String },
+    /// Check which peers are reachable right now.
+    Ping,
 }
 
 /// Where the local shard store lives.
@@ -106,11 +165,20 @@ fn human(bytes: u64) -> String {
 
 pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
-        StorageCmd::Put { file, tier } => put(config_path, file, &tier).await,
+        StorageCmd::Put {
+            file,
+            tier,
+            local,
+            insecure_ignore_diversity,
+        } => put(config_path, file, &tier, local, insecure_ignore_diversity).await,
+        StorageCmd::Peer { cmd } => peer(config_path, cmd).await,
         StorageCmd::Get { hash, out, range } => get(config_path, &hash, out, range).await,
         StorageCmd::Ls { quiet } => ls(config_path, quiet).await,
         StorageCmd::Info { hash } => info(config_path, &hash).await,
         StorageCmd::Verify { hash } => verify(config_path, &hash).await,
+        StorageCmd::Repair { hash, dry_run, now } => {
+            repair(config_path, hash.as_deref(), dry_run, now).await
+        }
         StorageCmd::Rm { hash, yes } => rm(config_path, &hash, yes).await,
         StorageCmd::Status => status(config_path).await,
         StorageCmd::Tiers => {
@@ -124,16 +192,71 @@ pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
     }
 }
 
-async fn put(config_path: &std::path::Path, file: PathBuf, tier: &str) -> Result<()> {
-    let tier: Tier = tier.parse()?;
-    let storage = open(config_path).await?;
+/// Open a distributed view of this node's storage, if peers are configured.
+async fn open_distributed(
+    config_path: &std::path::Path,
+    ignore_diversity: bool,
+) -> Result<Option<(DistributedStorage, usize, usize)>> {
+    let root = storage_root(config_path)?;
+    let catalog = peers::load(&root)?;
+    if catalog.is_empty() {
+        return Ok(None);
+    }
+    let peer_count = catalog.len();
+    let domains = catalog.domain_count();
 
+    let mut config = c0mpute_placement::DistributedConfig::default();
+    if ignore_diversity {
+        config.policy = Some(PlacementPolicy {
+            max_per_domain: usize::MAX,
+            allow_unknown_domain: true,
+            ..PlacementPolicy::for_parity(4)
+        });
+    }
+
+    let storage = DistributedStorage::new(
+        open(config_path).await?,
+        Arc::new(HttpTransport::default()),
+        Arc::new(RwLock::new(catalog)),
+    )
+    .with_config(config);
+    Ok(Some((storage, peer_count, domains)))
+}
+
+async fn put(
+    config_path: &std::path::Path,
+    file: PathBuf,
+    tier: &str,
+    force_local: bool,
+    ignore_diversity: bool,
+) -> Result<()> {
+    let tier: Tier = tier.parse()?;
     let bytes = tokio::fs::read(&file)
         .await
         .with_context(|| format!("read {}", file.display()))?;
     let len = bytes.len() as u64;
 
-    let manifest = storage.put_tiered(&bytes, tier).await?;
+    if ignore_diversity {
+        eprintln!(
+            "warning: --insecure-ignore-diversity — shards may all land in one\n\
+             failure domain, which makes the durability claim meaningless."
+        );
+    }
+
+    let distributed = if force_local {
+        None
+    } else {
+        open_distributed(config_path, ignore_diversity).await?
+    };
+
+    let manifest = match &distributed {
+        Some((storage, peer_count, domains)) => {
+            eprintln!("  placing across {peer_count} peer(s) in {domains} failure domain(s)");
+            storage.put(&bytes, tier).await?
+        }
+        None => open(config_path).await?.put_tiered(&bytes, tier).await?,
+    };
+
     println!("blake3:{}", manifest.object_hash.to_hex());
     eprintln!(
         "  {} in {} block(s), {} shards, tier {} ({:.1}x expansion, {} raw)",
@@ -144,7 +267,119 @@ async fn put(config_path: &std::path::Path, file: PathBuf, tier: &str) -> Result
         tier.expansion(),
         human((len as f64 * tier.expansion()).ceil() as u64),
     );
+    if distributed.is_none() {
+        eprintln!(
+            "  single-node: every shard is on this disk, so the erasure coding is\n  \
+             overhead without durability. Add peers with `c0mpute storage peer add`."
+        );
+    }
     Ok(())
+}
+
+async fn peer(config_path: &std::path::Path, cmd: PeerCmd) -> Result<()> {
+    let root = storage_root(config_path)?;
+    let mut catalog = peers::load(&root)?;
+
+    match cmd {
+        PeerCmd::Add {
+            peer_id,
+            endpoint,
+            asn,
+            region,
+        } => {
+            let info = peers::build(peer_id.clone(), endpoint.clone(), asn, region);
+            let domain = info.domain();
+            catalog.upsert(info);
+            peers::save(&root, &catalog)?;
+            println!("added {peer_id} at {endpoint}");
+            println!("  failure domain: {domain:?}");
+            if matches!(domain, c0mpute_placement::FailureDomain::Unknown) {
+                eprintln!(
+                    "  warning: unknown failure domain — this peer will be skipped by\n  \
+                     placement. Pass --asn, or use an endpoint with a literal IP."
+                );
+            }
+            report_capacity(&catalog);
+        }
+        PeerCmd::Ls => {
+            if catalog.is_empty() {
+                println!("no storage peers configured");
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:<32} {:<24} {}",
+                "PEER", "ENDPOINT", "DOMAIN", "FREE"
+            );
+            for p in catalog.peers() {
+                println!(
+                    "{:<20} {:<32} {:<24} {}",
+                    p.peer_id,
+                    p.endpoint,
+                    format!("{:?}", p.domain()),
+                    if p.free_bytes == u64::MAX {
+                        "unknown".to_string()
+                    } else {
+                        human(p.free_bytes)
+                    }
+                );
+            }
+            report_capacity(&catalog);
+        }
+        PeerCmd::Rm { peer_id } => {
+            catalog.remove(&peer_id);
+            peers::save(&root, &catalog)?;
+            println!("removed {peer_id}");
+            report_capacity(&catalog);
+        }
+        PeerCmd::Ping => {
+            if catalog.is_empty() {
+                println!("no storage peers configured");
+                return Ok(());
+            }
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
+            for p in catalog.peers() {
+                let url = format!("{}/storage/v1/status", p.endpoint.trim_end_matches('/'));
+                let started = std::time::Instant::now();
+                match client.get(&url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        println!(
+                            "{:<20} up    {:>5} ms",
+                            p.peer_id,
+                            started.elapsed().as_millis()
+                        )
+                    }
+                    Ok(r) => println!("{:<20} HTTP {}", p.peer_id, r.status()),
+                    Err(e) => println!("{:<20} down  {e}", p.peer_id),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Say plainly whether this network can place at each tier.
+///
+/// The peer count is the number people look at; the domain count is the one
+/// that decides whether a placement is durable, so print both together.
+fn report_capacity(catalog: &c0mpute_placement::PeerCatalog) {
+    let domains = catalog.domain_count();
+    println!(
+        "\n{} peer(s) across {domains} failure domain(s)",
+        catalog.len()
+    );
+    for tier in [Tier::Hot, Tier::Standard, Tier::Critical] {
+        let policy = PlacementPolicy::for_parity(tier.parity());
+        let needed = policy.domains_required(tier.n());
+        let ok = catalog.len() >= tier.n() && domains >= needed;
+        println!(
+            "  {:<9} {} — needs {} peers across {needed} domains",
+            tier.to_string(),
+            if ok { "ready" } else { "NOT ready" },
+            tier.n()
+        );
+    }
 }
 
 async fn get(
@@ -169,9 +404,22 @@ async fn get(
             if end < start {
                 bail!("range end {end} is before start {start}");
             }
+            // Range reads are served locally. An object placed across the
+            // network has no local shards, so this only works for a
+            // single-node object today; distributed range reads land with the
+            // filesystem layer (CIP-007), which is what needs them.
             storage.get_range(&hash, start, end - start + 1).await?
         }
-        None => storage.get(&hash).await?,
+        None => {
+            // Whether the shards are local or on peers is a property of the
+            // object, not of the command. Prefer the distributed path when
+            // peers are configured; it falls back to local shards per block,
+            // so a single-node object still reads.
+            match open_distributed(config_path, false).await? {
+                Some((distributed, _, _)) => distributed.get(&hash).await?,
+                None => storage.get(&hash).await?,
+            }
+        }
     };
 
     match out {
@@ -246,27 +494,63 @@ async fn info(config_path: &std::path::Path, hash: &str) -> Result<()> {
     println!("shards    {}", m.shard_count());
     println!("manifest  v{}", m.version);
 
-    let mut healthy = 0usize;
-    let mut missing = 0usize;
-    for block in &m.blocks {
-        for shard in &block.shards {
-            if storage.chunk_store().has(&shard.hash).await {
-                healthy += 1;
-            } else {
-                missing += 1;
+    // Where the shards live decides how to check them: probe the peers when
+    // the object was placed across the network, the local disk otherwise.
+    match open_distributed(config_path, false).await? {
+        Some((distributed, _, _)) => {
+            let health = distributed.health(&m).await?;
+            let placed: Vec<&str> = m.blocks[0]
+                .shards
+                .iter()
+                .filter_map(|s| s.host_hint.as_deref())
+                .collect();
+            if !placed.is_empty() {
+                println!("hosts     {}", placed.join(", "));
+            }
+            for h in &health {
+                println!(
+                    "block {:<3} {} of {} shards present — {:?}{}",
+                    h.index,
+                    h.healthy,
+                    h.total,
+                    h.state,
+                    if h.missing.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (missing shards {:?})", h.missing)
+                    }
+                );
+            }
+            if health.iter().any(|h| h.state.needs_repair()) {
+                println!("          repair is CIP-005; not implemented yet");
             }
         }
-    }
-    let state = if missing == 0 {
-        "healthy"
-    } else if missing <= m.parity as usize {
-        "degraded (readable)"
-    } else {
-        "LOST"
-    };
-    println!("health    {healthy} present, {missing} missing — {state}");
-    if missing > 0 {
-        println!("          repair is CIP-005; on a single node there is nowhere to repair from");
+        None => {
+            let mut healthy = 0usize;
+            let mut missing = 0usize;
+            for block in &m.blocks {
+                for shard in &block.shards {
+                    if storage.chunk_store().has(&shard.hash).await {
+                        healthy += 1;
+                    } else {
+                        missing += 1;
+                    }
+                }
+            }
+            let state = if missing == 0 {
+                "healthy"
+            } else if missing <= m.parity as usize {
+                "degraded (readable)"
+            } else {
+                "LOST"
+            };
+            println!("health    {healthy} present, {missing} missing — {state}");
+            if missing > 0 {
+                println!(
+                    "          repair is CIP-005; on a single node there is nowhere to repair from"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -467,4 +751,127 @@ mod tests {
             assert!(note.contains(cip), "note should mention {cip}");
         }
     }
+}
+
+/// Rebuild shards lost to departed peers (CIP-005).
+///
+/// Explicit rather than elected: an operator running this has asked for the
+/// work directly, and is usually not one of the shard holders, so they could
+/// never win the rendezvous election that coordinates the background daemon.
+async fn repair(
+    config_path: &std::path::Path,
+    hash: Option<&str>,
+    dry_run: bool,
+    condemn_now: bool,
+) -> Result<()> {
+    let root = storage_root(config_path)?;
+    let catalog = peers::load(&root)?;
+    if catalog.is_empty() {
+        bail!(
+            "no storage peers configured — there is nowhere to repair from or to.\n\
+             Add peers with `c0mpute storage peer add`."
+        );
+    }
+    let storage = open(config_path).await?;
+    let local_id = format!("local:{}", root.display());
+    let repairer = c0mpute_placement::Repairer::new(
+        Arc::new(HttpTransport::default()),
+        Arc::new(RwLock::new(catalog)),
+        local_id,
+    )
+    .manual();
+
+    let objects = match hash {
+        Some(h) => vec![parse_hash(h)?],
+        None => storage.list().await?,
+    };
+    if objects.is_empty() {
+        println!("no objects on this node");
+        return Ok(());
+    }
+
+    let mut total_repaired = 0usize;
+    let mut total_shards = 0usize;
+    let mut total_lost = 0usize;
+
+    for object in objects {
+        let mut manifest = match storage.read_manifest(&object).await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("blake3:{}: unreadable manifest: {e:#}", object.to_hex());
+                continue;
+            }
+        };
+
+        if dry_run {
+            let plans = repairer.scan(&manifest, condemn_now).await?;
+            for plan in plans.iter().filter(|p| p.state.needs_repair()) {
+                println!(
+                    "blake3:{} block {} — {:?}, {} shard(s) missing {:?}",
+                    object.to_hex(),
+                    plan.block,
+                    plan.state,
+                    plan.missing.len(),
+                    plan.missing
+                );
+                total_repaired += 1;
+            }
+            continue;
+        }
+
+        let report = repairer
+            .repair_object(&mut manifest, 0, condemn_now)
+            .await?;
+        if report.blocks_repaired > 0 {
+            // The manifest now points at the new shard homes, so it has to be
+            // written back or the next read still looks for the dead peers.
+            storage.write_manifest(&manifest).await?;
+            println!(
+                "blake3:{} — repaired {} block(s), {} shard(s) regenerated",
+                object.to_hex(),
+                report.blocks_repaired,
+                report.shards_regenerated
+            );
+        }
+        for att in &report.attestations {
+            println!(
+                "  block {} shards {:?} → {}",
+                att.block,
+                att.shards_regenerated,
+                att.destinations.join(", ")
+            );
+        }
+        if report.blocks_lost > 0 {
+            eprintln!(
+                "blake3:{} — {} block(s) LOST: fewer than k shards remain, repair cannot help",
+                object.to_hex(),
+                report.blocks_lost
+            );
+        }
+        for f in &report.failures {
+            eprintln!("blake3:{}: {f}", object.to_hex());
+        }
+        total_repaired += report.blocks_repaired;
+        total_shards += report.shards_regenerated;
+        total_lost += report.blocks_lost;
+    }
+
+    if dry_run {
+        println!("\n{total_repaired} block(s) would be repaired (dry run)");
+        if total_repaired > 0 {
+            println!("re-run without --dry-run to rebuild them");
+        }
+    } else {
+        println!("\n{total_repaired} block(s) repaired, {total_shards} shard(s) regenerated");
+        if total_lost > 0 {
+            println!("{total_lost} block(s) unrecoverable");
+        }
+    }
+    if !condemn_now && total_repaired == 0 {
+        println!(
+            "note: peers unreachable for less than the grace window are left alone,\n\
+             so a node that is merely rebooting is not repaired away. Use --now to override."
+        );
+    }
+    Ok(())
 }

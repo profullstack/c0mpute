@@ -353,7 +353,7 @@ async fn put_object(
             .storage
             .read_manifest(&object_hash)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
         return Ok((StatusCode::OK, axum::Json(manifest)).into_response());
     }
 
@@ -379,7 +379,7 @@ async fn put_object(
         .put_stream(stream, Some(object_hash), tier, Some(len))
         .await
         .map_err(|e| {
-            let msg = e.to_string();
+            let msg = format!("{e:#}");
             if msg.contains("integrity failure") {
                 ApiError::Unprocessable(msg)
             } else {
@@ -429,7 +429,7 @@ async fn get_object(
             .storage
             .get_range_with(&manifest, offset, len)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
         let end = offset + bytes.len() as u64 - 1;
         return Ok((
             StatusCode::PARTIAL_CONTENT,
@@ -496,7 +496,7 @@ async fn delete_object(
         .storage
         .delete(&object_hash)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
     state.budget.release(cost);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -518,7 +518,7 @@ async fn load_manifest(state: &StorageApiState, hash: &Hash) -> ApiResult<Object
         .storage
         .read_manifest(hash)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))
+        .map_err(|e| ApiError::Internal(format!("{e:#}")))
 }
 
 // ----------------------------------------------------------------- shards
@@ -593,7 +593,7 @@ async fn put_shard(
         .chunk_store()
         .put(&body)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
     state.budget.charge(len);
     Ok(StatusCode::CREATED.into_response())
 }
