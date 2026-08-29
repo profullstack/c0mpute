@@ -16,8 +16,13 @@
 
 pub mod erasure;
 pub mod storage;
+pub mod tier;
 
-pub use storage::{Storage, ObjectManifest, ShardEntry};
+pub use storage::{
+    BlockEntry, DEFAULT_BLOCK_SIZE, MANIFEST_VERSION, MAX_BLOCK_SIZE, ObjectManifest, ShardEntry,
+    Storage, block_size_for,
+};
+pub use tier::Tier;
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +52,24 @@ impl ChunkStore {
             .join(&hex[0..2])
             .join(&hex[2..4])
             .join(&hex)
+    }
+
+    /// Write bytes, reporting whether this call *created* the chunk (`true`)
+    /// or found it already present (`false`).
+    ///
+    /// Callers that may need to undo a partial write must use this rather than
+    /// [`ChunkStore::put`]: chunks are content-addressed and therefore shared
+    /// between objects, so rolling back a write by deleting every hash it
+    /// touched will happily delete chunks a *different, intact* object still
+    /// depends on. Deleting only what you created is the difference between
+    /// discarding junk and destroying someone else's data.
+    pub async fn put_new(&self, bytes: &[u8]) -> Result<(Hash, bool)> {
+        let hash = Hash::of(bytes);
+        if self.has(&hash).await {
+            return Ok((hash, false));
+        }
+        self.put(bytes).await?;
+        Ok((hash, true))
     }
 
     /// Write bytes; the returned hash is computed and is the storage key.
@@ -134,10 +157,7 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "c0mpute-store-test-{}",
-            uuid_like_suffix()
-        ));
+        let dir = std::env::temp_dir().join(format!("c0mpute-store-test-{}", uuid_like_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
