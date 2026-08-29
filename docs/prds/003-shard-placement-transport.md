@@ -1,7 +1,7 @@
 ---
 cip: 003
 title: "Cross-node shard placement and streaming transport"
-status: Draft
+status: In progress
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
@@ -9,7 +9,7 @@ updated: 2026-08-29
 implements: DIP-0012 (0012-storage-plugin.md) Phase 3
 depends-on: 002
 blocks: 005, 006
-implementation:
+implementation: PR #23 (c0mpute-placement crate; HTTP transport over the CIP-002 shard endpoints; `c0mpute storage peer`)
 estimate: "3–4 weeks"
 ---
 
@@ -57,6 +57,20 @@ first thing this CIP fixes.
 
 ## Design
 
+### What shipped first: HTTP, not libp2p
+
+The plan below rewrites the libp2p protocol before placement can work. That
+ordering turned out to be unnecessary. CIP-002 already ships shard `PUT`/`GET`/
+`HEAD` endpoints that verify what they are given, so placement was built
+against a `ShardTransport` trait with an HTTP implementation on top of those —
+and cross-node placement works today, on a real multi-node testnet, with no
+libp2p changes at all.
+
+The streaming libp2p protocol below is still worth doing (it removes an HTTP
+hop between peers that are already connected, and gives repair a batched
+`Have` probe). It is now a *second implementation of an existing trait* rather
+than a prerequisite, which makes it independently schedulable.
+
 ### Fix the transport first
 
 `request_response::cbor::Behaviour<FetchRequest, FetchResponse>` buffers an
@@ -93,11 +107,27 @@ Given a block needing `n` hosts, score each candidate peer:
 ```
 score = reputation                        # c0mpute-verify::reputation, >= 0.9 required
       * uptime_30d                        # >= 0.99 required (CIP-001)
-      * free_disk_factor                  # committed - used, normalised
-      * (1 / (1 + rtt_ms / 100))          # prefer near peers, weakly
+      * (0.9 + 0.1 / (1 + rtt_ms / 100))  # prefer near peers, weakly
 ```
 
-Then select greedily under **diversity constraints**, in priority order:
+Free disk is a hard filter rather than a score term — a peer either has room
+for the shard or it does not.
+
+**The latency weighting is deliberately narrower than this CIP first
+specified.** A bare `1 / (1 + rtt/100)` factor makes a 400 ms peer score 20%
+below a 1 ms one, which is enough for a fast flaky node to outrank a slow
+reliable one. CIP-001 is explicit that availability drives durability and
+latency does not, so the term is scaled into a band where it separates
+otherwise-equal peers but cannot overturn a reputation gap. A unit test pins
+this.
+
+Greedy selection under a per-domain cap is **optimal, not heuristic**: "at
+most `max_per_domain` from each domain" is a partition matroid, and greedy is
+optimal over a matroid. So a `DiversityUnsatisfiable` result means no other
+assignment would have worked either — no backtracking, and no better answer
+being missed.
+
+Select greedily under **diversity constraints**, in priority order:
 
 1. No two shards of the same block on the same peer. (Hard.)
 2. At most `floor(parity / 2)` shards per ASN — 2 of 14 for `standard`. (Hard.)

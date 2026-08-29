@@ -66,7 +66,7 @@ Delivering read/write network storage for c0mpute, implementing
 |-----|-------|-----------|--------|
 | [001](001-storage-program.md) | Storage program: durability model, tiers, and economics | — | In progress |
 | [002](002-storage-http-api.md) | Storage HTTP API on the gateway | 001 | In progress |
-| [003](003-shard-placement-transport.md) | Cross-node shard placement and streaming transport | 002 | Draft |
+| [003](003-shard-placement-transport.md) | Cross-node shard placement and streaming transport | 002 | In progress |
 | [004](004-metadata-durability.md) | Metadata durability: manifests, volumes, and the root pointer | 002 | Draft |
 | [005](005-repair-daemon.md) | Auto-repair daemon | 003, 004 | Draft |
 | [006](006-challenges-metering-payouts.md) | Storage challenges, metering, and provider payouts | 003, 004 | Draft |

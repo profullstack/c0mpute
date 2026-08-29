@@ -1,0 +1,30 @@
+[package]
+name = "c0mpute-placement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-node shard placement and retrieval for c0mpute storage (CIP-003)."
+
+[features]
+# Exposes the in-memory transport to downstream crates' tests.
+testing = []
+
+[dependencies]
+c0mpute-proto = { workspace = true }
+c0mpute-store = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Enables the `testing` feature for this crate's own integration tests, which
+# are a separate crate and so do not see `cfg(test)`.
+c0mpute-placement = { path = ".", features = ["testing"] }
+serde_json = { workspace = true }
+c0mpute-gateway = { workspace = true }
+axum = { workspace = true }
