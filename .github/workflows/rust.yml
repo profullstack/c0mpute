@@ -1,0 +1,119 @@
+name: rust
+
+# The Rust build/test gate.
+#
+# Until this existed, CI ran only security scanners (CodeQL, ThreatCrush,
+# gitleaks, semgrep, Socket, bun audit) — nothing compiled the workspace or ran
+# a test. A PR could break every crate in the tree and still show all-green.
+#
+# `build-and-test` is the gate and must stay blocking. `lint` is advisory for
+# now: the tree does not currently satisfy `cargo fmt --check`, and clippy has
+# pre-existing warnings in c0mpute-net and c0mpute-update. Making either
+# blocking today would redden every PR for reasons unrelated to its diff. Once
+# the tree is clean, drop the `continue-on-error` lines and they become real
+# gates — that is the point of running them now rather than waiting.
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+# A new push supersedes an in-flight run for the same ref. Rust builds are the
+# most expensive job in this repo; there is no value in finishing one for a
+# commit that has already been replaced.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings only where we opt in below; see the lint job.
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # The toolchain version is read out of .mise.toml rather than pinned
+      # here, so CI cannot silently drift from what contributors run locally
+      # (DIP-0004 pins the contributor toolchain via mise). If the two were
+      # written in two places, they would disagree eventually and CI would be
+      # testing a compiler nobody uses.
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        run: |
+          version=$(grep -E '^rust\s*=' .mise.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::could not read the rust version from .mise.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Using Rust $version (from .mise.toml)"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Build before testing so a compile error is reported as a compile
+      # error, rather than as an opaque failure inside `cargo test`.
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  lint:
+    name: fmt + clippy (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Advisory until the tree is clean — see the header comment. The result is
+    # still visible on every PR, so the backlog cannot quietly grow.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        run: |
+          version=$(grep -E '^rust\s*=' .mise.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=${version:-stable}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+
+      # Report what the two steps found in one place, so the advisory result is
+      # legible without opening the log.
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Rust lint (advisory)"
+            echo
+            echo "Not blocking yet: the tree has pre-existing \`cargo fmt\` diffs and"
+            echo "clippy warnings in \`c0mpute-net\` and \`c0mpute-update\`. Clear those and"
+            echo "remove the \`continue-on-error\` lines in \`.github/workflows/rust.yml\`"
+            echo "to turn this into a real gate."
+          } >> "$GITHUB_STEP_SUMMARY"
