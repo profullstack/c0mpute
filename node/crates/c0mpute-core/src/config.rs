@@ -3,14 +3,20 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use c0mpute_proto::Role;
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    // Each section defaults, so a partial config.toml that sets only what the
+    // operator cares about (e.g. just `[storage] root`) loads cleanly instead
+    // of erroring on the sections they left out.
+    #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
     pub roles: Vec<Role>,

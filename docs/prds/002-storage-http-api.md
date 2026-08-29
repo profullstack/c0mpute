@@ -1,7 +1,7 @@
 ---
 cip: 002
 title: "Storage HTTP API on the gateway"
-status: Draft
+status: In progress
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
@@ -9,7 +9,7 @@ updated: 2026-08-29
 implements: DIP-0012 (0012-storage-plugin.md) Phase 2
 depends-on: 001
 blocks: 003, 004, 012
-implementation:
+implementation: PR #21 (c0mpute-store block layer + manifest v2, c0mpute-gateway storage API, `c0mpute storage` CLI)
 estimate: "1.5–2 weeks"
 ---
 
@@ -107,14 +107,15 @@ This CIP adds streaming variants alongside the existing ones:
 
 ```rust
 impl Storage {
-    /// Consume an AsyncRead, hashing and RS-encoding in fixed blocks.
-    pub async fn put_stream<R: AsyncRead + Unpin>(
-        &self, reader: R, expected: Option<Hash>, tier: Tier,
-    ) -> Result<ObjectManifest>;
+    /// Consume a byte stream, hashing and RS-encoding block by block.
+    pub async fn put_stream<S>(
+        &self, stream: S, expected: Option<Hash>, tier: Tier, size_hint: Option<u64>,
+    ) -> Result<ObjectManifest>
+    where S: Stream<Item = Result<Bytes>>;
 
-    /// Produce an AsyncRead that reconstructs lazily, block by block.
-    pub fn get_stream(&self, object_hash: &Hash)
-        -> Result<impl AsyncRead + Unpin>;
+    /// Yield the object's blocks in order, reconstructing lazily.
+    pub fn read_stream(&self, manifest: ObjectManifest)
+        -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
     /// Byte-range read. Needed by CIP-007 for random-access files.
     pub async fn get_range(
@@ -122,6 +123,14 @@ impl Storage {
     ) -> Result<Vec<u8>>;
 }
 ```
+
+A `Stream<Item = Result<Bytes>>` rather than `AsyncRead`: axum bodies are
+already byte streams in both directions (`Body::into_data_stream`,
+`Body::from_stream`), so this avoids a bridging dependency on both sides.
+`size_hint` carries the HTTP `Content-Length` through to [`block_size_for`].
+
+The non-streaming `put` is a thin wrapper over `put_stream`, so there is one
+write path rather than two that drift.
 
 Both are built on a **block layer**: an object is split into fixed-size blocks
 (default 4 MiB, recorded in the manifest) and each block is independently
@@ -157,6 +166,29 @@ pub struct BlockEntry {
 Version 1 manifests (flat `shards`, single implicit block) still parse — a
 `#[serde(default)]` shim maps them to a one-block v2. There is no production
 data to migrate, but the shim keeps the existing tests meaningful.
+
+### Rollback must delete only what the write created
+
+A write that fails its hash commitment has to undo itself, and the obvious
+implementation — remember every shard hash written, then delete them all — is
+**wrong in a way that loses data**.
+
+Shards are content-addressed and therefore shared between objects. Uploading
+the bytes of an object that *already exists*, under a wrong committed hash,
+produces exactly the same shard hashes. Rolling back everything the write
+touched deletes the intact object's shards: one malformed request, from anyone
+who can obtain the content, destroys it.
+
+So `ChunkStore` grows `put_new`, which reports whether a call created the chunk
+or found it already present, and rollback removes only newly-created hashes.
+Refcounting is still deliberately avoided (CIP-004); this is strictly narrower
+and needs no coordination.
+
+Found by driving the running server with curl, not by the unit tests — those
+stored nothing beforehand, so there was nothing for the bad write to destroy.
+Both the store and the HTTP suite now carry a regression test that stores an
+object first. Worth remembering for CIP-005 and CIP-004, which both delete
+content-addressed data and will meet the same trap.
 
 ### Auth
 

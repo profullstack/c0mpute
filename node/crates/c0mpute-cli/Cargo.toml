@@ -15,6 +15,9 @@ c0mpute-doctor = { workspace = true }
 c0mpute-proto = { workspace = true }
 c0mpute-update = { workspace = true }
 c0mpute-secure-chat = { workspace = true }
+c0mpute-store = { workspace = true }
+c0mpute-gateway = { workspace = true }
+axum = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
