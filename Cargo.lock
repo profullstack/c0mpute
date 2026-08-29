@@ -609,6 +609,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "blake3",
  "c0mpute-gateway",
  "c0mpute-placement",
  "c0mpute-proto",

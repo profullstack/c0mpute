@@ -72,6 +72,19 @@ pub enum StorageCmd {
     Info { hash: String },
     /// Re-read an object and verify every block against its hash.
     Verify { hash: String },
+    /// Rebuild shards lost to departed peers (CIP-005).
+    Repair {
+        /// Repair one object. Omit to sweep every object on this node.
+        hash: Option<String>,
+        /// Report what would be repaired without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Treat an unreachable peer as gone immediately, skipping the grace
+        /// window. The window exists so a rebooting node is not repaired away;
+        /// override it only when you know a peer is really gone.
+        #[arg(long)]
+        now: bool,
+    },
     /// Delete an object and its shards.
     Rm {
         hash: String,
@@ -163,6 +176,9 @@ pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
         StorageCmd::Ls { quiet } => ls(config_path, quiet).await,
         StorageCmd::Info { hash } => info(config_path, &hash).await,
         StorageCmd::Verify { hash } => verify(config_path, &hash).await,
+        StorageCmd::Repair { hash, dry_run, now } => {
+            repair(config_path, hash.as_deref(), dry_run, now).await
+        }
         StorageCmd::Rm { hash, yes } => rm(config_path, &hash, yes).await,
         StorageCmd::Status => status(config_path).await,
         StorageCmd::Tiers => {
@@ -735,4 +751,127 @@ mod tests {
             assert!(note.contains(cip), "note should mention {cip}");
         }
     }
+}
+
+/// Rebuild shards lost to departed peers (CIP-005).
+///
+/// Explicit rather than elected: an operator running this has asked for the
+/// work directly, and is usually not one of the shard holders, so they could
+/// never win the rendezvous election that coordinates the background daemon.
+async fn repair(
+    config_path: &std::path::Path,
+    hash: Option<&str>,
+    dry_run: bool,
+    condemn_now: bool,
+) -> Result<()> {
+    let root = storage_root(config_path)?;
+    let catalog = peers::load(&root)?;
+    if catalog.is_empty() {
+        bail!(
+            "no storage peers configured — there is nowhere to repair from or to.\n\
+             Add peers with `c0mpute storage peer add`."
+        );
+    }
+    let storage = open(config_path).await?;
+    let local_id = format!("local:{}", root.display());
+    let repairer = c0mpute_placement::Repairer::new(
+        Arc::new(HttpTransport::default()),
+        Arc::new(RwLock::new(catalog)),
+        local_id,
+    )
+    .manual();
+
+    let objects = match hash {
+        Some(h) => vec![parse_hash(h)?],
+        None => storage.list().await?,
+    };
+    if objects.is_empty() {
+        println!("no objects on this node");
+        return Ok(());
+    }
+
+    let mut total_repaired = 0usize;
+    let mut total_shards = 0usize;
+    let mut total_lost = 0usize;
+
+    for object in objects {
+        let mut manifest = match storage.read_manifest(&object).await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("blake3:{}: unreadable manifest: {e:#}", object.to_hex());
+                continue;
+            }
+        };
+
+        if dry_run {
+            let plans = repairer.scan(&manifest, condemn_now).await?;
+            for plan in plans.iter().filter(|p| p.state.needs_repair()) {
+                println!(
+                    "blake3:{} block {} — {:?}, {} shard(s) missing {:?}",
+                    object.to_hex(),
+                    plan.block,
+                    plan.state,
+                    plan.missing.len(),
+                    plan.missing
+                );
+                total_repaired += 1;
+            }
+            continue;
+        }
+
+        let report = repairer
+            .repair_object(&mut manifest, 0, condemn_now)
+            .await?;
+        if report.blocks_repaired > 0 {
+            // The manifest now points at the new shard homes, so it has to be
+            // written back or the next read still looks for the dead peers.
+            storage.write_manifest(&manifest).await?;
+            println!(
+                "blake3:{} — repaired {} block(s), {} shard(s) regenerated",
+                object.to_hex(),
+                report.blocks_repaired,
+                report.shards_regenerated
+            );
+        }
+        for att in &report.attestations {
+            println!(
+                "  block {} shards {:?} → {}",
+                att.block,
+                att.shards_regenerated,
+                att.destinations.join(", ")
+            );
+        }
+        if report.blocks_lost > 0 {
+            eprintln!(
+                "blake3:{} — {} block(s) LOST: fewer than k shards remain, repair cannot help",
+                object.to_hex(),
+                report.blocks_lost
+            );
+        }
+        for f in &report.failures {
+            eprintln!("blake3:{}: {f}", object.to_hex());
+        }
+        total_repaired += report.blocks_repaired;
+        total_shards += report.shards_regenerated;
+        total_lost += report.blocks_lost;
+    }
+
+    if dry_run {
+        println!("\n{total_repaired} block(s) would be repaired (dry run)");
+        if total_repaired > 0 {
+            println!("re-run without --dry-run to rebuild them");
+        }
+    } else {
+        println!("\n{total_repaired} block(s) repaired, {total_shards} shard(s) regenerated");
+        if total_lost > 0 {
+            println!("{total_lost} block(s) unrecoverable");
+        }
+    }
+    if !condemn_now && total_repaired == 0 {
+        println!(
+            "note: peers unreachable for less than the grace window are left alone,\n\
+             so a node that is merely rebooting is not repaired away. Use --now to override."
+        );
+    }
+    Ok(())
 }

@@ -1,7 +1,7 @@
 ---
 cip: 005
 title: "Auto-repair daemon"
-status: Draft
+status: In progress
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
@@ -9,7 +9,7 @@ updated: 2026-08-29
 implements: DIP-0012 (0012-storage-plugin.md) Phase 4
 depends-on: 003, 004
 blocks:
-implementation:
+implementation: PR #26 (c0mpute-placement::repair; `c0mpute storage repair`)
 estimate: "3–4 weeks"
 ---
 
@@ -56,6 +56,40 @@ We chose the left column. The bill for that choice is paid here.
   is garbage, and CIP-004's GC handles it.
 
 ## Design
+
+### What shipped, and what the implementation changed
+
+The repair engine, election, flap tolerance and diversity-aware replacement
+placement are implemented and driven by `c0mpute storage repair`. The
+scheduled background daemon, gossip repair leases, signed attestations and the
+bandwidth token bucket are **not** — see "Still outstanding" at the end.
+
+Three things the design below did not anticipate, all found by running it:
+
+1. **Election has to be bypassable.** `elect_repairer` picks among the block's
+   *holders*. An operator running `c0mpute storage repair` is usually not one,
+   so they could never win and every repair deferred forever. Election exists
+   to stop fourteen nodes doing the same job, not to stop anyone doing it, so
+   it is now a mode: honoured by the daemon, bypassed on explicit request.
+
+2. **A dead peer still looks healthy in the catalog.** Reputation and uptime
+   are periodic measurements, not liveness. Repair happily selected the node
+   that had just died as the *destination* for the replacement — the repair
+   "succeeded" and the block stayed exactly as degraded. Replacement selection
+   now excludes every peer the block has ever pointed at, plus anything that
+   failed a probe this pass.
+
+3. **That is not sufficient on its own.** A peer that died in an *earlier*
+   round is in the catalog, looks healthy, and is not probed at all because it
+   holds none of this block's shards. The first time we learn is when the
+   placement fails. So repair now selects spare candidates and fails over.
+   (Any subset of a valid selection is valid — the per-domain cap is a maximum
+   — so skipping a dead candidate cannot break diversity.)
+
+The common thread is that **the catalog has no liveness signal**, and every
+layer that assumes otherwise gets this wrong in a way that looks like success.
+CIP-006's challenges are what eventually make peer health a measured fact
+rather than a stale field.
 
 ### Who repairs?
 
@@ -220,6 +254,26 @@ Defences:
 **3–4 weeks.** ~0.5 week detection and classification, 0.5 week rendezvous
 election and leases, 1 week the repair path, 0.5 week attestations, 1 week
 bandwidth control and storm defences, 0.5 week the chaos test harness.
+
+## Still outstanding
+
+Implemented: detection and classification, rendezvous election, flap-tolerant
+condemnation, k-shard reconstruction with verification, minimal regeneration,
+diversity-aware replacement with failover, attestation records, priority
+ordering, and the storm cap on blocks per pass.
+
+Not yet:
+
+- **The scheduled daemon.** Repair runs on request today. The rolling
+  hourly scan needs somewhere to live — most naturally the worker supervisor.
+- **Gossip repair leases.** Election alone prevents most duplicate work;
+  leases close the race when two nodes disagree about who is healthy.
+- **Signed attestations.** The record exists and round-trips as JSON;
+  signing needs CoinPay DIDs, which arrive with CIP-006.
+- **The bandwidth token bucket.** Repair is unthrottled, which is fine for
+  an operator-invoked pass and not for a background loop on a consumer uplink.
+- **Batched `Have` probes.** One HEAD per shard, per CIP-003's HTTP transport.
+  Fine at this scale, too chatty for an hourly scan of millions of blocks.
 
 ## Open questions
 
