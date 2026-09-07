@@ -3,39 +3,44 @@ import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
 import {
   loadAllPlugins,
+  byCategory,
   tagline,
   installCommand,
+  CATEGORY_LABELS,
+  CATEGORY_BLURBS,
   type PluginManifest,
 } from "@/lib/plugins";
 
 export const metadata = {
   title: "plugins — c0mpute",
-  description: "c0mpute plugin ecosystem: transcode (FFmpeg GPU video encoding), coinpay (DID identity + escrow payments), and infernet (AI LLM inference). MIT-licensed.",
+  description:
+    "c0mpute workload plugins, network services and applications: AI inference, embeddings, diffusion, speech and OCR; transcoding, rendering and streaming; crawling, storage and hosting. MIT-licensed, manifest-driven.",
   alternates: { canonical: "https://c0mpute.com/plugins" },
 };
 
 export default function PluginsPage() {
-  const plugins = loadAllPlugins();
+  const groups = byCategory(loadAllPlugins());
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">plugins</h1>
         <p className="comment">
-          // installable workload + service plugins for the c0mpute CLI
+          // typed workloads, network services, and applications built on them
         </p>
       </header>
 
       <section className="space-y-2 text-sm leading-6">
         <p>
-          Plugins extend the c0mpute CLI with new workload types or
-          services. The three v1 plugins are pre-installed by{" "}
-          <code>curl https://c0mpute.com/install.sh | sh</code>.
+          Plugins define what the network can execute. A workload plugin is a
+          priceable, verifiable contract — an input schema, an output schema,
+          capability requirements, pricing units and validation hooks — not an
+          invitation to run arbitrary code on someone&apos;s machine.
         </p>
         <p>
           Third-party plugins install with{" "}
           <code>c0mpute plugin install &lt;url&gt;</code> where{" "}
-          <code>&lt;url&gt;</code> points at the plugin's signed{" "}
+          <code>&lt;url&gt;</code> points at the plugin&apos;s{" "}
           <code>install.sh</code>. See{" "}
           <a href="https://github.com/profullstack/c0mpute/blob/master/dips/0006-module-model.md">
             DIP-0006
@@ -44,29 +49,79 @@ export default function PluginsPage() {
         </p>
       </section>
 
-      <section className="space-y-4">
-        {plugins.map((p) => (
-          <PluginCard key={p.id} p={p} />
-        ))}
+      {/* The three labels matter: an application built on c0mpute should not
+          read as a core protocol dependency just because it ships a
+          manifest. */}
+      <section className="space-y-2 text-xs leading-6 border border-[var(--color-rule)] rounded-md px-4 py-3">
+        <p className="text-[var(--color-dim)]">// how to read the labels</p>
+        <p>
+          <Badge label="workload" /> executes jobs the network prices and
+          verifies.{" "}
+          <Badge label="service" /> provides a network capability other
+          workloads use.{" "}
+          <Badge label="application" /> is a product built <em>on</em>{" "}
+          c0mpute — useful, and not something the protocol depends on.
+        </p>
       </section>
 
-      <section className="rule pt-8 text-sm text-[var(--color-dim)]">
+      {groups.map(({ category, plugins }) => (
+        <section key={category} className="space-y-4">
+          <header className="space-y-1 rule pt-6">
+            <h2 className="text-sm font-semibold accent">
+              [ {CATEGORY_LABELS[category]} ]
+              <span className="text-[var(--color-dim)] font-normal">
+                {" "}
+                · {plugins.length}
+              </span>
+            </h2>
+            <p className="text-xs text-[var(--color-dim)]">
+              {CATEGORY_BLURBS[category]}
+            </p>
+          </header>
+          {plugins.map((p) => (
+            <PluginCard key={p.id} p={p} />
+          ))}
+        </section>
+      ))}
+
+      <section className="rule pt-8 text-sm text-[var(--color-dim)] space-y-2">
         <p>
-          Want to publish a plugin? For now, open a PR adding{" "}
+          Want to publish a plugin? Open a PR adding{" "}
           <code>plugins/&lt;your-id&gt;/module.toml</code> on{" "}
           <a href="https://github.com/profullstack/c0mpute">
             github.com/profullstack/c0mpute
           </a>
-          . The marketplace UI here renders from those manifests at build
-          time. A submission API lands once we have signing in place.
+          , including a <code>category</code>. This page renders from those
+          manifests at build time.
+        </p>
+        <p className="text-xs">
+          A submission API lands once plugin signing is in place — signed
+          manifests, publisher keys and content hashes. Until then a remote{" "}
+          <code>install.sh</code> is the trust boundary, which is exactly why
+          it is not the long-term answer.
         </p>
       </section>
 
       <p className="text-xs text-[var(--color-dim)]">
-        → <Link href="/docs">docs</Link> ·{" "}
+        → <Link href="/protocol">protocol</Link> ·{" "}
+        <Link href="/docs">docs</Link> ·{" "}
         <Link href="/getting-started">getting-started</Link>
       </p>
     </div>
+  );
+}
+
+/** workload | service | application — see the legend above. */
+function kindLabel(p: PluginManifest): string {
+  if (p.kind === "workload") return "workload";
+  return p.category === "applications" ? "application" : "service";
+}
+
+function Badge({ label }: { label: string }) {
+  return (
+    <span className="border border-[var(--color-rule)] rounded px-1.5 py-0.5 accent whitespace-nowrap">
+      {label}
+    </span>
   );
 }
 
@@ -81,14 +136,14 @@ function PluginCard({ p }: { p: PluginManifest }) {
   return (
     <article className="border border-[var(--color-rule)] bg-[var(--color-card)] rounded p-5 space-y-3">
       <header className="flex items-baseline justify-between gap-3">
-        <h2 className="text-lg accent">
+        <h3 className="text-lg accent">
           <span className="text-[var(--color-dim)]">[</span>
           {p.id}
           <span className="text-[var(--color-dim)]">]</span>{" "}
           <span className="text-[var(--color-fg)]">{p.name}</span>
-        </h2>
-        <span className="text-xs text-[var(--color-dim)]">
-          v{p.version} · {p.kind} · {dispatchLabel}
+        </h3>
+        <span className="text-xs text-[var(--color-dim)] whitespace-nowrap">
+          v{p.version} · {kindLabel(p)} · {dispatchLabel}
         </span>
       </header>
 

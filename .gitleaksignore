@@ -4,13 +4,23 @@
 # certain, treat it as a leak: rotate first, argue afterwards.
 #
 # Format is a gitleaks fingerprint, `<commit>:<path>:<rule>:<line>`, taken
-# verbatim from the scan output. Fingerprints pin a commit, so history stays
-# covered without rewriting it.
+# verbatim from the scan output.
+#
+# Note on why fingerprints stay useful after a squash-merge: CI checks out
+# with `fetch-depth: 0`, and `gitleaks detect --source .` scans every
+# *reachable* commit — not just the first-parent history of master. A merged
+# branch that still exists on the remote keeps its pre-squash commits
+# reachable, so a fingerprint pinning one of those SHAs is still doing work
+# even though `git log master` never shows it. Deleting the merged branch is
+# what actually retires an entry here.
 
 # The example ed25519 identifier from the did:key specification, used in a
 # test asserting that c0mpute rejects foreign DID methods. It is a *public*
 # key — a DID is a public key by construction — but it is 44 characters of
-# base58, and the generic-api-key rule scores on entropy alone. The line
-# also carries an inline `gitleaks:allow`, which covers future scans of the
-# working tree; this entry covers the commit that introduced it.
+# base58, and the generic-api-key rule scores on entropy alone.
+#
+# The line also carries an inline `gitleaks:allow`, which covers the content
+# as it stands on master. This entry covers the pre-squash commit on branch
+# `worktree-c0mpute-v2-protocol-spine` (PR #30), which remains reachable
+# until that branch is deleted.
 8680fe8bfc104e376b89e780f73bda2075178ab2:node/crates/c0mpute-envelope/src/identity.rs:generic-api-key:276

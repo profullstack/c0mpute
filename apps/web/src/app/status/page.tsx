@@ -78,6 +78,20 @@ export default async function StatusPage() {
 
   return (
     <DashboardShell>
+      {/* An aggregator is an optional hosted service, and saying so is not a
+          disclaimer — it is the architecture. A buyer who doubts this view
+          queries the network directly. See DIP-0024. */}
+      <p className="text-xs text-[var(--color-dim)] leading-6">
+        An observed view of the network, not canonical state. This page reads
+        from an aggregator we run; aggregators and indexers cache what peers
+        publish and can be stale, partial or incomplete. They cannot forge a
+        record — every advert and receipt is independently signed — and
+        nothing here is authoritative.{" "}
+        <Link href="/protocol" className="hover:text-[var(--color-accent)]">
+          how that works
+        </Link>
+      </p>
+
       <div className="flex items-center justify-between">
         {status.source === "stub" && (
           <span className="text-xs text-[var(--color-warn)]">
