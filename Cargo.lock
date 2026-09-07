@@ -564,6 +564,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "c0mpute-envelope"
+version = "0.2.26"
+dependencies = [
+ "blake3",
+ "bs58",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "c0mpute-gateway"
 version = "0.2.26"
 dependencies = [

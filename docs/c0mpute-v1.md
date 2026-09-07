@@ -1,5 +1,13 @@
 # c0mpute.com v1 Augmentation PRD
 
+> **Superseded where it conflicts with the v2 direction.** c0mpute v2 makes
+> the network a protocol and open marketplace rather than a fleet plus
+> plugins, and no hosted service may be authoritative for protocol
+> correctness (DIP-0024). Where this document assumes a coordinator, a
+> central scheduler, or CoinPay as the identity layer, the v2 direction and
+> `docs/protocol/` win. Everything else here — the module model, the
+> workload verticals, the pricing work — carries forward unchanged.
+
 ## Status
 
 Draft augmentation PRD for steering the existing p2p compute work toward the new c0mpute.com direction before implementation goes too far in the wrong direction.

@@ -1,0 +1,16 @@
+# Findings gitleaks reports that are not secrets.
+#
+# Add an entry only for something that is genuinely public. If you are not
+# certain, treat it as a leak: rotate first, argue afterwards.
+#
+# Format is a gitleaks fingerprint, `<commit>:<path>:<rule>:<line>`, taken
+# verbatim from the scan output. Fingerprints pin a commit, so history stays
+# covered without rewriting it.
+
+# The example ed25519 identifier from the did:key specification, used in a
+# test asserting that c0mpute rejects foreign DID methods. It is a *public*
+# key — a DID is a public key by construction — but it is 44 characters of
+# base58, and the generic-api-key rule scores on entropy alone. The line
+# also carries an inline `gitleaks:allow`, which covers future scans of the
+# working tree; this entry covers the commit that introduced it.
+8680fe8bfc104e376b89e780f73bda2075178ab2:node/crates/c0mpute-envelope/src/identity.rs:generic-api-key:276

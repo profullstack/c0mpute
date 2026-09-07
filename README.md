@@ -136,7 +136,8 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 ```
 .
 ├── docs/
-│   ├── c0mpute-v1.md                  # v1 PRD (source of truth)
+│   ├── protocol/                      # the wire protocol — what interop requires
+│   ├── c0mpute-v1.md                  # v1 PRD (superseded where it conflicts with v2)
 │   └── prds/                          # CIPs — per-phase PRDs (see prds/README.md)
 ├── dips/                              # design proposals (the "why")
 ├── node/
@@ -145,6 +146,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 │       ├── c0mpute-core/, c0mpute-net/, c0mpute-store/, c0mpute-gateway/
 │       ├── c0mpute-verify/, c0mpute-update/, c0mpute-doctor/
 │       ├── c0mpute-proto/, c0mpute-api/
+│       ├── c0mpute-envelope/            # canonical JSON, DIDs, signed envelopes
 │       └── c0mpute-transcode/           # in-process FFmpeg workload
 ├── plugins/                           # marketplace manifests only
 │   ├── transcode/module.toml          # in-process; code at node/crates/c0mpute-transcode
@@ -163,11 +165,27 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 ```
 
 There is **no central backend** — no Supabase, no coordinator daemon.
-Discovery, dispatch, and verification flow through libp2p Kad-DHT +
-gossipsub. Identity, payments, escrow, and reputation flow through
-CoinPay DID. The only public infrastructure we host is static
-(landing site, release tarballs, bootstrap seed list, plugin manifest
-mirrors). See [DIP-0011](dips/0011-no-central-backend.md).
+Discovery and dispatch flow through libp2p Kad-DHT + gossipsub. The only
+public infrastructure we host is static (landing site, release tarballs,
+bootstrap seed list, plugin manifest mirrors). See
+[DIP-0011](dips/0011-no-central-backend.md).
+
+Every protocol record — provider adverts, job manifests, offers, receipts —
+carries **its own signature**, so it stays verifiable after it leaves the
+wire: relayed by an indexer, read back off disk, or shown to a third party
+who was never a peer. Identity is a locally generated `did:c0mpute:z…`
+needing no account and no payment product; CoinPay remains the default
+settlement adapter and the first-party integration, named on the wire
+rather than assumed. Indexers and gateways may cache, proxy and bill —
+none may be authoritative.
+
+> **If c0mpute.com disappears, c0mpute keeps computing.**
+
+See [`docs/protocol/`](docs/protocol/README.md) for the specification,
+[DIP-0024](dips/v2.x/0024-protocol-vs-hosted-services.md) for the rule that
+keeps hosted services optional, and
+[DIP-0025](dips/v2.x/0025-signed-envelopes-and-native-identity.md) for
+identity and envelopes.
 
 `plugins/` directory is for **marketplace metadata only**. Each plugin's
 `module.toml` describes how `c0mpute` discovers, dispatches to, and (in
