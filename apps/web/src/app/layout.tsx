@@ -6,24 +6,24 @@ import { WebMcpProvider } from "@/components/webmcp-provider";
 
 const SITE = "https://c0mpute.com";
 const DESCRIPTION =
-  "Decentralized compute marketplace. CLI-first. Three modules: transcode (FFmpeg), coinpay (DID + payments), infernet (AI inference).";
+  "The open compute network. Run jobs anywhere, sell unused compute, pay only for verified work. CPUs, GPUs, storage and bandwidth from PCs to data centers, through one open protocol — for humans and AI agents.";
 
 export const metadata: Metadata = {
-  title: "c0mpute — decentralized compute network",
+  title: "c0mpute — the open compute network",
   description: DESCRIPTION,
   manifest: "/manifest.json",
   appleWebApp: { capable: true, statusBarStyle: "default", title: "c0mpute" },
   openGraph: {
     type: "website",
     siteName: "c0mpute",
-    title: "c0mpute — decentralized compute network",
+    title: "c0mpute — the open compute network",
     description: DESCRIPTION,
     url: SITE,
     images: [{ url: `${SITE}/og-image.png`, width: 1200, height: 630, alt: "c0mpute" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "c0mpute — decentralized compute network",
+    title: "c0mpute — the open compute network",
     description: DESCRIPTION,
     images: [`${SITE}/og-image.png`],
   },
@@ -53,13 +53,14 @@ export default function RootLayout({
             >
               <span className="accent">$</span> c0mpute
             </Link>
-            <div className="flex gap-5 text-[var(--color-dim)]">
+            <div className="flex flex-wrap justify-end gap-x-5 gap-y-1 text-[var(--color-dim)]">
               <Link href="/getting-started" className="!border-0 hover:text-[var(--color-accent)]">getting-started</Link>
+              <Link href="/protocol" className="!border-0 hover:text-[var(--color-accent)]">protocol</Link>
+              <Link href="/providers" className="!border-0 hover:text-[var(--color-accent)]">providers</Link>
+              <Link href="/agents" className="!border-0 hover:text-[var(--color-accent)]">agents</Link>
               <Link href="/plugins" className="!border-0 hover:text-[var(--color-accent)]">plugins</Link>
               <Link href="/docs" className="!border-0 hover:text-[var(--color-accent)]">docs</Link>
-              <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
               <Link href="/status" className="!border-0 hover:text-[var(--color-accent)]">status</Link>
-              <Link href="/contact" className="!border-0 hover:text-[var(--color-accent)]">contact</Link>
             </div>
           </nav>
         </header>
@@ -71,6 +72,7 @@ export default function RootLayout({
             <span>c0mpute.com</span>
             <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
             <Link href="/about" className="!border-0 hover:text-[var(--color-accent)]">about</Link>
+            <Link href="/contact" className="!border-0 hover:text-[var(--color-accent)]">contact</Link>
             <Link href="/pricing" className="!border-0 hover:text-[var(--color-accent)]">pricing</Link>
             <Link href="/terms" className="!border-0 hover:text-[var(--color-accent)]">terms</Link>
             <Link href="/privacy" className="!border-0 hover:text-[var(--color-accent)]">privacy</Link>
