@@ -1,0 +1,16 @@
+[package]
+name = "c0mpute-market"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Provider directory, offer book, receipt-derived reputation, and buyer-side offer selection for the c0mpute network"
+
+[dependencies]
+c0mpute-envelope = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -15,6 +15,7 @@ members = [
     "node/crates/c0mpute-doctor",
     "node/crates/c0mpute-proto",
     "node/crates/c0mpute-envelope",  # canonical serialization + signed protocol envelopes (DIP-0024)
+    "node/crates/c0mpute-market",    # provider directory, offer book, reputation, buyer-side selection
     "node/crates/c0mpute-api",
     "node/crates/c0mpute-transcode",    # in-process transcode workload (FFmpeg)
     "node/crates/c0mpute-secure-chat",  # in-process E2E encrypted p2p messaging (DIP-0018)
@@ -68,6 +69,7 @@ rpassword = "7"
 
 c0mpute-proto = { path = "node/crates/c0mpute-proto" }
 c0mpute-envelope = { path = "node/crates/c0mpute-envelope" }
+c0mpute-market = { path = "node/crates/c0mpute-market" }
 c0mpute-store = { path = "node/crates/c0mpute-store" }
 c0mpute-placement = { path = "node/crates/c0mpute-placement" }
 c0mpute-net = { path = "node/crates/c0mpute-net" }

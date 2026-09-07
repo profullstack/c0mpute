@@ -244,9 +244,9 @@ $ c0mpute run job.json --gateway none      # prove it works without us`}</CodeBl
         </p>
         <table className="w-full text-left border-collapse text-xs">
           <tbody className="divide-y divide-[var(--color-rule)]">
-            <Row k="shipped" v="canonical serialization, native identity, signed envelopes, the four message types, cross-implementation test vectors" />
-            <Row k="in progress" v="local daemon, DHT discovery, gossip job announcements, offer collection, buyer-side scheduling, relay paths for providers behind NAT" />
-            <Row k="planned" v="settlement adapters, receipt-derived reputation, generic container workloads, private network overlays" />
+            <Row k="shipped" v="canonical serialization, native identity, signed envelopes, the four message types, cross-implementation test vectors, provider directory, offer book, buyer-side selection policies, receipt-derived reputation" />
+            <Row k="in progress" v="the transport: local daemon, DHT discovery, gossip job announcements, offer collection over the wire, relay paths for providers behind NAT" />
+            <Row k="planned" v="settlement adapters, generic container workloads, private network overlays" />
           </tbody>
         </table>
         <p>
