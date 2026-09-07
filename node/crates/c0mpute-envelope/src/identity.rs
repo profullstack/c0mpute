@@ -273,7 +273,12 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_foreign_method() {
-        assert!(Did::parse("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").is_err());
+        // The example ed25519 identifier from the did:key spec. It is a
+        // *public* key — being public is the entire point of a DID — but
+        // it is 44 characters of base58 and gitleaks' generic-api-key rule
+        // scores it on entropy alone, so it needs the allow directive.
+        let did_key = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"; // gitleaks:allow
+        assert!(Did::parse(did_key).is_err());
     }
 
     #[test]
