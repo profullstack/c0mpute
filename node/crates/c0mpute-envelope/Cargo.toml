@@ -1,0 +1,17 @@
+[package]
+name = "c0mpute-envelope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Canonical serialization, native identity, and signed protocol envelopes for the c0mpute network"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+ed25519-dalek = { workspace = true }
+bs58 = { workspace = true }
+thiserror = { workspace = true }

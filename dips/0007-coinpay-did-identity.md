@@ -12,6 +12,14 @@ supersedes: 0003
 superseded-by:
 ---
 
+> **Amended by DIP-0025 (Draft).** The *identity* half of this DIP no longer
+> holds: network identity is now a natively generated `did:c0mpute:z…`, so a
+> peer can be discovered and verified with no payment product in the path. The
+> *payment, escrow, settlement and reputation* half stands — CoinPay is the
+> default settlement adapter and the first-party integration. What changed is
+> that it is no longer load-bearing for the network to run. See
+> `docs/protocol/identity.md`.
+
 ## Summary
 
 Every actor on the c0mpute network — buyer, worker, validator, organization

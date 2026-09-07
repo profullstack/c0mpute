@@ -72,6 +72,18 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # Blocking, unlike the lint job: this invariant has no legacy debt to
+      # work through, and it is cheap to keep green from the start.
+      #
+      # It re-canonicalizes every envelope shown in docs/protocol/ using
+      # Python's json.dumps(sort_keys=True) and compares byte-for-byte against
+      # what c0mpute-envelope produced. That catches a spec page going stale,
+      # and — the reason it is worth a CI slot — it checks that the canonical
+      # form is reproducible by a second implementation in another language,
+      # which is what every hash and signature on the network depends on.
+      - name: Protocol docs match the implementation
+        run: python3 scripts/check-protocol-docs.py
+
   lint:
     name: fmt + clippy (advisory)
     runs-on: ubuntu-latest

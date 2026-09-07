@@ -118,9 +118,17 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0014 | Public /status page + status-aggregator service                  | Accepted   |
 | 0015 | Hosting vertical: censorship-resistant static sites              | Draft      |
 | 0017 | Streaming reads: progressive RS reconstruction for sequential workloads | Draft |
+| 0018 | secure-chat — end-to-end encrypted p2p messaging plugin           | Draft      |
+| 0019 | live-stream — p2p HLS via BitTorrent-style segment swarming       | Draft      |
+| 0020 | ctv-ads — decentralized Connected TV ad marketplace               | Draft      |
+| 0021 | ads-manager — shared ad operations layer for the ad plugins       | Draft      |
+| 0022 | podcasting + podcasts — p2p podcast publishing and listening      | Draft      |
+| 0023 | podcast-ads — dynamic ad insertion for p2p podcasts               | Draft      |
 
 ### v2.x (`dips/v2.x/`)
 
 | #    | Title                                                            | Status     |
 |------|------------------------------------------------------------------|------------|
 | 0016 | Abuse policy: CSAM hash blocklist, per-worker opt-in             | Draft      |
+| 0024 | Separate the protocol from every hosted service that accelerates it | Draft   |
+| 0025 | Signed envelopes and native `did:c0mpute` identity                | Draft      |
