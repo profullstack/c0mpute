@@ -1,10 +1,13 @@
 # The c0mpute protocol
 
-**Status:** Phase 1. Envelopes, identity and the four message types are
-specified and implemented. Discovery, scheduling, relays, settlement
-adapters and reputation are named here but not yet written — the pages
-that do not exist yet are listed at the bottom rather than stubbed, so
-nothing in this directory describes code that has not been built.
+**Status:** Phase 1 complete, Phase 2 in progress. Envelopes, identity,
+the four message types, buyer-side scheduling and receipt-derived
+reputation are specified and implemented. The **transport** is not:
+nothing yet carries adverts and offers between machines. Discovery,
+relays, settlement adapters and the validation tiers are named here but
+not yet written — the pages that do not exist yet are listed at the bottom
+rather than stubbed, so nothing in this directory describes code that has
+not been built.
 
 > c0mpute.com infrastructure is not required for the c0mpute network to
 > operate.
@@ -77,16 +80,23 @@ from a provider that claimed the capabilities relied on.
 | [jobs.md](jobs.md) | `job/v2` |
 | [offers.md](offers.md) | `offer/v1` |
 | [receipts.md](receipts.md) | `receipt/v1`, acceptance, and derived reputation |
+| [scheduling.md](scheduling.md) | eligibility, offer selection, and reputation scoring |
 
 ## Implementation
 
-`node/crates/c0mpute-envelope` is the reference implementation. It depends
-on no transport, no HTTP client and no settlement product — identity
-enters as raw ed25519 bytes and settlement is named by an open string.
-That is what makes DIP-0024's dependency rule checkable rather than
-aspirational.
+`node/crates/c0mpute-envelope` is the reference implementation of the
+message types; `node/crates/c0mpute-market` is the reference
+implementation of the buyer side — provider directory, offer book,
+reputation ledger and selection.
 
-Cross-implementation test vectors are pinned in that crate's
+Neither depends on a transport, an HTTP client or a settlement product.
+Identity enters as raw ed25519 bytes, settlement is named by an open
+string, and time enters as a parameter rather than being read from the
+clock. That is what makes DIP-0024's dependency rule checkable rather than
+aspirational — and what makes every expiry path testable rather than a
+matter of waiting.
+
+Cross-implementation test vectors are pinned in `c0mpute-envelope`'s
 `tests/vectors.rs`. A second implementation is correct when it reproduces
 those DIDs and hashes exactly. To print them:
 
@@ -94,19 +104,27 @@ those DIDs and hashes exactly. To print them:
 cargo test -p c0mpute-envelope --test vectors -- --nocapture print_vectors
 ```
 
+The full chain — advert, job, offer, selection, receipt, countersignature
+— runs end to end with no shared state between the parties in
+`c0mpute-market`'s `tests/gateway_none.rs`, which also covers what a
+hostile intermediary can and cannot do.
+
 ## Not yet written
 
 These are real parts of the v2 direction with no specification here,
 because there is no implementation to specify:
 
 - **discovery** — DHT provider lookup and gossip topic layout (Phase 2)
-- **scheduling** — buyer-side offer scoring policies (Phase 2)
 - **relays** — NAT traversal and outbound-only providers (Phase 2)
 - **settlement** — what a settlement adapter must do (Phase 3)
-- **reputation** — deriving scores from receipts (Phase 3)
 - **validation** — the L0–L5 tiers as a wire contract (Phase 3)
 
 `ValidationPolicy` and `SettlementAdapter` already travel in `job/v2` and
 `receipt/v1`, so a job can *state* its validation level and settlement
 rail today. What an implementation must do to honour either is the part
 still missing.
+
+Scheduling and receipt-derived reputation moved off this list with
+`c0mpute-market` — see [scheduling.md](scheduling.md). What is still
+missing there is the **transport**: the market logic runs, and nothing yet
+carries adverts and offers between machines.

@@ -599,6 +599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "c0mpute-market"
+version = "0.2.26"
+dependencies = [
+ "c0mpute-envelope",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "c0mpute-net"
 version = "0.2.26"
 dependencies = [
