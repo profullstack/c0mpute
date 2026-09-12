@@ -1,0 +1,29 @@
+{
+  "openaccess": "0.1",
+  "name": "c0mpute",
+  "url": "https://c0mpute.com",
+  "operator": "https://logicsrc.com/.well-known/openprofile.md",
+  "redirect_uris": [
+    "https://c0mpute.com/api/v1/openaccess/callback"
+  ],
+  "jwks": {
+    "keys": [
+      {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "kid": "u0S7l8LxbDuV",
+        "x": "KmAo7ges7SKaOoTmEO_ab45zw2AYlm5QFEQYU3S0fOs",
+        "alg": "EdDSA",
+        "use": "sig"
+      }
+    ]
+  },
+  "scopes": {},
+  "honours": [
+    "profullstack.com/all-access"
+  ],
+  "webhooks": "https://c0mpute.com/api/v1/openaccess/events",
+  "hubs": [
+    "https://openaccess.logicsrc.com"
+  ]
+}
