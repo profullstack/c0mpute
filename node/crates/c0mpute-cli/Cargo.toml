@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 c0mpute-core = { workspace = true }
 c0mpute-doctor = { workspace = true }
+c0mpute-bench = { workspace = true }
 c0mpute-proto = { workspace = true }
 c0mpute-update = { workspace = true }
 c0mpute-secure-chat = { workspace = true }

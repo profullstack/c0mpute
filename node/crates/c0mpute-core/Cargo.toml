@@ -14,6 +14,7 @@ c0mpute-gateway = { workspace = true }
 c0mpute-verify = { workspace = true }
 c0mpute-update = { workspace = true }
 c0mpute-doctor = { workspace = true }
+c0mpute-bench = { workspace = true }
 c0mpute-api = { workspace = true }
 axum = { workspace = true }
 rand = { workspace = true }

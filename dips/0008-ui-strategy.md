@@ -1,13 +1,13 @@
 ---
 dip: 0008
-title: "UI strategy: CLI-first, simple web landing, react-blessed TUI, Perry GUIs later"
+title: "UI strategy: CLI-first, simple web landing, hqtui TUI, Perry GUIs later"
 status: Accepted
 authors:
   - anthony@profullstack.com
 created: 2026-05-03
 updated: 2026-05-03
 discussion:
-implementation: apps/web (landing), apps/tui (react-blessed scaffold), Cmd::Tui in node/crates/c0mpute-cli
+implementation: apps/web (landing), apps/tui (@profullstack/hqtui dashboard), Cmd::Tui in node/crates/c0mpute-cli
 supersedes:
 superseded-by:
 ---
@@ -21,7 +21,7 @@ c0mpute's user surfaces, ranked by priority for v1:
 2. **Simple web landing** at `c0mpute.com` — dark, terminal-aesthetic,
    single Next.js app. Just enough to explain the install + link to
    `getting-started`, `docs`, `contact`, `terms`, `privacy`.
-3. **TUI** at `c0mpute tui` — react-blessed (Bun) terminal dashboard for
+3. **TUI** at `c0mpute tui` — @profullstack/hqtui (Bun) terminal dashboard for
    interactive views (worker status, live jobs, module browser).
 4. **Per-plugin web dashboards** at `c0mpute.com/transcode`,
    `c0mpute.com/coinpay`, `c0mpute.com/infernet` — **deferred**. Stubbed
@@ -63,13 +63,23 @@ react-blessed TUI for the interactive bits, defer everything else.
 
 ### TUI (`apps/tui`)
 
-- Bun + react-blessed. Produces a binary `c0mpute-tui` (via
-  `bun build --compile`).
+- Bun + [@profullstack/hqtui](https://hqtui.com) (the house zero-dep TUI
+  library, also under ThreatCrush's dashboard). Installed as source and
+  run through Bun by a `c0mpute-tui` launcher script, so a reinstall picks
+  up the repo copy without a release. The view is a pure function of
+  state (`apps/tui/src/view.ts`) and is unit-tested through hqtui's
+  `renderToText`.
+- Superseded 2026-09-12: the original scaffold used react-blessed; it was
+  replaced when the first real panel (the `c0mpute bench` score) landed,
+  because blessed's dynamic widget requires could not be bundled and the
+  house library already existed.
 - Launched via `c0mpute tui` — the Rust CLI subprocess-launches it the
   same way it shells out to `coinpay` / `infernet`. If `c0mpute-tui`
   isn't on PATH, the user gets the same install hint as for any other
   peer binary.
 - Initial views (Phase 2):
+  - Bench — the node's `c0mpute bench` score, per-workload scaling and
+    throughput (shipped first; reads `bench.json` from the data dir).
   - Worker dashboard — live status, hardware, current job.
   - Job tail — live progress for one or many jobs.
   - Module browser — list / install / enable / disable.
@@ -77,7 +87,7 @@ react-blessed TUI for the interactive bits, defer everything else.
 - The TUI talks to the same coordinator API the CLI uses; no separate
   protocol.
 
-### Why react-blessed over alternatives
+### Why react-blessed over alternatives (original decision, since revisited)
 
 - **Ratatui (Rust)** — would let us keep everything in one Rust binary.
   Considered, but the React component model we'll reuse on the web is
@@ -128,8 +138,8 @@ a contained scope.
 This DIP captures decisions already implemented in this session:
 
 - `apps/web` is the c0mpute landing (no basePath).
-- `apps/tui` is scaffolded with react-blessed; today it renders a
-  static placeholder so the wiring works end-to-end.
+- `apps/tui` runs on @profullstack/hqtui; it renders the worker state,
+  the module list and the `c0mpute bench` report from the data dir.
 - `c0mpute tui` Rust subcommand is wired and shells out to the TUI.
 - `plugins/<id>/web/` directories exist with README stubs.
 

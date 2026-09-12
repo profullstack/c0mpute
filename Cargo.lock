@@ -490,12 +490,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "c0mpute-bench"
+version = "0.2.25"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "serde",
+ "serde_json",
+ "sysinfo",
+]
+
+[[package]]
 name = "c0mpute-cli"
 version = "0.2.26"
 dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "c0mpute-bench",
  "c0mpute-core",
  "c0mpute-doctor",
  "c0mpute-gateway",
@@ -527,6 +539,7 @@ dependencies = [
  "axum",
  "blake3",
  "c0mpute-api",
+ "c0mpute-bench",
  "c0mpute-doctor",
  "c0mpute-gateway",
  "c0mpute-net",

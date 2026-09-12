@@ -34,14 +34,29 @@ pub struct CapabilityAd {
     pub hardware: serde_json::Value,
     /// Unix-ms when this ad was created. Older than ~5min = ignore.
     pub published_at_ms: u64,
+    /// `c0mpute bench` score (geometric mean of measured throughput against a
+    /// fixed reference core, ×1000). `None` until the operator has run a full
+    /// benchmark. Defaults on decode so pre-bench peers still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_score: Option<u32>,
 }
 
 impl CapabilityAd {
     pub fn now(peer_id: String, tags: Vec<String>, hardware: serde_json::Value) -> Self {
+        Self::with_score(peer_id, tags, hardware, None)
+    }
+
+    pub fn with_score(
+        peer_id: String,
+        tags: Vec<String>,
+        hardware: serde_json::Value,
+        bench_score: Option<u32>,
+    ) -> Self {
         Self {
             peer_id,
             tags,
             hardware,
+            bench_score,
             published_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)

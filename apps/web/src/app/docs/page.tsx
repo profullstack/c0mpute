@@ -242,6 +242,32 @@ c0mpute doctor --report                # send anonymized telemetry`}
         </Code>
       </Section>
 
+      <Section h="bench" title="[ benchmark ]">
+        <P>
+          <code>c0mpute bench</code> measures the machine it runs on: recursive
+          fibonacci, a dense matrix multiply and blake3 hashing, each at 1, 2,
+          4, … N threads. The report is saved as <code>bench.json</code> in the
+          data dir with the same <code>metadata</code> + <code>results</code>
+          layout as fleetcode&apos;s runtime-benchmarks, and reduced to one
+          score: 1000 means one reference core on every workload, so an
+          8-vCPU cloud box lands near 7 000 and a 16-core desktop near 20 000.
+        </P>
+        <P>
+          The worker reads the score at start and publishes it as{" "}
+          <code>bench_score</code> in its capability ad, so buyers and the{" "}
+          <Link href="/status">network status</Link> page see measured capacity
+          rather than a GPU tag alone. Quick runs are for a sanity check and
+          are never advertised.
+        </P>
+        <Code>
+{`c0mpute bench                          # full run, saves + prints the table
+c0mpute bench --quick                  # ~1s smoke run, not advertised
+c0mpute bench --json                   # the report as JSON
+c0mpute bench show                     # last saved report
+c0mpute bench --threads 1,8,32         # your own thread ladder`}
+        </Code>
+      </Section>
+
       <Section h="agents" title="[ ai agents / webmcp ]">
         <P>
           c0mpute.com speaks{" "}

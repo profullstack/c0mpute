@@ -107,16 +107,33 @@ fn amd_present() -> bool {
         .unwrap_or(false)
 }
 
+/// Where `c0mpute bench` leaves its report for this node.
+pub fn bench_report_path() -> Option<std::path::PathBuf> {
+    crate::config::data_dir().map(|d| c0mpute_bench::path_in(&d))
+}
+
+/// The score this node advertises: the last *full* `c0mpute bench` run, or
+/// `None` when the operator has never benchmarked (quick runs don't count).
+pub fn local_bench_score() -> Option<u32> {
+    bench_report_path().and_then(|p| c0mpute_bench::advertised_score(&p))
+}
+
 /// Build the per-host hardware blob attached to capability ads. Today
-/// it's a coarse summary; future: probe ffmpeg encoders, GPU vendor,
+/// it's a coarse summary plus whatever the last `c0mpute bench` run
+/// recorded about the host; future: probe ffmpeg encoders, GPU vendor,
 /// free disk, free VRAM, etc.
 pub fn hardware_blob(config: &Config) -> serde_json::Value {
-    serde_json::json!({
+    let mut blob = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "free_disk_root": config.storage.root.display().to_string(),
-        // Real hardware fields land in a follow-up — sysinfo + ffmpeg
-        // -encoders + nvidia-smi-style probes.
-    })
+    });
+    if let Some(report) = bench_report_path().and_then(|p| c0mpute_bench::load(&p).ok().flatten())
+    {
+        blob["cpu"] = serde_json::Value::String(report.metadata.cpu.clone());
+        blob["cores"] = serde_json::Value::from(report.metadata.cores);
+        blob["bench_at"] = serde_json::Value::String(report.metadata.start_time.clone());
+    }
+    blob
 }
 
 /// Periodically publish this worker's capability ad.
@@ -124,6 +141,7 @@ pub async fn advertise_loop(
     net: Arc<Libp2pNetwork>,
     tags: Vec<String>,
     hardware: serde_json::Value,
+    bench_score: Option<u32>,
     interval: Duration,
 ) {
     // Always subscribe before we publish — gossipsub requires the
@@ -143,7 +161,8 @@ pub async fn advertise_loop(
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
-        let ad = CapabilityAd::now(peer_id.clone(), tags.clone(), hardware.clone());
+        let ad =
+            CapabilityAd::with_score(peer_id.clone(), tags.clone(), hardware.clone(), bench_score);
         let payload = match serde_json::to_vec(&ad) {
             Ok(b) => b,
             Err(e) => {
@@ -339,6 +358,7 @@ mod tests {
             net_a.clone(),
             tags.clone(),
             hardware,
+            Some(8438),
             Duration::from_millis(200),
         ));
 
@@ -357,6 +377,7 @@ mod tests {
         let ad = found.expect("registry never saw A's advertisement");
         assert_eq!(ad.peer_id, net_a.peer_id().to_base58());
         assert_eq!(ad.tags, tags);
+        assert_eq!(ad.bench_score, Some(8438), "bench score travels in the ad");
 
         // find_with_tag should return A.
         let storage_workers =

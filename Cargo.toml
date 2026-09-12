@@ -13,6 +13,7 @@ members = [
     "node/crates/c0mpute-verify",
     "node/crates/c0mpute-update",
     "node/crates/c0mpute-doctor",
+    "node/crates/c0mpute-bench",         # per-node compute benchmark + score
     "node/crates/c0mpute-proto",
     "node/crates/c0mpute-envelope",  # canonical serialization + signed protocol envelopes (DIP-0024)
     "node/crates/c0mpute-market",    # provider directory, offer book, reputation, buyer-side selection
@@ -77,6 +78,7 @@ c0mpute-gateway = { path = "node/crates/c0mpute-gateway" }
 c0mpute-verify = { path = "node/crates/c0mpute-verify" }
 c0mpute-update = { path = "node/crates/c0mpute-update" }
 c0mpute-doctor = { path = "node/crates/c0mpute-doctor" }
+c0mpute-bench = { path = "node/crates/c0mpute-bench" }
 c0mpute-api = { path = "node/crates/c0mpute-api" }
 c0mpute-core = { path = "node/crates/c0mpute-core" }
 c0mpute-transcode = { path = "node/crates/c0mpute-transcode" }

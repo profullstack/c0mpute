@@ -42,6 +42,16 @@ export default async function StatusPage() {
           : `${network.avg_job_latency_seconds.toFixed(1)}s`,
       note: "per workload",
     },
+    {
+      label: "Bench capacity",
+      value:
+        network.bench && network.bench.workers_benchmarked > 0
+          ? network.bench.total_score.toLocaleString()
+          : "\u2014",
+      note: network.bench
+        ? `${network.bench.workers_benchmarked} benchmarked \u00b7 median ${network.bench.median_score ?? "\u2014"}`
+        : "run `c0mpute bench` on a worker",
+    },
   ];
 
   const roleRows = Object.entries(network.workers_with_role)

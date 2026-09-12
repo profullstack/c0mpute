@@ -3,6 +3,7 @@
 //! Top-level surface:
 //!
 //!   c0mpute doctor
+//!   c0mpute bench [run|show|path] [--quick] [--json]
 //!   c0mpute worker register|start|stop|status
 //!   c0mpute job submit|status|logs|cancel
 //!   c0mpute modules list|install|enable|disable
@@ -58,6 +59,22 @@ struct Cli {
 enum Cmd {
     /// Run full-stack diagnostic checks.
     Doctor,
+    /// Benchmark this machine (fib / matmul / hash at 1…N threads) and record
+    /// a score the worker advertises to the network. Report lands in
+    /// `<data-dir>/bench.json`, same shape as fleetcode's runtime-benchmarks.
+    Bench {
+        #[command(subcommand)]
+        cmd: Option<BenchCmd>,
+        /// Smaller problem sizes; done in a second or two. Not advertised.
+        #[arg(long, global = true)]
+        quick: bool,
+        /// Print the report as JSON instead of the table.
+        #[arg(long, global = true)]
+        json: bool,
+        /// Thread counts to run, e.g. `1,4,16`. Default: 1, 2, 4, … , all cores.
+        #[arg(long, value_delimiter = ',', global = true)]
+        threads: Option<Vec<usize>>,
+    },
     /// Worker lifecycle.
     Worker {
         #[command(subcommand)]
@@ -113,9 +130,9 @@ enum Cmd {
 
     /// Launch the interactive TUI (worker / job / module dashboard).
     ///
-    /// Subprocess-launches `c0mpute-tui` (a react-blessed terminal UI built
-    /// on Bun). See apps/tui in the repo. Long-term we move to Perry once
-    /// their CLI surface ships.
+    /// Subprocess-launches `c0mpute-tui` (a terminal dashboard on
+    /// @profullstack/hqtui, run through Bun). See apps/tui in the repo.
+    /// Long-term we move to Perry once their CLI surface ships.
     Tui {
         /// Arguments forwarded to the TUI binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -454,6 +471,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Pool { model } => run_pool(model),
         Cmd::Doctor => run_doctor().await,
+        Cmd::Bench { cmd, quick, json, threads } => run_bench(cmd, quick, json, threads),
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
@@ -571,6 +589,17 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             } else {
                 println!("auto-update: off");
             }
+            match c0mpute_bench::load(&bench_report_path()).ok().flatten() {
+                Some(r) if r.metadata.quick => println!(
+                    "bench: {} (quick run {} — not advertised; run `c0mpute bench`)",
+                    r.score, r.metadata.start_time
+                ),
+                Some(r) => println!(
+                    "bench: score {} ({} cores, {})",
+                    r.score, r.metadata.cores, r.metadata.start_time
+                ),
+                None => println!("bench: not run — `c0mpute bench` publishes a capacity score"),
+            }
             print_served_models_eligibility();
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
@@ -622,6 +651,91 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             let sup = Supervisor::boot(cfg).await?;
             sup.run().await
         }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// bench
+// ────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+enum BenchCmd {
+    /// Run the benchmark and save the report (the default).
+    Run,
+    /// Print the last saved report without running anything.
+    Show,
+    /// Print where the report is stored.
+    Path,
+}
+
+fn bench_report_path() -> PathBuf {
+    c0mpute_bench::path_in(&config::data_dir().unwrap_or_else(|| PathBuf::from(".")))
+}
+
+fn run_bench(cmd: Option<BenchCmd>, quick: bool, json: bool, threads: Option<Vec<usize>>) -> Result<()> {
+    let path = bench_report_path();
+    match cmd.unwrap_or(BenchCmd::Run) {
+        BenchCmd::Path => {
+            println!("{}", path.display());
+            Ok(())
+        }
+        BenchCmd::Show => match c0mpute_bench::load(&path)? {
+            Some(report) => {
+                print_bench(&report, json);
+                Ok(())
+            }
+            None => anyhow::bail!(
+                "no bench report at {} — run `c0mpute bench` first",
+                path.display()
+            ),
+        },
+        BenchCmd::Run => {
+            if let Some(t) = &threads {
+                if t.is_empty() || t.contains(&0) {
+                    anyhow::bail!("--threads needs one or more counts greater than zero");
+                }
+            }
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            if !json {
+                eprintln!(
+                    "c0mpute bench: {} run on {cores} cores — {} workloads × {} thread counts",
+                    if quick { "quick" } else { "full" },
+                    c0mpute_bench::WORKLOADS.len(),
+                    threads.as_ref().map(|t| t.len()).unwrap_or_else(|| c0mpute_bench::thread_ladder(cores).len()),
+                );
+            }
+            fn progress(workload: &str, threads: usize) {
+                eprint!("\r  {workload:<7} @ {threads:>3} threads…   ");
+            }
+            let opts = c0mpute_bench::Options {
+                quick,
+                threads,
+                progress: if json { None } else { Some(progress) },
+            };
+            let report = c0mpute_bench::run(&opts);
+            if !json {
+                eprint!("\r{:40}\r", "");
+            }
+            c0mpute_bench::save(&report, &path)?;
+            print_bench(&report, json);
+            if !json {
+                println!("saved {}", path.display());
+                if report.metadata.quick {
+                    println!("quick runs are not advertised — run `c0mpute bench` without --quick to publish a score");
+                } else {
+                    println!("the worker advertises score {} on its next start", report.score);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_bench(report: &c0mpute_bench::BenchReport, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report).unwrap_or_default());
+    } else {
+        print!("{}", c0mpute_bench::render_text(report));
     }
 }
 
@@ -1510,8 +1624,9 @@ fn install_tui() -> Result<()> {
         anyhow::bail!("failed to fetch/build the TUI (need network + bun)");
     }
 
-    // Launcher — runs the Bun source (bun --compile can't bundle blessed's
-    // dynamic widget requires).
+    // Launcher — runs the Bun source. Kept as source rather than a
+    // `bun --compile` binary so `c0mpute tui` picks up the repo's copy on
+    // reinstall without a release cycle.
     let body = format!(
         "#!/usr/bin/env sh\n\
          # c0mpute-tui launcher (installed on demand by `c0mpute tui`).\n\
@@ -1519,7 +1634,7 @@ fn install_tui() -> Result<()> {
          [ -z \"$BUN\" ] && [ -x \"$HOME/.bun/bin/bun\" ] && BUN=\"$HOME/.bun/bin/bun\"\n\
          [ -z \"$BUN\" ] && command -v mise >/dev/null 2>&1 && BUN=\"$(mise which bun 2>/dev/null || true)\"\n\
          [ -n \"$BUN\" ] || {{ echo 'bun not found; run: mise use --global bun@latest' >&2; exit 1; }}\n\
-         exec \"$BUN\" run \"{}/src/index.tsx\" \"$@\"\n",
+         exec \"$BUN\" run \"{}/src/index.ts\" \"$@\"\n",
         tui_dir.display()
     );
     std::fs::write(&wrapper, body).map_err(|e| anyhow::anyhow!("write launcher: {e}"))?;

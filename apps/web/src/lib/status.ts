@@ -18,6 +18,13 @@ export interface StatusPayload {
         avg_latency_seconds: number | null;
       }
     >;
+    /** `c0mpute bench` scores across online workers. Absent from older aggregators. */
+    bench?: {
+      workers_benchmarked: number;
+      total_score: number;
+      median_score: number | null;
+      max_score: number | null;
+    };
   };
   source: "aggregator" | "stub";
 }
