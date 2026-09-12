@@ -14,7 +14,7 @@
 [module]
 id          = "crawl"
 name        = "Crawl — distributed web fetching"
-version     = "0.2.25"
+version     = "0.2.27"
 kind        = "workload"
 category    = "data"
 description = "Decentralized web crawling and page-rendering pool. Static fetches and JS-rendered pages, robots-aware, WARC-capable."

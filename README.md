@@ -129,7 +129,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 | CLI binaries (`c0mpute`) | Rust | Static binary; no runtime to install on workers |
 | P2P / chunks / FFmpeg | Rust | rust-libp2p, content-addressed storage, no GC pauses |
 | Web (`apps/web`) | Bun + Next.js 16 | Apex landing at c0mpute.com |
-| TUI (`apps/tui`) | Bun + react-blessed | `c0mpute tui` interactive dashboard |
+| TUI (`apps/tui`) | Bun + @profullstack/hqtui | `c0mpute tui` interactive dashboard |
 | Future GPU kernels | Mojo | When a workload needs custom GPU compute (DIP-0009) |
 
 ## Repo layout
@@ -155,7 +155,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 │   └── infernet/module.toml           # subprocess; binary from infernetprotocol/infernet-protocol
 ├── apps/
 │   ├── web/                           # @c0mpute/web — Next.js apex landing
-│   └── tui/                           # @c0mpute/tui — react-blessed TUI
+│   └── tui/                           # @c0mpute/tui — hqtui terminal dashboard
 ├── packages/
 │   └── shared/                        # @c0mpute/shared — shared TS types
 ├── .mise.toml                         # contributor toolchain pins

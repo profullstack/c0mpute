@@ -476,7 +476,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "c0mpute-api"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-bench"
-version = "0.2.25"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "blake3",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "serde",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-envelope"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "blake3",
  "bs58",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-market"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "c0mpute-envelope",
  "serde",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-placement"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "blake3",
  "hex",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "blake3",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "hex",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
-version = "0.2.26"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "blake3",

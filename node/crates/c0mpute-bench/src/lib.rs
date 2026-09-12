@@ -126,7 +126,9 @@ pub fn thread_ladder(max: usize) -> Vec<usize> {
 pub fn run(opts: &Options) -> BenchReport {
     let started = Instant::now();
     let start_time = rfc3339_now();
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let threads = opts.threads.clone().unwrap_or_else(|| thread_ladder(cores));
 
     let mut per_workload: BTreeMap<String, Vec<Sample>> = BTreeMap::new();
@@ -333,24 +335,26 @@ fn matmul_parallel(a: &[f64], b: &[f64], n: usize, threads: usize) -> Vec<f64> {
         for _ in 0..threads.max(1) {
             let next_row = &next_row;
             let bt = &bt;
-            s.spawn(move || loop {
-                let i = next_row.fetch_add(1, Ordering::Relaxed);
-                if i >= n {
-                    break;
-                }
-                let arow = &a[i * n..(i + 1) * n];
-                // SAFETY: row `i` is claimed by exactly one thread via the
-                // atomic counter, and `c` outlives the scope.
-                let crow = unsafe {
-                    std::slice::from_raw_parts_mut((c_ptr as *mut f64).add(i * n), n)
-                };
-                for j in 0..n {
-                    let bcol = &bt[j * n..(j + 1) * n];
-                    let mut acc = 0.0;
-                    for k in 0..n {
-                        acc += arow[k] * bcol[k];
+            s.spawn(move || {
+                loop {
+                    let i = next_row.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
                     }
-                    crow[j] = acc;
+                    let arow = &a[i * n..(i + 1) * n];
+                    // SAFETY: row `i` is claimed by exactly one thread via the
+                    // atomic counter, and `c` outlives the scope.
+                    let crow = unsafe {
+                        std::slice::from_raw_parts_mut((c_ptr as *mut f64).add(i * n), n)
+                    };
+                    for j in 0..n {
+                        let bcol = &bt[j * n..(j + 1) * n];
+                        let mut acc = 0.0;
+                        for k in 0..n {
+                            acc += arow[k] * bcol[k];
+                        }
+                        crow[j] = acc;
+                    }
                 }
             });
         }
@@ -386,15 +390,17 @@ fn hash_parallel(buf: &[u8], threads: usize) -> blake3::Hash {
         for _ in 0..threads.max(1) {
             let next = &next;
             let chunks = &chunks;
-            s.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= chunks.len() {
-                    break;
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= chunks.len() {
+                        break;
+                    }
+                    let h = blake3::hash(chunks[i]);
+                    // SAFETY: slot `i` is claimed by exactly one thread and the
+                    // vec outlives the scope.
+                    unsafe { *(d_ptr as *mut [u8; 32]).add(i) = *h.as_bytes() };
                 }
-                let h = blake3::hash(chunks[i]);
-                // SAFETY: slot `i` is claimed by exactly one thread and the
-                // vec outlives the scope.
-                unsafe { *(d_ptr as *mut [u8; 32]).add(i) = *h.as_bytes() };
             });
         }
     });
@@ -425,12 +431,19 @@ pub const REFERENCE: [(&str, f64); 3] = [
 
 /// Geometric mean over workloads of best throughput relative to [`REFERENCE`].
 pub fn score(report: &BenchReport) -> u32 {
-    let Some(ours) = report.results.get(RUNTIME) else { return 0 };
+    let Some(ours) = report.results.get(RUNTIME) else {
+        return 0;
+    };
     let mut log_sum = 0.0;
     let mut n = 0usize;
     for (name, reference) in REFERENCE {
-        let Some(samples) = ours.get(name) else { continue };
-        let best = samples.iter().map(|s| s.result.throughput).fold(0.0, f64::max);
+        let Some(samples) = ours.get(name) else {
+            continue;
+        };
+        let best = samples
+            .iter()
+            .map(|s| s.result.throughput)
+            .fold(0.0, f64::max);
         if best <= 0.0 {
             continue;
         }
@@ -440,7 +453,9 @@ pub fn score(report: &BenchReport) -> u32 {
     if n == 0 {
         return 0;
     }
-    ((log_sum / n as f64).exp() * 1000.0).round().clamp(0.0, u32::MAX as f64) as u32
+    ((log_sum / n as f64).exp() * 1000.0)
+        .round()
+        .clamp(0.0, u32::MAX as f64) as u32
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -453,8 +468,7 @@ pub fn path_in(data_dir: &Path) -> PathBuf {
 
 pub fn save(report: &BenchReport, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(report)?;
     std::fs::write(path, json).with_context(|| format!("write {}", path.display()))
@@ -464,8 +478,7 @@ pub fn save(report: &BenchReport, path: &Path) -> Result<()> {
 pub fn load(path: &Path) -> Result<Option<BenchReport>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("parse {}", path.display()))?,
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?,
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
@@ -494,18 +507,29 @@ pub fn render_text(report: &BenchReport) -> String {
     out.push_str(&format!(
         "c0mpute bench  ·  score {}{}\n",
         report.score,
-        if m.quick { "  (quick run — not advertised)" } else { "" }
+        if m.quick {
+            "  (quick run — not advertised)"
+        } else {
+            ""
+        }
     ));
     out.push_str(&format!("  cpu      {}\n", m.cpu));
     out.push_str(&format!("  cores    {}\n", m.cores));
     out.push_str(&format!("  kernel   {}\n", m.kernel));
     out.push_str(&format!("  compiler {}\n", m.compiler));
-    out.push_str(&format!("  when     {}  ({} ms)\n", m.start_time, m.elapsed_ms));
+    out.push_str(&format!(
+        "  when     {}  ({} ms)\n",
+        m.start_time, m.elapsed_ms
+    ));
 
-    let Some(ours) = report.results.get(RUNTIME) else { return out };
+    let Some(ours) = report.results.get(RUNTIME) else {
+        return out;
+    };
     const BAR: usize = 24;
     for name in WORKLOADS {
-        let Some(samples) = ours.get(name) else { continue };
+        let Some(samples) = ours.get(name) else {
+            continue;
+        };
         let params = samples.first().map(|s| s.params.as_str()).unwrap_or("");
         out.push_str(&format!("\n  {name} ({params})\n"));
         out.push_str("  thr   duration      speedup  eff   throughput\n");
@@ -668,14 +692,21 @@ mod tests {
 
     #[test]
     fn quick_run_produces_full_report_and_round_trips() {
-        let report = run(&Options { quick: true, threads: Some(vec![1, 2]), progress: None });
+        let report = run(&Options {
+            quick: true,
+            threads: Some(vec![1, 2]),
+            progress: None,
+        });
         let ours = &report.results[RUNTIME];
         for w in WORKLOADS {
             let s = &ours[w];
             assert_eq!(s.len(), 2);
             assert_eq!(s[0].threads, 1);
             assert_eq!(s[0].result.speedup, 1.0);
-            assert!(s.iter().any(|x| x.result.scaled == 1.0), "one sample is the best");
+            assert!(
+                s.iter().any(|x| x.result.scaled == 1.0),
+                "one sample is the best"
+            );
             assert!(s.iter().all(|x| x.result.throughput > 0.0));
         }
         assert!(report.metadata.quick);
@@ -697,7 +728,11 @@ mod tests {
 
     #[test]
     fn load_missing_is_none_and_score_of_reference_is_1000() {
-        assert!(load(Path::new("/nonexistent/c0mpute/bench.json")).unwrap().is_none());
+        assert!(
+            load(Path::new("/nonexistent/c0mpute/bench.json"))
+                .unwrap()
+                .is_none()
+        );
 
         let mut per = BTreeMap::new();
         for (name, reference) in REFERENCE {
