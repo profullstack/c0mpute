@@ -4,11 +4,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "target": "ES2022",
-    "jsx": "react",
     "types": ["bun"],
     "noEmit": true,
     "strict": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": ["src/**/*.ts"]
 }

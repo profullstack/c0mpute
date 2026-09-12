@@ -43,8 +43,9 @@ c0mpute infernet run prompts.jsonl --model qwen --max-price 5.00
 
 # monitor
 c0mpute job status <job-id>
-c0mpute tui                              # interactive dashboard (react-blessed)
+c0mpute tui                              # interactive dashboard (hqtui)
 c0mpute doctor                           # full-stack health check
+c0mpute bench                            # measure this node; the worker advertises the score
 
 # trust
 c0mpute coinpay reputation inspect did:coinpay:worker:abc123
@@ -111,7 +112,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 
 ```
 ┌──────────────────── c0mpute (Rust binary) ────────────────────┐
-│   subcommands: doctor, worker, job, modules, tui              │
+│   subcommands: doctor, bench, worker, job, modules, tui       │
 │   plugins: transcode (in-process)                             │
 │            coinpay   (subprocess → external `coinpay` binary) │
 │            infernet  (subprocess → external `infernet` binary)│
@@ -128,7 +129,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 | CLI binaries (`c0mpute`) | Rust | Static binary; no runtime to install on workers |
 | P2P / chunks / FFmpeg | Rust | rust-libp2p, content-addressed storage, no GC pauses |
 | Web (`apps/web`) | Bun + Next.js 16 | Apex landing at c0mpute.com |
-| TUI (`apps/tui`) | Bun + react-blessed | `c0mpute tui` interactive dashboard |
+| TUI (`apps/tui`) | Bun + @profullstack/hqtui | `c0mpute tui` interactive dashboard |
 | Future GPU kernels | Mojo | When a workload needs custom GPU compute (DIP-0009) |
 
 ## Repo layout
@@ -144,7 +145,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 │   └── crates/                        # all Rust source — host + transcode workload
 │       ├── c0mpute-cli/                 # produces `c0mpute`
 │       ├── c0mpute-core/, c0mpute-net/, c0mpute-store/, c0mpute-gateway/
-│       ├── c0mpute-verify/, c0mpute-update/, c0mpute-doctor/
+│       ├── c0mpute-verify/, c0mpute-update/, c0mpute-doctor/, c0mpute-bench/
 │       ├── c0mpute-proto/, c0mpute-api/
 │       ├── c0mpute-envelope/            # canonical JSON, DIDs, signed envelopes
 │       └── c0mpute-transcode/           # in-process FFmpeg workload
@@ -154,7 +155,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 │   └── infernet/module.toml           # subprocess; binary from infernetprotocol/infernet-protocol
 ├── apps/
 │   ├── web/                           # @c0mpute/web — Next.js apex landing
-│   └── tui/                           # @c0mpute/tui — react-blessed TUI
+│   └── tui/                           # @c0mpute/tui — hqtui terminal dashboard
 ├── packages/
 │   └── shared/                        # @c0mpute/shared — shared TS types
 ├── .mise.toml                         # contributor toolchain pins
@@ -214,6 +215,11 @@ cargo build --bin c0mpute
   (passthrough), `tui`, `version`
 - `c0mpute plugin install <url>` chain-calls upstream installers
 - `c0mpute doctor` cross-checks `coinpay` and `infernet` on PATH
+- `c0mpute bench` runs fib / matmul / blake3 at 1…N threads, writes
+  `bench.json` (same `metadata` + `results` layout as
+  [fleetcode's runtime-benchmarks](https://fleetcode.com/runtime-benchmarks/))
+  and folds it into one score; the worker publishes `bench_score` in its
+  capability ad and the status aggregator sums it as network capacity
 - Apex landing at [c0mpute.com](https://c0mpute.com) deployed via
   Railway, dark CLI-aesthetic with `/`, `/getting-started`, `/docs`,
   `/contact`, `/terms`, `/privacy`

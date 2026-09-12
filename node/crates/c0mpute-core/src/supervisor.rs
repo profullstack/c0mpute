@@ -90,12 +90,20 @@ impl Supervisor {
         // Capability advertise loop: periodically publish our own ad.
         let tags = capabilities::tags_from_config(&self.config);
         let hardware = capabilities::hardware_blob(&self.config);
+        let bench_score = capabilities::local_bench_score();
         let net = self.libp2p.clone();
-        info!(?tags, "advertising capabilities");
+        match bench_score {
+            Some(score) => info!(?tags, score, "advertising capabilities"),
+            None => info!(
+                ?tags,
+                "advertising capabilities (no bench score — run `c0mpute bench` to publish one)"
+            ),
+        }
         tokio::spawn(capabilities::advertise_loop(
             net.clone(),
             tags.clone(),
             hardware,
+            bench_score,
             capabilities::DEFAULT_ADVERTISE_INTERVAL,
         ));
 

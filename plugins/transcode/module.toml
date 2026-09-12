@@ -7,7 +7,7 @@
 [module]
 id          = "transcode"
 name        = "FFmpeg Transcoding"
-version     = "0.2.25"
+version     = "0.2.27"
 kind        = "workload"
 category    = "media"
 description = "Decentralized audio/video transcoding via FFmpeg with hardware acceleration (NVENC, QSV, AMF, VideoToolbox, AV1)."

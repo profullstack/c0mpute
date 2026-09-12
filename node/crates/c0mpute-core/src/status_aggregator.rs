@@ -107,6 +107,34 @@ struct NetworkStatus {
     jobs_completed_24h: u64,
     avg_job_latency_seconds: Option<f64>,
     workload_types: BTreeMap<String, WorkloadStats>,
+    /// `c0mpute bench` scores across online workers (see c0mpute-bench).
+    bench: BenchSummary,
+}
+
+#[derive(Serialize, Default, Debug, PartialEq)]
+pub(crate) struct BenchSummary {
+    /// Workers whose ad carries a score.
+    workers_benchmarked: u64,
+    /// Sum of scores — the network's total measured capacity in
+    /// reference-core thousandths.
+    total_score: u64,
+    median_score: Option<u32>,
+    max_score: Option<u32>,
+}
+
+impl BenchSummary {
+    pub(crate) fn from_scores(mut scores: Vec<u32>) -> Self {
+        if scores.is_empty() {
+            return Self::default();
+        }
+        scores.sort_unstable();
+        Self {
+            workers_benchmarked: scores.len() as u64,
+            total_score: scores.iter().map(|&s| s as u64).sum(),
+            median_score: Some(scores[scores.len() / 2]),
+            max_score: scores.last().copied(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -224,6 +252,7 @@ async fn build_payload(state: &AppState) -> StatusPayload {
             }
         }
     }
+    let bench = BenchSummary::from_scores(ads.iter().filter_map(|(_, ad)| ad.bench_score).collect());
 
     // Jobs — from the correlated job state.
     let mut workload_types: BTreeMap<String, (u64, u64, f64, u64)> = KNOWN_WORKLOADS
@@ -286,8 +315,28 @@ async fn build_payload(state: &AppState) -> StatusPayload {
             jobs_completed_24h,
             avg_job_latency_seconds,
             workload_types,
+            bench,
         },
         source: "aggregator",
+    }
+}
+
+#[cfg(test)]
+mod bench_summary_tests {
+    use super::BenchSummary;
+
+    #[test]
+    fn empty_network_has_no_scores() {
+        assert_eq!(BenchSummary::from_scores(vec![]), BenchSummary::default());
+    }
+
+    #[test]
+    fn summary_counts_sums_and_picks_median_and_max() {
+        let s = BenchSummary::from_scores(vec![4000, 900, 12_000]);
+        assert_eq!(s.workers_benchmarked, 3);
+        assert_eq!(s.total_score, 16_900);
+        assert_eq!(s.median_score, Some(4000));
+        assert_eq!(s.max_score, Some(12_000));
     }
 }
 

@@ -298,16 +298,14 @@ install_transcode_deps() {
 }
 
 # ────────────────────────────────────────────────────────────────────────
-# c0mpute-tui (Bun/blessed terminal UI)
+# c0mpute-tui (Bun terminal UI on @profullstack/hqtui)
 #
-# `c0mpute tui` subprocess-launches a `c0mpute-tui` binary on PATH. The TUI
-# is a Bun + blessed app; blessed loads its widgets via computed
-# `require('./widgets/'+name)`, which `bun build --compile` CANNOT bundle
-# (the standalone binary dies with "Cannot find module './widgets/node'").
-# So we install it as SOURCE run through Bun, wrapped by a small launcher —
-# NOT a compiled binary. Source comes from the in-repo copy when running
-# in-tree, otherwise the repo tarball on GitHub. Optional: any failure warns
-# and continues (the rest of c0mpute works without the TUI).
+# `c0mpute tui` subprocess-launches a `c0mpute-tui` binary on PATH. We
+# install the TUI as SOURCE run through Bun, wrapped by a small launcher —
+# NOT a compiled binary — so a reinstall picks up the repo's copy without a
+# release cycle. Source comes from the in-repo copy when running in-tree,
+# otherwise the repo tarball on GitHub. Optional: any failure warns and
+# continues (the rest of c0mpute works without the TUI).
 # ────────────────────────────────────────────────────────────────────────
 install_tui() {
   bun_bin="$(command -v bun || true)"
@@ -319,10 +317,10 @@ install_tui() {
 
   wrapper="$C0MPUTE_HOME/bin/c0mpute-tui"
   # Only skip if the existing file is actually OUR bun launcher. Earlier
-  # installers shipped a `bun build --compile` binary that crashes at runtime
-  # ("Cannot find module './widgets/node'" — blessed's dynamic requires can't
-  # be bundled); those must be replaced even without --force. Detect our
-  # wrapper by its `bun run` marker (a compiled binary won't match under grep).
+  # installers shipped a `bun build --compile` binary that crashed at runtime
+  # (the old react-blessed TUI's dynamic requires couldn't be bundled); those
+  # must be replaced even without --force. Detect our wrapper by its
+  # `bun run` marker (a compiled binary won't match under grep).
   if [ -x "$wrapper" ] && [ "$FORCE" -eq 0 ] && grep -q 'bun run' "$wrapper" 2>/dev/null; then
     say "c0mpute-tui already installed at $wrapper (use --force to reinstall)"
     return 0
@@ -370,10 +368,9 @@ install_tui() {
 
   cat > "$wrapper" <<EOF
 #!/usr/bin/env sh
-# c0mpute-tui launcher: runs the Bun/blessed TUI from source.
-# (bun --compile can't bundle blessed's dynamic widget requires, so we run source.)
+# c0mpute-tui launcher: runs the hqtui-based TUI from source through Bun.
 BUN="\$(command -v bun || echo "\$HOME/.bun/bin/bun")"
-exec "\$BUN" run "$dest/src/index.tsx" "\$@"
+exec "\$BUN" run "$dest/src/index.ts" "\$@"
 EOF
   chmod +x "$wrapper"
   [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
@@ -680,7 +677,7 @@ main() {
   # (ffmpeg) lives in the plugin's installer.
   if [ "$INSTALL_TRANSCODE" -eq 1 ]; then install_transcode_deps; fi
 
-  # c0mpute-tui: Bun/blessed terminal UI launched by `c0mpute tui`.
+  # c0mpute-tui: Bun + hqtui terminal UI launched by `c0mpute tui`.
   if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
 
   if [ "$WORKER_MODE" -eq 1 ]; then worker_checks; fi
