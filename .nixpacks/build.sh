@@ -1,0 +1,1 @@
+docker build /home/anthony/src/profullstack/c0mpute/.claude/worktrees/dev2-c0mpute.com-r0w9tbu0 -f /home/anthony/src/profullstack/c0mpute/.claude/worktrees/dev2-c0mpute.com-r0w9tbu0/.nixpacks/Dockerfile -t 6da4057f-d6fd-46b8-b22b-c9a7e1f694ce --build-arg CI=true --build-arg NIXPACKS_METADATA=node --build-arg NODE_ENV=production --build-arg NPM_CONFIG_PRODUCTION=false
