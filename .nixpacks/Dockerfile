@@ -1,34 +1,56 @@
-FROM ghcr.io/railwayapp/nixpacks:ubuntu-1745885067
+# c0mpute.com on dev2: the compose stack builds this file (cli-tools dev2/dev2-site
+# looks for .nixpacks/Dockerfile). It is a copy of ../Dockerfile.web, the image
+# Railway built with RAILWAY_DOCKERFILE_PATH=Dockerfile.web: the Next.js site plus
+# the co-located Rust status aggregator. Keep the two in step.
 
-ENTRYPOINT ["/bin/bash", "-l", "-c"]
-WORKDIR /app/
+# c0mpute.com — single Railway deploy (DIP-0014).
+#
+# One service, two co-located processes: the Next.js site (foreground) and the
+# status aggregator (Rust libp2p observer, background). The site proxies
+# /status + /api/status to the aggregator over loopback. This replaces the
+# earlier separate `c0mpute-status-aggregator` Railway service — the whole
+# monorepo ships as one deploy.
+#
+# Point the c0mpute.com service at this file with the RAILWAY_DOCKERFILE_PATH
+# variable (= Dockerfile.web). Build context is the repo root.
 
+# ── stage 1: build the aggregator (Rust) ─────────────────────────────────
+# Copy only the Rust workspace so edits under apps/web/ don't bust this layer.
+FROM rust:1.92-bookworm AS rustbuild
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY node ./node
+RUN cargo build --release --bin c0mpute
 
-COPY .nixpacks/nixpkgs-31fb21469e34b6b5c7be77b9a35bae43d0c598e9.nix .nixpacks/nixpkgs-31fb21469e34b6b5c7be77b9a35bae43d0c598e9.nix
-RUN nix-env -if .nixpacks/nixpkgs-31fb21469e34b6b5c7be77b9a35bae43d0c598e9.nix && nix-collect-garbage -d
+# ── stage 2: build the Next.js site (Bun) ────────────────────────────────
+FROM oven/bun:1.3-debian AS webbuild
+WORKDIR /app
+# Native deps (better-sqlite3 is an optional native module) need a toolchain.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN bun install --frozen-lockfile
+RUN bun run --cwd packages/shared build && bun run --filter=c0mpute build
 
+# ── stage 3: runtime ─────────────────────────────────────────────────────
+FROM oven/bun:1.3-debian AS runtime
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-ARG CI NIXPACKS_METADATA NODE_ENV NPM_CONFIG_PRODUCTION
-ENV CI=$CI NIXPACKS_METADATA=$NIXPACKS_METADATA NODE_ENV=$NODE_ENV NPM_CONFIG_PRODUCTION=$NPM_CONFIG_PRODUCTION
+# Full built app: `next start` (non-standalone) serves from .next, and several
+# route handlers read repo files at request time (scripts/install.sh, etc.),
+# so the whole tree + node_modules must be present.
+COPY --from=webbuild /app /app
+# Co-located aggregator binary.
+COPY --from=rustbuild /src/target/release/c0mpute /usr/local/bin/c0mpute
+COPY scripts/railway-web-start.sh /usr/local/bin/railway-web-start.sh
+RUN chmod +x /usr/local/bin/railway-web-start.sh
 
-# setup phase
-# noop
+# The aggregator serves its JSON on loopback; the site reads it there.
+ENV C0MPUTE_STATUS_BIND=127.0.0.1:8090
+ENV STATUS_AGGREGATOR_URL=http://127.0.0.1:8090
 
-# install phase
-ENV NIXPACKS_PATH=/app/node_modules/.bin:$NIXPACKS_PATH
-COPY . /app/.
-RUN --mount=type=cache,id=LrHMiOYyIcs-/root/bun,target=/root/.bun bun i --no-save
-
-# build phase
-COPY . /app/.
-RUN --mount=type=cache,id=LrHMiOYyIcs-apps/web/next/cache,target=/app/apps/web/.next/cache --mount=type=cache,id=LrHMiOYyIcs-node_modules/cache,target=/app/node_modules/.cache bun run build
-
-
-RUN printf '\nPATH=/app/node_modules/.bin:$PATH' >> /root/.profile
-
-
-# start
-COPY . /app
-
-CMD ["bun run start"]
-
+ENTRYPOINT ["/usr/local/bin/railway-web-start.sh"]
