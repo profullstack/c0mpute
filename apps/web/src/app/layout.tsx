@@ -82,6 +82,11 @@ export default function RootLayout({
             >
               github
             </a>
+            <nav className="webring flex gap-x-3" aria-label="Profullstack webring">
+              <a href="https://rssamplifier.com/ring/profullstack/previous?from=https%3A%2F%2Fc0mpute.com%2F" rel="prev" className="!border-0 hover:text-[var(--color-accent)]">{"<<"}</a>
+              <a href="https://rssamplifier.com/ring/profullstack" className="!border-0 hover:text-[var(--color-accent)]">Profullstack</a>
+              <a href="https://rssamplifier.com/ring/profullstack/next?from=https%3A%2F%2Fc0mpute.com%2F" rel="next" className="!border-0 hover:text-[var(--color-accent)]">{">>"}</a>
+            </nav>
             <span className="ml-auto">MIT</span>
           </div>
         </footer>
