@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
+    "@profullstack/footer": "latest",
     "@profullstack/x402-gateway": "^0.7.0",
     "@sqlitecloud/drivers": "^1.0.880",
     "ioredis": "^5.11.1",
