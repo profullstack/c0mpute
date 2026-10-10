@@ -160,21 +160,36 @@ c0mpute transcode preset list`}
           spot-check duplicate execution.
         </P>
         <Code>
-{`# Simple batch with default model
-c0mpute infernet run prompts.jsonl \\
-  --model qwen \\
-  --max-price 5.00
+{`# Run a prompt on the network (stdin works too)
+c0mpute infernet chat --model qwen2.5:7b "summarise this"
+cat prompt.txt | c0mpute infernet chat --model qwen2.5:7b
 
-# Pin a specific model + runtime image hash for reproducible runs
-c0mpute infernet run prompts.jsonl \\
-  --model llama-3.1-8b \\
-  --max-price 0.25
+# How many live nodes serve each model
+c0mpute pool
+c0mpute pool qwen
 
-# List models the network advertises
-c0mpute infernet models list
+# The models one node advertises (node_id or row id)
+c0mpute infernet model list --node <id>
 
-# Benchmark a model against the network's workers
-c0mpute infernet benchmark --model qwen`}
+# Models pulled on this machine
+c0mpute infernet model list`}
+        </Code>
+      </Section>
+
+      <Section h="reserve" title="[ reserve a node ]">
+        <P>
+          Infernet managed endpoints reserve one identified GPU operator
+          with an exact set of models, by the hour. You get your own API
+          keys, rate limits and usage reports, and pay only for hours that
+          pass the uptime checks. Every <code>infernet reservation</code>{" "}
+          command works through <code>c0mpute infernet</code>.
+        </P>
+        <Code>
+{`c0mpute infernet reservation pricing        # price list by GPU class
+c0mpute infernet reservation create --name N --operator O --models m1,m2
+c0mpute infernet reservation key-issue <id> --label customer-a
+c0mpute infernet reservation report <id>
+c0mpute infernet reservation --help`}
         </Code>
       </Section>
 
