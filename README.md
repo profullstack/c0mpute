@@ -39,7 +39,12 @@ c0mpute worker start --gpu
 
 # submit jobs
 c0mpute transcode submit input.mov --preset hls --max-price 1.25
-c0mpute infernet run prompts.jsonl --model qwen --max-price 5.00
+c0mpute infernet chat --model qwen2.5:7b "hello"
+
+# infernet: see what serves what, reserve a node
+c0mpute pool qwen                        # live nodes per model
+c0mpute infernet model list --node <id>  # one node's advertised models
+c0mpute infernet reservation pricing     # managed endpoints, by GPU class
 
 # monitor
 c0mpute job status <job-id>

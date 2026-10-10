@@ -12,7 +12,7 @@
 [module]
 id          = "hosting"
 name        = "Hosting — censorship-resistant static sites"
-version     = "0.2.27"
+version     = "0.2.28"
 kind        = "workload"
 category    = "data"
 description = "Static-site hosting with multi-replica placement, mutable naming, epoch settlement, and slashable proof-of-serve. See DIP-0015."

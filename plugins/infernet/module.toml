@@ -2,11 +2,15 @@
 #
 # Source code lives upstream at github.com/infernetprotocol/infernet-protocol, NOT
 # this repo. This directory is a marketplace wrapper only.
+#
+# `version` is this wrapper's, kept in lockstep with c0mpute by
+# scripts/bump-version.sh. The installed infernet CLI's own version is what
+# `c0mpute plugin list` reports.
 
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.27"
+version     = "0.2.28"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification."
@@ -23,7 +27,7 @@ arch         = ["x86_64", "aarch64"]
 capabilities = ["gpu:nvidia?", "model-runtime"]
 
 [module.workloads]
-"infernet.inference" = { command = "run", validation = "schema_and_spotcheck" }
+"infernet.inference" = { command = "chat", validation = "schema_and_spotcheck" }
 
 [module.dispatch]
 mode   = "subprocess"

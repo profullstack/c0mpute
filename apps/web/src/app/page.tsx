@@ -66,7 +66,7 @@ $ c0mpute worker start --gpu`}</CodeBlock>
       <section className="space-y-3">
         <p className="comment">// submit a job</p>
         <CodeBlock>{`$ c0mpute transcode submit input.mov --preset hls
-$ c0mpute infernet run prompts.jsonl --model qwen --max-price 0.10`}</CodeBlock>
+$ c0mpute infernet chat --model qwen2.5:7b "hello"`}</CodeBlock>
       </section>
 
       <section className="space-y-3">

@@ -42,7 +42,7 @@ $ c0mpute worker start --gpu`}</CodeBlock>
 
       <Section number="4" label="submit a job">
         <CodeBlock>{`$ c0mpute transcode submit input.mov --preset hls --max-price 1.25
-$ c0mpute infernet run prompts.jsonl --model qwen
+$ c0mpute infernet chat --model qwen2.5:7b "hello"
 $ c0mpute job status <job-id>`}</CodeBlock>
       </Section>
 

@@ -40,7 +40,7 @@ use c0mpute_secure_chat as chat;
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet run prompts.jsonl --model qwen"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing"
 )]
 struct Cli {
     /// Override the config file location.
@@ -183,10 +183,14 @@ enum Cmd {
 
     /// Show the live infernet distribution pool: how many nodes are serving
     /// each model right now (from the control plane's peer list). Pass a model
-    /// id to see just that model + which nodes.
+    /// id to see just that model + which nodes, or --node for the models one
+    /// node advertises. To reserve a node: `c0mpute infernet reservation pricing`.
     Pool {
         /// Model id to filter on (substring match, e.g. `9b`). Omit for all.
         model: Option<String>,
+        /// List the models one node advertises (its node_id or row id), live or not.
+        #[arg(long, conflicts_with = "model")]
+        node: Option<String>,
     },
 }
 
@@ -469,7 +473,8 @@ async fn run_app(cli: Cli) -> Result<()> {
             print_all_versions();
             Ok(())
         }
-        Cmd::Pool { model } => run_pool(model),
+        Cmd::Pool { node: Some(id), .. } => run_pool_node(&id),
+        Cmd::Pool { model, node: None } => run_pool(model),
         Cmd::Doctor => run_doctor().await,
         Cmd::Bench { cmd, quick, json, threads } => run_bench(cmd, quick, json, threads),
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
@@ -525,6 +530,40 @@ fn status_label(s: &c0mpute_doctor::Status) -> &'static str {
 
 fn peer_label(bin: &str) -> &'static str {
     if which_on_path(bin).is_some() { "OK" } else { "WARN" }
+}
+
+/// The installed version of a peer CLI, from the first line of `<bin> --version`.
+/// Only that line is read: `infernet --version` goes on to check npm for updates,
+/// so the child is killed rather than waited on.
+fn peer_version(bin: &str) -> Option<String> {
+    use std::io::BufRead;
+    let path = which_on_path(bin)?;
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut line = String::new();
+    let read = child
+        .stdout
+        .take()
+        .map(|out| std::io::BufReader::new(out).read_line(&mut line));
+    let _ = child.kill();
+    let _ = child.wait();
+    read?.ok()?;
+    parse_version(&line)
+}
+
+/// The first dotted version in a line: "infernet v0.1.58" and "0.15.0" both work.
+fn parse_version(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| {
+            let parts: Vec<&str> = w.split('.').collect();
+            parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_string)
 }
 
 fn peer_status_text(bin: &str) -> String {
@@ -1259,9 +1298,11 @@ fn prompt_new_password() -> Result<String> {
 fn run_plugin(cmd: PluginCmd) -> Result<()> {
     match cmd {
         PluginCmd::List => {
-            println!("transcode  v0.1.0  in-process  built-in");
-            println!("coinpay    v0.1.0  subprocess  {}", peer_status_text("coinpay"));
-            println!("infernet   v0.1.0  subprocess  {}", peer_status_text("infernet"));
+            println!("transcode  v{:<8}  in-process  built-in", env!("CARGO_PKG_VERSION"));
+            for bin in ["coinpay", "infernet"] {
+                let v = peer_version(bin).map(|v| format!("v{v}")).unwrap_or_else(|| "-".into());
+                println!("{bin:<9}  {v:<9}  subprocess  {}", peer_status_text(bin));
+            }
             Ok(())
         }
         PluginCmd::Install { target } => install_plugin(&target),
@@ -1670,7 +1711,8 @@ fn infernet_control_plane_url() -> String {
 /// that actually decides how a fits-one-node model distributes.
 fn run_pool(model: Option<String>) -> Result<()> {
     let base = infernet_control_plane_url();
-    let url = format!("{base}/api/peers?limit=1000");
+    // The control plane caps /api/peers at 100.
+    let url = format!("{base}/api/peers?limit=100");
     let out = Command::new("curl")
         .args(["-fsSL", "--max-time", "12", &url])
         .output()
@@ -1687,7 +1729,15 @@ fn run_pool(model: Option<String>) -> Result<()> {
         .or_else(|| json.as_array().cloned())
         .unwrap_or_default();
 
-    println!("infernet pool @ {base} — {} live nodes", peers.len());
+    println!(
+        "infernet pool @ {base} — {} dialable nodes (public address, seen in the last 15 min)",
+        peers.len()
+    );
+    // /api/peers only lists nodes another node can dial, so NAT'd nodes that
+    // still take jobs are missing from it. The overview has the full count.
+    if let Some((online, registered)) = fetch_online_nodes(&base) {
+        println!("{online} online of {registered} registered (incl. nodes behind NAT)");
+    }
 
     let served = |p: &serde_json::Value| -> Vec<String> {
         p.get("served_models")
@@ -1727,7 +1777,88 @@ fn run_pool(model: Option<String>) -> Result<()> {
             }
         }
     }
+    println!("one node's models: c0mpute pool --node <id>   reserve one: c0mpute infernet reservation pricing");
     Ok(())
+}
+
+/// `c0mpute pool --node <id>` — one node's advertised models, from the control
+/// plane's public GET /api/nodes/<id>/models (the same data as
+/// `infernet model list --node`, without needing infernet installed).
+fn run_pool_node(id: &str) -> Result<()> {
+    let base = infernet_control_plane_url();
+    let url = format!("{base}/api/nodes/{}/models", url_path_segment(id));
+    let out = Command::new("curl")
+        .args(["-sSL", "--max-time", "12", "-w", "\n%{http_code}", &url])
+        .output()
+        .map_err(|e| anyhow::anyhow!("run curl: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.trim_end().rsplit_once('\n').unwrap_or(("", text.trim()));
+    match code {
+        "200" => {}
+        "404" => anyhow::bail!("node {id} not found (or not public) at {base}"),
+        _ => anyhow::bail!("failed to fetch {url} (HTTP {code})"),
+    }
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| anyhow::anyhow!("parse node models from {url}: {e}"))?;
+    let node = json.get("data").unwrap_or(&json);
+    let field = |k: &str| node.get(k).and_then(|v| v.as_str()).unwrap_or("-");
+    let models: Vec<&str> = node
+        .get("served_models")
+        .and_then(|m| m.as_array())
+        .map(|a| a.iter().filter_map(|m| m.as_str()).collect())
+        .unwrap_or_default();
+    println!(
+        "node {} ({})  status {}  last_seen {}",
+        field("node_id"),
+        field("name"),
+        field("status"),
+        field("last_seen")
+    );
+    println!("advertised models: {}", models.len());
+    for m in models {
+        println!("  {m}");
+    }
+    Ok(())
+}
+
+/// Percent-encode everything but unreserved characters, so an id can't add
+/// path segments or a query string.
+fn url_path_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// (online, registered) from the control plane's /api/overview "Online nodes"
+/// card, whose note reads "of N registered". Best-effort: None on any failure.
+fn fetch_online_nodes(base: &str) -> Option<(u64, u64)> {
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "8", &format!("{base}/api/overview")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    parse_online_card(&json)
+}
+
+fn parse_online_card(json: &serde_json::Value) -> Option<(u64, u64)> {
+    let card = json
+        .get("cards")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("label").and_then(|l| l.as_str()) == Some("Online nodes"))?;
+    let online = card.get("value")?.as_u64()?;
+    let registered = card
+        .get("note")?
+        .as_str()?
+        .split_whitespace()
+        .find_map(|w| w.parse::<u64>().ok())?;
+    Some((online, registered))
 }
 
 fn delegate(bin: &str, args: &[String]) -> Result<()> {
@@ -2451,4 +2582,32 @@ fn which_on_path(bin: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod infernet_tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_reads_infernet_and_coinpay_lines() {
+        assert_eq!(parse_version("infernet v0.1.58\n").as_deref(), Some("0.1.58"));
+        assert_eq!(parse_version("0.15.0").as_deref(), Some("0.15.0"));
+        assert_eq!(parse_version("update check failed (offline?)"), None);
+    }
+
+    #[test]
+    fn online_card_parses_value_and_registered() {
+        let json = serde_json::json!({ "cards": [
+            { "label": "Models served", "value": 3, "note": "a, b, c" },
+            { "label": "Online nodes", "value": 2, "note": "of 41 registered" }
+        ]});
+        assert_eq!(parse_online_card(&json), Some((2, 41)));
+        assert_eq!(parse_online_card(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn node_id_is_one_path_segment() {
+        assert_eq!(url_path_segment("provider-0f44326c"), "provider-0f44326c");
+        assert_eq!(url_path_segment("../x?y"), "..%2Fx%3Fy");
+    }
 }
