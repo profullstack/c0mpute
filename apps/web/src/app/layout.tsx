@@ -9,6 +9,12 @@ const SITE = "https://c0mpute.com";
 const DESCRIPTION =
   "The open compute network. Run jobs anywhere, sell unused compute, pay only for verified work. CPUs, GPUs, storage and bandwidth from PCs to data centers, through one open protocol — for humans and AI agents.";
 
+// Static pages re-render hourly so the footer (@profullstack/footer, which fetches the
+// package's @latest template) picks up a footer release without a redeploy. Without
+// this the prerendered pages are baked at build (s-maxage=31536000) and only a
+// redeploy would change the footer.
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: "c0mpute — the open compute network",
   description: DESCRIPTION,
