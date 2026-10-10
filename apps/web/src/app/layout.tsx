@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 import Script from "next/script";
+import { Footer } from "@profullstack/footer/react";
 import { WebMcpProvider } from "@/components/webmcp-provider";
 
 const SITE = "https://c0mpute.com";
@@ -67,30 +68,21 @@ export default function RootLayout({
 
         <main className="flex-1">{children}</main>
 
-        <footer className="border-t border-[var(--color-rule)] mt-16">
-          <div className="max-w-3xl mx-auto px-6 py-6 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--color-dim)]">
-            <span>c0mpute.com</span>
-            <Link href="/blog" className="!border-0 hover:text-[var(--color-accent)]">blog</Link>
-            <Link href="/about" className="!border-0 hover:text-[var(--color-accent)]">about</Link>
-            <Link href="/contact" className="!border-0 hover:text-[var(--color-accent)]">contact</Link>
-            <Link href="/pricing" className="!border-0 hover:text-[var(--color-accent)]">pricing</Link>
-            <Link href="/terms" className="!border-0 hover:text-[var(--color-accent)]">terms</Link>
-            <Link href="/privacy" className="!border-0 hover:text-[var(--color-accent)]">privacy</Link>
-            <a
-              href="https://github.com/profullstack/c0mpute"
-              className="!border-0 hover:text-[var(--color-accent)]"
-            >
-              github
-            </a>
-            <nav className="webring flex gap-x-3" aria-label="Profullstack webring">
-              <a href="https://rssamplifier.com/ring/profullstack/previous?from=https%3A%2F%2Fc0mpute.com%2F" rel="prev" title="Previous site" className="!border-0 hover:text-[var(--color-accent)]">{"<<"}</a>
-              <a href="https://rssamplifier.com/ring/profullstack" className="!border-0 hover:text-[var(--color-accent)]">Profullstack</a>
-              <a href="https://rssamplifier.com/ring/profullstack/next?from=https%3A%2F%2Fc0mpute.com%2F" rel="next" title="Next site" className="!border-0 hover:text-[var(--color-accent)]">{">>"}</a>
-              <a href="https://rssamplifier.com/ring/profullstack/random?from=https%3A%2F%2Fc0mpute.com%2F" title="Random site" aria-label="Random site" className="!border-0 hover:text-[var(--color-accent)]">{"⚄"}</a>
-            </nav>
-            <span className="ml-auto">MIT</span>
-          </div>
-        </footer>
+        <div className="mt-16 text-[var(--color-dim)] [&_a]:!border-0">
+          <Footer
+            site="https://c0mpute.com/"
+            links={[
+              { label: "blog", href: "/blog" },
+              { label: "about", href: "/about" },
+              { label: "contact", href: "/contact" },
+              { label: "pricing", href: "/pricing" },
+              { label: "terms", href: "/terms" },
+              { label: "privacy", href: "/privacy" },
+              { label: "github", href: "https://github.com/profullstack/c0mpute" },
+            ]}
+            tagline="MIT licensed"
+          />
+        </div>
               <Script data-site="130ff3f6-f531-4f4b-b732-73a3f0d072b1" src="https://crawlproof.com/stats.js" strategy="afterInteractive" />
               <script
                 type="application/ld+json"
