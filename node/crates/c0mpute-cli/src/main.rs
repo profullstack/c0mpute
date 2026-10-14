@@ -2199,6 +2199,10 @@ fn ensure_infernet_daemon() {
     if which_on_path("infernet").is_none() || !infernet_initialized() {
         return;
     }
+    if infernet_systemd_managed() {
+        tracing::info!("infernet daemon is managed by infernet.service; not starting another");
+        return;
+    }
     tracing::info!("ensuring infernet node daemon is running");
     let _ = infernet_cmd(&["start"]);
 }
@@ -2681,7 +2685,8 @@ fn refresh_plugins() {
         if let Some(path) = which_on_path(bin) {
             // `infernet update` has no version check: every call reinstalls and restarts the
             // daemon. Only run it when npm has something newer than what is installed.
-            if *bin == "infernet" && !infernet_update_available() {
+            // A systemd-managed daemon updates itself; `infernet update` would restart it from here.
+            if *bin == "infernet" && (infernet_systemd_managed() || !infernet_update_available()) {
                 continue;
             }
             tracing::debug!(plugin = bin, "checking plugin for upgrades");
@@ -2693,6 +2698,19 @@ fn refresh_plugins() {
                 .status();
         }
     }
+}
+
+/// True when a systemd `infernet.service` is running the node daemon. That unit owns the daemon
+/// (and the daemon auto-updates itself), so the worker must not start, update or restart another
+/// one: two daemons on one config dir fight over the socket, port and pidfile.
+fn infernet_systemd_managed() -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", "infernet.service"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// npm package the infernet installer pulls (`npm install -g @infernetprotocol/cli`).
@@ -2764,6 +2782,11 @@ fn reap_stale_infernet_daemons() {
         return;
     }
     let me = unsafe { libc::getuid() };
+    // Only daemons this worker started (they share its cgroup): a daemon run by infernet.service or
+    // by hand is someone else's to manage.
+    let Ok(own_cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return;
+    };
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return;
     };
@@ -2784,6 +2807,10 @@ fn reap_stale_infernet_daemons() {
         };
         if !is_infernet_daemon_cmdline(&cmdline)
             || entry.metadata().map(|m| m.uid()).ok() != Some(me)
+            || std::fs::read_to_string(entry.path().join("cgroup"))
+                .ok()
+                .as_deref()
+                != Some(own_cgroup.as_str())
         {
             continue;
         }
