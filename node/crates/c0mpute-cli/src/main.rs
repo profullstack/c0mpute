@@ -27,13 +27,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use c0mpute_core::{
     Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing, run_auction,
     run_register,
 };
 use c0mpute_proto::Role;
 use c0mpute_secure_chat as chat;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -362,9 +362,9 @@ fn maybe_self_update(cli: &Cli) {
         return;
     };
     let current = env!("CARGO_PKG_VERSION");
-    if let Ok(c0mpute_update::UpgradeOutcome::Upgraded { .. }) =
-        rt.block_on(c0mpute_update::upgrade_now(current, c0mpute_update::DEFAULT_RELEASE_FEED))
-    {
+    if let Ok(c0mpute_update::UpgradeOutcome::Upgraded { .. }) = rt.block_on(
+        c0mpute_update::upgrade_now(current, c0mpute_update::DEFAULT_RELEASE_FEED),
+    ) {
         use std::os::unix::process::CommandExt;
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("c0mpute"));
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -476,7 +476,12 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Pool { node: Some(id), .. } => run_pool_node(&id),
         Cmd::Pool { model, node: None } => run_pool(model),
         Cmd::Doctor => run_doctor().await,
-        Cmd::Bench { cmd, quick, json, threads } => run_bench(cmd, quick, json, threads),
+        Cmd::Bench {
+            cmd,
+            quick,
+            json,
+            threads,
+        } => run_bench(cmd, quick, json, threads),
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
@@ -514,8 +519,16 @@ async fn run_doctor() -> Result<()> {
     }
 
     println!("{:5} c0mpute — Ok (this binary)", "OK");
-    println!("{:5} coinpay — {}", peer_label("coinpay"), peer_status_text("coinpay"));
-    println!("{:5} infernet — {}", peer_label("infernet"), peer_status_text("infernet"));
+    println!(
+        "{:5} coinpay — {}",
+        peer_label("coinpay"),
+        peer_status_text("coinpay")
+    );
+    println!(
+        "{:5} infernet — {}",
+        peer_label("infernet"),
+        peer_status_text("infernet")
+    );
 
     Ok(())
 }
@@ -529,7 +542,11 @@ fn status_label(s: &c0mpute_doctor::Status) -> &'static str {
 }
 
 fn peer_label(bin: &str) -> &'static str {
-    if which_on_path(bin).is_some() { "OK" } else { "WARN" }
+    if which_on_path(bin).is_some() {
+        "OK"
+    } else {
+        "WARN"
+    }
 }
 
 /// The installed version of a peer CLI, from the first line of `<bin> --version`.
@@ -561,7 +578,10 @@ fn parse_version(line: &str) -> Option<String> {
         .map(|w| w.trim_start_matches('v'))
         .find(|w| {
             let parts: Vec<&str> = w.split('.').collect();
-            parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            parts.len() >= 2
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
         })
         .map(str::to_string)
 }
@@ -569,9 +589,9 @@ fn parse_version(line: &str) -> Option<String> {
 fn peer_status_text(bin: &str) -> String {
     match which_on_path(bin) {
         Some(p) => format!("Ok ({})", p.display()),
-        None => format!(
-            "not on PATH — install via `curl -fsSL https://c0mpute.com/install.sh | sh`"
-        ),
+        None => {
+            format!("not on PATH — install via `curl -fsSL https://c0mpute.com/install.sh | sh`")
+        }
     }
 }
 
@@ -604,7 +624,9 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             ensure_coinpay_did();
             println!();
             println!("next:");
-            println!("  c0mpute login          # sign in to coinpay + infernet (ties this node to your accounts)");
+            println!(
+                "  c0mpute login          # sign in to coinpay + infernet (ties this node to your accounts)"
+            );
             println!("  c0mpute worker start   # join the swarm");
             Ok(())
         }
@@ -669,6 +691,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             let interval_secs = cfg.update_interval_secs.max(60);
             bootstrap_infernet_first_run();
             ensure_infernet_daemon();
+            reap_stale_infernet_daemons();
             // Opt-in: serve configured models over infernet RPC (builds llama.cpp
             // in the background on first run, then serves once ready).
             let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc);
@@ -684,6 +707,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                         ticker.tick().await;
                         let _ = tokio::task::spawn_blocking(refresh_plugins).await;
                         let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc).await;
+                        let _ = tokio::task::spawn_blocking(reap_stale_infernet_daemons).await;
                     }
                 });
             }
@@ -711,7 +735,12 @@ fn bench_report_path() -> PathBuf {
     c0mpute_bench::path_in(&config::data_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
-fn run_bench(cmd: Option<BenchCmd>, quick: bool, json: bool, threads: Option<Vec<usize>>) -> Result<()> {
+fn run_bench(
+    cmd: Option<BenchCmd>,
+    quick: bool,
+    json: bool,
+    threads: Option<Vec<usize>>,
+) -> Result<()> {
     let path = bench_report_path();
     match cmd.unwrap_or(BenchCmd::Run) {
         BenchCmd::Path => {
@@ -734,13 +763,18 @@ fn run_bench(cmd: Option<BenchCmd>, quick: bool, json: bool, threads: Option<Vec
                     anyhow::bail!("--threads needs one or more counts greater than zero");
                 }
             }
-            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
             if !json {
                 eprintln!(
                     "c0mpute bench: {} run on {cores} cores — {} workloads × {} thread counts",
                     if quick { "quick" } else { "full" },
                     c0mpute_bench::WORKLOADS.len(),
-                    threads.as_ref().map(|t| t.len()).unwrap_or_else(|| c0mpute_bench::thread_ladder(cores).len()),
+                    threads
+                        .as_ref()
+                        .map(|t| t.len())
+                        .unwrap_or_else(|| c0mpute_bench::thread_ladder(cores).len()),
                 );
             }
             fn progress(workload: &str, threads: usize) {
@@ -760,9 +794,14 @@ fn run_bench(cmd: Option<BenchCmd>, quick: bool, json: bool, threads: Option<Vec
             if !json {
                 println!("saved {}", path.display());
                 if report.metadata.quick {
-                    println!("quick runs are not advertised — run `c0mpute bench` without --quick to publish a score");
+                    println!(
+                        "quick runs are not advertised — run `c0mpute bench` without --quick to publish a score"
+                    );
                 } else {
-                    println!("the worker advertises score {} on its next start", report.score);
+                    println!(
+                        "the worker advertises score {} on its next start",
+                        report.score
+                    );
                 }
             }
             Ok(())
@@ -772,7 +811,10 @@ fn run_bench(cmd: Option<BenchCmd>, quick: bool, json: bool, threads: Option<Vec
 
 fn print_bench(report: &c0mpute_bench::BenchReport, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(report).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(report).unwrap_or_default()
+        );
     } else {
         print!("{}", c0mpute_bench::render_text(report));
     }
@@ -807,7 +849,10 @@ fn daemonize_worker() -> Result<()> {
     if let Some(parent) = pid_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let stdout = OpenOptions::new().create(true).append(true).open(&log_file)?;
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)?;
     let stderr = stdout.try_clone()?;
 
     // Print to the launching terminal *before* forking — once detached,
@@ -951,8 +996,9 @@ fn run_attached_worker(passthrough: Vec<String>) -> Result<()> {
         std::thread::spawn(|| {
             let mut b = [0u8; 1];
             loop {
-                let n =
-                    unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1) };
+                let n = unsafe {
+                    libc::read(libc::STDIN_FILENO, b.as_mut_ptr() as *mut libc::c_void, 1)
+                };
                 // EOF/error, Ctrl-D, or Ctrl-C → detach.
                 if n <= 0 || b[0] == 0x04 || b[0] == 0x03 {
                     DETACH.store(true, Ordering::SeqCst);
@@ -1247,7 +1293,11 @@ fn run_chat(cmd: ChatCmd) -> Result<()> {
             Ok(())
         }
 
-        ChatCmd::Send { to, message: _, sealed: _ } => {
+        ChatCmd::Send {
+            to,
+            message: _,
+            sealed: _,
+        } => {
             println!("[v0.2] direct send to {to} requires p2p transport (not yet live)");
             println!("       DHT key lookup and gossip relay land in v0.2.");
             Ok(())
@@ -1298,9 +1348,14 @@ fn prompt_new_password() -> Result<String> {
 fn run_plugin(cmd: PluginCmd) -> Result<()> {
     match cmd {
         PluginCmd::List => {
-            println!("transcode  v{:<8}  in-process  built-in", env!("CARGO_PKG_VERSION"));
+            println!(
+                "transcode  v{:<8}  in-process  built-in",
+                env!("CARGO_PKG_VERSION")
+            );
             for bin in ["coinpay", "infernet"] {
-                let v = peer_version(bin).map(|v| format!("v{v}")).unwrap_or_else(|| "-".into());
+                let v = peer_version(bin)
+                    .map(|v| format!("v{v}"))
+                    .unwrap_or_else(|| "-".into());
                 println!("{bin:<9}  {v:<9}  subprocess  {}", peer_status_text(bin));
             }
             Ok(())
@@ -1423,7 +1478,9 @@ async fn run_update(check_only: bool, feed: Option<String>) -> Result<()> {
         }
         Ok(UpgradeOutcome::Upgraded { from, to }) => {
             println!("upgraded {from} → {to}");
-            println!("restart any running worker to apply: c0mpute worker stop && c0mpute worker start -d");
+            println!(
+                "restart any running worker to apply: c0mpute worker stop && c0mpute worker start -d"
+            );
         }
         Ok(UpgradeOutcome::Available { .. }) => unreachable!("upgrade_now applies or errors"),
         Err(e) => {
@@ -1502,7 +1559,7 @@ fn parse_role(s: &str) -> Option<Role> {
 /// child `c0mpute` so the real handlers run unchanged.
 fn run_menu() -> Result<()> {
     use clap::CommandFactory;
-    use dialoguer::{theme::ColorfulTheme, Select};
+    use dialoguer::{Select, theme::ColorfulTheme};
 
     let root = Cli::command();
     let mut path: Vec<String> = Vec::new();
@@ -1535,7 +1592,13 @@ fn run_menu() -> Result<()> {
 
         let mut labels: Vec<String> = subs
             .iter()
-            .map(|(n, a)| if a.is_empty() { n.clone() } else { format!("{n:<12} {a}") })
+            .map(|(n, a)| {
+                if a.is_empty() {
+                    n.clone()
+                } else {
+                    format!("{n:<12} {a}")
+                }
+            })
             .collect();
         let has_extra = !path.is_empty();
         if has_extra {
@@ -1742,7 +1805,11 @@ fn run_pool(model: Option<String>) -> Result<()> {
     let served = |p: &serde_json::Value| -> Vec<String> {
         p.get("served_models")
             .and_then(|s| s.as_array())
-            .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
 
@@ -1753,7 +1820,10 @@ fn run_pool(model: Option<String>) -> Result<()> {
                 .iter()
                 .filter(|p| served(p).iter().any(|m| m.to_lowercase().contains(&f)))
                 .collect();
-            println!("nodes serving a model matching \"{filter}\": {}", matched.len());
+            println!(
+                "nodes serving a model matching \"{filter}\": {}",
+                matched.len()
+            );
             for p in matched {
                 let pk = p.get("pubkey").and_then(|v| v.as_str()).unwrap_or("?");
                 let short = pk.get(..12).unwrap_or(pk);
@@ -1777,7 +1847,9 @@ fn run_pool(model: Option<String>) -> Result<()> {
             }
         }
     }
-    println!("one node's models: c0mpute pool --node <id>   reserve one: c0mpute infernet reservation pricing");
+    println!(
+        "one node's models: c0mpute pool --node <id>   reserve one: c0mpute infernet reservation pricing"
+    );
     Ok(())
 }
 
@@ -1792,7 +1864,10 @@ fn run_pool_node(id: &str) -> Result<()> {
         .output()
         .map_err(|e| anyhow::anyhow!("run curl: {e}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.trim_end().rsplit_once('\n').unwrap_or(("", text.trim()));
+    let (body, code) = text
+        .trim_end()
+        .rsplit_once('\n')
+        .unwrap_or(("", text.trim()));
     match code {
         "200" => {}
         "404" => anyhow::bail!("node {id} not found (or not public) at {base}"),
@@ -1826,7 +1901,9 @@ fn run_pool_node(id: &str) -> Result<()> {
 fn url_path_segment(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -1883,7 +1960,9 @@ fn delegate(bin: &str, args: &[String]) -> Result<()> {
 /// coinpay must never fail registration — we just point the operator at it.
 fn ensure_coinpay_did() {
     let Some(coinpay) = which_on_path("coinpay") else {
-        println!("payable DID: `coinpay` not installed — run `c0mpute coinpay reputation did setup` later to set one up.");
+        println!(
+            "payable DID: `coinpay` not installed — run `c0mpute coinpay reputation did setup` later to set one up."
+        );
         return;
     };
     println!("payable DID:");
@@ -1912,7 +1991,10 @@ fn run_login() -> Result<()> {
         println!("── infernet ── initializing node (init + register)…");
         ensure_infernet_initialized();
     }
-    login_one("infernet", "ties this node to your infernetprotocol.com account");
+    login_one(
+        "infernet",
+        "ties this node to your infernetprotocol.com account",
+    );
     // Bind this node to the account so it shows on /dashboard and can be
     // assigned models/jobs (best-effort; no-op if not installed or not authed).
     if which_on_path("infernet").is_some() {
@@ -1939,13 +2021,17 @@ fn login_hf() {
     } else if which_on_path("huggingface-cli").is_some() {
         ("huggingface-cli", &["login"])
     } else {
-        println!("  ! huggingface CLI not installed — skip (installed with vLLM on NVIDIA nodes)\n");
+        println!(
+            "  ! huggingface CLI not installed — skip (installed with vLLM on NVIDIA nodes)\n"
+        );
         return;
     };
     let path = which_on_path(bin).unwrap();
     match Command::new(path).args(args).status() {
         Ok(s) if s.success() => println!("  ✓ huggingface signed in\n"),
-        Ok(_) => println!("  ! huggingface login skipped/failed (fine unless you use gated models)\n"),
+        Ok(_) => {
+            println!("  ! huggingface login skipped/failed (fine unless you use gated models)\n")
+        }
         Err(e) => println!("  ! couldn't run {bin}: {e}\n"),
     }
 }
@@ -2015,8 +2101,8 @@ fn ensure_infernet_initialized() -> bool {
     if infernet_initialized() {
         return false;
     }
-    let url =
-        std::env::var("INFERNET_URL").unwrap_or_else(|_| "https://infernetprotocol.com".to_string());
+    let url = std::env::var("INFERNET_URL")
+        .unwrap_or_else(|_| "https://infernetprotocol.com".to_string());
     let name = infernet_node_name();
     // "Always accept": every prompt is supplied as a flag, and we pipe a stream
     // of "y" so any remaining prompt (e.g. the firewall rule, which opens the
@@ -2156,7 +2242,9 @@ fn build_llama_rpc_background() {
         let _ = std::fs::create_dir_all(p);
     }
     let _ = std::fs::write(&lock, b"");
-    tracing::info!("building llama.cpp (rpc-server/llama-server) in background for infernet RPC serving");
+    tracing::info!(
+        "building llama.cpp (rpc-server/llama-server) in background for infernet RPC serving"
+    );
     let script = "set -e\n\
          # Ensure a build toolchain (cmake + C/C++ compiler + git) — not present\n\
          # on a fresh node by default.\n\
@@ -2276,8 +2364,18 @@ fn resolve_ollama_gguf(model: &str) -> Option<PathBuf> {
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        for layer in json.get("layers").and_then(|l| l.as_array()).into_iter().flatten() {
-            if layer.get("mediaType").and_then(|m| m.as_str()).unwrap_or("").contains("model") {
+        for layer in json
+            .get("layers")
+            .and_then(|l| l.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if layer
+                .get("mediaType")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .contains("model")
+            {
                 if let Some(digest) = layer.get("digest").and_then(|d| d.as_str()) {
                     let blob = base.join("blobs").join(digest.replace(':', "-"));
                     if std::fs::File::open(&blob).is_ok() {
@@ -2311,7 +2409,12 @@ fn rpc_slice_active_models() -> std::collections::HashSet<String> {
             .map(|pid| pid_alive(pid as i32))
             .unwrap_or(false);
         if alive {
-            for m in slice.get("models").and_then(|m| m.as_array()).into_iter().flatten() {
+            for m in slice
+                .get("models")
+                .and_then(|m| m.as_array())
+                .into_iter()
+                .flatten()
+            {
                 if let Some(s) = m.as_str() {
                     set.insert(s.to_string());
                 }
@@ -2389,7 +2492,14 @@ fn bootstrap_infernet_rpc() {
         // (slice).
         tracing::info!(model, "infernet: RPC-sharding oversized model");
         let _ = Command::new(&infernet)
-            .args(["inference", "primary", "--model", model, "--gguf", &gguf.to_string_lossy()])
+            .args([
+                "inference",
+                "primary",
+                "--model",
+                model,
+                "--gguf",
+                &gguf.to_string_lossy(),
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2398,7 +2508,13 @@ fn bootstrap_infernet_rpc() {
         if !active.contains(model) {
             let _ = Command::new(&infernet)
                 .args([
-                    "inference", "serve", "--backend", "rpc", "--model", model, "--port",
+                    "inference",
+                    "serve",
+                    "--backend",
+                    "rpc",
+                    "--model",
+                    model,
+                    "--port",
                     &port.to_string(),
                 ])
                 .stdin(std::process::Stdio::null())
@@ -2518,7 +2634,10 @@ fn prune_rpc_primaries(keep: &[String]) {
         models.retain(|m| m.as_str().map(|s| keep_set.contains(s)).unwrap_or(false));
         changed |= models.len() != before;
     }
-    if let Some(paths) = primary.get_mut("gguf_paths").and_then(|p| p.as_object_mut()) {
+    if let Some(paths) = primary
+        .get_mut("gguf_paths")
+        .and_then(|p| p.as_object_mut())
+    {
         let before = paths.len();
         paths.retain(|k, _| keep_set.contains(k.as_str()));
         changed |= paths.len() != before;
@@ -2534,10 +2653,8 @@ fn prune_rpc_primaries(keep: &[String]) {
 }
 
 /// (binary, self-update args) for the peer-CLI plugins c0mpute manages.
-const PLUGIN_UPDATERS: &[(&str, &[&str])] = &[
-    ("coinpay", &["self", "update"]),
-    ("infernet", &["update"]),
-];
+const PLUGIN_UPDATERS: &[(&str, &[&str])] =
+    &[("coinpay", &["self", "update"]), ("infernet", &["update"])];
 
 /// Upgrade every installed plugin in the foreground, streaming their output.
 /// Used by `c0mpute update` so a manual update always brings plugins along.
@@ -2562,6 +2679,11 @@ fn upgrade_plugins_foreground() {
 fn refresh_plugins() {
     for (bin, args) in PLUGIN_UPDATERS {
         if let Some(path) = which_on_path(bin) {
+            // `infernet update` has no version check: every call reinstalls and restarts the
+            // daemon. Only run it when npm has something newer than what is installed.
+            if *bin == "infernet" && !infernet_update_available() {
+                continue;
+            }
             tracing::debug!(plugin = bin, "checking plugin for upgrades");
             let _ = Command::new(path)
                 .args(*args)
@@ -2571,6 +2693,135 @@ fn refresh_plugins() {
                 .status();
         }
     }
+}
+
+/// npm package the infernet installer pulls (`npm install -g @infernetprotocol/cli`).
+const INFERNET_NPM_LATEST: &str = "https://registry.npmjs.org/@infernetprotocol/cli/latest";
+
+/// True only when npm's latest infernet differs from the installed one. Unknown on either side
+/// (offline, registry down, unparseable `--version`) means no: a pointless reinstall restarts the
+/// daemon, and an interrupted restart is what leaks old daemons.
+fn infernet_update_available() -> bool {
+    let Some(installed) = tool_version("infernet") else {
+        return false;
+    };
+    let Some(latest) = npm_latest_version(INFERNET_NPM_LATEST) else {
+        return false;
+    };
+    let newer = latest != installed;
+    if newer {
+        tracing::info!(
+            installed,
+            latest,
+            "infernet: newer version on npm, updating"
+        );
+    } else {
+        tracing::debug!(installed, "infernet: already latest");
+    }
+    newer
+}
+
+/// `version` from an npm registry `/latest` document. Called from blocking threads.
+fn npm_latest_version(url: &str) -> Option<String> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    handle.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .ok()?;
+        let doc: serde_json::Value = client
+            .get(url)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        doc.get("version")?.as_str().map(str::to_string)
+    })
+}
+
+/// Stop infernet node daemons that are not the one in `daemon.pid`. A daemon restart (`infernet
+/// setup`, run by `infernet update`) asks the old daemon to shut down over IPC, and the old one can
+/// release its socket and pidfile without exiting (its offline heartbeat has no timeout), so the
+/// next start succeeds and the old process lives on. On dev2 that reached 326 daemons / 22 GB.
+#[cfg(target_os = "linux")]
+fn reap_stale_infernet_daemons() {
+    use std::os::unix::fs::MetadataExt;
+    let Some(pidfile) = infernet_config_path().map(|p| p.with_file_name("daemon.pid")) else {
+        return;
+    };
+    let Some(current) = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+    else {
+        return; // no daemon of record: never guess which one to keep
+    };
+    // SAFETY: kill(pid, 0) only checks that the pid exists.
+    if unsafe { libc::kill(current, 0) } != 0 {
+        return;
+    }
+    let me = unsafe { libc::getuid() };
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    let mut stale = Vec::new();
+    for entry in dir.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid == current {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if !is_infernet_daemon_cmdline(&cmdline)
+            || entry.metadata().map(|m| m.uid()).ok() != Some(me)
+        {
+            continue;
+        }
+        stale.push(pid);
+    }
+    if stale.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        count = stale.len(),
+        keep = current,
+        "infernet: stopping stale node daemons"
+    );
+    for &pid in &stale {
+        // SAFETY: a plain signal to a process matched by cmdline and uid.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    for &pid in &stale {
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reap_stale_infernet_daemons() {}
+
+/// `node …/@infernetprotocol/cli/index.js start --foreground` (the detached daemon), from a
+/// NUL-separated /proc cmdline.
+fn is_infernet_daemon_cmdline(raw: &[u8]) -> bool {
+    let args: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
+    let has = |needle: &[u8]| args.iter().any(|a| *a == needle);
+    let infernet = args.iter().any(|a| {
+        let a = String::from_utf8_lossy(a);
+        a.contains("@infernetprotocol/cli") || a.ends_with("/infernet")
+    });
+    infernet && has(b"start") && has(b"--foreground")
 }
 
 fn which_on_path(bin: &str) -> Option<PathBuf> {
@@ -2589,8 +2840,66 @@ mod infernet_tests {
     use super::*;
 
     #[test]
+    fn infernet_daemon_cmdline_matching() {
+        let daemon = b"/root/.local/share/mise/installs/node/22.23.3/bin/node\0/root/.local/share/mise/installs/node/22.23.3/lib/node_modules/@infernetprotocol/cli/index.js\0start\0--foreground\0";
+        assert!(is_infernet_daemon_cmdline(daemon));
+        assert!(!is_infernet_daemon_cmdline(
+            b"/usr/bin/node\0/x/@infernetprotocol/cli/index.js\0start\0"
+        ));
+        assert!(!is_infernet_daemon_cmdline(
+            b"/usr/bin/node\0/x/@infernetprotocol/cli/index.js\0inference\0serve\0--foreground\0"
+        ));
+        assert!(!is_infernet_daemon_cmdline(
+            b"/usr/bin/node\0/srv/app/index.js\0start\0--foreground\0"
+        ));
+    }
+
+    /// Real processes: two fake daemons, one recorded in daemon.pid. Only the other one dies.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaper_stops_only_unrecorded_daemons() {
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!("c0mpute-reap-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("infernet")).unwrap();
+        let fake = |tag: &str| {
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "sleep 600",
+                    &format!("/x/{tag}/@infernetprotocol/cli/index.js"),
+                    "start",
+                    "--foreground",
+                ])
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut keep = fake("keep");
+        let mut stale = fake("stale");
+        std::fs::write(dir.join("infernet/daemon.pid"), keep.id().to_string()).unwrap();
+        // SAFETY: the only test that reads XDG_CONFIG_HOME.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        reap_stale_infernet_daemons();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            stale.try_wait().unwrap().is_some(),
+            "stale daemon still running"
+        );
+        assert!(
+            keep.try_wait().unwrap().is_none(),
+            "recorded daemon was killed"
+        );
+        let _ = keep.kill();
+        let _ = keep.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parse_version_reads_infernet_and_coinpay_lines() {
-        assert_eq!(parse_version("infernet v0.1.58\n").as_deref(), Some("0.1.58"));
+        assert_eq!(
+            parse_version("infernet v0.1.58\n").as_deref(),
+            Some("0.1.58")
+        );
         assert_eq!(parse_version("0.15.0").as_deref(), Some("0.15.0"));
         assert_eq!(parse_version("update check failed (offline?)"), None);
     }
