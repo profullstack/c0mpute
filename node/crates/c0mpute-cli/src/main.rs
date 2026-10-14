@@ -2865,7 +2865,7 @@ mod infernet_tests {
             Command::new("sh")
                 .args([
                     "-c",
-                    "sleep 600",
+                    "sleep 600; :",
                     &format!("/x/{tag}/@infernetprotocol/cli/index.js"),
                     "start",
                     "--foreground",
@@ -2874,8 +2874,20 @@ mod infernet_tests {
                 .spawn()
                 .unwrap()
         };
+        // `; :` keeps sh from exec-ing sleep, which would replace the cmdline being matched.
         let mut keep = fake("keep");
         let mut stale = fake("stale");
+        for child in [&keep, &stale] {
+            let path = format!("/proc/{}/cmdline", child.id());
+            let ready = (0..100).any(|_| {
+                let ok = std::fs::read(&path).is_ok_and(|c| is_infernet_daemon_cmdline(&c));
+                if !ok {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                ok
+            });
+            assert!(ready, "fake daemon never showed the infernet cmdline");
+        }
         std::fs::write(dir.join("infernet/daemon.pid"), keep.id().to_string()).unwrap();
         // SAFETY: the only test that reads XDG_CONFIG_HOME.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
