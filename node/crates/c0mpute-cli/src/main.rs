@@ -2665,6 +2665,12 @@ const PLUGIN_UPDATERS: &[(&str, &[&str])] =
 fn upgrade_plugins_foreground() {
     for (bin, args) in PLUGIN_UPDATERS {
         if let Some(path) = which_on_path(bin) {
+            // `infernet update` restarts the daemon from this shell; under infernet.service that
+            // starts a second daemon beside systemd's, and the daemon updates itself anyway.
+            if *bin == "infernet" && infernet_systemd_managed() {
+                println!("→ infernet is managed by infernet.service (it updates itself); skipping");
+                continue;
+            }
             println!("→ upgrading {bin}…");
             match Command::new(path).args(*args).status() {
                 Ok(s) if s.success() => println!("  ✓ {bin} up to date"),
@@ -2704,13 +2710,17 @@ fn refresh_plugins() {
 /// (and the daemon auto-updates itself), so the worker must not start, update or restart another
 /// one: two daemons on one config dir fight over the socket, port and pidfile.
 fn infernet_systemd_managed() -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", "infernet.service"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    // Enabled, not only active: during the unit's own restart it is briefly "activating", and the
+    // worker must not slip a second daemon in then.
+    ["is-enabled", "is-active"].iter().any(|verb| {
+        Command::new("systemctl")
+            .args([*verb, "--quiet", "infernet.service"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
 /// npm package the infernet installer pulls (`npm install -g @infernetprotocol/cli`).
