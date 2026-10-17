@@ -28,6 +28,13 @@ export function stripDeadLinks(html: string): string {
       DEAD_IMAGE_HOSTS.some((h) => m.includes(h)) ? "" : m,
     );
   }
+  // JSON-LD blocks embedded in the post: drop a dead "image" property.
+  for (const h of DEAD_IMAGE_HOSTS) {
+    const host = h.replace(/[\\.]/g, "\\$&");
+    const val = `(?:\\[\\s*"https?:\\/\\/${host}[^"]*"(?:\\s*,\\s*"[^"]*")*\\s*\\]|"https?:\\/\\/${host}[^"]*")`;
+    out = out.replace(new RegExp(`"image"\\s*:\\s*${val}\\s*,`, "g"), "");
+    out = out.replace(new RegExp(`,\\s*"image"\\s*:\\s*${val}`, "g"), "");
+  }
   if (DEAD_LINK_PREFIXES.some((p) => out.includes(p))) {
     out = out.replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (m, inner) =>
       DEAD_LINK_PREFIXES.some((p) => m.includes(`href="${p}`) || m.includes(`href='${p}`)) ? inner : m,
