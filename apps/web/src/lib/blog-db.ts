@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/sqlite-proxy";
 import { desc, eq } from "drizzle-orm";
 import Redis from "ioredis";
 import { blogPosts } from "./schema";
+import { isDeadImageUrl, stripDeadLinks } from "./dead-links";
 
 // ── SQLite Cloud + Drizzle ────────────────────────────────────────────────────
 
@@ -263,7 +264,12 @@ export interface BlogPost {
 type NewPost = Omit<BlogPost, "id" | "created_at">;
 
 function hydrate(row: typeof blogPosts.$inferSelect): BlogPost {
-  return { ...row, tags: JSON.parse((row.tags as string) ?? "[]") };
+  return {
+    ...row,
+    content_html: stripDeadLinks(row.content_html),
+    image_url: isDeadImageUrl(row.image_url) ? null : row.image_url,
+    tags: JSON.parse((row.tags as string) ?? "[]"),
+  };
 }
 
 // ── Exported functions ────────────────────────────────────────────────────────
