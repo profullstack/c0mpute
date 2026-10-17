@@ -30,7 +30,7 @@ export function stripDeadLinks(html: string): string {
   }
   // JSON-LD blocks embedded in the post: drop a dead "image" property.
   for (const h of DEAD_IMAGE_HOSTS) {
-    const host = h.replace(/\./g, "\\.");
+    const host = h.replace(/[\\.]/g, "\\$&");
     const val = `(?:\\[\\s*"https?:\\/\\/${host}[^"]*"(?:\\s*,\\s*"[^"]*")*\\s*\\]|"https?:\\/\\/${host}[^"]*")`;
     out = out.replace(new RegExp(`"image"\\s*:\\s*${val}\\s*,`, "g"), "");
     out = out.replace(new RegExp(`,\\s*"image"\\s*:\\s*${val}`, "g"), "");
