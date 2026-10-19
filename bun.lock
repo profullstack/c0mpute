@@ -20,7 +20,7 @@
     },
     "apps/tui": {
       "name": "@c0mpute/tui",
-      "version": "0.2.28",
+      "version": "0.2.31",
       "bin": {
         "c0mpute-tui": "./src/index.ts",
       },
@@ -34,10 +34,9 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.2.28",
+      "version": "0.2.31",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
-        "@profullstack/footer": "latest",
         "@profullstack/x402-gateway": "^0.7.0",
         "@sqlitecloud/drivers": "^1.0.880",
         "ioredis": "^5.11.1",
@@ -59,7 +58,7 @@
     },
     "packages/shared": {
       "name": "@c0mpute/shared",
-      "version": "0.2.28",
+      "version": "0.2.31",
       "devDependencies": {
         "typescript": "^5.8.0",
       },
@@ -221,8 +220,6 @@
     "@posthog/core": ["@posthog/core@1.30.9", "", { "dependencies": { "@posthog/types": "1.381.0" } }, "sha512-Cn004VJ7ZWQRaVQG7efh+pMtRMIVZznktngXe5I3E8wClRdMwCZaSa6jo/X04Oc04z8PeMp4GEcWVkdEhmAEXw=="],
 
     "@posthog/types": ["@posthog/types@1.381.0", "", {}, "sha512-AW68BovKFCNbPdq3VjOzfQeSQRYMvQVv+46LDywWFXO/oOTXFKwjY92FaJQSTXWgTNgDpqigCw3yUFDinK3hZA=="],
-
-    "@profullstack/footer": ["@profullstack/footer@0.2.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-0bpxw5OEsvIdiU8tV5R3zmeAZ8X1rjnZj0vl/mrto+oxN8D6tLjImr5/Ki1ynAUXVRqpz+ejbVlXhORzzLBDkQ=="],
 
     "@profullstack/hqtui": ["@profullstack/hqtui@0.5.0", "", { "bin": { "hqtui": "bin/hqtui.mjs" } }, "sha512-jDwILBmdQx8pQA0ao/tzzty8u5nFNS4XhvU9xXhZvdIaMeiF3HBJIVtP6cS6kigS4lXmHR7sztbb9QJpaWwhig=="],
 
