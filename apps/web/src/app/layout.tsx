@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 import Script from "next/script";
+import { Footer } from "@profullstack/footer/react";
 import { WebMcpProvider } from "@/components/webmcp-provider";
 import { PitFooter } from "@/components/pit-footer";
 
@@ -10,7 +11,8 @@ const DESCRIPTION =
   "The open compute network. Run jobs anywhere, sell unused compute, pay only for verified work. CPUs, GPUs, storage and bandwidth from PCs to data centers, through one open protocol — for humans and AI agents.";
 
 // Static pages re-render hourly so the pit.world network footer (fetched server-side
-// from pit.world/snippets) picks up changes without a redeploy. Without this the
+// from pit.world/snippets) and the @profullstack/footer webring row (rendered from the
+// package's @latest template) pick up changes without a redeploy. Without this the
 // prerendered pages are baked at build (s-maxage=31536000) and only a redeploy
 // would change the footer.
 export const revalidate = 3600;
@@ -75,9 +77,8 @@ export default function RootLayout({
         <main className="flex-1">{children}</main>
 
         <footer className="mt-16 border-t border-[var(--color-rule)]">
-          <div className="max-w-3xl mx-auto px-6 py-5 flex flex-wrap items-center justify-between gap-x-5 gap-y-2 text-xs text-[var(--color-dim)] [&_a]:!border-0">
-            <span>&copy; {new Date().getFullYear()} c0mpute &middot; MIT licensed</span>
-            <nav aria-label="Footer" className="flex flex-wrap gap-x-4 gap-y-1">
+          <div className="max-w-3xl mx-auto px-6 py-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-[var(--color-dim)] [&_a]:!border-0">
+            <nav aria-label="Footer" className="flex flex-wrap justify-center gap-x-4 gap-y-1">
               {[
                 ["blog", "/blog"],
                 ["about", "/about"],
@@ -92,6 +93,11 @@ export default function RootLayout({
             </nav>
           </div>
         </footer>
+        {/* The Profullstack webring row (server-rendered by @profullstack/footer), which
+            also carries the copyright. The pit.world network footer stays last in <body>. */}
+        <div className="text-xs text-[var(--color-dim)] [&_a]:!border-0">
+          <Footer site="https://c0mpute.com/" tagline="MIT licensed" />
+        </div>
               <Script data-site="130ff3f6-f531-4f4b-b732-73a3f0d072b1" src="https://crawlproof.com/stats.js" strategy="afterInteractive" />
               <script
                 type="application/ld+json"
