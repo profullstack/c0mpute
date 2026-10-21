@@ -5,6 +5,7 @@ import Script from "next/script";
 import { Footer } from "@profullstack/footer/react";
 import { WebMcpProvider } from "@/components/webmcp-provider";
 import { PitFooter } from "@/components/pit-footer";
+import { SiteNav } from "@/components/site-nav";
 
 const SITE = "https://c0mpute.com";
 const DESCRIPTION =
@@ -55,24 +56,7 @@ export default function RootLayout({
       <body className="min-h-screen flex flex-col">
         <WebMcpProvider />
         <header className="border-b border-[var(--color-rule)]">
-          <nav className="max-w-3xl mx-auto px-6 py-4 flex items-center justify-between text-sm">
-            <Link
-              href="/"
-              className="!border-0 font-bold text-[var(--color-fg)] hover:text-[var(--color-accent)]"
-            >
-              <span className="accent">$</span> c0mpute
-            </Link>
-            <div className="flex flex-wrap justify-end gap-x-5 gap-y-1 text-[var(--color-dim)]">
-              <Link href="/getting-started" className="!border-0 hover:text-[var(--color-accent)]">getting-started</Link>
-              <Link href="/protocol" className="!border-0 hover:text-[var(--color-accent)]">protocol</Link>
-              <Link href="/providers" className="!border-0 accent hover:text-[var(--color-accent)]">run a node</Link>
-              <Link href="/nodes" className="!border-0 hover:text-[var(--color-accent)]">nodes</Link>
-              <Link href="/agents" className="!border-0 hover:text-[var(--color-accent)]">agents</Link>
-              <Link href="/plugins" className="!border-0 hover:text-[var(--color-accent)]">plugins</Link>
-              <Link href="/docs" className="!border-0 hover:text-[var(--color-accent)]">docs</Link>
-              <Link href="/status" className="!border-0 hover:text-[var(--color-accent)]">status</Link>
-            </div>
-          </nav>
+          <SiteNav />
         </header>
 
         <main className="flex-1">{children}</main>
