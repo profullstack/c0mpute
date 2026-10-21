@@ -13,6 +13,7 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: `${BASE}/plugins`,            priority: 0.8,  changeFrequency: "weekly"  },
   { url: `${BASE}/blog`,               priority: 0.8,  changeFrequency: "daily"   },
   { url: `${BASE}/status`,             priority: 0.6,  changeFrequency: "hourly"  },
+  { url: `${BASE}/nodes`,              priority: 0.7,  changeFrequency: "hourly"  },
   { url: `${BASE}/about`,              priority: 0.7,  changeFrequency: "monthly" },
   { url: `${BASE}/pricing`,            priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/contact`,            priority: 0.5,  changeFrequency: "monthly" },

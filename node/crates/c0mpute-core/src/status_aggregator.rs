@@ -344,6 +344,106 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusPayload> {
     Json(build_payload(&state).await)
 }
 
+/// One row of the public node board (`GET /nodes`).
+///
+/// Built only from fields of the capability ad, which every worker already
+/// gossips in the clear: a shortened peer id, a coarse hardware class, the
+/// core count, the `c0mpute bench` score, the c0mpute version and an optional
+/// referral handle. No CPU model string, address, hostname or region.
+#[derive(Serialize, Debug, PartialEq)]
+struct NodeRow {
+    id: String,
+    class: String,
+    cores: Option<u64>,
+    bench_score: Option<u32>,
+    version: Option<String>,
+    #[serde(rename = "ref")]
+    referral: Option<String>,
+    last_seen_s: u64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ReferrerRow {
+    #[serde(rename = "ref")]
+    referral: String,
+    nodes: u64,
+}
+
+#[derive(Serialize)]
+struct NodesPayload {
+    generated_at: String,
+    workers_online: u64,
+    nodes: Vec<NodeRow>,
+    referrers: Vec<ReferrerRow>,
+}
+
+/// Coarse class from the ad's tags: the first GPU vendor, else `cpu`.
+fn node_class(tags: &[String]) -> String {
+    for v in ["nvidia", "amd", "apple"] {
+        if tags.iter().any(|t| t == &format!("c0mpute:gpu:{v}")) {
+            return format!("gpu:{v}");
+        }
+    }
+    "cpu".to_string()
+}
+
+/// The last 8 characters of the base58 peer id; enough to tell rows apart.
+fn short_id(peer_id: &str) -> String {
+    let n = peer_id.len();
+    peer_id[n.saturating_sub(8)..].to_string()
+}
+
+fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) -> NodesPayload {
+    let mut nodes: Vec<NodeRow> = ads
+        .iter()
+        .map(|(peer, ad)| NodeRow {
+            id: short_id(peer),
+            class: node_class(&ad.tags),
+            cores: ad.hardware.get("cores").and_then(|v| v.as_u64()),
+            bench_score: ad.bench_score,
+            version: ad.hardware.get("version").and_then(|v| v.as_str()).map(|s| s.chars().take(24).collect()),
+            referral: ad
+                .hardware
+                .get("ref")
+                .and_then(|v| v.as_str())
+                .and_then(crate::capabilities::sanitize_ref),
+            last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
+        })
+        .collect();
+    // Benchmarked nodes first, best score first; then by id for a stable order.
+    nodes.sort_by(|a, b| b.bench_score.cmp(&a.bench_score).then(a.id.cmp(&b.id)));
+
+    let mut by_ref: BTreeMap<String, u64> = BTreeMap::new();
+    for n in &nodes {
+        if let Some(r) = &n.referral {
+            *by_ref.entry(r.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut referrers: Vec<ReferrerRow> = by_ref
+        .into_iter()
+        .map(|(referral, nodes)| ReferrerRow { referral, nodes })
+        .collect();
+    referrers.sort_by(|a, b| b.nodes.cmp(&a.nodes).then(a.referral.cmp(&b.referral)));
+
+    NodesPayload {
+        generated_at: iso8601_utc(now),
+        workers_online: nodes.len() as u64,
+        nodes,
+        referrers,
+    }
+}
+
+async fn nodes_handler(State(state): State<AppState>) -> Json<NodesPayload> {
+    let ads: Vec<(String, c0mpute_net::topics::CapabilityAd)> = state
+        .registry
+        .list()
+        .await
+        .into_iter()
+        .map(|(p, a)| (p.to_base58(), a))
+        .collect();
+    Json(build_nodes(&ads, now_ms()))
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -471,6 +571,7 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
     let state = AppState { registry, jobs };
     let app = Router::new()
         .route("/", get(status_handler))
+        .route("/nodes", get(nodes_handler))
         .route("/healthz", get(healthz))
         .with_state(state);
 
@@ -510,6 +611,37 @@ fn iso8601_utc(unix_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_board_ranks_by_bench_and_counts_referrers() {
+        use c0mpute_net::topics::CapabilityAd;
+        let mk = |tags: &[&str], score: Option<u32>, hw: serde_json::Value| {
+            let mut ad = CapabilityAd::with_score(
+                "x".into(),
+                tags.iter().map(|t| t.to_string()).collect(),
+                hw,
+                score,
+            );
+            ad.published_at_ms = 10_000;
+            ad
+        };
+        let ads = vec![
+            ("12D3KooWaaaaaaaaAAAAAAAA".to_string(), mk(&["c0mpute:cpu"], None, serde_json::json!({"ref": "Chovy"}))),
+            ("12D3KooWbbbbbbbbBBBBBBBB".to_string(), mk(&["c0mpute:gpu:nvidia"], Some(9000), serde_json::json!({"cores": 16, "version": "0.2.32", "ref": "chovy", "cpu": "secret model"}))),
+            ("12D3KooWccccccccCCCCCCCC".to_string(), mk(&["c0mpute:cpu"], Some(100), serde_json::json!({"ref": "<bad>"}))),
+        ];
+        let p = build_nodes(&ads, 40_000);
+        assert_eq!(p.workers_online, 3);
+        assert_eq!(p.nodes[0].id, "BBBBBBBB");
+        assert_eq!(p.nodes[0].class, "gpu:nvidia");
+        assert_eq!(p.nodes[0].cores, Some(16));
+        assert_eq!(p.nodes[0].last_seen_s, 30);
+        assert_eq!(p.nodes[2].bench_score, None);
+        assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
+        assert_eq!(p.referrers, vec![ReferrerRow { referral: "chovy".into(), nodes: 2 }]);
+        let json = serde_json::to_string(&p.nodes).unwrap();
+        assert!(!json.contains("secret model"), "cpu model never published");
+    }
 
     #[test]
     fn iso8601_known_epochs() {

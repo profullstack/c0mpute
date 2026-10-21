@@ -31,12 +31,21 @@ export interface StatusPayload {
 
 const AGGREGATOR_URL = process.env.STATUS_AGGREGATOR_URL ?? null;
 
-export async function getStatusPayload(): Promise<StatusPayload> {
+/**
+ * `revalidate` (seconds) is for statically regenerated pages such as the home
+ * page: a `no-store` fetch there throws Next's dynamic-usage error, which the
+ * catch below would swallow into the stub. Dynamic pages leave it unset.
+ */
+export async function getStatusPayload(
+  opts: { revalidate?: number } = {},
+): Promise<StatusPayload> {
   if (AGGREGATOR_URL) {
     try {
       const r = await fetch(AGGREGATOR_URL, {
         signal: AbortSignal.timeout(2_000),
-        cache: "no-store",
+        ...(opts.revalidate
+          ? { next: { revalidate: opts.revalidate } }
+          : { cache: "no-store" as const }),
       });
       if (r.ok) {
         const data = (await r.json()) as Omit<StatusPayload, "source">;

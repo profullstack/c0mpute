@@ -23,7 +23,7 @@ export default function ProvidersPage() {
           the same way, and get paid the same way. Nobody approves you.
         </p>
         <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
-$ c0mpute worker start`}</CodeBlock>
+$ c0mpute worker status        # the installer already started it`}</CodeBlock>
       </section>
 
       <section className="space-y-3 text-sm leading-7">
@@ -124,9 +124,52 @@ $ c0mpute worker start`}</CodeBlock>
           us and cannot be quietly edited. Failures are receipts too — a
           network where only successes are signed measures nothing.
         </p>
-        <p className="text-xs text-[var(--color-dim)]">
-          → <Link href="/pricing">pricing and units</Link>
+        <p>
+          <strong className="text-[var(--color-fg)]">What pays today.</strong>{" "}
+          Paid AI inference runs through{" "}
+          <a href="https://infernetprotocol.com" target="_blank" rel="noopener noreferrer">Infernet</a>,
+          the inference plugin the installer sets up. Clients pay through{" "}
+          <a href="https://coinpayportal.com" target="_blank" rel="noopener noreferrer">CoinPay</a>{" "}
+          in 16 coins (BTC, ETH, SOL, USDC, USDT and more) or with PayPal.
+          You choose where your share lands:
         </p>
+        <CodeBlock>{`$ infernet payout set USDC 0xYourAddress --network polygon
+$ infernet payout list`}</CodeBlock>
+        <p className="text-[var(--color-dim)]">
+          Be realistic about it: the network is small and paid demand is early,
+          so earnings today are small and irregular. Running a node now is
+          mostly about getting the network to the size where it matters. Every
+          node shows up on the <Link href="/nodes">public node board</Link>,
+          ranked by its <code>c0mpute bench</code> score.
+        </p>
+        <p className="text-xs text-[var(--color-dim)]">
+          → <Link href="/pricing">pricing and units</Link> · <Link href="/nodes#refer">invite people with your own link</Link>
+        </p>
+      </section>
+
+      <section className="space-y-3 text-sm leading-7">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ why it matters ]</h2>
+        <p>
+          The goal is 100,000 nodes. Pooled spare capacity at that scale is
+          enough to train and serve open-weight models on hardware owned by the
+          people running it, so the next generation of models does not have to
+          come only from a few labs with their own data centers. We are a long
+          way from that number, and the <Link href="/nodes">live count</Link>{" "}
+          says exactly how far.
+        </p>
+      </section>
+
+      <section className="space-y-3 text-sm leading-7">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ what you need ]</h2>
+        <table className="w-full text-left border-collapse text-xs">
+          <tbody className="divide-y divide-[var(--color-rule)]">
+            <Row k="OS" v="Linux (x86_64, arm64) or macOS (Intel, Apple Silicon). Windows works inside WSL2." />
+            <Row k="hardware" v="any CPU. A GPU (NVIDIA, AMD or Apple) is detected and advertised, but not required: CPU nodes serve small models such as qwen2.5:0.5b." />
+            <Row k="disk" v="a few GB for the binaries and a small model; more if you want to hold storage shards." />
+            <Row k="network" v="outbound internet. No port forwarding needed to join; opening the p2p port makes the node dialable for more jobs." />
+            <Row k="time" v="about two minutes for the installer on a fresh Ubuntu box, then the worker starts by itself." />
+          </tbody>
+        </table>
       </section>
 
       <section className="space-y-3 rule pt-8 text-sm leading-7">
