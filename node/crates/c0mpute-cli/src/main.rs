@@ -2855,13 +2855,17 @@ fn reap_stale_infernet_daemons() {
 fn reap_stale_infernet_daemons() {}
 
 /// `node …/@infernetprotocol/cli/index.js start --foreground` (the detached daemon), from a
-/// NUL-separated /proc cmdline.
+/// NUL-separated /proc cmdline. The installer's git path runs the same daemon from
+/// `~/.infernet/source/apps/cli/index.js` (under bun or node); one of those leaked on bbs for a
+/// week because only the npm path matched.
 fn is_infernet_daemon_cmdline(raw: &[u8]) -> bool {
     let args: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
     let has = |needle: &[u8]| args.iter().any(|a| *a == needle);
     let infernet = args.iter().any(|a| {
         let a = String::from_utf8_lossy(a);
-        a.contains("@infernetprotocol/cli") || a.ends_with("/infernet")
+        a.contains("@infernetprotocol/cli")
+            || a.ends_with("/infernet")
+            || a.ends_with("/.infernet/source/apps/cli/index.js")
     });
     infernet && has(b"start") && has(b"--foreground")
 }
@@ -2885,6 +2889,9 @@ mod infernet_tests {
     fn infernet_daemon_cmdline_matching() {
         let daemon = b"/root/.local/share/mise/installs/node/22.23.3/bin/node\0/root/.local/share/mise/installs/node/22.23.3/lib/node_modules/@infernetprotocol/cli/index.js\0start\0--foreground\0";
         assert!(is_infernet_daemon_cmdline(daemon));
+        assert!(is_infernet_daemon_cmdline(
+            b"/root/.local/share/mise/installs/bun/1.4.2/bin/bun\0/root/.infernet/source/apps/cli/index.js\0start\0--foreground\0"
+        ));
         assert!(!is_infernet_daemon_cmdline(
             b"/usr/bin/node\0/x/@infernetprotocol/cli/index.js\0start\0"
         ));
