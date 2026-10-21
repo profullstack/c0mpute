@@ -9,6 +9,35 @@
 [![GitHub stars](https://img.shields.io/github/stars/profullstack/c0mpute?style=social)](https://github.com/profullstack/c0mpute)
 [![GitHub last commit](https://img.shields.io/github/last-commit/profullstack/c0mpute)](https://github.com/profullstack/c0mpute/commits/master)
 [![GitHub issues](https://img.shields.io/github/issues/profullstack/c0mpute)](https://github.com/profullstack/c0mpute/issues)
+[![Nodes online](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fc0mpute.com%2Fapi%2Fnodes&query=%24.workers_online&label=nodes%20online&color=brightgreen)](https://c0mpute.com/nodes)
+[![Goal](https://img.shields.io/badge/goal-100%2C000%20nodes-blue)](https://c0mpute.com/providers)
+
+## Run a node
+
+```sh
+curl -fsSL https://c0mpute.com/install.sh | sh
+```
+
+That is the whole setup. The installer puts `c0mpute`, `infernet` and `coinpay` in
+`~/.c0mpute/bin` and starts the worker for you (a systemd service where it can, a
+background daemon otherwise). Check it with `c0mpute worker status`, then run
+`c0mpute bench` once so your node gets a score on the
+[node board](https://c0mpute.com/nodes).
+
+- **Runs on:** Linux (x86_64, arm64) and macOS (Intel, Apple Silicon); Windows inside WSL2.
+  Any CPU works; NVIDIA, AMD and Apple GPUs are detected and advertised.
+- **Network:** outbound internet is enough to join. No account, no port forwarding.
+- **What it does:** serves AI inference (through [Infernet](https://infernetprotocol.com)),
+  FFmpeg transcoding and storage jobs from the network.
+- **What you get:** paid inference is billed through CoinPay (16 coins or PayPal) and you set
+  your payout address with `infernet payout set <coin> <address>`. Paid demand is early, so
+  expect small, irregular earnings for now.
+- **Invite people:** share `https://c0mpute.com/r/<your-handle>`. Nodes installed from it
+  show your handle on the board (`C0MPUTE_REF=<handle>` does the same by hand).
+
+**Why:** the goal is 100,000 nodes. That much pooled capacity is enough to train and serve
+open-weight models in the open, on hardware owned by the people running it. The live count
+on the board says how far we are from that.
 
 ## Install
 

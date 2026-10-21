@@ -133,7 +133,42 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
         blob["cores"] = serde_json::Value::from(report.metadata.cores);
         blob["bench_at"] = serde_json::Value::String(report.metadata.start_time.clone());
     }
+    if let Some(code) = referral_code() {
+        blob["ref"] = serde_json::Value::String(code);
+    }
     blob
+}
+
+/// The referral code this node was installed with, if any.
+///
+/// `C0MPUTE_REF` wins; otherwise `~/.c0mpute/ref` (or `$C0MPUTE_HOME/ref`),
+/// which `install.sh` writes when it is run as
+/// `curl -fsSL https://c0mpute.com/install.sh | C0MPUTE_REF=<code> sh`.
+/// The code is a public handle chosen by whoever shared the link. It rides
+/// in the hardware blob of the (already public) capability ad so the status
+/// aggregator can credit the referrer on c0mpute.com/nodes. It carries no
+/// payout and proves nothing about identity.
+pub fn referral_code() -> Option<String> {
+    let raw = std::env::var("C0MPUTE_REF").ok().or_else(|| {
+        let home = std::env::var_os("C0MPUTE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".c0mpute"))
+            })?;
+        std::fs::read_to_string(home.join("ref")).ok()
+    })?;
+    sanitize_ref(&raw)
+}
+
+/// Lowercase `[a-z0-9_-]`, 1..=32 chars, or nothing.
+pub fn sanitize_ref(raw: &str) -> Option<String> {
+    let code = raw.trim().to_ascii_lowercase();
+    let ok = !code.is_empty()
+        && code.len() <= 32
+        && code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then_some(code)
 }
 
 /// Periodically publish this worker's capability ad.
@@ -288,6 +323,16 @@ impl Registry {
 mod tests {
     use super::*;
     use c0mpute_net::{Libp2pNetwork, Multiaddr, NetworkConfig, Protocol};
+
+    #[test]
+    fn referral_codes_are_sanitized() {
+        assert_eq!(sanitize_ref(" Chovy \n").as_deref(), Some("chovy"));
+        assert_eq!(sanitize_ref("rig_42-a").as_deref(), Some("rig_42-a"));
+        assert_eq!(sanitize_ref(""), None);
+        assert_eq!(sanitize_ref("has space"), None);
+        assert_eq!(sanitize_ref("<script>"), None);
+        assert_eq!(sanitize_ref(&"a".repeat(33)), None);
+    }
 
     fn tempdir(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(

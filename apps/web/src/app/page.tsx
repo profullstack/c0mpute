@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
+import { getStatusPayload } from "@/lib/status";
+import { NODE_GOAL } from "@/lib/nodes";
 
 // ad.network publisher claim for c0mpute.com: the meta tag lets ad.network
 // verify ownership from the server-rendered HTML. No ad unit on the home page.
@@ -10,27 +12,71 @@ export const metadata: Metadata = {
   other: { "ad.network": AD_NETWORK_CODE },
 };
 
-export default function HomePage() {
+// Live node count above the fold: refresh every minute instead of hourly.
+export const revalidate = 60;
+
+export default async function HomePage() {
+  const status = await getStatusPayload({ revalidate: 30 });
+  const online = status.source === "aggregator" ? status.network.workers_online : null;
+  const tags = status.network.workers_with_tag;
+  const gpus =
+    (tags["c0mpute:gpu:nvidia"] ?? 0) + (tags["c0mpute:gpu:amd"] ?? 0) + (tags["c0mpute:gpu:apple"] ?? 0);
+  const pct = online === null ? 0 : Math.max(0.5, Math.min(100, (online / NODE_GOAL) * 100));
+
   return (
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-12">
-      <section className="space-y-4">
-        <h1 className="text-3xl font-bold accent">The Open Compute Network</h1>
+      {/* Above the fold, for the person we most need: someone with a machine.
+          The pitch is the mission, the CTA is one command, and the proof is the
+          live count, however small it is today. */}
+      <section className="space-y-5">
+        <p className="comment">// the open compute network</p>
+        <h1 className="text-3xl font-bold accent">Run a node. Help build open AI.</h1>
         <p className="text-[var(--color-fg)] leading-relaxed">
-          Run jobs anywhere. Sell unused compute. Pay only for verified work.
+          c0mpute pools spare CPUs and GPUs from ordinary machines into one open
+          network. One command turns your box into a node that serves inference,
+          transcoding and storage jobs.
         </p>
         <p className="text-sm text-[var(--color-dim)] leading-relaxed">
-          CPUs, GPUs, storage, bandwidth and specialized accelerators — from
-          PCs, servers and data centers — available through one open protocol,
-          to humans and AI agents alike.
+          The goal is 100,000 nodes. At that size the network has enough
+          capacity to train and serve open-weight models in the open, on
+          hardware owned by the people running it, instead of leaving frontier
+          AI to a handful of companies. That is the mission, not a claim about
+          today.
         </p>
-      </section>
 
-      <section className="space-y-3">
-        <p className="comment">// install — Linux, macOS (x86_64 / aarch64)</p>
-        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh`}</CodeBlock>
+        <div className="border border-[var(--color-rule)] bg-[var(--color-card)] rounded-md px-4 py-3 space-y-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+            <span>
+              <span className="accent font-bold text-lg">
+                {online === null ? "?" : online.toLocaleString()}
+              </span>{" "}
+              nodes online now
+              {online !== null && gpus > 0 ? ` (${gpus} with a GPU)` : ""}
+            </span>
+            <span className="text-xs text-[var(--color-dim)]">goal: {NODE_GOAL.toLocaleString()}</span>
+          </div>
+          <div className="h-1.5 w-full rounded bg-[var(--color-rule)] overflow-hidden" aria-hidden="true">
+            <div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} />
+          </div>
+          <p className="text-xs text-[var(--color-dim)]">
+            Counted live from signed node adverts. → <Link href="/nodes">see every node</Link>
+          </p>
+        </div>
+
+        <div className="space-y-2" id="run">
+          <p className="comment">// run a node: Linux, macOS, or Windows via WSL2 (x86_64 / arm64), CPU or GPU</p>
+          <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh`}</CodeBlock>
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            The installer starts the worker for you (a systemd service where it
+            can, otherwise a background daemon). Check it with{" "}
+            <code>c0mpute worker status</code>. No account and no port
+            forwarding needed to join. → <Link href="/providers">what running a node involves</Link> ·{" "}
+            <Link href="/nodes#refer">invite people with your own link</Link>
+          </p>
+        </div>
+
         <p className="text-xs text-[var(--color-dim)]">
-          → <Link href="/getting-started">submit a job</Link> ·{" "}
-          <Link href="/providers">become a provider</Link> ·{" "}
+          Here to buy compute instead? → <Link href="/getting-started">submit a job</Link> ·{" "}
           <Link href="/status">explore the network</Link> ·{" "}
           <Link href="/protocol">read the protocol</Link>
         </p>

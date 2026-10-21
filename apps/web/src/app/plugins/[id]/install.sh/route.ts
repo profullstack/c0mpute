@@ -36,7 +36,7 @@ export async function GET(
   return new Response(script, {
     status: 200,
     headers: {
-      "content-type": "text/plain; charset=utf-8",
+      "content-type": "text/x-shellscript; charset=utf-8",
       // Cache modestly — long enough for a CDN to do its job, short
       // enough that updates land quickly.
       "cache-control": "public, max-age=300, s-maxage=300",

@@ -20,6 +20,7 @@
 #   --worker        Add Docker / FFmpeg readiness checks
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
+#   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF)
 #   --no-exec       Don't auto-exec a fresh shell at the end
 #                   (CI-friendly; default is to drop you into a new
 #                   shell with c0mpute already on $PATH)
@@ -78,6 +79,8 @@ while [ $# -gt 0 ]; do
     --developer)    DEVELOPER_MODE=1 ;;
     --force)        FORCE=1 ;;
     --no-exec)      NO_EXEC=1 ;;
+    --ref)          shift; C0MPUTE_REF="${1:-}" ;;
+    --ref=*)        C0MPUTE_REF="${1#--ref=}" ;;
     --help|-h)
       sed -n '2,20p' "$0"
       exit 0
@@ -641,6 +644,25 @@ UNIT
   fi
 }
 
+# Referral: `curl -fsSL https://c0mpute.com/install.sh | C0MPUTE_REF=<code> sh`
+# (links from c0mpute.com/r/<code>) stores the code in $C0MPUTE_HOME/ref. The
+# worker puts it in its public capability ad so c0mpute.com/nodes can credit
+# the referrer. It is a public handle, not a secret and not a payout. An
+# existing ref is kept unless a new one is passed.
+save_ref() {
+  code=$(printf '%s' "${C0MPUTE_REF:-}" | tr '[:upper:]' '[:lower:]')
+  [ -n "$code" ] || return 0
+  case "$code" in
+    *[!a-z0-9_-]*) warn "ignoring referral code '$code' (use a-z, 0-9, - or _)"; return 0 ;;
+  esac
+  if [ "${#code}" -gt 32 ]; then
+    warn "ignoring referral code longer than 32 characters"
+    return 0
+  fi
+  mkdir -p "$C0MPUTE_HOME" && printf '%s\n' "$code" > "$C0MPUTE_HOME/ref" \
+    && ok "referral code '$code' saved (shown on https://c0mpute.com/nodes)"
+}
+
 # ────────────────────────────────────────────────────────────────────────
 # main
 # ────────────────────────────────────────────────────────────────────────
@@ -675,7 +697,10 @@ main() {
 
   # transcode is built into the c0mpute binary, but its system dep
   # (ffmpeg) lives in the plugin's installer.
-  if [ "$INSTALL_TRANSCODE" -eq 1 ]; then install_transcode_deps; fi
+  # Optional: a missing ffmpeg only disables transcode jobs, so it must not
+  # abort the install (under `set -e` a failing last command in an `if` body
+  # exits the script, and the worker never started).
+  if [ "$INSTALL_TRANSCODE" -eq 1 ]; then install_transcode_deps || true; fi
 
   # c0mpute-tui: Bun + hqtui terminal UI launched by `c0mpute tui`.
   if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
@@ -684,6 +709,8 @@ main() {
 
   print_versions
   run_doctor
+
+  save_ref
 
   # Auto-start the worker so the node self-onboards (init + register + serve +
   # distribute) with no manual step. Opt out with --no-start.
@@ -717,6 +744,10 @@ convention. Open it at BOTH layers if your host has a cloud firewall:
   Railway:   no host firewall — add a TCP Proxy (Settings → Networking) or,
              per DIP-0010, run the seed on a droplet with a stable public IP.
 Verify from outside the box: https://check-host.net/check-tcp?host=<ip>:46337
+
+Your node on the public board (it appears within a few minutes):
+  https://c0mpute.com/nodes   (run `c0mpute bench` once to get a score)
+Invite others with your own link: https://c0mpute.com/r/<your-handle>
 
 Docs: https://c0mpute.com/docs
 EOF

@@ -47,27 +47,37 @@ ensure_ffmpeg() {
     return 1
   fi
 
+  # Package managers may prompt (sudo password, conffiles), so give them the
+  # terminal when there is one. Under `curl | sh` over ssh without -t, in
+  # cloud-init or in a container there is no /dev/tty, and redirecting to it
+  # fails before the package manager even runs; install non-interactively.
+  if ( : </dev/tty ) 2>/dev/null; then
+    run_pm() { "$@" </dev/tty 2>/dev/tty; }
+  else
+    run_pm() { "$@" </dev/null; }
+  fi
+
   if command -v apt-get >/dev/null 2>&1; then
     say "installing ffmpeg via apt-get"
     if ! dpkg -l 2>/dev/null | grep -q '^ii  ffmpeg '; then
       $SUDO apt-get update -y >/dev/null 2>&1 || true
-      $SUDO apt-get install -y ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+      run_pm $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg && { ok "ffmpeg installed"; return 0; }
     fi
   elif command -v dnf >/dev/null 2>&1; then
     say "installing ffmpeg via dnf"
-    $SUDO dnf install -y ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+    run_pm $SUDO dnf install -y ffmpeg && { ok "ffmpeg installed"; return 0; }
   elif command -v yum >/dev/null 2>&1; then
     say "installing ffmpeg via yum"
-    $SUDO yum install -y ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+    run_pm $SUDO yum install -y ffmpeg && { ok "ffmpeg installed"; return 0; }
   elif command -v pacman >/dev/null 2>&1; then
     say "installing ffmpeg via pacman"
-    $SUDO pacman -S --noconfirm ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+    run_pm $SUDO pacman -S --noconfirm ffmpeg && { ok "ffmpeg installed"; return 0; }
   elif command -v zypper >/dev/null 2>&1; then
     say "installing ffmpeg via zypper"
-    $SUDO zypper install -y ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+    run_pm $SUDO zypper install -y ffmpeg && { ok "ffmpeg installed"; return 0; }
   elif command -v apk >/dev/null 2>&1; then
     say "installing ffmpeg via apk"
-    $SUDO apk add --no-cache ffmpeg </dev/tty 2>/dev/tty && { ok "ffmpeg installed"; return 0; }
+    run_pm $SUDO apk add --no-cache ffmpeg && { ok "ffmpeg installed"; return 0; }
   else
     warn "no supported package manager found; install ffmpeg manually"
     return 1
