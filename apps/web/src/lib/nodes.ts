@@ -1,4 +1,5 @@
 import "server-only";
+import { fetchFromAggregators } from "./aggregators";
 
 /** One row of the public node board, as served by the aggregator's `GET /nodes`. */
 export interface NodeRow {
@@ -22,23 +23,9 @@ export interface NodesPayload {
 /** The mission number. A goal, not a count. */
 export const NODE_GOAL = 100_000;
 
-const AGGREGATOR_URL = process.env.STATUS_AGGREGATOR_URL ?? null;
-
 export async function getNodesPayload(): Promise<NodesPayload> {
-  if (AGGREGATOR_URL) {
-    try {
-      const r = await fetch(`${AGGREGATOR_URL.replace(/\/$/, "")}/nodes`, {
-        signal: AbortSignal.timeout(2_000),
-        cache: "no-store",
-      });
-      if (r.ok) {
-        const data = (await r.json()) as Omit<NodesPayload, "source">;
-        return { ...data, source: "aggregator" };
-      }
-    } catch {
-      // fall through
-    }
-  }
+  const data = await fetchFromAggregators<Omit<NodesPayload, "source">>("/nodes");
+  if (data) return { ...data, source: "aggregator" };
   return {
     generated_at: new Date().toISOString(),
     workers_online: 0,

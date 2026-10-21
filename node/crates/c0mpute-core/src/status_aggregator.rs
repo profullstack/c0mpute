@@ -527,7 +527,7 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
 
     // Best-effort bootstrap from c0mpute.com/bootstrap.json; mDNS covers LAN.
     let bootstrap_addrs =
-        bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, vec![]).await;
+        bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, bootstrap::default_seeds()).await;
     info!(
         count = bootstrap_addrs.len(),
         "aggregator: bootstrap peers loaded"

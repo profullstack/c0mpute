@@ -1,4 +1,5 @@
 import "server-only";
+import { fetchFromAggregators } from "./aggregators";
 
 export interface StatusPayload {
   ok: boolean;
@@ -29,7 +30,6 @@ export interface StatusPayload {
   source: "aggregator" | "stub";
 }
 
-const AGGREGATOR_URL = process.env.STATUS_AGGREGATOR_URL ?? null;
 
 /**
  * `revalidate` (seconds) is for statically regenerated pages such as the home
@@ -39,23 +39,8 @@ const AGGREGATOR_URL = process.env.STATUS_AGGREGATOR_URL ?? null;
 export async function getStatusPayload(
   opts: { revalidate?: number } = {},
 ): Promise<StatusPayload> {
-  if (AGGREGATOR_URL) {
-    try {
-      const r = await fetch(AGGREGATOR_URL, {
-        signal: AbortSignal.timeout(2_000),
-        ...(opts.revalidate
-          ? { next: { revalidate: opts.revalidate } }
-          : { cache: "no-store" as const }),
-      });
-      if (r.ok) {
-        const data = (await r.json()) as Omit<StatusPayload, "source">;
-        return { ...data, source: "aggregator" };
-      }
-    } catch {
-      // fall through to stub
-    }
-  }
-
+  const data = await fetchFromAggregators<Omit<StatusPayload, "source">>("/", opts);
+  if (data) return { ...data, source: "aggregator" };
   return buildStub();
 }
 

@@ -43,7 +43,7 @@ impl Supervisor {
         // first-on-network node.
         let bootstrap_addrs = bootstrap::fetch_or_fallback(
             bootstrap::DEFAULT_BOOTSTRAP_URL,
-            vec![],
+            bootstrap::default_seeds(),
         )
         .await;
         info!(

@@ -2706,20 +2706,25 @@ fn refresh_plugins() {
     }
 }
 
-/// True when a systemd `infernet.service` is running the node daemon. That unit owns the daemon
-/// (and the daemon auto-updates itself), so the worker must not start, update or restart another
-/// one: two daemons on one config dir fight over the socket, port and pidfile.
+/// True when a systemd `infernet.service` is running the node daemon, system-wide or as a user
+/// unit (`infernet setup` installs the user unit since infernet v0.1.62). That unit owns the
+/// daemon (and the daemon auto-updates itself), so the worker must not start, update or restart
+/// another one: two daemons on one config dir fight over the socket, port and pidfile.
 fn infernet_systemd_managed() -> bool {
     // Enabled, not only active: during the unit's own restart it is briefly "activating", and the
     // worker must not slip a second daemon in then.
-    ["is-enabled", "is-active"].iter().any(|verb| {
-        Command::new("systemctl")
-            .args([*verb, "--quiet", "infernet.service"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+    let scopes: [&[&str]; 2] = [&[], &["--user"]];
+    scopes.iter().any(|scope| {
+        ["is-enabled", "is-active"].iter().any(|verb| {
+            Command::new("systemctl")
+                .args(scope.iter())
+                .args([*verb, "--quiet", "infernet.service"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
     })
 }
 
