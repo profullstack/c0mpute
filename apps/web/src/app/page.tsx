@@ -1,13 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import Script from "next/script";
 import { CodeBlock } from "@/components/CodeBlock";
 
 // ad.network publisher claim for c0mpute.com: the meta tag lets ad.network
-// verify ownership from the server-rendered HTML; the aside below is the
-// home page unit, filled in place by crawlproof.com/ad.js.
+// verify ownership from the server-rendered HTML. No ad unit on the home page.
 const AD_NETWORK_CODE = "vpG989NPYf0fcWqU";
-const HOME_AD_SLOT = "31c47e01-a5b8-4517-876f-e18c2387e384";
 
 export const metadata: Metadata = {
   other: { "ad.network": AD_NETWORK_CODE },
@@ -38,15 +35,6 @@ export default function HomePage() {
           <Link href="/protocol">read the protocol</Link>
         </p>
       </section>
-
-      <aside
-        data-ad-network={AD_NETWORK_CODE}
-        data-cp-ad=""
-        data-slot={HOME_AD_SLOT}
-        data-format="banner_300x250"
-        className="flex justify-center"
-      />
-      <Script src="https://crawlproof.com/ad.js" strategy="afterInteractive" />
 
       {/* The one idea the rest of the site hangs off. Above the fold on
           purpose: a visitor who reads only this should understand that the
