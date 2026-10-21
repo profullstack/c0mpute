@@ -199,6 +199,14 @@ ensure_bun() {
 # c0mpute itself
 # ────────────────────────────────────────────────────────────────────────
 
+# Tags of the most recent published releases, newest first (drafts are not
+# listed). Empty when GitHub's API is unreachable or rate limited.
+recent_release_tags() {
+  curl -fsSL -H 'Accept: application/vnd.github+json' \
+    "${C0MPUTE_RELEASES_API:-https://api.github.com/repos/profullstack/c0mpute/releases?per_page=6}" 2>/dev/null \
+    | sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' | head -n 6
+}
+
 install_c0mpute() {
   platform="$1"
   target="$C0MPUTE_HOME/bin/c0mpute"
@@ -221,6 +229,23 @@ install_c0mpute() {
 
   say "downloading c0mpute ${C0MPUTE_VERSION}"
   http_code=$(curl -sSL -o "$tmp/$artifact" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  if [ "$http_code" != "200" ] && [ "$C0MPUTE_VERSION" = "latest" ]; then
+    # The newest release can be public before its binaries finish uploading
+    # (or a platform build failed). Walk back through recent releases and
+    # take the first one that has this platform's asset.
+    warn "latest c0mpute release has no ${artifact} yet (HTTP ${http_code}); trying the previous releases"
+    for tag in $(recent_release_tags); do
+      try_url="${RELEASE_BASE}/${tag}/${artifact}"
+      code=$(curl -sSL -o "$tmp/$artifact" -w '%{http_code}' "$try_url" 2>/dev/null || echo "000")
+      if [ "$code" = "200" ]; then
+        say "using c0mpute ${tag}"
+        url="$try_url"
+        sig_url="${url}.minisig"
+        http_code=200
+        break
+      fi
+    done
+  fi
   if [ "$http_code" != "200" ]; then
     rm -rf "$tmp"
     cat <<EOF >&2

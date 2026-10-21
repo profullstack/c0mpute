@@ -5,6 +5,15 @@ name: release
 # aarch64, packages each as a tarball (zip on Windows), generates a
 # SHA-256 checksum, and uploads the lot to a GitHub Release.
 #
+# The release is created as a DRAFT first, every platform uploads into the
+# draft, and only when all five uploads succeeded does the `publish` job make
+# it public and mark it Latest. Before this, softprops/action-gh-release
+# published + marked Latest on the first upload, so for ~3 minutes after a
+# tag `releases/latest/download/<artifact>` 404'd for every platform still
+# building, and `curl -fsSL https://c0mpute.com/install.sh | sh` failed.
+# A failed platform leaves the draft unpublished (Latest stays on the
+# previous release); fix and re-run the failed jobs.
+#
 # Stable install URL: https://c0mpute.com/releases/latest/<artifact>
 # redirects to https://github.com/profullstack/c0mpute/releases/latest/download/<artifact>
 # (configured in apps/web/next.config.mjs).
@@ -14,13 +23,38 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.2.33"
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  GH_REPO: ${{ github.repository }}
+
 jobs:
+  draft:
+    name: create draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the release as a draft (or reuse it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          case "$TAG" in v*) ;; *) echo "not a release tag: $TAG" >&2; exit 1 ;; esac
+          if gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            echo "release $TAG exists (draft=$(gh release view "$TAG" --json isDraft -q .isDraft)); uploads will replace its assets"
+          else
+            gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG"
+          fi
+
   release:
     name: ${{ matrix.platform }}
+    needs: draft
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,6 +86,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -94,11 +130,34 @@ jobs:
           "ARTIFACT=$artifact" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "ARTIFACT_SHA=$artifact.sha256" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ env.ARTIFACT }}
-            ${{ env.ARTIFACT_SHA }}
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+      - name: Upload to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT_SHA" --clobber
+
+  publish:
+    name: publish + mark latest
+    # Runs only when every platform job succeeded (needs + default success()).
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every asset is on the release, then publish it as Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip"
+          have=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for a in $want; do
+            for f in "$a" "$a.sha256"; do
+              echo "$have" | grep -qx "$f" || { echo "missing asset $f on $TAG; not publishing" >&2; exit 1; }
+            done
+          done
+          gh release edit "$TAG" --draft=false --latest
+          # The public download URL must now serve every platform.
+          for a in $want; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -L "https://github.com/$GH_REPO/releases/download/$TAG/$a")
+            echo "$a -> $code"
+            [ "$code" = "200" ] || { echo "asset $a not downloadable after publish" >&2; exit 1; }
+          done
