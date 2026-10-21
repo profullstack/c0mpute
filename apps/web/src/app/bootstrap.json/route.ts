@@ -6,9 +6,8 @@
  * The peer list comes from the `BOOTSTRAP_PEERS_JSON` env var — a JSON array of
  * `{ id, addrs, operator?, region? }` objects — so seeds can be added, rotated,
  * or removed by editing an env var, with no code deploy (per DIP-0010: "so we
- * can update it without a binary release"). Unset/malformed → an empty list,
- * which is a valid file: nodes then fall back to their hardcoded list + mDNS
- * rather than seeing a 404.
+ * can update it without a binary release"). Unset/malformed/empty → the
+ * built-in DEFAULT_PEERS (our two seeds), never an empty list.
  *
  * Shape mirrors `node/crates/c0mpute-net/src/bootstrap.rs::BootstrapFile`.
  */
@@ -27,8 +26,29 @@ interface BootstrapPeer {
   region?: string;
 }
 
+// Used when BOOTSTRAP_PEERS_JSON is unset or unusable, so a missing env var can
+// never empty the list. Mirrors DEFAULT_SEEDS in c0mpute-net/src/bootstrap.rs.
+const DEFAULT_PEERS: BootstrapPeer[] = [
+  {
+    id: "12D3KooWADm5FfNxzPRanv1vacpPD7eh1bWv6pqmDCGE69Zof2n6",
+    addrs: ["/ip4/23.95.228.174/tcp/46337"],
+    operator: "profullstack",
+    region: "us-east",
+  },
+  {
+    id: "12D3KooWN99F7k4Fj6SdUqZ2VG4ZBLuw1e1ftwdPDBx3GsiDXzqv",
+    addrs: ["/ip4/152.53.47.37/tcp/46339"],
+    operator: "profullstack",
+    region: "eu-central",
+  },
+];
+
 function loadPeers(): BootstrapPeer[] {
-  const raw = process.env.BOOTSTRAP_PEERS_JSON;
+  const peers = parsePeers(process.env.BOOTSTRAP_PEERS_JSON);
+  return peers.length > 0 ? peers : DEFAULT_PEERS;
+}
+
+function parsePeers(raw: string | undefined): BootstrapPeer[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);

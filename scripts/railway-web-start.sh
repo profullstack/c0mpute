@@ -9,10 +9,20 @@
 # the site keeps serving — /status just falls back to the stub payload.
 set -eu
 
-# Background: status aggregator. Its exit must never kill the container; the
-# site (foreground) is what Railway tracks for liveness.
+# Background: status aggregator, restarted whenever it exits (backoff 2 s
+# doubling to 60 s). Its exit must never kill the container; the site
+# (foreground) is what the host tracks for liveness. The site also reads the
+# other aggregators in STATUS_AGGREGATOR_URLS, so a restart here is invisible.
 (
-  c0mpute status-aggregator || echo "status-aggregator exited ($?)" >&2
+  delay=2
+  while :; do
+    started=$(date +%s)
+    c0mpute status-aggregator || true
+    echo "status-aggregator exited; restarting in ${delay}s" >&2
+    sleep "$delay"
+    # A run that lasted 10 minutes was healthy: start the backoff over.
+    if [ $(( $(date +%s) - started )) -ge 600 ]; then delay=2; else delay=$(( delay * 2 > 60 ? 60 : delay * 2 )); fi
+  done
 ) &
 
 # Foreground: the Next.js server. exec so it becomes the container's main

@@ -2706,20 +2706,25 @@ fn refresh_plugins() {
     }
 }
 
-/// True when a systemd `infernet.service` is running the node daemon. That unit owns the daemon
-/// (and the daemon auto-updates itself), so the worker must not start, update or restart another
-/// one: two daemons on one config dir fight over the socket, port and pidfile.
+/// True when a systemd `infernet.service` is running the node daemon, system-wide or as a user
+/// unit (`infernet setup` installs the user unit since infernet v0.1.62). That unit owns the
+/// daemon (and the daemon auto-updates itself), so the worker must not start, update or restart
+/// another one: two daemons on one config dir fight over the socket, port and pidfile.
 fn infernet_systemd_managed() -> bool {
     // Enabled, not only active: during the unit's own restart it is briefly "activating", and the
     // worker must not slip a second daemon in then.
-    ["is-enabled", "is-active"].iter().any(|verb| {
-        Command::new("systemctl")
-            .args([*verb, "--quiet", "infernet.service"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+    let scopes: [&[&str]; 2] = [&[], &["--user"]];
+    scopes.iter().any(|scope| {
+        ["is-enabled", "is-active"].iter().any(|verb| {
+            Command::new("systemctl")
+                .args(scope.iter())
+                .args([*verb, "--quiet", "infernet.service"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
     })
 }
 
@@ -2850,13 +2855,17 @@ fn reap_stale_infernet_daemons() {
 fn reap_stale_infernet_daemons() {}
 
 /// `node …/@infernetprotocol/cli/index.js start --foreground` (the detached daemon), from a
-/// NUL-separated /proc cmdline.
+/// NUL-separated /proc cmdline. The installer's git path runs the same daemon from
+/// `~/.infernet/source/apps/cli/index.js` (under bun or node); one of those leaked on bbs for a
+/// week because only the npm path matched.
 fn is_infernet_daemon_cmdline(raw: &[u8]) -> bool {
     let args: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
     let has = |needle: &[u8]| args.iter().any(|a| *a == needle);
     let infernet = args.iter().any(|a| {
         let a = String::from_utf8_lossy(a);
-        a.contains("@infernetprotocol/cli") || a.ends_with("/infernet")
+        a.contains("@infernetprotocol/cli")
+            || a.ends_with("/infernet")
+            || a.ends_with("/.infernet/source/apps/cli/index.js")
     });
     infernet && has(b"start") && has(b"--foreground")
 }
@@ -2880,6 +2889,9 @@ mod infernet_tests {
     fn infernet_daemon_cmdline_matching() {
         let daemon = b"/root/.local/share/mise/installs/node/22.23.3/bin/node\0/root/.local/share/mise/installs/node/22.23.3/lib/node_modules/@infernetprotocol/cli/index.js\0start\0--foreground\0";
         assert!(is_infernet_daemon_cmdline(daemon));
+        assert!(is_infernet_daemon_cmdline(
+            b"/root/.local/share/mise/installs/bun/1.4.2/bin/bun\0/root/.infernet/source/apps/cli/index.js\0start\0--foreground\0"
+        ));
         assert!(!is_infernet_daemon_cmdline(
             b"/usr/bin/node\0/x/@infernetprotocol/cli/index.js\0start\0"
         ));

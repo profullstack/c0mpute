@@ -14,6 +14,21 @@ use tracing::{debug, warn};
 
 pub const DEFAULT_BOOTSTRAP_URL: &str = "https://c0mpute.com/bootstrap.json";
 
+/// Seeds compiled into the binary (DIP-0010), used when c0mpute.com cannot be
+/// reached and merged into the fetched list otherwise. Two boxes in two data
+/// centers, so one outage never strands new nodes.
+pub const DEFAULT_SEEDS: &[&str] = &[
+    // dev2, Buffalo (c0mpute-seed.service)
+    "/ip4/23.95.228.174/tcp/46337/p2p/12D3KooWADm5FfNxzPRanv1vacpPD7eh1bWv6pqmDCGE69Zof2n6",
+    // vienna, netcup (c0mpute-seed.service, since 2026-10-21)
+    "/ip4/152.53.47.37/tcp/46339/p2p/12D3KooWN99F7k4Fj6SdUqZ2VG4ZBLuw1e1ftwdPDBx3GsiDXzqv",
+];
+
+/// [`DEFAULT_SEEDS`] as multiaddrs.
+pub fn default_seeds() -> Vec<Multiaddr> {
+    DEFAULT_SEEDS.iter().filter_map(|s| s.parse().ok()).collect()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct BootstrapFile {
     pub version: u32,
@@ -83,5 +98,15 @@ pub async fn fetch_or_fallback(url: &str, fallback: Vec<Multiaddr>) -> Vec<Multi
             warn!(err = %e, url, "bootstrap fetch failed; using hardcoded fallback list");
             fallback
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn every_default_seed_parses() {
+        assert_eq!(default_seeds().len(), DEFAULT_SEEDS.len());
     }
 }

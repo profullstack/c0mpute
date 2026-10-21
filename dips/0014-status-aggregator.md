@@ -273,9 +273,13 @@ Phase 3 — deploy (operator step):
 - **Anti-scraping.** Even with aggregate-only data, do we want to
   rate-limit `/api/status`? Probably yes at the edge. Cloudflare /
   Railway both support this trivially.
-- **Multiple aggregators.** Eventually we'd want >1 aggregator for
-  redundancy. The c0mpute.com proxy can fall back across them. Out
-  of scope for v1.
+- **Multiple aggregators.** Done 2026-10-21: c0mpute.com reads every
+  URL in `STATUS_AGGREGATOR_URLS` in parallel and uses the answer that
+  sees the most workers (`apps/web/src/lib/aggregators.ts`). Today that
+  is the one in the web container on dev2 (restarted on exit) and the
+  vienna seed's (`:8091`). Both seeds are also compiled into the binary
+  (`DEFAULT_SEEDS`) and served by `/bootstrap.json` when its env var is
+  empty.
 - **Historical data.** Do we want sparkline-style "workers online
   over time" charts? Adds complexity (need persistent storage) for
   modest value. Punt unless someone asks.

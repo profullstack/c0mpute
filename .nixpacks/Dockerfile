@@ -52,6 +52,8 @@ RUN chmod +x /usr/local/bin/railway-web-start.sh
 # The aggregator serves its JSON on loopback; the site reads it there.
 ENV C0MPUTE_STATUS_BIND=127.0.0.1:8090
 ENV STATUS_AGGREGATOR_URL=http://127.0.0.1:8090
+# Every aggregator the site reads (lib/aggregators.ts): this container's own plus the vienna seed's.
+ENV STATUS_AGGREGATOR_URLS=http://127.0.0.1:8090,http://152.53.47.37:8091
 
 # Runs as root, exactly as the Railway image built from Dockerfile.web does (semgrep
 # never scanned that file: its name is not a Dockerfile pattern). Moving to a
