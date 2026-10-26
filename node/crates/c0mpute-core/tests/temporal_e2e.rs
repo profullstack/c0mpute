@@ -111,6 +111,10 @@ async fn train_then_serve_a_sticky_session() {
     .expect("infer worker serves");
     let sid_peer = s.net.peer_id().to_base58();
     assert!(s.tags.iter().any(|t| t.ends_with(cfc_hash.trim_start_matches("sha256:"))));
+    let saddr = format!("{}/p2p/{sid_peer}", s.net.listen_addrs().await.unwrap()[0]);
+    // The training worker does not subscribe to the infer topic, so it cannot
+    // relay it: session clients dial the infer worker (no mDNS on CI).
+    let buyer = node::spawn_node(&net(&tmp.path().join("b2/id"), vec![saddr.clone()])).await.unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let sf = client::open_session(
@@ -139,7 +143,7 @@ async fn train_then_serve_a_sticky_session() {
     assert_eq!(r["error"]["code"], json!("E_SEQ_LATE"));
 
     // Another peer that copied the session file cannot drive the session.
-    let thief = node::spawn_node(&net(&tmp.path().join("t/id"), vec![waddr])).await.unwrap();
+    let thief = node::spawn_node(&net(&tmp.path().join("t/id"), vec![saddr, waddr])).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let r = client::call(thief, &sf, json!({"op": "reset"}), Duration::from_secs(5)).await;
     assert!(r.is_err(), "worker ignores calls from a peer that did not open the session");

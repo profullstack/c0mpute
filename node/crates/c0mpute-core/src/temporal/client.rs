@@ -20,6 +20,22 @@ use super::http::TransferServer;
 use super::{INFER_WORKLOAD, SCHEMA_VERSION, SessionCall, SessionReady, SessionReply, SessionSpec, TRAIN_WORKLOAD, TrainSpec, select_family};
 use crate::buyer::{JobAuction, run_auction};
 
+/// Run an auction, retrying while gossipsub has no subscriber for the topic
+/// yet (a worker that just joined, or a fresh buyer node): those errors mean
+/// "mesh still forming", not "no worker". Gives up after ~30 s.
+pub async fn auction_with_mesh_retry(net: Arc<Libp2pNetwork>, make: impl Fn() -> JobAuction) -> Result<crate::buyer::AuctionOutcome> {
+    let mut tries = 0;
+    loop {
+        match run_auction(net.clone(), make()).await {
+            Err(e) if tries < 30 && { let m = format!("{e:#}"); m.contains("NoPeersSubscribedToTopic") || m.contains("InsufficientPeers") } => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 /// RFC 3339 UTC timestamp without pulling in a date crate.
 pub fn now_rfc3339() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
@@ -144,14 +160,17 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest) -> Result<Value>
         let mut last_err = None;
         let mut outcome = None;
         for attempt in 0..=req.retries.min(5) {
-            let auction = JobAuction::new(TRAIN_WORKLOAD, serde_json::to_value(&spec)?)
-                .with_required_capabilities(tags.clone())
-                .with_allowed_bidders(req.workers.clone())
-                .with_max_price_usd(req.max_price_usd)
-                .with_bid_window(req.bid_window)
-                .with_deadline(Duration::from_secs(req.timeout_s + 600))
-                .with_receipt_timeout(Duration::from_secs(req.timeout_s + 300));
-            match run_auction(net.clone(), auction).await {
+            let spec_v = serde_json::to_value(&spec)?;
+            let make = || {
+                JobAuction::new(TRAIN_WORKLOAD, spec_v.clone())
+                    .with_required_capabilities(tags.clone())
+                    .with_allowed_bidders(req.workers.clone())
+                    .with_max_price_usd(req.max_price_usd)
+                    .with_bid_window(req.bid_window)
+                    .with_deadline(Duration::from_secs(req.timeout_s + 600))
+                    .with_receipt_timeout(Duration::from_secs(req.timeout_s + 300))
+            };
+            match auction_with_mesh_retry(net.clone(), make).await {
                 Ok(o) if o.receipt.status == JobStatus::Completed => {
                     outcome = Some(o);
                     break;
@@ -262,13 +281,16 @@ pub async fn open_session(net: Arc<Libp2pNetwork>, req: &OpenRequest) -> Result<
     spec.validate()?;
     let mut rx = net.messages();
     let tags = required_tags(INFER_WORKLOAD, &Requirements { model_hash: Some(req.model_hash.clone()), ..Default::default() });
-    let auction = JobAuction::new(INFER_WORKLOAD, serde_json::to_value(&spec)?)
-        .with_required_capabilities(tags)
-        .with_allowed_bidders(req.workers.clone())
-        .with_max_price_usd(req.max_price_usd)
-        .with_bid_window(req.bid_window)
-        .with_receipt_timeout(Duration::from_secs(60));
-    let o = run_auction(net.clone(), auction).await?;
+    let spec_v = serde_json::to_value(&spec)?;
+    let make = || {
+        JobAuction::new(INFER_WORKLOAD, spec_v.clone())
+            .with_required_capabilities(tags.clone())
+            .with_allowed_bidders(req.workers.clone())
+            .with_max_price_usd(req.max_price_usd)
+            .with_bid_window(req.bid_window)
+            .with_receipt_timeout(Duration::from_secs(60))
+    };
+    let o = auction_with_mesh_retry(net.clone(), make).await?;
     if o.receipt.status != JobStatus::Completed || o.receipt.output_hash.as_deref() != Some(req.model_hash.as_str()) {
         bail!("worker {} could not open the session ({:?})", o.accepted_bid.bidder_peer_id, o.receipt.status);
     }

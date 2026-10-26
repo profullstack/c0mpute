@@ -58,7 +58,10 @@ const DHT_CRAWL_INTERVAL: Duration = Duration::from_secs(30);
 /// worker daemon; `infernet.inference` is emitted by the infernet peer
 /// binary. Both always appear in the output (as zeros when idle) to mirror
 /// the page's stub shape.
-const KNOWN_WORKLOADS: &[&str] = &["ffmpeg.transcode", "infernet.inference"];
+// The temporal workloads (DIP 0026) are listed so seeds running the
+// aggregator also relay them for buyers that only know the seeds; their
+// session calls are sealed, so the aggregator sees only ciphertext.
+const KNOWN_WORKLOADS: &[&str] = &["ffmpeg.transcode", "infernet.inference", "infernet.temporal.train", "infernet.temporal.infer"];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
 /// stays populated. Extra roles observed on the wire are added dynamically.
