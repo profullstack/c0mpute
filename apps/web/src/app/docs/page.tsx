@@ -176,6 +176,19 @@ c0mpute infernet model list`}
         </Code>
       </Section>
 
+      <Section h="temporal" title="[ temporal policies ]">
+        <P>
+          Train and serve small liquid neural networks (CfC, LTC) and GRU
+          baselines that predict the next UI action, on workers you trust.
+          Full guide: <a href="/temporal">c0mpute.com/temporal</a>.
+        </P>
+        <Code>
+{`c0mpute infernet temporal serve --train
+c0mpute infernet temporal train --dataset bundle.json --output ./model --family cfc --baseline gru --worker <peer-id> --yes
+c0mpute infernet temporal predict --session s1 --model sha256:<hash> --input step.json`}
+        </Code>
+      </Section>
+
       <Section h="reserve" title="[ reserve a node ]">
         <P>
           Infernet managed endpoints reserve one identified GPU operator
