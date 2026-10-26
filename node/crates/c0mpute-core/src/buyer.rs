@@ -33,6 +33,9 @@ pub struct JobAuction {
     pub deadline: Duration,
     pub bid_window: Duration,
     pub receipt_timeout: Duration,
+    /// When non-empty, only bids from these peer ids are considered (the
+    /// buyer's trusted workers). Others are ignored, not rejected.
+    pub allowed_bidders: Vec<String>,
 }
 
 impl JobAuction {
@@ -45,7 +48,18 @@ impl JobAuction {
             deadline: Duration::from_secs(15 * 60),
             bid_window: DEFAULT_BID_WINDOW,
             receipt_timeout: DEFAULT_RECEIPT_TIMEOUT,
+            allowed_bidders: Vec::new(),
         }
+    }
+
+    pub fn with_allowed_bidders(mut self, peers: Vec<String>) -> Self {
+        self.allowed_bidders = peers;
+        self
+    }
+
+    pub fn with_receipt_timeout(mut self, d: Duration) -> Self {
+        self.receipt_timeout = d;
+        self
     }
 
     pub fn with_required_capabilities(mut self, caps: Vec<String>) -> Self {
@@ -124,6 +138,12 @@ pub async fn run_auction(
                     if bid.job_id == job_id
                         && bid.bidder_peer_id != offer.buyer_peer_id
                     {
+                        if !auction.allowed_bidders.is_empty()
+                            && !auction.allowed_bidders.contains(&bid.bidder_peer_id)
+                        {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a worker outside the allowlist ignored");
+                            continue;
+                        }
                         if !source_matches_claim(&msg, &bid.bidder_peer_id) {
                             warn!(
                                 %job_id,
@@ -257,7 +277,7 @@ async fn publish_json<T: serde::Serialize>(
 /// `JobBid.bidder_peer_id` / `JobReceipt.worker_peer_id` are just self-reported
 /// strings inside the signed-later-but-not-yet payload, so without this check
 /// any peer can claim to be any other peer_id in a bid or completion receipt.
-fn source_matches_claim(msg: &GossipMessage, claimed_peer_id: &str) -> bool {
+pub(crate) fn source_matches_claim(msg: &GossipMessage, claimed_peer_id: &str) -> bool {
     match &msg.source {
         Some(source) => source.to_base58() == claimed_peer_id,
         None => false,

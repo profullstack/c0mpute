@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Stand-in for the `infernet` CLI's temporal commands in c0mpute tests.
+
+Same command lines and JSON shapes as Infernet (model capabilities --json,
+model train --json, model serve --stdio), no PyTorch: weights are a few
+bytes derived from the job, so hashes are real and checkable.
+"""
+import hashlib, json, os, sys
+
+def sha(b):
+    return "sha256:" + hashlib.sha256(b).hexdigest()
+
+args = sys.argv[1:]
+if args[:2] == ["model", "capabilities"]:
+    print(json.dumps({"workloads": ["infernet.temporal.train", "infernet.temporal.infer"], "families": ["cfc", "ltc", "gru"],
+                      "research_families": ["ltc"], "devices": {"cpu": True, "cuda": False, "mps": False}, "ram_mb": 16384,
+                      "threads": 4, "max_sessions": 64, "runtime": {"name": "infernet-liquid", "version": "0.1.0", "lock_hash": "sha256:" + "0" * 64}}))
+    sys.exit(0)
+
+def flag(name):
+    return args[args.index(name) + 1] if name in args else None
+
+if args[:2] == ["model", "train"]:
+    job = json.load(open(flag("--job")))
+    bundle = json.load(open(flag("--dataset")))
+    if bundle["manifest"]["dataset_hash"] != job["dataset_hash"]:
+        print("error: E_HASH_MISMATCH", file=sys.stderr); sys.exit(1)
+    out = flag("--output"); os.makedirs(out, exist_ok=True)
+    weights = ("weights:" + job["model_type"] + ":" + job["dataset_hash"]).encode()
+    open(os.path.join(out, "model.safetensors"), "wb").write(weights)
+    score = {"cfc": 0.8, "gru": 0.9, "ltc": 0.7}[job["model_type"]]
+    manifest = {"schema_version": "liquid-agent/v1", "kind": "model_manifest", "architecture": {"family": job["model_type"]},
+                "weights": {"format": "safetensors", "file": "model.safetensors", "weights_hash": sha(weights), "size_bytes": len(weights)},
+                "training": {"dataset_hash": job["dataset_hash"], "train_job_id": job["job_id"]}}
+    json.dump(manifest, open(os.path.join(out, "manifest.json"), "w"))
+    ev = {"model_hash": sha(weights), "dataset_hash": job["dataset_hash"], "split": "test", "metrics": {"episode_success": score}}
+    json.dump(ev, open(os.path.join(out, "eval.json"), "w"))
+    print(json.dumps({"dataset_hash": job["dataset_hash"], "results": [{"family": job["model_type"], "model_dir": out, "model_hash": sha(weights), "eval": ev}], "selected": job["model_type"]}))
+    sys.exit(0)
+
+if args[:2] == ["model", "serve"]:
+    models, sessions = set(), {}
+    for line in sys.stdin:
+        r = json.loads(line); rid = r.get("id"); op = r.get("op")
+        def ok(res): print(json.dumps({"v": 1, "id": rid, "ok": True, "result": res}), flush=True)
+        def err(code, msg): print(json.dumps({"v": 1, "id": rid, "ok": False, "error": {"code": code, "message": msg, "retriable": False}}), flush=True)
+        if op == "load":
+            m = json.load(open(os.path.join(r["model_dir"], "manifest.json")))["weights"]["weights_hash"]
+            if r.get("expected_hash") and r["expected_hash"] != m: err("E_MODEL_HASH", "mismatch"); continue
+            models.add(m); ok({"model_hash": m})
+        elif op == "open_session":
+            if r["model_hash"] not in models: err("E_NOT_LOADED", "no"); continue
+            sessions[r["session_id"]] = {"seq": -1, "scope": r.get("account_scope")}
+            ok({"session_id": r["session_id"], "sequence_index": -1, "state": "active"})
+        elif op == "predict":
+            q = r["request"]; s = sessions.get(q["session_id"])
+            if s is None: err("E_SESSION_UNKNOWN", "no session"); continue
+            if q["sequence_index"] <= s["seq"]: err("E_SEQ_DUPLICATE" if q["sequence_index"] == s["seq"] else "E_SEQ_LATE", "seq"); continue
+            if q["sequence_index"] > s["seq"] + 1: err("E_SEQ_GAP", "gap"); continue
+            s["seq"] = q["sequence_index"]
+            ok({"kind": "action_proposal", "session_id": q["session_id"], "sequence_index": s["seq"], "action": {"type": "wait"}, "confidence": 0.9, "requires_approval": False, "abstain_reason": None})
+        elif op in ("reset", "close_session"):
+            s = sessions.get(r["session_id"])
+            if s is None: err("E_SESSION_UNKNOWN", "no session"); continue
+            if op == "reset": s["seq"] = -1
+            else: sessions.pop(r["session_id"])
+            ok({"session_id": r["session_id"], "sequence_index": -1, "state": "closed" if op == "close_session" else "active"})
+        elif op == "shutdown":
+            ok({"bye": True}); break
+        else:
+            err("E_BAD_REQUEST", f"unknown op {op}")
+    sys.exit(0)
+
+print("fake infernet: unsupported " + " ".join(args), file=sys.stderr)
+sys.exit(2)

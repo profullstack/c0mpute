@@ -209,7 +209,7 @@ fn is_ipv6_private_or_local(ip: &std::net::Ipv6Addr) -> bool {
         || (segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
 }
 
-async fn publish_receipt(
+pub(crate) async fn publish_receipt(
     net: &Libp2pNetwork,
     accept: &JobAccept,
     output_hash: Option<String>,

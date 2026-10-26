@@ -22,6 +22,7 @@
 
 mod peers;
 mod storage;
+mod temporal;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,7 +41,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
 )]
 struct Cli {
     /// Override the config file location.
@@ -495,6 +496,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
         Cmd::Login => run_login(),
+        Cmd::Infernet { args } if args.first().map(String::as_str) == Some("temporal") => temporal::run(&args[1..]).await,
         Cmd::Infernet { mut args } => {
             // Default the network to c0mpute when caller didn't specify.
             if matches!(args.first().map(String::as_str), Some("run"))
@@ -2870,7 +2872,7 @@ fn is_infernet_daemon_cmdline(raw: &[u8]) -> bool {
     infernet && has(b"start") && has(b"--foreground")
 }
 
-fn which_on_path(bin: &str) -> Option<PathBuf> {
+pub(crate) fn which_on_path(bin: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path) {
         let candidate = entry.join(bin);
