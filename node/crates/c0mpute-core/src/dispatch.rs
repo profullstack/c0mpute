@@ -42,6 +42,21 @@ pub fn run_worker_subscriber(
     advertised_tags: Vec<String>,
     runner_tx: Option<mpsc::Sender<AcceptedJob>>,
 ) {
+    run_worker_subscriber_filtered(net, workload_type, advertised_tags, runner_tx, None)
+}
+
+/// Extra per-workload eligibility, checked after the capability tags and
+/// before bidding (spec validation, "busy", etc.). `false` = don't bid.
+pub type OfferFilter = Arc<dyn Fn(&JobOffer) -> bool + Send + Sync>;
+
+/// [`run_worker_subscriber`] with an [`OfferFilter`].
+pub fn run_worker_subscriber_filtered(
+    net: Arc<Libp2pNetwork>,
+    workload_type: String,
+    advertised_tags: Vec<String>,
+    runner_tx: Option<mpsc::Sender<AcceptedJob>>,
+    filter: Option<OfferFilter>,
+) {
     tokio::spawn(async move {
         let topic = job_topic(&workload_type);
         if let Err(e) = net.subscribe(&topic).await {
@@ -70,6 +85,12 @@ pub fn run_worker_subscriber(
             if let Ok(offer) = serde_json::from_slice::<JobOffer>(&msg.data) {
                 if offer.workload_type != workload_type {
                     continue;
+                }
+                if let Some(f) = &filter {
+                    if !f(&offer) {
+                        debug!(job_id = %offer.job_id, "dispatch: offer filtered out");
+                        continue;
+                    }
                 }
                 handle_offer(&net, &topic, &offer, &advertised_tags).await;
                 continue;

@@ -132,3 +132,4 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0016 | Abuse policy: CSAM hash blocklist, per-worker opt-in             | Draft      |
 | 0024 | Separate the protocol from every hosted service that accelerates it | Draft   |
 | 0025 | Signed envelopes and native `did:c0mpute` identity                | Draft      |
+| 0026 | Infernet temporal policies (liquid networks) as c0mpute workloads | Accepted   |

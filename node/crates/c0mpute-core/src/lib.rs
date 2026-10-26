@@ -12,11 +12,12 @@ pub mod register;
 pub mod runner;
 pub mod status_aggregator;
 pub mod supervisor;
+pub mod temporal;
 
 pub use buyer::{AuctionOutcome, JobAuction, run_auction};
 pub use capabilities::{Registry, advertise_loop, tags_from_config};
 pub use config::Config;
-pub use dispatch::{run_worker_subscriber, workload_types_from_roles};
+pub use dispatch::{OfferFilter, run_worker_subscriber, run_worker_subscriber_filtered, workload_types_from_roles};
 pub use register::{Registration, run_register};
 pub use runner::TranscodeJobInline;
 pub use supervisor::Supervisor;
