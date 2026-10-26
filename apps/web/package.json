@@ -12,22 +12,22 @@
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
     "@profullstack/footer": "latest",
-    "@profullstack/x402-gateway": "^0.11.0",
-    "@sqlitecloud/drivers": "^1.0.880",
-    "ioredis": "^5.11.1",
-    "next": "16.4.1",
-    "posthog-js": "^1.381.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "@profullstack/x402-gateway": "^0.13.1",
+    "@sqlitecloud/drivers": "^1.0.982",
+    "ioredis": "^6.0.0",
+    "next": "16.4.3",
+    "posthog-js": "^1.438.23",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@iarna/toml": "^2.2.5",
-    "@tailwindcss/postcss": "^4.0.0",
-    "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "postcss": "^8.5.10",
-    "tailwindcss": "^4.0.0",
-    "typescript": "^5.8.0"
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2"
   }
 }

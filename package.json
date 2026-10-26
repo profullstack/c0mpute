@@ -19,16 +19,21 @@
     "export:cloud": "$HOME/.bun/bin/bun bin/export-from-cloud.ts"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.31.10",
-    "typescript": "^5.8.0"
+    "drizzle-kit": "^0.31.11",
+    "typescript": "^7.0.2"
   },
   "optionalDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "better-sqlite3": "^12.10.0"
+    "@types/better-sqlite3": "^9.6.0",
+    "better-sqlite3": "^13.0.3"
   },
   "dependencies": {
-    "@sqlitecloud/drivers": "^1.0.880",
-    "drizzle-orm": "^0.45.2",
-    "postcss": "^8.5.15"
+    "@sqlitecloud/drivers": "^1.0.982",
+    "drizzle-orm": "^0.45.4",
+    "postcss": "^8.5.31"
+  },
+  "overrides": {
+    "ws": "^8.22.0",
+    "socket.io-parser": "^4.2.7",
+    "source-map-js": "^1.2.2"
   }
 }
