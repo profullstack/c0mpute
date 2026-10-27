@@ -61,7 +61,12 @@ const DHT_CRAWL_INTERVAL: Duration = Duration::from_secs(30);
 // The temporal workloads (DIP 0026) are listed so seeds running the
 // aggregator also relay them for buyers that only know the seeds; their
 // session calls are sealed, so the aggregator sees only ciphertext.
-const KNOWN_WORKLOADS: &[&str] = &["ffmpeg.transcode", "infernet.inference", "infernet.temporal.train", "infernet.temporal.infer"];
+const KNOWN_WORKLOADS: &[&str] = &[
+    "ffmpeg.transcode",
+    "infernet.inference",
+    "infernet.temporal.train",
+    "infernet.temporal.infer",
+];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
 /// stays populated. Extra roles observed on the wire are added dynamically.
@@ -255,7 +260,8 @@ async fn build_payload(state: &AppState) -> StatusPayload {
             }
         }
     }
-    let bench = BenchSummary::from_scores(ads.iter().filter_map(|(_, ad)| ad.bench_score).collect());
+    let bench =
+        BenchSummary::from_scores(ads.iter().filter_map(|(_, ad)| ad.bench_score).collect());
 
     // Jobs — from the correlated job state.
     let mut workload_types: BTreeMap<String, (u64, u64, f64, u64)> = KNOWN_WORKLOADS
@@ -362,7 +368,18 @@ struct NodeRow {
     version: Option<String>,
     #[serde(rename = "ref")]
     referral: Option<String>,
+    /// The operator's listing (`mode`, `min_usd`, `fixed_usd`), if the node
+    /// advertises one. Re-validated here: only known fields, sane numbers.
+    pricing: Option<serde_json::Value>,
     last_seen_s: u64,
+}
+
+/// The ad's pricing listing, rebuilt from validated fields only.
+fn listing(hw: &serde_json::Value) -> Option<serde_json::Value> {
+    let v = hw.get("pricing")?;
+    let p: crate::pricing::PricingConfig = serde_json::from_value(v.clone()).ok()?;
+    let cap = |x: f64| x <= 1_000_000.0;
+    (p.validate().is_ok() && cap(p.min_usd) && p.fixed_usd.is_none_or(cap)).then(|| p.listing())
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -404,12 +421,17 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
             class: node_class(&ad.tags),
             cores: ad.hardware.get("cores").and_then(|v| v.as_u64()),
             bench_score: ad.bench_score,
-            version: ad.hardware.get("version").and_then(|v| v.as_str()).map(|s| s.chars().take(24).collect()),
+            version: ad
+                .hardware
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(24).collect()),
             referral: ad
                 .hardware
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::sanitize_ref),
+            pricing: listing(&ad.hardware),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
         })
         .collect();
@@ -530,7 +552,8 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
 
     // Best-effort bootstrap from c0mpute.com/bootstrap.json; mDNS covers LAN.
     let bootstrap_addrs =
-        bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, bootstrap::default_seeds()).await;
+        bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, bootstrap::default_seeds())
+            .await;
     info!(
         count = bootstrap_addrs.len(),
         "aggregator: bootstrap peers loaded"
@@ -629,9 +652,26 @@ mod tests {
             ad
         };
         let ads = vec![
-            ("12D3KooWaaaaaaaaAAAAAAAA".to_string(), mk(&["c0mpute:cpu"], None, serde_json::json!({"ref": "Chovy"}))),
-            ("12D3KooWbbbbbbbbBBBBBBBB".to_string(), mk(&["c0mpute:gpu:nvidia"], Some(9000), serde_json::json!({"cores": 16, "version": "0.2.32", "ref": "chovy", "cpu": "secret model"}))),
-            ("12D3KooWccccccccCCCCCCCC".to_string(), mk(&["c0mpute:cpu"], Some(100), serde_json::json!({"ref": "<bad>"}))),
+            (
+                "12D3KooWaaaaaaaaAAAAAAAA".to_string(),
+                mk(&["c0mpute:cpu"], None, serde_json::json!({"ref": "Chovy"})),
+            ),
+            (
+                "12D3KooWbbbbbbbbBBBBBBBB".to_string(),
+                mk(
+                    &["c0mpute:gpu:nvidia"],
+                    Some(9000),
+                    serde_json::json!({"cores": 16, "version": "0.2.32", "ref": "chovy", "cpu": "secret model"}),
+                ),
+            ),
+            (
+                "12D3KooWccccccccCCCCCCCC".to_string(),
+                mk(
+                    &["c0mpute:cpu"],
+                    Some(100),
+                    serde_json::json!({"ref": "<bad>"}),
+                ),
+            ),
         ];
         let p = build_nodes(&ads, 40_000);
         assert_eq!(p.workers_online, 3);
@@ -641,9 +681,40 @@ mod tests {
         assert_eq!(p.nodes[0].last_seen_s, 30);
         assert_eq!(p.nodes[2].bench_score, None);
         assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
-        assert_eq!(p.referrers, vec![ReferrerRow { referral: "chovy".into(), nodes: 2 }]);
+        assert_eq!(
+            p.referrers,
+            vec![ReferrerRow {
+                referral: "chovy".into(),
+                nodes: 2
+            }]
+        );
         let json = serde_json::to_string(&p.nodes).unwrap();
         assert!(!json.contains("secret model"), "cpu model never published");
+    }
+
+    #[test]
+    fn node_board_carries_only_a_valid_pricing_listing() {
+        let ok = serde_json::json!({"pricing": {"mode": "dynamic", "min_usd": 0.02, "junk": "x"}});
+        assert_eq!(
+            listing(&ok),
+            Some(serde_json::json!({"mode": "dynamic", "min_usd": 0.02}))
+        );
+        let fixed =
+            serde_json::json!({"pricing": {"mode": "fixed", "min_usd": 0.0, "fixed_usd": 0.5}});
+        assert_eq!(listing(&fixed).unwrap()["fixed_usd"], 0.5);
+        assert_eq!(
+            listing(&serde_json::json!({"pricing": {"mode": "fixed"}})),
+            None
+        );
+        assert_eq!(
+            listing(&serde_json::json!({"pricing": {"min_usd": -1}})),
+            None
+        );
+        assert_eq!(
+            listing(&serde_json::json!({"pricing": {"mode": "auction"}})),
+            None
+        );
+        assert_eq!(listing(&serde_json::json!({})), None);
     }
 
     #[test]

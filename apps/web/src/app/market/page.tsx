@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
-import { getNodesPayload } from "@/lib/nodes";
-import { MARKET_FEE_PCT, OPERATOR_SHARE_PCT, splitPrice } from "@/lib/market";
+import { getNodesPayload, priceLabel } from "@/lib/nodes";
+import { DYNAMIC_IDLE_SHARE, MARKET_FEE_PCT, OPERATOR_SHARE_PCT, splitPrice } from "@/lib/market";
 
 export const metadata = {
   title: "market — c0mpute",
@@ -91,6 +91,7 @@ export default async function MarketPage() {
                   <th className="py-2 pr-3">node</th>
                   <th className="py-2 pr-3">class</th>
                   <th className="py-2 pr-3">bench</th>
+                  <th className="py-2 pr-3">price / job</th>
                   <th className="py-2 pr-3">version</th>
                   <th className="py-2">seen</th>
                 </tr>
@@ -101,6 +102,7 @@ export default async function MarketPage() {
                     <td className="py-2 pr-3 accent font-mono">{n.id}</td>
                     <td className="py-2 pr-3">{n.class}</td>
                     <td className="py-2 pr-3">{n.bench_score?.toLocaleString() ?? "-"}</td>
+                    <td className="py-2 pr-3">{priceLabel(n.pricing)}</td>
                     <td className="py-2 pr-3 text-[var(--color-dim)]">{n.version ?? "-"}</td>
                     <td className="py-2 text-[var(--color-dim)]">{ago(n.last_seen_s)}</td>
                   </tr>
@@ -141,6 +143,23 @@ $ c0mpute transcode submit input.mov --preset hls --max-price 1.25`}</CodeBlock>
         </p>
         <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
 $ infernet payout set USDC 0xYourAddress --network polygon`}</CodeBlock>
+        <p>
+          <strong className="text-[var(--color-fg)]">Set your price.</strong>{" "}
+          Every node is listed with dynamic pricing by default: when it is idle
+          it bids {Math.round(DYNAMIC_IDLE_SHARE * 100)}% of the buyer&apos;s
+          cap to win work, and the bid rises toward the full cap as its job
+          queue fills. You set a minimum and it never bids under it; jobs capped
+          below your minimum are skipped. Or ask one fixed price.
+        </p>
+        <CodeBlock>{`$ c0mpute pricing set --min 0.05          # dynamic, never under $0.05 a job
+$ c0mpute pricing set --fixed 0.40        # always $0.40 a job
+$ c0mpute pricing                         # show your listing
+$ c0mpute worker stop && c0mpute worker start -d   # apply`}</CodeBlock>
+        <p className="text-xs text-[var(--color-dim)] leading-6">
+          Your listing (mode and minimum) rides in the node&apos;s capability
+          ad and shows in the table above and in <a href="/api/nodes">/api/nodes</a>.
+          The {MARKET_FEE_PCT}% market fee comes out of the price you win the job at.
+        </p>
         <p className="text-xs text-[var(--color-dim)]">
           → <Link href="/providers">running a node</Link>
         </p>

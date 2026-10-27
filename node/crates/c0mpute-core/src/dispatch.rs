@@ -25,6 +25,7 @@ use c0mpute_net::{GossipMessage, Libp2pNetwork};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::pricing::PricingConfig;
 use crate::runner::AcceptedJob;
 
 /// Reject job offers older than this — replay protection + freshness
@@ -56,6 +57,20 @@ pub fn run_worker_subscriber_filtered(
     advertised_tags: Vec<String>,
     runner_tx: Option<mpsc::Sender<AcceptedJob>>,
     filter: Option<OfferFilter>,
+) {
+    run_worker_subscriber_priced(net, workload_type, advertised_tags, runner_tx, filter, None)
+}
+
+/// [`run_worker_subscriber_filtered`] that bids with the operator's
+/// [`PricingConfig`] (dynamic with a floor, or fixed) instead of the buyer's
+/// cap. `None` keeps the cap-price bid.
+pub fn run_worker_subscriber_priced(
+    net: Arc<Libp2pNetwork>,
+    workload_type: String,
+    advertised_tags: Vec<String>,
+    runner_tx: Option<mpsc::Sender<AcceptedJob>>,
+    filter: Option<OfferFilter>,
+    pricing: Option<PricingConfig>,
 ) {
     tokio::spawn(async move {
         let topic = job_topic(&workload_type);
@@ -92,7 +107,16 @@ pub fn run_worker_subscriber_filtered(
                         continue;
                     }
                 }
-                handle_offer(&net, &topic, &offer, &advertised_tags).await;
+                let load = runner_tx.as_ref().map(queue_load).unwrap_or(0.0);
+                handle_offer(
+                    &net,
+                    &topic,
+                    &offer,
+                    &advertised_tags,
+                    pricing.as_ref(),
+                    load,
+                )
+                .await;
                 continue;
             }
             if let Ok(accept) = serde_json::from_slice::<JobAccept>(&msg.data) {
@@ -127,11 +151,22 @@ pub fn run_worker_subscriber_filtered(
     });
 }
 
+/// How full the runner's queue is: 0.0 empty, 1.0 full.
+fn queue_load(tx: &mpsc::Sender<AcceptedJob>) -> f64 {
+    let max = tx.max_capacity();
+    if max == 0 {
+        return 0.0;
+    }
+    (max - tx.capacity()) as f64 / max as f64
+}
+
 async fn handle_offer(
     net: &Libp2pNetwork,
     topic: &str,
     offer: &JobOffer,
     advertised_tags: &[String],
+    pricing: Option<&PricingConfig>,
+    load: f64,
 ) {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -160,14 +195,23 @@ async fn handle_offer(
         return;
     }
 
-    // Phase 1: publish a bid at the buyer's max price (cooperative
-    // pricing). Phase 2 will compute a real per-worker price from
-    // hardware + queue depth + reputation tier.
+    // The operator's listing prices the bid (dynamic by queue load, never
+    // under their floor); without one, bid the buyer's cap.
+    let price_usd = match pricing {
+        Some(p) => match p.quote(offer.max_price_usd, load) {
+            Some(price) => price,
+            None => {
+                debug!(job_id = %offer.job_id, cap = offer.max_price_usd, min = p.min_usd, "dispatch: cap under our floor, not bidding");
+                return;
+            }
+        },
+        None => offer.max_price_usd,
+    };
     let bid = JobBid {
         job_id: offer.job_id.clone(),
         bidder_peer_id: net.peer_id().to_base58(),
         bidder_did: None,
-        price_usd: offer.max_price_usd,
+        price_usd,
         eta_seconds: 60, // placeholder; real ETA from the worker pool
         published_at_ms: now_ms,
     };
