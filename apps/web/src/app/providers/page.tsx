@@ -114,9 +114,12 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
         <p>
           You set your rates. A buyer sets a cap. When you quote under it and
           the work validates, settlement releases and both sides sign a
-          receipt. There is{" "}
-          <strong className="text-[var(--color-fg)]">no protocol fee</strong>{" "}
-          — the amount agreed is the amount transferred.
+          receipt. A direct protocol deal has{" "}
+          <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
+          bought through the <Link href="/market">market</Link>, including paid
+          Infernet inference, pay you{" "}
+          <strong className="text-[var(--color-fg)]">90%</strong>; c0mpute keeps a
+          10% market fee.
         </p>
         <p className="text-[var(--color-dim)]">
           Your record is portable. Reputation is derived from signed receipts
