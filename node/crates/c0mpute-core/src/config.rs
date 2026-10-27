@@ -31,6 +31,9 @@ pub struct Config {
     /// Override the release-feed URL.
     #[serde(default)]
     pub update_feed_url: Option<String>,
+    /// The operator's listing: dynamic or fixed price per job, with a floor.
+    #[serde(default)]
+    pub pricing: crate::pricing::PricingConfig,
 }
 
 impl Default for Config {
@@ -44,6 +47,7 @@ impl Default for Config {
             update_auto: default_auto_update(),
             update_interval_secs: default_update_interval_secs(),
             update_feed_url: None,
+            pricing: Default::default(),
         }
     }
 }

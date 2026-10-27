@@ -31,11 +31,9 @@ impl Supervisor {
         // <config_dir>/identity.key. Bootstrap list is empty for now —
         // DIP-0010 wires up c0mpute.com/bootstrap.json once we run
         // public seed nodes.
-        let identity_dir = config::config_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        let local_source: Arc<dyn ChunkSource> =
-            Arc::new(StoreSource(store.clone()));
+        let local_source: Arc<dyn ChunkSource> = Arc::new(StoreSource(store.clone()));
 
         // Fetch bootstrap list from c0mpute.com (best-effort) and merge
         // with the hardcoded fallback list. mDNS handles LAN discovery
@@ -46,17 +44,13 @@ impl Supervisor {
             bootstrap::default_seeds(),
         )
         .await;
-        info!(
-            count = bootstrap_addrs.len(),
-            "bootstrap peers loaded"
-        );
+        info!(count = bootstrap_addrs.len(), "bootstrap peers loaded");
 
         let net_cfg = NetworkConfig::for_dir(identity_dir)
             .with_local_source(local_source)
             .with_bootstrap(bootstrap_addrs);
 
-        let libp2p_net: Arc<Libp2pNetwork> =
-            Arc::new(Libp2pNetwork::spawn(net_cfg).await?);
+        let libp2p_net: Arc<Libp2pNetwork> = Arc::new(Libp2pNetwork::spawn(net_cfg).await?);
         info!(
             peer_id = %libp2p_net.peer_id(),
             "libp2p network up"
@@ -126,11 +120,13 @@ impl Supervisor {
                 }
                 _ => None,
             };
-            dispatch::run_worker_subscriber(
+            dispatch::run_worker_subscriber_priced(
                 net.clone(),
                 workload_type,
                 tags.clone(),
                 runner_tx,
+                None,
+                Some(self.config.pricing.clone()),
             );
         }
 
@@ -153,8 +149,7 @@ impl Supervisor {
                 .update_feed_url
                 .clone()
                 .unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
-            let interval =
-                std::time::Duration::from_secs(self.config.update_interval_secs.max(60));
+            let interval = std::time::Duration::from_secs(self.config.update_interval_secs.max(60));
             let current = env!("CARGO_PKG_VERSION").to_string();
             info!(
                 interval_secs = interval.as_secs(),

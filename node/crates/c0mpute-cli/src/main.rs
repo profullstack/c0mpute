@@ -76,6 +76,15 @@ enum Cmd {
         #[arg(long, value_delimiter = ',', global = true)]
         threads: Option<Vec<usize>>,
     },
+    /// Your listing on c0mpute.com/market: how this node prices its bids.
+    ///
+    /// Dynamic (default) undercuts the buyer's cap when idle and rises as the
+    /// queue fills; fixed always asks one price. Neither goes under `--min`.
+    /// A running worker picks a change up on restart.
+    Pricing {
+        #[command(subcommand)]
+        cmd: Option<PricingCmd>,
+    },
     /// Worker lifecycle.
     Worker {
         #[command(subcommand)]
@@ -484,6 +493,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             threads,
         } => run_bench(cmd, quick, json, threads),
         Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
+        Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
         Cmd::Storage { cmd } => storage::run(cmd, &config_path).await,
@@ -496,7 +506,9 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
         Cmd::Login => run_login(),
-        Cmd::Infernet { args } if args.first().map(String::as_str) == Some("temporal") => temporal::run(&args[1..]).await,
+        Cmd::Infernet { args } if args.first().map(String::as_str) == Some("temporal") => {
+            temporal::run(&args[1..]).await
+        }
         Cmd::Infernet { mut args } => {
             // Default the network to c0mpute when caller didn't specify.
             if matches!(args.first().map(String::as_str), Some("run"))
@@ -722,6 +734,64 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
 // ────────────────────────────────────────────────────────────────────────
 // bench
 // ────────────────────────────────────────────────────────────────────────
+
+#[derive(Subcommand, Debug)]
+enum PricingCmd {
+    /// Print the current listing (the default).
+    Show,
+    /// Set the floor and the mode.
+    Set {
+        /// Lowest price per job you accept, in USD.
+        #[arg(long)]
+        min: Option<f64>,
+        /// Always ask this price per job (fixed mode).
+        #[arg(long, conflicts_with = "dynamic")]
+        fixed: Option<f64>,
+        /// Price by demand: undercut when idle, up to the buyer's cap when busy.
+        #[arg(long)]
+        dynamic: bool,
+    },
+}
+
+fn run_pricing(cmd: Option<PricingCmd>, config_path: &std::path::Path) -> Result<()> {
+    use c0mpute_core::pricing::PricingMode;
+    let mut cfg = Config::load_or_default(config_path)?;
+    if let Some(PricingCmd::Set {
+        min,
+        fixed,
+        dynamic,
+    }) = cmd
+    {
+        if let Some(m) = min {
+            cfg.pricing.min_usd = m;
+        }
+        if let Some(f) = fixed {
+            cfg.pricing.mode = PricingMode::Fixed;
+            cfg.pricing.fixed_usd = Some(f);
+        } else if dynamic {
+            cfg.pricing.mode = PricingMode::Dynamic;
+            cfg.pricing.fixed_usd = None;
+        }
+        cfg.pricing.validate().map_err(anyhow::Error::msg)?;
+        cfg.save(config_path)?;
+        println!(
+            "saved to {} (apply: c0mpute worker stop && c0mpute worker start -d)",
+            config_path.display()
+        );
+    }
+    let p = &cfg.pricing;
+    println!("mode     : {}", p.mode.as_str());
+    println!("min      : ${} per job", p.min_usd);
+    if let (PricingMode::Fixed, Some(f)) = (p.mode, p.fixed_usd) {
+        println!("price    : ${f} per job");
+    }
+    if let Some(q) = p.quote(1.0, 0.0) {
+        println!("example  : on a $1.00 job you bid ${q:.2} when idle");
+    } else {
+        println!("example  : you skip jobs capped at $1.00 (under your floor)");
+    }
+    Ok(())
+}
 
 #[derive(Subcommand, Debug)]
 enum BenchCmd {

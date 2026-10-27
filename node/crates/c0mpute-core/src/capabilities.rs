@@ -127,8 +127,7 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "free_disk_root": config.storage.root.display().to_string(),
     });
-    if let Some(report) = bench_report_path().and_then(|p| c0mpute_bench::load(&p).ok().flatten())
-    {
+    if let Some(report) = bench_report_path().and_then(|p| c0mpute_bench::load(&p).ok().flatten()) {
         blob["cpu"] = serde_json::Value::String(report.metadata.cpu.clone());
         blob["cores"] = serde_json::Value::from(report.metadata.cores);
         blob["bench_at"] = serde_json::Value::String(report.metadata.start_time.clone());
@@ -136,6 +135,7 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
     if let Some(code) = referral_code() {
         blob["ref"] = serde_json::Value::String(code);
     }
+    blob["pricing"] = config.pricing.listing();
     blob
 }
 
@@ -411,9 +411,7 @@ mod tests {
         let mut found: Option<CapabilityAd> = None;
         for _ in 0..50 {
             let entries = registry.list().await;
-            if let Some((_, ad)) =
-                entries.iter().find(|(p, _)| *p == net_a.peer_id())
-            {
+            if let Some((_, ad)) = entries.iter().find(|(p, _)| *p == net_a.peer_id()) {
                 found = Some(ad.clone());
                 break;
             }
@@ -425,8 +423,7 @@ mod tests {
         assert_eq!(ad.bench_score, Some(8438), "bench score travels in the ad");
 
         // find_with_tag should return A.
-        let storage_workers =
-            registry.find_with_tag("c0mpute:role:storage").await;
+        let storage_workers = registry.find_with_tag("c0mpute:role:storage").await;
         assert_eq!(storage_workers.len(), 1);
         assert_eq!(storage_workers[0].0, net_a.peer_id());
     }

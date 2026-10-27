@@ -13,3 +13,10 @@ export function splitPrice(usd: number): { operator: number; fee: number } {
   const fee = Math.round((cents * MARKET_FEE_PCT) / 100);
   return { operator: (cents - fee) / 100, fee: fee / 100 };
 }
+
+/**
+ * Share of the buyer's cap an idle node bids in dynamic mode; the bid rises to
+ * the full cap as its queue fills, never under the operator's minimum. Mirrors
+ * `DYNAMIC_IDLE_SHARE` in node/crates/c0mpute-core/src/pricing.rs.
+ */
+export const DYNAMIC_IDLE_SHARE = 0.6;
