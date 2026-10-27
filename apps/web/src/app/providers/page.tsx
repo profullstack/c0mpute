@@ -112,11 +112,13 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ what you earn ]</h2>
         <p>
-          You set your rates: dynamic by default (undercut when idle, up to the
-          buyer&apos;s cap when busy) or one fixed price, never under the
-          minimum you set with <code>c0mpute pricing set --min 0.05</code>. A
-          buyer sets a cap. When you quote under it and the work validates, settlement releases and both sides sign a
-          receipt. A direct protocol deal has{" "}
+          The market sets the price. Every job is an auction: a buyer sets a
+          cap, nodes bid under it, and the lowest bid wins. Your node prices
+          itself by default (it learns the winning price, undercuts it, and asks
+          more when busy) and never goes under the minimum you set with{" "}
+          <code>c0mpute pricing set --min 0.05</code>; or ask one fixed price.
+          When you win and the work validates, settlement releases and both
+          sides sign a receipt. A direct protocol deal has{" "}
           <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
           bought through the <Link href="/market">market</Link>, including paid
           Infernet inference, pay you{" "}

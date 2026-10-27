@@ -9,7 +9,7 @@
 ## Run a node
 
 - [Run a node](https://c0mpute.com/providers): `curl -fsSL https://c0mpute.com/install.sh | sh` installs c0mpute and starts the worker (Linux, macOS, Windows via WSL2; CPU or GPU). The goal is 100,000 nodes, enough pooled capacity to train and serve open-weight models in the open.
-- [Market](https://c0mpute.com/market): GPU nodes online with each operator's listing. `c0mpute pricing set --min <usd>` = dynamic pricing (idle bids 60% of the buyer's cap, rising to the cap as the queue fills) never under the floor; `--fixed <usd>` = one price. The listing (`pricing: {mode, min_usd, fixed_usd}`) is in https://c0mpute.com/api/nodes.
+- [Market](https://c0mpute.com/market): GPU nodes online with each operator's listing. Fully competitive: every job is a sealed-bid auction under the buyer's cap and the lowest bid wins automatically; no rate card. `c0mpute pricing set --min <usd>` = dynamic pricing (starts at 60% of the cap, undercuts the winning price by 2% after a loss, probes up after a win, rises with queue load) never under the floor; 5% market fee on market jobs; `--fixed <usd>` = one price. The listing (`pricing: {mode, min_usd, fixed_usd}`) is in https://c0mpute.com/api/nodes.
 - [Node board](https://c0mpute.com/nodes): every node online now, ranked by `c0mpute bench` score. JSON at https://c0mpute.com/api/nodes.
 - Referral links: https://c0mpute.com/r/<handle> gives an install line with `C0MPUTE_REF=<handle>`; nodes installed with it show the handle on the board. Public scoreboard, no payout.
 

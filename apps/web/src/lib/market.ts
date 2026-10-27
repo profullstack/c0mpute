@@ -15,8 +15,11 @@ export function splitPrice(usd: number): { operator: number; fee: number } {
 }
 
 /**
- * Share of the buyer's cap an idle node bids in dynamic mode; the bid rises to
- * the full cap as its queue fills, never under the operator's minimum. Mirrors
- * `DYNAMIC_IDLE_SHARE` in node/crates/c0mpute-core/src/pricing.rs.
+ * Share of the buyer's cap a dynamic node bids before it has seen an auction.
+ * After that it prices off the clearing price it learns: it undercuts a winning
+ * bid it lost to by UNDERCUT, probes higher after a win, rises toward the cap as
+ * its queue fills, and never goes under the operator's minimum. The lowest bid
+ * wins. Mirrors node/crates/c0mpute-core/src/pricing.rs.
  */
 export const DYNAMIC_IDLE_SHARE = 0.6;
+export const UNDERCUT = 0.02;

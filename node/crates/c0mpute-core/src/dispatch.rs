@@ -25,12 +25,16 @@ use c0mpute_net::{GossipMessage, Libp2pNetwork};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::pricing::PricingConfig;
+use crate::pricing::{MarketLearner, PricingConfig};
 use crate::runner::AcceptedJob;
 
 /// Reject job offers older than this — replay protection + freshness
 /// guard.
 pub const MAX_OFFER_AGE: Duration = Duration::from_secs(5 * 60);
+
+/// Open bids remembered for learning the clearing price; reset when full
+/// (auctions that never accept would otherwise pile up).
+const MAX_OPEN_BIDS: usize = 1024;
 
 /// Spawn a per-workload subscriber. Listens on
 /// `c0mpute/jobs/<workload_type>`:
@@ -82,6 +86,11 @@ pub fn run_worker_subscriber_priced(
 
         let our_peer_id = net.peer_id().to_base58();
         let mut rx = net.messages();
+        // What the market clears at, learned from accepts on auctions we
+        // bid in, plus our open bids (job_id -> cap, our price).
+        let mut market = MarketLearner::default();
+        let mut open_bids: std::collections::HashMap<String, (f64, f64)> =
+            std::collections::HashMap::new();
         loop {
             let msg: GossipMessage = match rx.recv().await {
                 Ok(m) => m,
@@ -108,22 +117,34 @@ pub fn run_worker_subscriber_priced(
                     }
                 }
                 let load = runner_tx.as_ref().map(queue_load).unwrap_or(0.0);
-                handle_offer(
+                if let Some(price) = handle_offer(
                     &net,
                     &topic,
                     &offer,
                     &advertised_tags,
                     pricing.as_ref(),
                     load,
+                    &market,
                 )
-                .await;
+                .await
+                {
+                    if open_bids.len() >= MAX_OPEN_BIDS {
+                        open_bids.clear();
+                    }
+                    open_bids.insert(offer.job_id.clone(), (offer.max_price_usd, price));
+                }
                 continue;
             }
             if let Ok(accept) = serde_json::from_slice::<JobAccept>(&msg.data) {
                 if accept.workload_type != workload_type {
                     continue;
                 }
-                if accept.winning_bidder_peer_id != our_peer_id {
+                let won = accept.winning_bidder_peer_id == our_peer_id;
+                if let Some((cap, ours)) = open_bids.remove(&accept.job_id) {
+                    market.observe(cap, ours, accept.agreed_price_usd, won);
+                    debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
+                }
+                if !won {
                     debug!(
                         job_id = %accept.job_id,
                         winner = %accept.winning_bidder_peer_id,
@@ -167,18 +188,19 @@ async fn handle_offer(
     advertised_tags: &[String],
     pricing: Option<&PricingConfig>,
     load: f64,
-) {
+    market: &MarketLearner,
+) -> Option<f64> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     if now_ms.saturating_sub(offer.published_at_ms) > MAX_OFFER_AGE.as_millis() as u64 {
         debug!(job_id = %offer.job_id, "dispatch: ignoring stale offer");
-        return;
+        return None;
     }
     if offer.deadline_unix_ms < now_ms {
         debug!(job_id = %offer.job_id, "dispatch: deadline already passed");
-        return;
+        return None;
     }
     // Capability check.
     let missing: Vec<&String> = offer
@@ -192,17 +214,17 @@ async fn handle_offer(
             ?missing,
             "dispatch: not eligible (missing capabilities)"
         );
-        return;
+        return None;
     }
 
     // The operator's listing prices the bid (dynamic by queue load, never
     // under their floor); without one, bid the buyer's cap.
     let price_usd = match pricing {
-        Some(p) => match p.quote(offer.max_price_usd, load) {
+        Some(p) => match p.quote_in_market(offer.max_price_usd, load, market) {
             Some(price) => price,
             None => {
                 debug!(job_id = %offer.job_id, cap = offer.max_price_usd, min = p.min_usd, "dispatch: cap under our floor, not bidding");
-                return;
+                return None;
             }
         },
         None => offer.max_price_usd,
@@ -219,20 +241,26 @@ async fn handle_offer(
         Ok(b) => b,
         Err(e) => {
             warn!(err = %e, "dispatch: serialize bid");
-            return;
+            return None;
         }
     };
     match net.publish(topic, payload).await {
-        Ok(()) => info!(
-            job_id = %offer.job_id,
-            price = bid.price_usd,
-            "dispatch: bid published"
-        ),
-        Err(e) => debug!(
-            job_id = %offer.job_id,
-            err = %e,
-            "dispatch: bid publish failed (mesh forming?)"
-        ),
+        Ok(()) => {
+            info!(
+                job_id = %offer.job_id,
+                price = bid.price_usd,
+                "dispatch: bid published"
+            );
+            Some(price_usd)
+        }
+        Err(e) => {
+            debug!(
+                job_id = %offer.job_id,
+                err = %e,
+                "dispatch: bid publish failed (mesh forming?)"
+            );
+            None
+        }
     }
 }
 
