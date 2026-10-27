@@ -118,8 +118,8 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
           <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
           bought through the <Link href="/market">market</Link>, including paid
           Infernet inference, pay you{" "}
-          <strong className="text-[var(--color-fg)]">90%</strong>; c0mpute keeps a
-          10% market fee.
+          <strong className="text-[var(--color-fg)]">95%</strong>; c0mpute keeps a
+          5% market fee.
         </p>
         <p className="text-[var(--color-dim)]">
           Your record is portable. Reputation is derived from signed receipts

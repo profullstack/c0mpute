@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export const metadata = {
   title: "pricing — c0mpute",
-  description: "c0mpute uses a peer-to-peer market rate model. Buyers set a max price per job; providers quote. The open protocol takes 0%; jobs bought through the c0mpute market carry a 10% fee and the node operator keeps 90%.",
+  description: "c0mpute uses a peer-to-peer market rate model. Buyers set a max price per job; providers quote. The open protocol takes 0%; jobs bought through the c0mpute market carry a 5% fee and the node operator keeps 95%.",
   alternates: { canonical: "https://c0mpute.com/pricing" },
 };
 
@@ -11,7 +11,7 @@ export default function PricingPage() {
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">pricing</h1>
-        <p className="comment">// peer-to-peer rates · market fee 10%, operators keep 90%</p>
+        <p className="comment">// peer-to-peer rates · market fee 5%, operators keep 95%</p>
       </header>
 
       <section className="space-y-3 text-sm leading-7">
@@ -59,10 +59,10 @@ export default function PricingPage() {
             <tr>
               <td className="py-2 pr-6 align-top accent whitespace-nowrap">market</td>
               <td className="py-2 text-[var(--color-dim)] leading-6">
-                <strong className="text-[var(--color-fg)]">10% market fee, operator keeps 90%.</strong>{" "}
+                <strong className="text-[var(--color-fg)]">5% market fee, operator keeps 95%.</strong>{" "}
                 Jobs bought through <Link href="/market">c0mpute.com/market</Link>{" "}
-                and paid Infernet inference jobs pay the node operator 90% of
-                the price; c0mpute keeps 10% for matching, billing, settlement
+                and paid Infernet inference jobs pay the node operator 95% of
+                the price; c0mpute keeps 5% for matching, billing, settlement
                 and support.
               </td>
             </tr>
@@ -145,7 +145,7 @@ export default function PricingPage() {
         <p>
           Register hardware as a c0mpute provider and earn by completing jobs.
           You set your own rates. Direct protocol deals pay you the full
-          amount; jobs that come through the market pay you 90% (the 10%
+          amount; jobs that come through the market pay you 95% (the 5%
           market fee). Payment releases automatically when output passes
           validation.
         </p>
