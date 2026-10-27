@@ -68,6 +68,7 @@ export default function RootLayout({
                 ["blog", "/blog"],
                 ["about", "/about"],
                 ["contact", "/contact"],
+                ["market", "/market"],
                 ["pricing", "/pricing"],
                 ["terms", "/terms"],
                 ["privacy", "/privacy"],
