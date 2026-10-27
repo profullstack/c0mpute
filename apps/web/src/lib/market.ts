@@ -4,7 +4,7 @@
  * the rest. Anthony set it on 2026-10-27; Infernet applies the same number as
  * its house fee on paid jobs.
  */
-export const MARKET_FEE_PCT = 10;
+export const MARKET_FEE_PCT = 5;
 export const OPERATOR_SHARE_PCT = 100 - MARKET_FEE_PCT;
 
 /** Split a job price (decimal dollars) into the operator's share and the fee, in whole cents. */
