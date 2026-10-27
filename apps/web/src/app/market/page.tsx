@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
 import { getNodesPayload, priceLabel } from "@/lib/nodes";
-import { DYNAMIC_IDLE_SHARE, MARKET_FEE_PCT, OPERATOR_SHARE_PCT, splitPrice } from "@/lib/market";
+import { DYNAMIC_IDLE_SHARE, MARKET_FEE_PCT, UNDERCUT, OPERATOR_SHARE_PCT, splitPrice } from "@/lib/market";
 
 export const metadata = {
   title: "market — c0mpute",
@@ -128,8 +128,8 @@ export default async function MarketPage() {
         </p>
         <p>
           <strong className="text-[var(--color-fg)]">Batch jobs.</strong> Submit
-          from the CLI with a price cap; nodes quote under it and the job pays
-          out when the result validates.
+          from the CLI with a price cap; nodes bid under it, the lowest bid
+          wins, and the job pays out when the result validates.
         </p>
         <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
 $ c0mpute transcode submit input.mov --preset hls --max-price 1.25`}</CodeBlock>
@@ -144,12 +144,15 @@ $ c0mpute transcode submit input.mov --preset hls --max-price 1.25`}</CodeBlock>
         <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
 $ infernet payout set USDC 0xYourAddress --network polygon`}</CodeBlock>
         <p>
-          <strong className="text-[var(--color-fg)]">Set your price.</strong>{" "}
-          Every node is listed with dynamic pricing by default: when it is idle
-          it bids {Math.round(DYNAMIC_IDLE_SHARE * 100)}% of the buyer&apos;s
-          cap to win work, and the bid rises toward the full cap as its job
-          queue fills. You set a minimum and it never bids under it; jobs capped
-          below your minimum are skipped. Or ask one fixed price.
+          <strong className="text-[var(--color-fg)]">Prices are set by competition.</strong>{" "}
+          There is no rate card. Every job is a sealed-bid auction: the buyer
+          posts a cap, the nodes that can run it bid, and the lowest bid wins
+          automatically. Nodes price themselves by default: a new node starts
+          at {Math.round(DYNAMIC_IDLE_SHARE * 100)}% of the cap, undercuts the
+          winning price by {Math.round(UNDERCUT * 100)}% after it loses to a
+          cheaper bid, edges back up after it wins, and asks more as its job
+          queue fills. All you set is a minimum: it never bids under it, and
+          jobs capped below it are skipped. Or ask one fixed price.
         </p>
         <CodeBlock>{`$ c0mpute pricing set --min 0.05          # dynamic, never under $0.05 a job
 $ c0mpute pricing set --fixed 0.40        # always $0.40 a job
