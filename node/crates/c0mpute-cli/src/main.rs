@@ -41,7 +41,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode submit input.mov --preset hls\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
 )]
 struct Cli {
     /// Override the config file location.
@@ -1250,20 +1250,9 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
         TranscodeCmd::Preset {
             cmd: PresetCmd::List,
         } => {
-            for p in [
-                "audio-mp3",
-                "audio-aac",
-                "audio-opus",
-                "video-720p",
-                "video-1080p",
-                "video-4k",
-                "hls",
-                "dash",
-                "thumbnail",
-                "gif",
-                "extract-audio",
-                "normalize-audio",
-            ] {
+            // Keep this list in sync with preset_to_spec. The wider set of
+            // audio/HLS presets is a roadmap, not executable today.
+            for p in ["video-720p", "video-1080p", "video-4k"] {
                 println!("{p}");
             }
             Ok(())

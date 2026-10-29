@@ -18,6 +18,7 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: `${BASE}/nodes`,              priority: 0.7,  changeFrequency: "hourly"  },
   { url: `${BASE}/about`,              priority: 0.7,  changeFrequency: "monthly" },
   { url: `${BASE}/pricing`,            priority: 0.8,  changeFrequency: "monthly" },
+  { url: `${BASE}/estimates`,          priority: 0.9,  changeFrequency: "weekly" },
   { url: `${BASE}/contact`,            priority: 0.5,  changeFrequency: "monthly" },
   { url: `${BASE}/terms`,              priority: 0.3,  changeFrequency: "yearly"  },
   { url: `${BASE}/privacy`,            priority: 0.3,  changeFrequency: "yearly"  },

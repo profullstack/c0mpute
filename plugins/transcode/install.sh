@@ -95,5 +95,5 @@ transcode is built into the c0mpute binary — no separate plugin binary
 to install. ffmpeg is the only system dependency.
 
 Submit a transcode job:
-  c0mpute transcode submit input.mov --preset hls
+  c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p
 EOF

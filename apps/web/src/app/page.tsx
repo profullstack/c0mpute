@@ -63,6 +63,17 @@ export default async function HomePage() {
           </p>
         </div>
 
+        <Link
+          href="/estimates"
+          className="!border !border-[var(--color-accent-dim)] bg-[var(--color-card)] rounded-md px-4 py-3 flex flex-wrap items-center justify-between gap-3 hover:!border-[var(--color-accent)]"
+        >
+          <span>
+            <span className="block text-sm font-bold text-[var(--color-fg)]">What could your GPU earn?</span>
+            <span className="block text-xs text-[var(--color-dim)] mt-1">Pick a GPU and see transparent earning scenarios.</span>
+          </span>
+          <span className="text-sm accent whitespace-nowrap">estimate →</span>
+        </Link>
+
         <div className="space-y-2" id="run">
           <p className="comment">// run a node: Linux, macOS, or Windows via WSL2 (x86_64 / arm64), CPU or GPU</p>
           <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh`}</CodeBlock>

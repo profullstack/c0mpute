@@ -32,16 +32,23 @@ impl Capabilities {
 
     pub fn best_hardware_for(&self, codec: Codec) -> HardwarePref {
         let candidates = match codec {
-            Codec::H264 | Codec::Hevc => &[
+            Codec::H264 => &[
                 ("h264_nvenc", HardwarePref::Nvenc),
                 ("h264_qsv", HardwarePref::Qsv),
                 ("h264_amf", HardwarePref::Amf),
                 ("h264_videotoolbox", HardwarePref::VideoToolbox),
             ][..],
+            Codec::Hevc => &[
+                ("hevc_nvenc", HardwarePref::Nvenc),
+                ("hevc_qsv", HardwarePref::Qsv),
+                ("hevc_amf", HardwarePref::Amf),
+                ("hevc_videotoolbox", HardwarePref::VideoToolbox),
+            ][..],
             Codec::Av1 => &[
                 ("av1_nvenc", HardwarePref::Nvenc),
                 ("av1_qsv", HardwarePref::Qsv),
                 ("av1_amf", HardwarePref::Amf),
+                ("av1_videotoolbox", HardwarePref::VideoToolbox),
             ][..],
         };
         for (name, pref) in candidates {
@@ -65,7 +72,7 @@ pub async fn probe_capabilities(ffmpeg_bin: &Path) -> Result<Capabilities> {
 
     let encoders_raw = run_capture(ffmpeg_bin, &["-hide_banner", "-encoders"]).await?;
     // Encoder lines look like " V..... h264_nvenc           NVIDIA NVENC H.264..."
-    let encoders = encoders_raw
+    let mut encoders: Vec<String> = encoders_raw
         .lines()
         .filter_map(|l| {
             let l = l.trim_start();
@@ -77,10 +84,58 @@ pub async fn probe_capabilities(ffmpeg_bin: &Path) -> Result<Capabilities> {
         })
         .collect();
 
-    Ok(Capabilities {
-        hwaccels,
-        encoders,
-    })
+    // `ffmpeg -encoders` reports what the binary was built with, not what
+    // this host can actually run. A CPU-only machine can list NVENC and CUDA,
+    // then fail default jobs when the driver/device is absent. Keep only
+    // hardware encoders that pass a tiny real encode on this host.
+    const HARDWARE_ENCODERS: &[&str] = &[
+        "h264_nvenc",
+        "hevc_nvenc",
+        "av1_nvenc",
+        "h264_qsv",
+        "hevc_qsv",
+        "av1_qsv",
+        "h264_amf",
+        "hevc_amf",
+        "av1_amf",
+        "h264_videotoolbox",
+        "hevc_videotoolbox",
+        "av1_videotoolbox",
+    ];
+    for encoder in HARDWARE_ENCODERS {
+        if encoders.iter().any(|e| e == encoder) && !probe_encoder(ffmpeg_bin, encoder).await {
+            encoders.retain(|e| e != encoder);
+        }
+    }
+
+    Ok(Capabilities { hwaccels, encoders })
+}
+
+async fn probe_encoder(ffmpeg_bin: &Path, encoder: &str) -> bool {
+    let result = timeout(
+        Duration::from_secs(5),
+        Command::new(ffmpeg_bin)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=1",
+                "-frames:v",
+                "1",
+                "-an",
+                "-c:v",
+                encoder,
+                "-f",
+                "null",
+                "-",
+            ])
+            .output(),
+    )
+    .await;
+    matches!(result, Ok(Ok(output)) if output.status.success())
 }
 
 async fn run_capture(bin: &Path, args: &[&str]) -> Result<String> {
@@ -122,20 +177,8 @@ pub fn build_args(
         "warning".into(),
     ];
 
-    // Hardware-accelerated decode where applicable.
-    if matches!(hw, HardwarePref::Nvenc) {
-        args.extend([
-            "-hwaccel".into(),
-            "cuda".into(),
-            "-hwaccel_output_format".into(),
-            "cuda".into(),
-        ]);
-    } else if matches!(hw, HardwarePref::Qsv) {
-        args.extend(["-hwaccel".into(), "qsv".into()]);
-    } else if matches!(hw, HardwarePref::VideoToolbox) {
-        args.extend(["-hwaccel".into(), "videotoolbox".into()]);
-    }
-
+    // Decode on CPU for broad input compatibility. Hardware encoding still
+    // accelerates output without requiring a matching hardware decoder.
     args.extend(["-i".into(), input.to_string_lossy().into_owned()]);
 
     let encoder = spec.codec.ffmpeg_encoder(hw);
@@ -154,12 +197,7 @@ pub fn build_args(
             ]);
         }
         (Codec::Av1, HardwarePref::Cpu) => {
-            args.extend([
-                "-preset".into(),
-                "6".into(),
-                "-crf".into(),
-                "32".into(),
-            ]);
+            args.extend(["-preset".into(), "6".into(), "-crf".into(), "32".into()]);
         }
         (_, HardwarePref::Cpu) => {
             args.extend(["-preset".into(), "medium".into()]);
@@ -197,6 +235,14 @@ pub async fn transcode(
     caps: &Capabilities,
     budget: Duration,
 ) -> Result<PathBuf> {
+    let hardware = spec
+        .hardware_pref
+        .unwrap_or_else(|| caps.best_hardware_for(spec.codec));
+    let encoder = spec.codec.ffmpeg_encoder(hardware);
+    if !caps.supports_encoder(encoder) {
+        bail!("ffmpeg encoder {encoder} is unavailable on this worker");
+    }
+
     let args = build_args(input_path, output_path, spec, caps);
     debug!(?args, "spawning ffmpeg");
 
@@ -229,7 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nvenc_args_include_hwaccel() {
+    fn nvenc_args_select_encoder_without_forcing_hardware_decode() {
         let caps = Capabilities {
             hwaccels: vec!["cuda".into()],
             encoders: vec!["h264_nvenc".into()],
@@ -243,15 +289,10 @@ mod tests {
             hardware_pref: Some(HardwarePref::Nvenc),
             extra_ffmpeg_args: vec![],
         };
-        let args = build_args(
-            Path::new("in.ts"),
-            Path::new("out.ts"),
-            &spec,
-            &caps,
-        );
+        let args = build_args(Path::new("in.ts"), Path::new("out.ts"), &spec, &caps);
         let joined = args.join(" ");
-        assert!(joined.contains("-hwaccel cuda"));
         assert!(joined.contains("h264_nvenc"));
+        assert!(!joined.contains("-hwaccel"));
         assert!(joined.contains("scale=1920:1080"));
     }
 
@@ -267,12 +308,101 @@ mod tests {
             hardware_pref: Some(HardwarePref::Cpu),
             extra_ffmpeg_args: vec![],
         };
-        let args = build_args(
-            Path::new("in.ts"),
-            Path::new("out.ts"),
-            &spec,
-            &caps,
-        );
+        let args = build_args(Path::new("in.ts"), Path::new("out.ts"), &spec, &caps);
         assert!(args.iter().any(|a| a == "libsvtav1"));
+    }
+
+    #[test]
+    fn hardware_selection_checks_the_selected_codec_encoder() {
+        let caps = Capabilities {
+            hwaccels: vec!["cuda".into()],
+            encoders: vec!["h264_nvenc".into(), "libx265".into()],
+        };
+        assert_eq!(caps.best_hardware_for(Codec::H264), HardwarePref::Nvenc);
+        assert_eq!(caps.best_hardware_for(Codec::Hevc), HardwarePref::Cpu);
+    }
+
+    #[tokio::test]
+    async fn automatic_transcode_presets_produce_decodable_video_when_ffmpeg_supports_them() {
+        let ffmpeg = Path::new("ffmpeg");
+        let caps = match probe_capabilities(ffmpeg).await {
+            Ok(caps) if caps.supports_encoder("libx264") && caps.supports_encoder("mpeg4") => caps,
+            Ok(_) => {
+                eprintln!("skipping real FFmpeg smoke test: libx264 or mpeg4 encoder unavailable");
+                return;
+            }
+            Err(err) => {
+                eprintln!("skipping real FFmpeg smoke test: {err:#}");
+                return;
+            }
+        };
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let input = dir.path().join("input.mp4");
+        let fixture = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=128x72:r=10",
+                "-t",
+                "1",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&input)
+            .status()
+            .expect("run FFmpeg to make test input");
+        assert!(fixture.success(), "FFmpeg failed to create test input");
+
+        let presets = [
+            ("video-720p", Codec::H264, 2_500_000, 1280, 720),
+            ("video-1080p", Codec::H264, 5_000_000, 1920, 1080),
+            ("video-4k", Codec::Hevc, 15_000_000, 3840, 2160),
+        ];
+        for (name, codec, bitrate_bps, width, height) in presets {
+            if codec == Codec::Hevc && !caps.supports_encoder("libx265") {
+                eprintln!("skipping {name}: libx265 encoder unavailable");
+                continue;
+            }
+            let output = dir.path().join(format!("{name}.mp4"));
+            let spec = TranscodeSpec {
+                codec,
+                bitrate_bps,
+                width,
+                height,
+                keyframe_interval: 60,
+                // Exercise the same automatic hardware selection used by CLI presets.
+                hardware_pref: None,
+                extra_ffmpeg_args: vec!["-threads".into(), "2".into()],
+            };
+            transcode(
+                ffmpeg,
+                &input,
+                &output,
+                &spec,
+                &caps,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{name} transcode failed: {err:#}"));
+            assert!(
+                std::fs::metadata(&output).unwrap().len() > 0,
+                "{name} output is empty"
+            );
+
+            let verify = std::process::Command::new(ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-i"])
+                .arg(&output)
+                .args(["-f", "null", "-"])
+                .status()
+                .expect("run FFmpeg to decode transcode output");
+            assert!(verify.success(), "FFmpeg could not decode {name} output");
+        }
     }
 }

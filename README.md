@@ -67,7 +67,7 @@ c0mpute worker register
 c0mpute worker start --gpu
 
 # submit jobs
-c0mpute transcode submit input.mov --preset hls --max-price 1.25
+c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p --max-price 1.25
 c0mpute infernet chat --model qwen2.5:7b "hello"
 
 # infernet: see what serves what, reserve a node
