@@ -1,3 +1,4 @@
+import PwaRegistration from "./PwaRegistration";
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
@@ -54,6 +55,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen flex flex-col">
+        <PwaRegistration />
         <WebMcpProvider />
         <header className="border-b border-[var(--color-rule)]">
           <SiteNav />
