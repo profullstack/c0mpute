@@ -171,7 +171,7 @@ $ infernet payout list`}</CodeBlock>
         <table className="w-full text-left border-collapse text-xs">
           <tbody className="divide-y divide-[var(--color-rule)]">
             <Row k="OS" v="Linux (x86_64, arm64) or macOS (Intel, Apple Silicon). Windows works inside WSL2." />
-            <Row k="hardware" v="any CPU. A GPU (NVIDIA, AMD or Apple) is detected and advertised, but not required: CPU nodes serve small models such as qwen2.5:0.5b." />
+            <Row k="hardware" v="any CPU. A GPU (NVIDIA, AMD or Apple) is detected and advertised, but not required: setup defaults CPU-only nodes to qwen2.5:3b when RAM allows, and chooses a larger model for GPUs based on available VRAM." />
             <Row k="disk" v="a few GB for the binaries and a small model; more if you want to hold storage shards." />
             <Row k="network" v="outbound internet. No port forwarding needed to join; opening the p2p port makes the node dialable for more jobs." />
             <Row k="time" v="about two minutes for the installer on a fresh Ubuntu box, then the worker starts by itself." />

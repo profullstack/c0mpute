@@ -172,7 +172,12 @@ c0mpute pool qwen
 c0mpute infernet model list --node <id>
 
 # Models pulled on this machine
-c0mpute infernet model list`}
+c0mpute infernet model list
+
+# Hardware-aware model picks for writing, research, or coding
+c0mpute infernet model recommend --use-case marketing
+c0mpute infernet model recommend --use-case research
+c0mpute infernet model recommend --use-case coding`}
         </Code>
       </Section>
 
