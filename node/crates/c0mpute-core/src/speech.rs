@@ -18,6 +18,10 @@ const KOKORO_MODEL_SHA256: &str =
 const KOKORO_VOICES_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin";
 const KOKORO_VOICES_SHA256: &str =
     "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d";
+const PIP_BOOTSTRAP_URL: &str = "https://files.pythonhosted.org/packages/29/a2/d40fb2460e883eca5199c62cfc2463fd261f760556ae6290f88488c362c0/pip-25.1.1-py3-none-any.whl";
+const PIP_BOOTSTRAP_SHA256: &str =
+    "2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af";
+const PIP_BOOTSTRAP_WHEEL: &str = "pip-25.1.1-py3-none-any.whl";
 const PIPER_VOICES: &[&str] = &["en_US-joe-medium", "en_US-norman-medium"];
 const KOKORO_VOICES: &[&str] = &["af_sarah", "af_bella", "am_onyx", "am_michael"];
 
@@ -222,24 +226,84 @@ async fn ensure_venv() -> Result<()> {
     let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
     let mut command = Command::new(python);
     command.args(["-m", "venv"]).arg(&venv);
-    run_checked(command, "create the isolated speech Python environment").await?;
+    if run_checked(command, "create the isolated speech Python environment")
+        .await
+        .is_err()
+    {
+        // Debian and Ubuntu split ensurepip into a separate system package.
+        // The stdlib venv module can still create the isolated environment
+        // without pip, after which we install a hash-pinned pip wheel locally.
+        let _ = tokio::fs::remove_dir_all(&venv).await;
+        let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
+        let mut command = Command::new(python);
+        command.args(["-m", "venv", "--without-pip"]).arg(&venv);
+        run_checked(command, "create the isolated speech Python environment without system pip")
+            .await?;
+    }
 
-    let mut check_pip = Command::new(python_path());
-    check_pip
+    if !python_has_pip().await {
+        bootstrap_pip().await?;
+    }
+    if !python_has_pip().await {
+        bail!("could not install pip into the speech Python environment");
+    }
+    Ok(())
+}
+
+async fn python_has_pip() -> bool {
+    let mut check = Command::new(python_path());
+    check
         .args(["-m", "pip", "--version"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if !check_pip
+    check
         .status()
         .await
         .is_ok_and(|status| status.success())
-    {
-        bail!(
-            "the speech Python environment was created without pip; install Python venv support and retry"
-        );
+}
+
+async fn bootstrap_pip() -> Result<()> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?
+        .get(PIP_BOOTSTRAP_URL)
+        .send()
+        .await?
+        .error_for_status()?;
+    let wheel = response.bytes().await?;
+    if hex::encode(Sha256::digest(&wheel)) != PIP_BOOTSTRAP_SHA256 {
+        bail!("SHA-256 check failed for the pinned pip bootstrap wheel");
     }
-    Ok(())
+
+    let wheel_path = speech_root().join(PIP_BOOTSTRAP_WHEEL);
+    tokio::fs::write(&wheel_path, &wheel).await?;
+    let mut locate_site_packages = Command::new(python_path());
+    locate_site_packages
+        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+        .stdin(Stdio::null());
+    let output = locate_site_packages.output().await?;
+    if !output.status.success() {
+        let _ = tokio::fs::remove_file(&wheel_path).await;
+        bail!("could not locate the speech environment's site-packages directory");
+    }
+    let site_packages = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if site_packages.is_empty() {
+        let _ = tokio::fs::remove_file(&wheel_path).await;
+        bail!("the speech environment returned an empty site-packages path");
+    }
+    tokio::fs::create_dir_all(&site_packages).await?;
+
+    let extract_wheel =
+        "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
+    let mut install = Command::new(python_path());
+    install
+        .args(["-c", extract_wheel])
+        .arg(&wheel_path)
+        .arg(&site_packages);
+    let result = run_checked(install, "bootstrap pip into the speech Python environment").await;
+    let _ = tokio::fs::remove_file(&wheel_path).await;
+    result
 }
 
 async fn pip_install(packages: &[&str]) -> Result<()> {

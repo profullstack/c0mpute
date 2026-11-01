@@ -545,6 +545,18 @@ ensure_speech_python() {
   [ "$(uname -s)" = "Linux" ] || return 0
   speech_python_ready && return 0
 
+  if [ -z "$SUDO" ] && [ "$(id -u)" != "0" ]; then
+    probe=$(mktemp -d 2>/dev/null) || return 1
+    if python3 -m venv --without-pip "$probe/venv" >/dev/null 2>&1; then
+      rm -rf "$probe"
+      warn "system venv pip support is unavailable; c0mpute will bootstrap pip in the user's speech environment"
+      return 0
+    fi
+    rm -rf "$probe"
+    warn "Python venv support is unavailable and sudo is not configured"
+    return 1
+  fi
+
   if command -v apt-get >/dev/null 2>&1; then
     say "installing Python 3 venv support for the default TTS/STT roles"
     speech_venv_package="python3-venv"
