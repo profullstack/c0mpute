@@ -23,6 +23,7 @@ use tower_http::trace::TraceLayer;
 use crate::{Config, JobAuction, Supervisor, run_auction};
 
 const MAX_TTS_CHARS: usize = 6_000;
+const MAX_CONCURRENT_SPEECH_JOBS: usize = 6;
 const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const MAX_WAV_BYTES: usize = 20 * 1024 * 1024;
 
@@ -32,7 +33,8 @@ struct GatewayState {
     store: ChunkStore,
     token: Arc<str>,
     max_price_usd: f64,
-    slots: Arc<Semaphore>,
+    tts_slots: Arc<Semaphore>,
+    stt_slots: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -115,7 +117,10 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         store: supervisor.store,
         token: Arc::from(token),
         max_price_usd,
-        slots: Arc::new(Semaphore::new(2)),
+        // Let one multi-chunk readback fan out across up to six network
+        // workers instead of serializing most of its synthesis jobs here.
+        tts_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SPEECH_JOBS)),
+        stt_slots: Arc::new(Semaphore::new(2)),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -240,7 +245,7 @@ async fn synthesize(
         ));
     }
 
-    let _slot = state.slots.clone().acquire_owned().await.map_err(|_| {
+    let _slot = state.tts_slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "speech queue is unavailable".into(),
@@ -326,7 +331,7 @@ async fn transcribe(
         ));
     }
     let format = audio_format(&headers)?;
-    let _slot = state.slots.clone().acquire_owned().await.map_err(|_| {
+    let _slot = state.stt_slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "speech queue is unavailable".into(),
