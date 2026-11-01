@@ -526,6 +526,59 @@ worker_checks() {
   if command -v ffmpeg >/dev/null 2>&1; then ok "ffmpeg present"; else warn "ffmpeg not installed (required for transcode jobs)"; fi
 }
 
+# The worker starts with TTS + STT enabled. Python's venv support is a
+# separate OS package on Debian/Ubuntu, so verify it before creating a
+# systemd service that would otherwise restart-loop before advertising.
+speech_python_ready() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  probe=$(mktemp -d 2>/dev/null) || return 1
+  ready=0
+  if python3 -m venv "$probe/venv" >/dev/null 2>&1 \
+     && "$probe/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    ready=1
+  fi
+  rm -rf "$probe"
+  [ "$ready" -eq 1 ]
+}
+
+ensure_speech_python() {
+  [ "$(uname -s)" = "Linux" ] || return 0
+  speech_python_ready && return 0
+
+  if [ -z "$SUDO" ] && [ "$(id -u)" != "0" ]; then
+    probe=$(mktemp -d 2>/dev/null) || return 1
+    if python3 -m venv --without-pip "$probe/venv" >/dev/null 2>&1; then
+      rm -rf "$probe"
+      warn "system venv pip support is unavailable; c0mpute will bootstrap pip in the user's speech environment"
+      return 0
+    fi
+    rm -rf "$probe"
+    warn "Python venv support is unavailable and sudo is not configured"
+    return 1
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    say "installing Python 3 venv support for the default TTS/STT roles"
+    speech_venv_package="python3-venv"
+    if command -v python3 >/dev/null 2>&1; then
+      speech_venv_package=$(python3 -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}-venv")' 2>/dev/null || echo python3-venv)
+    fi
+    if [ -n "$SUDO" ]; then
+      $SUDO apt-get update || return 1
+      $SUDO apt-cache show "$speech_venv_package" >/dev/null 2>&1 || speech_venv_package="python3-venv"
+      $SUDO apt-get install -y python3 "$speech_venv_package" || return 1
+    else
+      apt-get update || return 1
+      apt-cache show "$speech_venv_package" >/dev/null 2>&1 || speech_venv_package="python3-venv"
+      apt-get install -y python3 "$speech_venv_package" || return 1
+    fi
+    speech_python_ready && return 0
+  fi
+
+  warn "Python venv + pip are required for the default TTS/STT roles; install your distribution's Python venv package"
+  return 1
+}
+
 # ────────────────────────────────────────────────────────────────────────
 # Storage relocation: symlink the shard data dir onto the largest
 # writable volume.
@@ -731,6 +784,12 @@ main() {
   if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
 
   if [ "$WORKER_MODE" -eq 1 ]; then worker_checks; fi
+
+  # Default worker roles include speech, so install the missing Debian/Ubuntu
+  # venv package before start_worker enables the systemd service.
+  if [ "$NO_START" -eq 0 ]; then
+    ensure_speech_python || die "could not prepare Python venv support required by the default TTS/STT worker roles"
+  fi
 
   print_versions
   run_doctor

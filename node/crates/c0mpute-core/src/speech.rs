@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tracing::warn;
 
 const WORKER: &str = include_str!("speech_worker.py");
 const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx";
@@ -17,6 +18,10 @@ const KOKORO_MODEL_SHA256: &str =
 const KOKORO_VOICES_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin";
 const KOKORO_VOICES_SHA256: &str =
     "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d";
+const PIP_BOOTSTRAP_URL: &str = "https://files.pythonhosted.org/packages/29/a2/d40fb2460e883eca5199c62cfc2463fd261f760556ae6290f88488c362c0/pip-25.1.1-py3-none-any.whl";
+const PIP_BOOTSTRAP_SHA256: &str =
+    "2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af";
+const PIP_BOOTSTRAP_WHEEL: &str = "pip-25.1.1-py3-none-any.whl";
 const PIPER_VOICES: &[&str] = &["en_US-joe-medium", "en_US-norman-medium"];
 const KOKORO_VOICES: &[&str] = &["af_sarah", "af_bella", "am_onyx", "am_michael"];
 
@@ -120,20 +125,31 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
     }
     if install_kokoro {
         tokio::fs::create_dir_all(root.join("models/kokoro")).await?;
-        pip_install(&["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
-        download_verified(
-            KOKORO_MODEL_URL,
-            &root.join("models/kokoro/kokoro-v1.0.int8.onnx"),
-            KOKORO_MODEL_SHA256,
-        )
-        .await?;
-        download_verified(
-            KOKORO_VOICES_URL,
-            &root.join("models/kokoro/voices-v1.0.bin"),
-            KOKORO_VOICES_SHA256,
-        )
-        .await?;
-        tokio::fs::write(root.join(".kokoro-ready"), b"kokoro-onnx 0.6.1 int8\n").await?;
+        let kokoro_setup: Result<()> = async {
+            pip_install(&["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
+            download_verified(
+                KOKORO_MODEL_URL,
+                &root.join("models/kokoro/kokoro-v1.0.int8.onnx"),
+                KOKORO_MODEL_SHA256,
+            )
+            .await?;
+            download_verified(
+                KOKORO_VOICES_URL,
+                &root.join("models/kokoro/voices-v1.0.bin"),
+                KOKORO_VOICES_SHA256,
+            )
+            .await?;
+            tokio::fs::write(root.join(".kokoro-ready"), b"kokoro-onnx 0.6.1 int8\n").await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = kokoro_setup {
+            if engine == "all" && !available_tts_engines().is_empty() {
+                warn!(err = %error, "Kokoro unavailable; continuing with the installed TTS engine");
+            } else {
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
@@ -165,15 +181,129 @@ pub async fn setup_stt() -> Result<()> {
 }
 
 async fn ensure_venv() -> Result<()> {
-    if python_path().is_file() {
-        return Ok(());
-    }
     let root = speech_root();
     tokio::fs::create_dir_all(&root).await?;
+    let venv = root.join("venv");
+    if python_path().is_file() {
+        let mut check_pip = Command::new(python_path());
+        check_pip
+            .args(["-m", "pip", "--version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if check_pip
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+
+        // A venv can survive a partial install with its interpreter present
+        // but pip missing. Repair it in place when ensurepip is available;
+        // otherwise rebuild it and clear readiness markers so packages are
+        // installed again against the new environment.
+        let mut ensure_pip = Command::new(python_path());
+        ensure_pip
+            .args(["-m", "ensurepip", "--upgrade"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if ensure_pip
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+
+        tokio::fs::remove_dir_all(&venv).await?;
+        for marker in [".piper-ready", ".kokoro-ready", ".stt-ready"] {
+            let _ = tokio::fs::remove_file(root.join(marker)).await;
+        }
+    }
+
     let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
     let mut command = Command::new(python);
-    command.args(["-m", "venv"]).arg(root.join("venv"));
-    run_checked(command, "create the isolated speech Python environment").await
+    command.args(["-m", "venv"]).arg(&venv);
+    if run_checked(command, "create the isolated speech Python environment")
+        .await
+        .is_err()
+    {
+        // Debian and Ubuntu split ensurepip into a separate system package.
+        // The stdlib venv module can still create the isolated environment
+        // without pip, after which we install a hash-pinned pip wheel locally.
+        let _ = tokio::fs::remove_dir_all(&venv).await;
+        let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
+        let mut command = Command::new(python);
+        command.args(["-m", "venv", "--without-pip"]).arg(&venv);
+        run_checked(command, "create the isolated speech Python environment without system pip")
+            .await?;
+    }
+
+    if !python_has_pip().await {
+        bootstrap_pip().await?;
+    }
+    if !python_has_pip().await {
+        bail!("could not install pip into the speech Python environment");
+    }
+    Ok(())
+}
+
+async fn python_has_pip() -> bool {
+    let mut check = Command::new(python_path());
+    check
+        .args(["-m", "pip", "--version"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    check
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+async fn bootstrap_pip() -> Result<()> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?
+        .get(PIP_BOOTSTRAP_URL)
+        .send()
+        .await?
+        .error_for_status()?;
+    let wheel = response.bytes().await?;
+    if hex::encode(Sha256::digest(&wheel)) != PIP_BOOTSTRAP_SHA256 {
+        bail!("SHA-256 check failed for the pinned pip bootstrap wheel");
+    }
+
+    let wheel_path = speech_root().join(PIP_BOOTSTRAP_WHEEL);
+    tokio::fs::write(&wheel_path, &wheel).await?;
+    let mut locate_site_packages = Command::new(python_path());
+    locate_site_packages
+        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+        .stdin(Stdio::null());
+    let output = locate_site_packages.output().await?;
+    if !output.status.success() {
+        let _ = tokio::fs::remove_file(&wheel_path).await;
+        bail!("could not locate the speech environment's site-packages directory");
+    }
+    let site_packages = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if site_packages.is_empty() {
+        let _ = tokio::fs::remove_file(&wheel_path).await;
+        bail!("the speech environment returned an empty site-packages path");
+    }
+    tokio::fs::create_dir_all(&site_packages).await?;
+
+    let extract_wheel =
+        "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
+    let mut install = Command::new(python_path());
+    install
+        .args(["-c", extract_wheel])
+        .arg(&wheel_path)
+        .arg(&site_packages);
+    let result = run_checked(install, "bootstrap pip into the speech Python environment").await;
+    let _ = tokio::fs::remove_file(&wheel_path).await;
+    result
 }
 
 async fn pip_install(packages: &[&str]) -> Result<()> {

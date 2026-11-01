@@ -387,9 +387,17 @@ enum KeyCmd {
 #[cfg(unix)]
 fn maybe_self_update(cli: &Cli) {
     // `update` handles this itself; don't double up. Opt-out for CI/scripts.
-    if matches!(cli.command, Some(Cmd::Update { .. }))
-        || std::env::var_os("C0MPUTE_NO_AUTO_UPDATE").is_some()
-    {
+    if matches!(cli.command, Some(Cmd::Update { .. })) {
+        return;
+    }
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(config::default_config_path);
+    let configured = Config::load_or_default(&config_path)
+        .map(|cfg| cfg.update_auto)
+        .unwrap_or(true);
+    if !c0mpute_update::auto_update_enabled(configured) {
         return;
     }
     let marker = config::data_dir().map(|d| d.join(".update-check"));
@@ -505,6 +513,16 @@ fn main() -> Result<()> {
     runtime.block_on(run_app(cli))
 }
 
+fn start_auto_update_poller(configured: bool) {
+    if !c0mpute_update::auto_update_enabled(configured) {
+        return;
+    }
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let feed = c0mpute_update::DEFAULT_RELEASE_FEED.to_string();
+    let interval = std::time::Duration::from_secs(config::UPDATE_CHECK_INTERVAL_SECS);
+    tokio::spawn(c0mpute_update::poll_loop(current, feed, interval));
+}
+
 async fn run_app(cli: Cli) -> Result<()> {
     let config_path = cli.config.unwrap_or_else(config::default_config_path);
 
@@ -535,7 +553,11 @@ async fn run_app(cli: Cli) -> Result<()> {
             json,
             threads,
         } => run_bench(cmd, quick, json, threads),
-        Cmd::StatusAggregator { bind } => c0mpute_core::status_aggregator::run(bind).await,
+        Cmd::StatusAggregator { bind } => {
+            let cfg = Config::load_or_default(&config_path)?;
+            start_auto_update_poller(cfg.update_auto);
+            c0mpute_core::status_aggregator::run(bind).await
+        }
         Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
@@ -545,7 +567,11 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
         Cmd::Tts { cmd } => run_tts(cmd).await,
         Cmd::Stt { cmd } => run_stt(cmd).await,
-        Cmd::Speech { cmd } => run_speech(cmd).await,
+        Cmd::Speech { cmd } => {
+            let cfg = Config::load_or_default(&config_path)?;
+            start_auto_update_poller(cfg.update_auto);
+            run_speech(cmd).await
+        }
         Cmd::Chat { cmd } => run_chat(cmd),
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
@@ -1340,10 +1366,9 @@ async fn run_tts(cmd: TtsCmd) -> Result<()> {
     match cmd {
         TtsCmd::Setup { engine } => {
             c0mpute_core::speech::setup_tts(&engine).await?;
-            println!(
-                "installed {engine} CPU voices under {}",
-                c0mpute_core::speech::speech_root().display()
-            );
+            let ready = c0mpute_core::speech::available_tts_engines();
+            println!("ready TTS engines: {}", ready.join(", "));
+            println!("voices and models under {}", c0mpute_core::speech::speech_root().display());
             println!(
                 "start a worker with `c0mpute worker start --roles tts` to advertise TTS jobs"
             );
