@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::{Libp2pNetwork, Multiaddr, NetworkConfig, bootstrap};
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use super::caps::{self, RuntimeCaps};
@@ -72,18 +73,26 @@ pub async fn serve(o: &ServeOptions) -> Result<Serving> {
     let infer = if resolved.is_empty() { None } else { Some(InferServer::start(&o.infernet, &resolved, &me, o.max_sessions).await?) };
     let models: Vec<String> = infer.as_ref().map(|s| s.models.clone()).unwrap_or_default();
     let tags = caps::tags(&caps, &models, o.train, infer.is_some());
+    let max_concurrent_jobs = crate::resources::max_concurrent_jobs(caps.devices.cuda);
+    let compute_slots = Arc::new(Semaphore::new(max_concurrent_jobs));
+    info!(
+        cpu_threads_per_job = crate::resources::cpu_threads_per_job(),
+        max_concurrent_jobs,
+        cuda_devices_per_job = ?crate::resources::cuda_devices_per_job(),
+        "temporal compute budget configured"
+    );
     let mut hardware = serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "temporal_runtime": caps.runtime.version, "ram_mb": caps.ram_mb, "cuda": caps.devices.cuda});
     hardware["models"] = serde_json::json!(models);
     tokio::spawn(capabilities::advertise_loop(net.clone(), tags.clone(), hardware, capabilities::local_bench_score(), capabilities::DEFAULT_ADVERTISE_INTERVAL));
     if o.train {
         let busy = Arc::new(AtomicBool::new(false));
-        let tx = worker::spawn_train_runner(net.clone(), o.cache_root.clone(), o.infernet.clone(), o.store.clone(), busy.clone());
+        let tx = worker::spawn_train_runner(net.clone(), o.cache_root.clone(), o.infernet.clone(), o.store.clone(), busy.clone(), compute_slots.clone());
         dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(worker::train_offer_filter(busy)));
     }
     if let Some(server) = &infer {
         let tx = worker::spawn_infer_runner(net.clone(), server.clone());
         dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(tx), Some(worker::infer_offer_filter(models.clone())));
-        worker::spawn_call_listener(net.clone(), server.clone());
+        worker::spawn_call_listener(net.clone(), server.clone(), compute_slots);
     }
     info!(peer = %me, ?tags, "temporal: serving");
     // Let the subscriptions land before callers start publishing.

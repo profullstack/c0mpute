@@ -52,9 +52,12 @@ pub struct RuntimeProc {
 impl RuntimeProc {
     /// Spawn `<infernet> model serve --stdio [extra]`.
     pub async fn spawn(infernet: &Path, extra: &[String]) -> Result<Arc<Self>> {
-        let mut child = Command::new(infernet)
+        let mut command = Command::new(infernet);
+        command
             .args(["model", "serve", "--stdio"])
-            .args(extra)
+            .args(extra);
+        crate::resources::apply_job_limits(&mut command);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

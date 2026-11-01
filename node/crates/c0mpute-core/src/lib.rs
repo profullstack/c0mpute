@@ -10,6 +10,7 @@ pub mod config;
 pub mod dispatch;
 pub mod pricing;
 pub mod register;
+pub mod resources;
 pub mod runner;
 pub mod speech;
 pub mod speech_gateway;

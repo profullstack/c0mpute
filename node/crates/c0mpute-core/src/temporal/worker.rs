@@ -11,7 +11,7 @@ use c0mpute_net::topics::{JobAccept, JobStatus, job_topic};
 use c0mpute_net::{GossipMessage, Libp2pNetwork};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use tracing::{info, warn};
 
 use super::crypto;
@@ -102,7 +102,8 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Res
     tokio::fs::write(&job_path, serde_json::to_vec_pretty(&spec.train_job)?).await?;
     let out_dir = job_dir.join("model");
     let timeout_s = spec.train_job["limits"]["timeout_s"].as_u64().unwrap_or(3600).clamp(1, 7 * 86_400);
-    let child = tokio::process::Command::new(infernet)
+    let mut command = tokio::process::Command::new(infernet);
+    command
         .args(["model", "train", "--json", "--dataset"])
         .arg(&dataset)
         .arg("--output")
@@ -110,8 +111,9 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Res
         .arg("--job")
         .arg(&job_path)
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    crate::resources::apply_job_limits(&mut command);
+    let child = command.output();
     let out = tokio::time::timeout(Duration::from_secs(timeout_s), child)
         .await
         .map_err(|_| anyhow::anyhow!("E_TIMEOUT: training exceeded {timeout_s}s"))??;
@@ -150,11 +152,15 @@ pub fn spawn_train_runner(
     infernet: PathBuf,
     store: ModelStore,
     busy: Arc<std::sync::atomic::AtomicBool>,
+    compute_slots: Arc<Semaphore>,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         let mut done: HashMap<String, (PathBuf, String)> = HashMap::new();
         while let Some(job) = rx.recv().await {
+            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+                return;
+            };
             let accept = job.accept.clone();
             busy.store(true, std::sync::atomic::Ordering::Relaxed);
             let result: Result<String> = async {
@@ -371,7 +377,11 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, server: Arc<InferServer>) -> 
 
 /// Answer sealed calls for sessions this node holds. Calls are accepted
 /// only from the peer that opened the session (gossipsub-signed source).
-pub fn spawn_call_listener(net: Arc<Libp2pNetwork>, server: Arc<InferServer>) {
+pub fn spawn_call_listener(
+    net: Arc<Libp2pNetwork>,
+    server: Arc<InferServer>,
+    compute_slots: Arc<Semaphore>,
+) {
     let topic = job_topic(INFER_WORKLOAD);
     let me = net.peer_id().to_base58();
     let mut rx: broadcast::Receiver<GossipMessage> = net.messages();
@@ -393,8 +403,16 @@ pub fn spawn_call_listener(net: Arc<Libp2pNetwork>, server: Arc<InferServer>) {
             if !source_matches_claim(&msg, &src) {
                 continue;
             }
-            let (net, server, topic) = (net.clone(), server.clone(), topic.clone());
+            let (net, server, topic, compute_slots) = (
+                net.clone(),
+                server.clone(),
+                topic.clone(),
+                compute_slots.clone(),
+            );
             tokio::spawn(async move {
+                let Ok(_compute_slot) = compute_slots.acquire_owned().await else {
+                    return;
+                };
                 if let Some(sealed) = server.call(&src, &call).await {
                     let reply = SessionReply { t: "temporal_reply".into(), session_id: call.session_id, call_id: call.call_id, sealed };
                     if let Ok(b) = serde_json::to_vec(&reply) {
