@@ -143,12 +143,13 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "free_disk_root": config.storage.root.display().to_string(),
     });
+    let (cpu, cores, ram_bytes) = c0mpute_bench::hardware_summary();
+    blob["cpu"] = serde_json::Value::String(cpu);
+    blob["cores"] = serde_json::Value::from(cores);
+    if let Some(ram_bytes) = ram_bytes {
+        blob["ram_bytes"] = serde_json::Value::from(ram_bytes);
+    }
     if let Some(report) = bench_report_path().and_then(|p| c0mpute_bench::load(&p).ok().flatten()) {
-        blob["cpu"] = serde_json::Value::String(report.metadata.cpu.clone());
-        blob["cores"] = serde_json::Value::from(report.metadata.cores);
-        if let Some(ram_bytes) = report.metadata.ram_bytes {
-            blob["ram_bytes"] = serde_json::Value::from(ram_bytes);
-        }
         blob["bench_at"] = serde_json::Value::String(report.metadata.start_time.clone());
         if !report.metadata.quick && report.score > 0 {
             blob["benchmark"] = benchmark_details(&report);
