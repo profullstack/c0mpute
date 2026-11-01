@@ -1366,10 +1366,9 @@ async fn run_tts(cmd: TtsCmd) -> Result<()> {
     match cmd {
         TtsCmd::Setup { engine } => {
             c0mpute_core::speech::setup_tts(&engine).await?;
-            println!(
-                "installed {engine} CPU voices under {}",
-                c0mpute_core::speech::speech_root().display()
-            );
+            let ready = c0mpute_core::speech::available_tts_engines();
+            println!("ready TTS engines: {}", ready.join(", "));
+            println!("voices and models under {}", c0mpute_core::speech::speech_root().display());
             println!(
                 "start a worker with `c0mpute worker start --roles tts` to advertise TTS jobs"
             );

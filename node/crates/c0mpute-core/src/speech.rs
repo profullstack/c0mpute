@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tracing::warn;
 
 const WORKER: &str = include_str!("speech_worker.py");
 const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx";
@@ -120,20 +121,31 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
     }
     if install_kokoro {
         tokio::fs::create_dir_all(root.join("models/kokoro")).await?;
-        pip_install(&["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
-        download_verified(
-            KOKORO_MODEL_URL,
-            &root.join("models/kokoro/kokoro-v1.0.int8.onnx"),
-            KOKORO_MODEL_SHA256,
-        )
-        .await?;
-        download_verified(
-            KOKORO_VOICES_URL,
-            &root.join("models/kokoro/voices-v1.0.bin"),
-            KOKORO_VOICES_SHA256,
-        )
-        .await?;
-        tokio::fs::write(root.join(".kokoro-ready"), b"kokoro-onnx 0.6.1 int8\n").await?;
+        let kokoro_setup: Result<()> = async {
+            pip_install(&["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
+            download_verified(
+                KOKORO_MODEL_URL,
+                &root.join("models/kokoro/kokoro-v1.0.int8.onnx"),
+                KOKORO_MODEL_SHA256,
+            )
+            .await?;
+            download_verified(
+                KOKORO_VOICES_URL,
+                &root.join("models/kokoro/voices-v1.0.bin"),
+                KOKORO_VOICES_SHA256,
+            )
+            .await?;
+            tokio::fs::write(root.join(".kokoro-ready"), b"kokoro-onnx 0.6.1 int8\n").await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = kokoro_setup {
+            if engine == "all" && !available_tts_engines().is_empty() {
+                warn!(err = %error, "Kokoro unavailable; continuing with the installed TTS engine");
+            } else {
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
