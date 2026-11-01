@@ -1966,6 +1966,9 @@ fn install_tui() -> Result<()> {
          exec \"$BUN\" run \"{}/src/index.ts\" \"$@\"\n",
         tui_dir.display()
     );
+    if let Some(parent) = wrapper.parent() {
+        std::fs::create_dir_all(parent).context("create launcher directory")?;
+    }
     std::fs::write(&wrapper, body).map_err(|e| anyhow::anyhow!("write launcher: {e}"))?;
     #[cfg(unix)]
     {

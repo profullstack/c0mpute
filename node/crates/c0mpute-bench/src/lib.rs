@@ -60,6 +60,8 @@ pub struct Metadata {
     pub start_time: String,
     pub cpu: String,
     pub cores: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_bytes: Option<u64>,
     pub kernel: String,
     pub compiler: String,
     /// c0mpute version that produced the report.
@@ -158,12 +160,13 @@ pub fn run(opts: &Options) -> BenchReport {
     let mut results = BTreeMap::new();
     results.insert(RUNTIME.to_string(), per_workload);
 
-    let (cpu, kernel) = host_info();
+    let (cpu, kernel, ram_bytes) = host_info();
     let mut report = BenchReport {
         metadata: Metadata {
             start_time,
             cpu,
             cores,
+            ram_bytes,
             kernel,
             compiler: env!("C0MPUTE_RUSTC_VERSION").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -515,6 +518,12 @@ pub fn render_text(report: &BenchReport) -> String {
     ));
     out.push_str(&format!("  cpu      {}\n", m.cpu));
     out.push_str(&format!("  cores    {}\n", m.cores));
+    if let Some(bytes) = m.ram_bytes {
+        out.push_str(&format!(
+            "  ram      {:.1} GiB\n",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
     out.push_str(&format!("  kernel   {}\n", m.kernel));
     out.push_str(&format!("  compiler {}\n", m.compiler));
     out.push_str(&format!(
@@ -576,10 +585,11 @@ pub fn human_rate(workload: &str, per_sec: f64) -> String {
 // Host info
 // ────────────────────────────────────────────────────────────────────────
 
-fn host_info() -> (String, String) {
+fn host_info() -> (String, String, Option<u64>) {
     use sysinfo::System;
     let mut sys = System::new();
     sys.refresh_cpu_all();
+    sys.refresh_memory();
     let cpu = sys
         .cpus()
         .first()
@@ -593,7 +603,8 @@ fn host_info() -> (String, String) {
     )
     .trim()
     .to_string();
-    (cpu, kernel)
+    let ram_bytes = (sys.total_memory() > 0).then_some(sys.total_memory());
+    (cpu, kernel, ram_bytes)
 }
 
 fn rfc3339_now() -> String {
@@ -758,6 +769,7 @@ mod tests {
                 start_time: String::new(),
                 cpu: String::new(),
                 cores: 1,
+                ram_bytes: None,
                 kernel: String::new(),
                 compiler: String::new(),
                 version: String::new(),

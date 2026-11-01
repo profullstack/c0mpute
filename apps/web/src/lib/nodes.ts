@@ -5,13 +5,29 @@ import { fetchFromAggregators } from "./aggregators";
 export interface NodeRow {
   id: string;
   class: string;
+  cpu: string | null;
   cores: number | null;
+  ram_bytes: number | null;
   bench_score: number | null;
+  bench_at: string | null;
+  benchmarks: Record<string, WorkloadBenchmark> | null;
   version: string | null;
   ref: string | null;
   /** The operator's listing; absent on nodes older than 0.2.35. */
   pricing?: Pricing | null;
   last_seen_s: number;
+}
+
+export interface BenchSample {
+  threads: number;
+  duration_us: number;
+  speedup: number;
+  throughput: number;
+}
+
+export interface WorkloadBenchmark {
+  params: string;
+  samples: BenchSample[];
 }
 
 /** How a node prices its bids, set by its operator with `c0mpute pricing set`. */
