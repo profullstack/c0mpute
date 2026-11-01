@@ -7,12 +7,11 @@
 //! the chunk-store / request-response transfer keyed off `spec_hash`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use c0mpute_net::topics::{
-    JobAccept, JobBid, JobOffer, JobReceipt, JobStatus, job_topic,
-};
+use c0mpute_net::topics::{JobAccept, JobBid, JobOffer, JobReceipt, JobStatus, job_topic};
 use c0mpute_net::{GossipMessage, Libp2pNetwork};
 use tokio::sync::broadcast;
 use tokio::time::{Instant, sleep};
@@ -23,6 +22,10 @@ use uuid::Uuid;
 pub const DEFAULT_BID_WINDOW: Duration = Duration::from_secs(8);
 /// How long to wait for the winner's receipt before giving up.
 pub const DEFAULT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+// Rotate equally priced bids so a burst of parallel chunks does not keep
+// selecting the same earliest bidder when several workers have equal prices.
+static NEXT_EQUAL_PRICE_BID: AtomicUsize = AtomicUsize::new(0);
 
 /// Auction inputs the buyer assembles before publishing the offer.
 pub struct JobAuction {
@@ -94,10 +97,7 @@ pub struct AuctionOutcome {
 ///
 /// Returns once the receipt arrives (or the timeout expires). The caller
 /// is responsible for any further verification of `output_hash`.
-pub async fn run_auction(
-    net: Arc<Libp2pNetwork>,
-    auction: JobAuction,
-) -> Result<AuctionOutcome> {
+pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result<AuctionOutcome> {
     let topic = job_topic(&auction.workload_type);
     net.subscribe(&topic).await?;
 
@@ -135,9 +135,7 @@ pub async fn run_auction(
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(msg)) if msg.topic == topic => {
                 if let Ok(bid) = serde_json::from_slice::<JobBid>(&msg.data) {
-                    if bid.job_id == job_id
-                        && bid.bidder_peer_id != offer.buyer_peer_id
-                    {
+                    if bid.job_id == job_id && bid.bidder_peer_id != offer.buyer_peer_id {
                         if !auction.allowed_bidders.is_empty()
                             && !auction.allowed_bidders.contains(&bid.bidder_peer_id)
                         {
@@ -183,6 +181,15 @@ pub async fn run_auction(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.published_at_ms.cmp(&b.published_at_ms))
     });
+    let cheapest_price = bids[0].price_usd;
+    let equal_price_count = bids
+        .iter()
+        .take_while(|bid| bid.price_usd == cheapest_price)
+        .count();
+    if equal_price_count > 1 {
+        let offset = NEXT_EQUAL_PRICE_BID.fetch_add(1, Ordering::Relaxed) % equal_price_count;
+        bids[..equal_price_count].rotate_left(offset);
+    }
     let winner = bids.remove(0);
     info!(
         %job_id,
@@ -210,9 +217,7 @@ pub async fn run_auction(
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(msg)) if msg.topic == topic => {
                 if let Ok(receipt) = serde_json::from_slice::<JobReceipt>(&msg.data) {
-                    if receipt.job_id == job_id
-                        && receipt.worker_peer_id == winner.bidder_peer_id
-                    {
+                    if receipt.job_id == job_id && receipt.worker_peer_id == winner.bidder_peer_id {
                         if !source_matches_claim(&msg, &receipt.worker_peer_id) {
                             warn!(
                                 %job_id,

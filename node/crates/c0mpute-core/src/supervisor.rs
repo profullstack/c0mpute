@@ -159,7 +159,7 @@ impl Supervisor {
                 .update_feed_url
                 .clone()
                 .unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
-            let interval = std::time::Duration::from_secs(self.config.update_interval_secs.max(60));
+            let interval = std::time::Duration::from_secs(config::UPDATE_CHECK_INTERVAL_SECS);
             let current = env!("CARGO_PKG_VERSION").to_string();
             info!(
                 interval_secs = interval.as_secs(),

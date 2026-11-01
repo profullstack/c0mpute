@@ -21,7 +21,7 @@ export default function GettingStartedPage() {
           <span className="accent">c0mpute</span>,{" "}
           <span className="accent">coinpay</span>,{" "}
           <span className="accent">infernet</span>. No sudo. The worker
-          self-upgrades every 5 minutes.
+          self-upgrades every 60 seconds.
         </p>
       </Section>
 
