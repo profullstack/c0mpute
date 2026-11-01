@@ -288,9 +288,10 @@ c0mpute doctor --report                # send anonymized telemetry`}
         <P>
           The worker reads the score at start and publishes it as{" "}
           <code>bench_score</code> in its capability ad, so buyers and the{" "}
-          <Link href="/status">network status</Link> page see measured capacity
-          rather than a GPU tag alone. Quick runs are for a sanity check and
-          are never advertised.
+          <Link href="/status">network status</Link> page see measured capacity.
+          The <Link href="/benchmark">benchmark board</Link> shows CPU, cores,
+          RAM and per-workload throughput for online nodes. Quick runs are for a
+          sanity check and are never advertised.
         </P>
         <Code>
 {`c0mpute bench                          # full run, saves + prints the table

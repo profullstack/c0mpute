@@ -11,6 +11,7 @@ const LINKS: { href: string; label: string; accent?: boolean }[] = [
   { href: "/estimates", label: "GPU earnings", accent: true },
   { href: "/market", label: "market" },
   { href: "/nodes", label: "nodes" },
+  { href: "/benchmark", label: "benchmarks" },
   { href: "/agents", label: "agents" },
   { href: "/plugins", label: "plugins" },
   { href: "/docs", label: "docs" },

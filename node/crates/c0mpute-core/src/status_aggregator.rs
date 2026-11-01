@@ -356,15 +356,19 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusPayload> {
 /// One row of the public node board (`GET /nodes`).
 ///
 /// Built only from fields of the capability ad, which every worker already
-/// gossips in the clear: a shortened peer id, a coarse hardware class, the
-/// core count, the `c0mpute bench` score, the c0mpute version and an optional
-/// referral handle. No CPU model string, address, hostname or region.
+/// gossips in the clear: a shortened peer id, hardware class and summary,
+/// benchmark score/details, version and optional referral handle. No address,
+/// hostname or region.
 #[derive(Serialize, Debug, PartialEq)]
 struct NodeRow {
     id: String,
     class: String,
+    cpu: Option<String>,
     cores: Option<u64>,
+    ram_bytes: Option<u64>,
     bench_score: Option<u32>,
+    bench_at: Option<String>,
+    benchmarks: Option<BTreeMap<String, WorkloadBenchmark>>,
     version: Option<String>,
     #[serde(rename = "ref")]
     referral: Option<String>,
@@ -372,6 +376,63 @@ struct NodeRow {
     /// advertises one. Re-validated here: only known fields, sane numbers.
     pricing: Option<serde_json::Value>,
     last_seen_s: u64,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct WorkloadBenchmark {
+    params: String,
+    samples: Vec<BenchmarkSample>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct BenchmarkSample {
+    threads: u64,
+    duration_us: u64,
+    speedup: f64,
+    throughput: f64,
+}
+
+/// Parse a bounded, allowlisted subset of an operator's full bench report.
+/// This keeps malformed or unexpectedly large capability ads off the page.
+fn benchmark_workloads(hw: &serde_json::Value) -> Option<BTreeMap<String, WorkloadBenchmark>> {
+    let workloads = hw.get("benchmark")?.get("workloads")?.as_object()?;
+    let mut parsed = BTreeMap::new();
+    for name in c0mpute_bench::WORKLOADS {
+        let Some(workload) = workloads.get(name) else {
+            continue;
+        };
+        let params: String = workload.get("params")?.as_str()?.chars().take(80).collect();
+        let Some(samples) = workload.get("samples")?.as_array() else {
+            continue;
+        };
+        let samples: Vec<BenchmarkSample> = samples
+            .iter()
+            .take(16)
+            .filter_map(|sample| {
+                let threads = sample.get("threads")?.as_u64()?;
+                let duration_us = sample.get("duration_us")?.as_u64()?;
+                let speedup = sample.get("speedup")?.as_f64()?;
+                let throughput = sample.get("throughput")?.as_f64()?;
+                (threads > 0
+                    && threads <= 4096
+                    && duration_us > 0
+                    && speedup.is_finite()
+                    && speedup > 0.0
+                    && throughput.is_finite()
+                    && throughput > 0.0)
+                    .then_some(BenchmarkSample {
+                        threads,
+                        duration_us,
+                        speedup,
+                        throughput,
+                    })
+            })
+            .collect();
+        if !samples.is_empty() {
+            parsed.insert(name.to_string(), WorkloadBenchmark { params, samples });
+        }
+    }
+    (!parsed.is_empty()).then_some(parsed)
 }
 
 /// The ad's pricing listing, rebuilt from validated fields only.
@@ -419,8 +480,20 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
         .map(|(peer, ad)| NodeRow {
             id: short_id(peer),
             class: node_class(&ad.tags),
+            cpu: ad
+                .hardware
+                .get("cpu")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(96).collect()),
             cores: ad.hardware.get("cores").and_then(|v| v.as_u64()),
+            ram_bytes: ad.hardware.get("ram_bytes").and_then(|v| v.as_u64()),
             bench_score: ad.bench_score,
+            bench_at: ad
+                .hardware
+                .get("bench_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(40).collect()),
+            benchmarks: benchmark_workloads(&ad.hardware),
             version: ad
                 .hardware
                 .get("version")
@@ -661,7 +734,18 @@ mod tests {
                 mk(
                     &["c0mpute:gpu:nvidia"],
                     Some(9000),
-                    serde_json::json!({"cores": 16, "version": "0.2.32", "ref": "chovy", "cpu": "secret model"}),
+                    serde_json::json!({
+                        "cores": 16,
+                        "ram_bytes": 68_719_476_736u64,
+                        "version": "0.2.32",
+                        "ref": "chovy",
+                        "cpu": "Example CPU",
+                        "bench_at": "2026-11-01T12:00:00Z",
+                        "benchmark": {"workloads": {"fib": {
+                            "params": "n=42",
+                            "samples": [{"threads": 1, "duration_us": 1000, "speedup": 1.0, "throughput": 500_000_000.0}]
+                        }}}
+                    }),
                 ),
             ),
             (
@@ -678,6 +762,13 @@ mod tests {
         assert_eq!(p.nodes[0].id, "BBBBBBBB");
         assert_eq!(p.nodes[0].class, "gpu:nvidia");
         assert_eq!(p.nodes[0].cores, Some(16));
+        assert_eq!(p.nodes[0].cpu.as_deref(), Some("Example CPU"));
+        assert_eq!(p.nodes[0].ram_bytes, Some(68_719_476_736));
+        assert_eq!(p.nodes[0].bench_at.as_deref(), Some("2026-11-01T12:00:00Z"));
+        assert_eq!(
+            p.nodes[0].benchmarks.as_ref().unwrap()["fib"].samples[0].throughput,
+            500_000_000.0
+        );
         assert_eq!(p.nodes[0].last_seen_s, 30);
         assert_eq!(p.nodes[2].bench_score, None);
         assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
@@ -689,7 +780,7 @@ mod tests {
             }]
         );
         let json = serde_json::to_string(&p.nodes).unwrap();
-        assert!(!json.contains("secret model"), "cpu model never published");
+        assert!(json.contains("Example CPU"), "public CPU model included");
     }
 
     #[test]

@@ -146,13 +146,57 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
     if let Some(report) = bench_report_path().and_then(|p| c0mpute_bench::load(&p).ok().flatten()) {
         blob["cpu"] = serde_json::Value::String(report.metadata.cpu.clone());
         blob["cores"] = serde_json::Value::from(report.metadata.cores);
+        if let Some(ram_bytes) = report.metadata.ram_bytes {
+            blob["ram_bytes"] = serde_json::Value::from(ram_bytes);
+        }
         blob["bench_at"] = serde_json::Value::String(report.metadata.start_time.clone());
+        if !report.metadata.quick && report.score > 0 {
+            blob["benchmark"] = benchmark_details(&report);
+        }
     }
     if let Some(code) = referral_code() {
         blob["ref"] = serde_json::Value::String(code);
     }
     blob["pricing"] = config.pricing.listing();
     blob
+}
+
+/// The small, public slice of the full local report that the node board needs.
+/// Compiler and kernel details stay in the local report, not in capability adverts.
+fn benchmark_details(report: &c0mpute_bench::BenchReport) -> serde_json::Value {
+    let mut workloads = serde_json::Map::new();
+    if let Some(results) = report.results.get(c0mpute_bench::RUNTIME) {
+        for name in c0mpute_bench::WORKLOADS {
+            let Some(samples) = results.get(name) else {
+                continue;
+            };
+            let rows: Vec<serde_json::Value> = samples
+                .iter()
+                .take(16)
+                .map(|sample| {
+                    serde_json::json!({
+                        "threads": sample.threads,
+                        "duration_us": sample.result.duration_us,
+                        "speedup": sample.result.speedup,
+                        "throughput": sample.result.throughput,
+                    })
+                })
+                .collect();
+            workloads.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "params": samples.first()
+                        .map(|sample| sample.params.chars().take(80).collect::<String>())
+                        .unwrap_or_default(),
+                    "samples": rows,
+                }),
+            );
+        }
+    }
+    serde_json::json!({
+        "run_at": report.metadata.start_time,
+        "workloads": workloads,
+    })
 }
 
 /// The referral code this node was installed with, if any.

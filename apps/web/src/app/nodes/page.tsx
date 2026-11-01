@@ -50,6 +50,10 @@ export default async function NodesPage() {
         </p>
       </section>
 
+      <p className="text-xs text-[var(--color-dim)]">
+        See <Link href="/benchmark">hardware details and per-workload benchmarks</Link>.
+      </p>
+
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">[ board ]</h2>
         {p.nodes.length === 0 ? (
