@@ -607,6 +607,17 @@ fn host_info() -> (String, String, Option<u64>) {
     (cpu, kernel, ram_bytes)
 }
 
+/// Current public host hardware summary for capability adverts. Bench reports
+/// remain the source of performance results, but this lets unbenchmarked nodes
+/// publish CPU, core count and installed memory too.
+pub fn hardware_summary() -> (String, usize, Option<u64>) {
+    let (cpu, _kernel, ram_bytes) = host_info();
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    (cpu, cores, ram_bytes)
+}
+
 fn rfc3339_now() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
