@@ -547,10 +547,18 @@ ensure_speech_python() {
 
   if command -v apt-get >/dev/null 2>&1; then
     say "installing Python 3 venv support for the default TTS/STT roles"
+    speech_venv_package="python3-venv"
+    if command -v python3 >/dev/null 2>&1; then
+      speech_venv_package=$(python3 -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}-venv")' 2>/dev/null || echo python3-venv)
+    fi
     if [ -n "$SUDO" ]; then
-      $SUDO apt-get update && $SUDO apt-get install -y python3 python3-venv || return 1
+      $SUDO apt-get update || return 1
+      $SUDO apt-cache show "$speech_venv_package" >/dev/null 2>&1 || speech_venv_package="python3-venv"
+      $SUDO apt-get install -y python3 "$speech_venv_package" || return 1
     else
-      apt-get update && apt-get install -y python3 python3-venv || return 1
+      apt-get update || return 1
+      apt-cache show "$speech_venv_package" >/dev/null 2>&1 || speech_venv_package="python3-venv"
+      apt-get install -y python3 "$speech_venv_package" || return 1
     fi
     speech_python_ready && return 0
   fi
