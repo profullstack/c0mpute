@@ -19,8 +19,8 @@ use async_trait::async_trait;
 use c0mpute_proto::{ChunkRequest, Hash};
 use futures::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol,
-    gossipsub, identify, identity, kad, mdns, ping, request_response,
+    Multiaddr, PeerId, StreamProtocol, gossipsub, identify, identity, kad, mdns, ping,
+    request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -47,6 +47,11 @@ enum Cmd {
         reply: oneshot::Sender<Result<()>>,
     },
     Fetch {
+        req: ChunkRequest,
+        reply: oneshot::Sender<Result<Vec<u8>>>,
+    },
+    FetchFrom {
+        peer: PeerId,
         req: ChunkRequest,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
@@ -218,6 +223,21 @@ impl Libp2pNetwork {
         self.peer_id
     }
 
+    /// Fetch a chunk directly from a peer already identified by a job offer
+    /// or receipt. This avoids waiting for a DHT provider record to propagate.
+    pub async fn fetch_from_peer(&self, peer: PeerId, req: &ChunkRequest) -> Result<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::FetchFrom {
+                peer,
+                req: req.clone(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("swarm task closed"))?;
+        rx.await.map_err(|_| anyhow!("swarm task closed"))?
+    }
+
     pub async fn listen_addrs(&self) -> Result<Vec<Multiaddr>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -310,8 +330,7 @@ struct SwarmTask {
     /// Pending `fetch` calls awaiting Kad provider lookups.
     pending_kad_lookups: HashMap<kad::QueryId, oneshot::Sender<Result<Vec<u8>>>>,
     /// Pending request-response calls.
-    pending_fetches:
-        HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
+    pending_fetches: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
     /// Track which chunk a fetch is for, so we can re-issue against another
     /// provider if the first one says NotFound.
     fetch_targets: HashMap<request_response::OutboundRequestId, Hash>,
@@ -360,10 +379,7 @@ impl SwarmTask {
                     gossipsub_cfg,
                 )
                 .map_err(|e| std::io::Error::other(format!("gossipsub behaviour: {e}")))?;
-                let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    local_peer_id,
-                )?;
+                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
                 Ok(C0mputeBehaviour {
                     kad,
                     identify,
@@ -419,7 +435,13 @@ impl SwarmTask {
     async fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Listen { addr, reply } => {
-                let r = self.swarm.lock().await.listen_on(addr).map(|_| ()).map_err(Into::into);
+                let r = self
+                    .swarm
+                    .lock()
+                    .await
+                    .listen_on(addr)
+                    .map(|_| ())
+                    .map_err(Into::into);
                 let _ = reply.send(r);
             }
             Cmd::Dial { addr, reply } => {
@@ -427,13 +449,7 @@ impl SwarmTask {
                 let _ = reply.send(r);
             }
             Cmd::Addrs { reply } => {
-                let addrs: Vec<Multiaddr> = self
-                    .swarm
-                    .lock()
-                    .await
-                    .listeners()
-                    .cloned()
-                    .collect();
+                let addrs: Vec<Multiaddr> = self.swarm.lock().await.listeners().cloned().collect();
                 let _ = reply.send(addrs);
             }
             Cmd::Announce { hash, reply } => {
@@ -461,6 +477,17 @@ impl SwarmTask {
                     .get_providers(key);
                 self.pending_kad_lookups.insert(qid, reply);
                 debug!(chunk = %req.chunk_hash, "kad get_providers issued");
+            }
+            Cmd::FetchFrom { peer, req, reply } => {
+                let request_id = self.swarm.lock().await.behaviour_mut().fetch.send_request(
+                    &peer,
+                    FetchRequest {
+                        chunk_hash: req.chunk_hash,
+                    },
+                );
+                self.pending_fetches.insert(request_id, reply);
+                self.fetch_targets.insert(request_id, req.chunk_hash);
+                debug!(%peer, chunk = %req.chunk_hash, "direct chunk fetch issued");
             }
             Cmd::Publish {
                 topic,
@@ -513,9 +540,11 @@ impl SwarmTask {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 debug!(%peer_id, "connection established");
             }
-            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Identify(
-                identify::Event::Received { peer_id, info, .. },
-            )) => {
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) => {
                 // Add the peer's listen addrs to Kad so it can be routed to.
                 let mut sw = self.swarm.lock().await;
                 for addr in info.listen_addrs {
@@ -559,23 +588,17 @@ impl SwarmTask {
                 // never blocks).
                 let _ = self.gossip_tx.send(msg);
             }
-            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(
-                mdns::Event::Discovered(peers),
-            )) => {
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                 let mut sw = self.swarm.lock().await;
                 for (peer_id, addr) in peers {
                     debug!(%peer_id, %addr, "mDNS discovered peer");
                     sw.behaviour_mut().kad.add_address(&peer_id, addr.clone());
                     // Add to gossipsub mesh too — gossipsub itself uses
                     // Kad for routing once peers are known.
-                    sw.behaviour_mut()
-                        .gossipsub
-                        .add_explicit_peer(&peer_id);
+                    sw.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 }
             }
-            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(
-                mdns::Event::Expired(peers),
-            )) => {
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
                 let mut sw = self.swarm.lock().await;
                 for (peer_id, _addr) in peers {
                     debug!(%peer_id, "mDNS peer expired");
@@ -664,9 +687,8 @@ impl SwarmTask {
                             let _ = reply.send(Ok(bytes));
                         }
                         FetchResponse::NotFound => {
-                            let _ = reply.send(Err(anyhow!(
-                                "provider returned NotFound for chunk"
-                            )));
+                            let _ =
+                                reply.send(Err(anyhow!("provider returned NotFound for chunk")));
                         }
                     }
                 }

@@ -118,6 +118,16 @@ impl Supervisor {
                         ffmpeg_bin,
                     ))
                 }
+                "tts.synthesize" => Some(runner::spawn_tts_runner(
+                    net.clone(),
+                    self.store.clone(),
+                    cache_root.clone(),
+                )),
+                "stt.transcribe" => Some(runner::spawn_stt_runner(
+                    net.clone(),
+                    self.store.clone(),
+                    cache_root.clone(),
+                )),
                 _ => None,
             };
             dispatch::run_worker_subscriber_priced(

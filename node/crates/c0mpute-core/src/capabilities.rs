@@ -53,13 +53,29 @@ pub const DEFAULT_ADVERTISE_INTERVAL: Duration = Duration::from_secs(60);
 pub fn tags_from_config(config: &Config) -> Vec<String> {
     let mut tags = Vec::new();
     for role in &config.roles {
-        let role_tag = match role {
-            Role::Storage => "c0mpute:role:storage",
-            Role::Transcode => "c0mpute:role:transcode",
-            Role::Gateway => "c0mpute:role:gateway",
-            Role::Verifier => "c0mpute:role:verifier",
-        };
-        tags.push(role_tag.to_string());
+        match role {
+            Role::Tts => {
+                let engines = crate::speech::available_tts_engines();
+                if !engines.is_empty() {
+                    tags.push("c0mpute:role:tts".to_string());
+                    tags.extend(
+                        engines
+                            .into_iter()
+                            .map(|engine| format!("c0mpute:tts:engine:{engine}")),
+                    );
+                }
+            }
+            Role::Stt => {
+                if crate::speech::stt_ready() {
+                    tags.push("c0mpute:role:stt".to_string());
+                    tags.push("c0mpute:stt:engine:faster-whisper".to_string());
+                }
+            }
+            Role::Storage => tags.push("c0mpute:role:storage".to_string()),
+            Role::Transcode => tags.push("c0mpute:role:transcode".to_string()),
+            Role::Gateway => tags.push("c0mpute:role:gateway".to_string()),
+            Role::Verifier => tags.push("c0mpute:role:verifier".to_string()),
+        }
     }
     tags.push(detect_hardware_tag());
     tags

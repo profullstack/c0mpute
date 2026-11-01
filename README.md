@@ -1,7 +1,8 @@
 # c0mpute
 
-> Decentralized compute network. CLI-first. Three modules out of the box:
-> **transcode** (FFmpeg), **coinpay** (DID + escrow), **infernet** (AI inference).
+> Decentralized compute network. CLI-first. Five modules out of the box:
+> **transcode** (FFmpeg), **tts** (Piper / Kokoro), **stt** (faster-whisper),
+> **coinpay** (DID + escrow), and **infernet** (AI inference).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg?logo=rust)](https://www.rust-lang.org/)
@@ -70,6 +71,11 @@ c0mpute worker start --gpu
 c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p --max-price 1.25
 c0mpute infernet chat --model qwen2.5:7b "hello"
 
+# free local CPU speech models + P2P speech worker roles
+c0mpute tts setup --engine all      # Kokoro and Piper; model files install per user
+c0mpute stt setup                   # multilingual faster-whisper base, CPU int8
+c0mpute worker start --roles tts,stt
+
 # infernet: see what serves what, reserve a node
 c0mpute pool qwen                        # live nodes per model
 c0mpute infernet model list --node <id>  # one node's advertised models
@@ -87,6 +93,31 @@ c0mpute coinpay reputation inspect did:coinpay:worker:abc123
 
 The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 `c0mpute.com/coinpay`, `c0mpute.com/infernet`.
+
+### CPU speech inference
+
+TTS (`tts.synthesize`) supports Kokoro and Piper on CPU. STT
+(`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8. Install the
+models once on each worker, then start it with the role it should advertise:
+
+```sh
+c0mpute tts setup --engine all
+c0mpute stt setup
+c0mpute worker start --roles tts,stt
+```
+
+The Kokoro model files are Apache-2.0. Piper's runtime is GPL-3.0 and its
+individual voice files carry their own licenses; the bundled Joe voice is
+CC0 and Norman is public domain. faster-whisper is MIT. Agent voice presets
+are based on their public OpenProfiles and can be listed with
+`c0mpute tts voices`.
+
+Applications reach the P2P speech jobs through an authenticated buyer bridge.
+Run `C0MPUTE_SPEECH_TOKEN=<random-secret> c0mpute speech serve` behind a
+private network or HTTPS reverse proxy, then configure the app server with
+`C0MPUTE_SPEECH_URL` and the same `C0MPUTE_SPEECH_TOKEN`. The bridge defaults
+to a $0 maximum bid so speech stays free; set `C0MPUTE_SPEECH_MAX_PRICE_USD`
+above zero only when you explicitly want to pay workers that charge for jobs.
 
 ### Run the worker in the background
 
@@ -148,6 +179,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 ┌──────────────────── c0mpute (Rust binary) ────────────────────┐
 │   subcommands: doctor, bench, worker, job, modules, tui       │
 │   plugins: transcode (in-process)                             │
+│            tts / stt (local CPU model runners)                │
 │            coinpay   (subprocess → external `coinpay` binary) │
 │            infernet  (subprocess → external `infernet` binary)│
 └───────────────────────────────────────────────────────────────┘

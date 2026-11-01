@@ -96,6 +96,22 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
       </section>
 
       <section className="space-y-3 text-sm leading-7">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ CPU voice inference ]</h2>
+        <p>
+          Voice inference runs on ordinary CPUs. Workers can install Piper or Kokoro for
+          text-to-speech and faster-whisper for transcription, then advertise only the voice
+          workloads they have installed:
+        </p>
+        <CodeBlock>{`$ c0mpute tts setup --engine all
+$ c0mpute stt setup
+$ c0mpute worker start --roles tts,stt`}</CodeBlock>
+        <p className="text-[var(--color-dim)]">
+          The TTS and STT jobs use the same P2P offer, bid and receipt flow as other c0mpute
+          workloads. Model downloads happen once per worker under its user data directory.
+        </p>
+      </section>
+
+      <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ behind NAT is fine ]</h2>
         <p>
           A residential provider must be able to earn without opening inbound

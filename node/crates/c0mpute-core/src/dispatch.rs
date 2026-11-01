@@ -265,13 +265,19 @@ async fn handle_offer(
 }
 
 /// Workload types this worker should listen for, derived from its
-/// configured roles. Today: `Transcode` role → `ffmpeg.transcode`.
+/// configured roles. Each modality maps to a separate job topic.
 /// `infernet.inference` is handled by the infernet peer binary, not
 /// this daemon.
 pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     let mut types = Vec::new();
     if roles.contains(&c0mpute_proto::Role::Transcode) {
         types.push("ffmpeg.transcode".to_string());
+    }
+    if roles.contains(&c0mpute_proto::Role::Tts) {
+        types.push("tts.synthesize".to_string());
+    }
+    if roles.contains(&c0mpute_proto::Role::Stt) {
+        types.push("stt.transcribe".to_string());
     }
     types
 }
