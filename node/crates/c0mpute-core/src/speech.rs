@@ -243,6 +243,7 @@ pub async fn transcribe(request: &serde_json::Value, audio: &Path, output: &Path
 async fn run_worker(action: &str, args: &[&str], request: &serde_json::Value) -> Result<()> {
     let mut command = Command::new(python_path());
     command.arg("-c").arg(WORKER).arg(action).arg(speech_root());
+    crate::resources::apply_job_limits(&mut command);
     command
         .args(args)
         .stdin(Stdio::piped())

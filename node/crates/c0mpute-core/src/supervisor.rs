@@ -10,6 +10,7 @@ use crate::dispatch;
 use crate::runner;
 use c0mpute_proto::Hash;
 use c0mpute_store::ChunkStore;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::{Config, config};
@@ -107,6 +108,13 @@ impl Supervisor {
         let cache_root = config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("cache");
+        let compute_slots = Arc::new(Semaphore::new(crate::resources::max_concurrent_cpu_jobs()));
+        info!(
+            cpu_threads_per_job = crate::resources::cpu_threads_per_job(),
+            max_concurrent_jobs = crate::resources::max_concurrent_cpu_jobs(),
+            cuda_devices_per_job = ?crate::resources::cuda_devices_per_job(),
+            "node compute budget configured"
+        );
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
             info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
@@ -116,17 +124,20 @@ impl Supervisor {
                         net.clone(),
                         cache_root.clone(),
                         ffmpeg_bin,
+                        compute_slots.clone(),
                     ))
                 }
                 "tts.synthesize" => Some(runner::spawn_tts_runner(
                     net.clone(),
                     self.store.clone(),
                     cache_root.clone(),
+                    compute_slots.clone(),
                 )),
                 "stt.transcribe" => Some(runner::spawn_stt_runner(
                     net.clone(),
                     self.store.clone(),
                     cache_root.clone(),
+                    compute_slots.clone(),
                 )),
                 _ => None,
             };

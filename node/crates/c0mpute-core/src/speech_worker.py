@@ -7,14 +7,8 @@ import wave
 from pathlib import Path
 
 
-def cpu_thread_count() -> int:
-    configured = os.environ.get("C0MPUTE_SPEECH_CPU_THREADS")
-    if configured:
-        try:
-            return max(1, int(configured))
-        except ValueError:
-            pass
-
+def available_cpu_capacity() -> float:
+    quota_capacity = None
     # Docker and most Linux services expose their CPU quota through cgroups.
     # Respect it because os.cpu_count() can report the whole host, which makes
     # ONNX Runtime create far too many threads inside a small container.
@@ -33,14 +27,28 @@ def cpu_thread_count() -> int:
                 quota_us = int(quota_path.read_text())
                 period_us = int(period_path.read_text())
             if quota_us > 0 and period_us > 0:
-                return max(1, math.ceil(quota_us / period_us))
+                quota_capacity = quota_us / period_us
+                break
         except (OSError, ValueError):
             continue
 
     try:
-        return max(1, len(os.sched_getaffinity(0)))
-    except AttributeError:
-        return max(1, os.cpu_count() or 1)
+        affinity_capacity = float(len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        affinity_capacity = float(os.cpu_count() or 1)
+    return min(quota_capacity, affinity_capacity) if quota_capacity else affinity_capacity
+
+
+def cpu_thread_count() -> int:
+    configured = os.environ.get("C0MPUTE_SPEECH_CPU_THREADS")
+    if not configured:
+        configured = os.environ.get("C0MPUTE_JOB_CPU_THREADS")
+    if configured:
+        try:
+            return max(1, int(configured))
+        except ValueError:
+            pass
+    return max(1, math.ceil(available_cpu_capacity() / 2))
 
 
 def session_options():

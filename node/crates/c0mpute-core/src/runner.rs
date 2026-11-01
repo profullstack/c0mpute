@@ -25,7 +25,7 @@ use c0mpute_net::{
 use c0mpute_proto::{ChunkRequest, Hash, TranscodeSpec};
 use c0mpute_store::ChunkStore;
 use tokio::fs;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{info, warn};
 
 /// Job handed off from the dispatch loop to a per-workload runner.
@@ -92,10 +92,14 @@ pub fn spawn_tts_runner(
     net: Arc<Libp2pNetwork>,
     store: ChunkStore,
     cache_root: PathBuf,
+    compute_slots: Arc<Semaphore>,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
+            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+                return;
+            };
             let job_id = job.accept.job_id.clone();
             match run_tts_job(&net, &store, &cache_root, &job).await {
                 Ok(hash) => {
@@ -116,10 +120,14 @@ pub fn spawn_stt_runner(
     net: Arc<Libp2pNetwork>,
     store: ChunkStore,
     cache_root: PathBuf,
+    compute_slots: Arc<Semaphore>,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
+            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+                return;
+            };
             let job_id = job.accept.job_id.clone();
             match run_stt_job(&net, &store, &cache_root, &job).await {
                 Ok(hash) => {
@@ -247,6 +255,7 @@ pub fn spawn_transcode_runner(
     net: Arc<Libp2pNetwork>,
     cache_root: PathBuf,
     ffmpeg_bin: PathBuf,
+    compute_slots: Arc<Semaphore>,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
     tokio::spawn(async move {
@@ -260,6 +269,9 @@ pub fn spawn_transcode_runner(
         };
         info!(?caps.encoders, "transcode runner ready");
         while let Some(job) = rx.recv().await {
+            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+                return;
+            };
             let job_id = job.accept.job_id.clone();
             let buyer_peer_id = job.accept.buyer_peer_id.clone();
             match run_transcode_job(&net, &cache_root, &ffmpeg_bin, &caps, &job).await {
@@ -311,13 +323,16 @@ async fn run_transcode_job(
     info!(bytes = input_bytes, path = %input_path.display(), "input downloaded");
 
     let budget = Duration::from_secs(15 * 60);
-    c0mpute_transcode::transcode(
+    let cuda_devices = crate::resources::cuda_devices_per_job();
+    c0mpute_transcode::transcode_with_limits(
         ffmpeg_bin,
         &input_path,
         &output_path,
         &inline.spec,
         caps,
         budget,
+        crate::resources::cpu_threads_per_job(),
+        cuda_devices.as_deref(),
     )
     .await
     .context("ffmpeg")?;

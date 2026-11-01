@@ -166,15 +166,33 @@ pub fn build_args(
     spec: &TranscodeSpec,
     caps: &Capabilities,
 ) -> Vec<String> {
+    build_args_with_threads(input, output, spec, caps, default_cpu_threads())
+}
+
+fn build_args_with_threads(
+    input: &Path,
+    output: &Path,
+    spec: &TranscodeSpec,
+    caps: &Capabilities,
+    cpu_threads: usize,
+) -> Vec<String> {
     let hw = spec
         .hardware_pref
         .unwrap_or_else(|| caps.best_hardware_for(spec.codec));
+    let cpu_threads = cpu_threads.max(1).to_string();
 
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-y".into(),
         "-loglevel".into(),
         "warning".into(),
+        // Bound both decoding and software filter parallelism for this job.
+        "-threads:v".into(),
+        cpu_threads.clone(),
+        "-filter_threads".into(),
+        cpu_threads.clone(),
+        "-filter_complex_threads".into(),
+        cpu_threads.clone(),
     ];
 
     // Decode on CPU for broad input compatibility. Hardware encoding still
@@ -183,6 +201,8 @@ pub fn build_args(
 
     let encoder = spec.codec.ffmpeg_encoder(hw);
     args.extend(["-c:v".into(), encoder.into()]);
+    // Set the output encoder's thread budget after the codec selection.
+    args.extend(["-threads:v".into(), cpu_threads.clone()]);
 
     // Per-encoder rate-control defaults aligned with PRD §9 examples.
     match (spec.codec, hw) {
@@ -220,9 +240,47 @@ pub fn build_args(
 
     args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
     args.extend(spec.extra_ffmpeg_args.iter().cloned());
+    // Keep caller-provided extra args from accidentally raising the node's
+    // per-job CPU share.
+    args.extend([
+        "-threads:v".into(),
+        cpu_threads.clone(),
+        "-filter_threads".into(),
+        cpu_threads.clone(),
+        "-filter_complex_threads".into(),
+        cpu_threads.clone(),
+    ]);
 
     args.push(output.to_string_lossy().into_owned());
     args
+}
+
+fn default_cpu_threads() -> usize {
+    if let Ok(configured) = std::env::var("C0MPUTE_JOB_CPU_THREADS") {
+        if let Ok(threads) = configured.parse::<usize>() {
+            if threads > 0 {
+                return threads;
+            }
+        }
+    }
+    let affinity = std::thread::available_parallelism()
+        .map(|count| count.get() as f64)
+        .unwrap_or(1.0);
+    let quota = std::fs::read_to_string("/sys/fs/cgroup/cpu.max")
+        .ok()
+        .and_then(|contents| {
+            let mut fields = contents.split_whitespace();
+            let quota = fields.next()?;
+            let period = fields.next()?.parse::<f64>().ok()?;
+            if quota == "max" {
+                return None;
+            }
+            let quota = quota.parse::<f64>().ok()?;
+            (quota > 0.0 && period > 0.0).then_some(quota / period)
+        });
+    (quota.map_or(affinity, |quota| affinity.min(quota)) / 2.0)
+        .ceil()
+        .max(1.0) as usize
 }
 
 /// Run a transcode from `input_path` to `output_path` using the configured
@@ -235,6 +293,30 @@ pub async fn transcode(
     caps: &Capabilities,
     budget: Duration,
 ) -> Result<PathBuf> {
+    transcode_with_limits(
+        ffmpeg_bin,
+        input_path,
+        output_path,
+        spec,
+        caps,
+        budget,
+        default_cpu_threads(),
+        None,
+    )
+    .await
+}
+
+/// Run FFmpeg with the node's per-job CPU and optional CUDA device limits.
+pub async fn transcode_with_limits(
+    ffmpeg_bin: &Path,
+    input_path: &Path,
+    output_path: &Path,
+    spec: &TranscodeSpec,
+    caps: &Capabilities,
+    budget: Duration,
+    cpu_threads: usize,
+    cuda_visible_devices: Option<&str>,
+) -> Result<PathBuf> {
     let hardware = spec
         .hardware_pref
         .unwrap_or_else(|| caps.best_hardware_for(spec.codec));
@@ -243,13 +325,18 @@ pub async fn transcode(
         bail!("ffmpeg encoder {encoder} is unavailable on this worker");
     }
 
-    let args = build_args(input_path, output_path, spec, caps);
+    let args = build_args_with_threads(input_path, output_path, spec, caps, cpu_threads);
     debug!(?args, "spawning ffmpeg");
 
-    let child = Command::new(ffmpeg_bin)
+    let mut command = Command::new(ffmpeg_bin);
+    command
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(devices) = cuda_visible_devices {
+        command.env("CUDA_VISIBLE_DEVICES", devices);
+    }
+    let child = command
         .spawn()
         .with_context(|| format!("spawn {}", ffmpeg_bin.display()))?;
 
