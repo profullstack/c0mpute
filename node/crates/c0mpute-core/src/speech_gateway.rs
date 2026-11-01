@@ -407,8 +407,8 @@ async fn run_speech_auction(
         .with_required_capabilities(required)
         .with_max_price_usd(state.max_price_usd)
         .with_bid_window(Duration::from_secs(4))
-        .with_deadline(Duration::from_secs(5 * 60))
-        .with_receipt_timeout(Duration::from_secs(4 * 60));
+        .with_deadline(Duration::from_secs(20 * 60))
+        .with_receipt_timeout(Duration::from_secs(15 * 60));
     run_auction(state.net.clone(), auction)
         .await
         .map_err(|error| {

@@ -737,11 +737,33 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             daemon: _,
         } => {
             let mut cfg = Config::load_or_default(config_path)?;
+            let default_speech_roles = roles.is_none();
             if let Some(rs) = roles {
                 cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
+            } else {
+                for role in [Role::Tts, Role::Stt] {
+                    if !cfg.roles.contains(&role) {
+                        cfg.roles.push(role);
+                    }
+                }
             }
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
+            }
+            if cfg.roles.contains(&Role::Tts) {
+                c0mpute_core::speech::setup_tts("all")
+                    .await
+                    .context("install the default CPU TTS engines before starting the worker")?;
+            }
+            if cfg.roles.contains(&Role::Stt) {
+                c0mpute_core::speech::setup_stt()
+                    .await
+                    .context("install the default CPU STT model before starting the worker")?;
+            }
+            if default_speech_roles {
+                eprintln!(
+                    "TTS and STT are enabled by default; pass --roles to choose a specific role set"
+                );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
             // speech-only or storage-only worker should not start an unrelated

@@ -97,14 +97,18 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 ### CPU speech inference
 
 TTS (`tts.synthesize`) supports Kokoro and Piper on CPU. STT
-(`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8. Install the
-models once on each worker, then start it with the role it should advertise:
+(`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8. A normal
+worker start installs both speech engines and STT on first run, then advertises
+both roles automatically:
 
 ```sh
-c0mpute tts setup --engine all
-c0mpute stt setup
-c0mpute worker start --roles tts,stt
+c0mpute worker start
 ```
+
+Pass `--roles` to choose an explicit role set. For example,
+`c0mpute worker start --roles storage` skips speech setup. Speech inference
+limits ONNX and Whisper CPU threads to the node's container quota when one is
+available.
 
 The Kokoro model files are Apache-2.0. Piper's runtime is GPL-3.0 and its
 individual voice files carry their own licenses; the bundled Joe voice is
