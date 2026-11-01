@@ -769,6 +769,7 @@ mod tests {
                 start_time: String::new(),
                 cpu: String::new(),
                 cores: 1,
+                ram_bytes: None,
                 kernel: String::new(),
                 compiler: String::new(),
                 version: String::new(),
