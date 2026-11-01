@@ -379,7 +379,7 @@ enum KeyCmd {
 }
 
 /// Opportunistic self-update run at the start of any command. Throttled to once
-/// per 5 minutes (a marker under the data dir); when a newer release exists it
+/// per 60 seconds (a marker under the data dir); when a newer release exists it
 /// downloads + verifies + swaps the binary and re-executes the same command on
 /// it. This keeps `c0mpute` current even when no worker is running — the
 /// worker's poll loop only updates while the worker is up. Opt out with
@@ -398,7 +398,7 @@ fn maybe_self_update(cli: &Cli) {
             .and_then(|md| md.modified())
             .map(|t| t.elapsed())
         {
-            if elapsed < std::time::Duration::from_secs(300) {
+            if elapsed < std::time::Duration::from_secs(config::UPDATE_CHECK_INTERVAL_SECS) {
                 return;
             }
         }
@@ -705,7 +705,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     .unwrap_or_else(|| c0mpute_update::DEFAULT_RELEASE_FEED.to_string());
                 println!(
                     "auto-update: on — checks {} every {}s, applies in place",
-                    feed, cfg.update_interval_secs
+                    feed,
+                    config::UPDATE_CHECK_INTERVAL_SECS
                 );
             } else {
                 println!("auto-update: off");
@@ -746,7 +747,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // speech-only or storage-only worker should not start an unrelated
             // inference agent as a side effect of joining c0mpute.
             let auto = cfg.update_auto;
-            let interval_secs = cfg.update_interval_secs.max(60);
+            let interval_secs = config::UPDATE_CHECK_INTERVAL_SECS;
             let serves_infernet = cfg.roles.contains(&Role::Gateway);
             if serves_infernet {
                 // First run: auto-configure the infernet peer (init + register,
@@ -758,7 +759,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 // Opt-in: serve configured models over infernet RPC.
                 let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc);
             }
-            // Check every surface for upgrades on the poll cadence (default 5m):
+            // Check every surface for upgrades on the fixed 60-second cadence:
             // c0mpute self-updates in the supervisor's poll loop; here we refresh
             // the plugins and (re)attempt RPC serving on the same interval. First
             // tick fires immediately.
@@ -2959,11 +2960,16 @@ fn npm_latest_version(url: &str) -> Option<String> {
 /// next start succeeds and the old process lives on. On dev2 that reached 326 daemons / 22 GB.
 #[cfg(target_os = "linux")]
 fn reap_stale_infernet_daemons() {
-    use std::os::unix::fs::MetadataExt;
     let Some(pidfile) = infernet_config_path().map(|p| p.with_file_name("daemon.pid")) else {
         return;
     };
-    let Some(current) = std::fs::read_to_string(&pidfile)
+    reap_stale_infernet_daemons_from(&pidfile);
+}
+
+#[cfg(target_os = "linux")]
+fn reap_stale_infernet_daemons_from(pidfile: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Some(current) = std::fs::read_to_string(pidfile)
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
     else {
@@ -3114,10 +3120,9 @@ mod infernet_tests {
             });
             assert!(ready, "fake daemon never showed the infernet cmdline");
         }
-        std::fs::write(dir.join("infernet/daemon.pid"), keep.id().to_string()).unwrap();
-        // SAFETY: the only test that reads XDG_CONFIG_HOME.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
-        reap_stale_infernet_daemons();
+        let pidfile = dir.join("infernet/daemon.pid");
+        std::fs::write(&pidfile, keep.id().to_string()).unwrap();
+        reap_stale_infernet_daemons_from(&pidfile);
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(
             stale.try_wait().unwrap().is_some(),

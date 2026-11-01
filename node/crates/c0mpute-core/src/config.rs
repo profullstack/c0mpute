@@ -24,8 +24,8 @@ pub struct Config {
     pub update_channel: String,
     #[serde(default = "default_auto_update")]
     pub update_auto: bool,
-    /// How often the worker polls the release feed for new versions. Defaults
-    /// to 5 minutes per user direction; override via config or env.
+    /// Retained for compatibility with existing config files. Update checks
+    /// use a fixed 60-second cadence.
     #[serde(default = "default_update_interval_secs")]
     pub update_interval_secs: u64,
     /// Override the release-feed URL.
@@ -111,8 +111,10 @@ fn default_auto_update() -> bool {
     true
 }
 fn default_update_interval_secs() -> u64 {
-    300 // 5 minutes
+    UPDATE_CHECK_INTERVAL_SECS
 }
+
+pub const UPDATE_CHECK_INTERVAL_SECS: u64 = 60;
 
 pub fn config_dir() -> Option<PathBuf> {
     // ~/.config/c0mpute on Linux, equivalent on macOS. Mirrors the install
@@ -157,8 +159,12 @@ impl Config {
 
         let text = std::fs::read_to_string(&canonical)
             .with_context(|| format!("read config {}", canonical.display()))?;
-        let cfg: Config = toml::from_str(&text)
+        let mut cfg: Config = toml::from_str(&text)
             .with_context(|| format!("parse config {}", canonical.display()))?;
+        // Older configs contain a 300-second cadence. Keep the serialized
+        // field for backwards compatibility, but normalize it to the fixed
+        // 60-second updater interval when loading them.
+        cfg.update_interval_secs = UPDATE_CHECK_INTERVAL_SECS;
         Ok(cfg)
     }
 
