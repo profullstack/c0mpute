@@ -2960,11 +2960,16 @@ fn npm_latest_version(url: &str) -> Option<String> {
 /// next start succeeds and the old process lives on. On dev2 that reached 326 daemons / 22 GB.
 #[cfg(target_os = "linux")]
 fn reap_stale_infernet_daemons() {
-    use std::os::unix::fs::MetadataExt;
     let Some(pidfile) = infernet_config_path().map(|p| p.with_file_name("daemon.pid")) else {
         return;
     };
-    let Some(current) = std::fs::read_to_string(&pidfile)
+    reap_stale_infernet_daemons_from(&pidfile);
+}
+
+#[cfg(target_os = "linux")]
+fn reap_stale_infernet_daemons_from(pidfile: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Some(current) = std::fs::read_to_string(pidfile)
         .ok()
         .and_then(|s| s.trim().parse::<i32>().ok())
     else {
@@ -3115,10 +3120,9 @@ mod infernet_tests {
             });
             assert!(ready, "fake daemon never showed the infernet cmdline");
         }
-        std::fs::write(dir.join("infernet/daemon.pid"), keep.id().to_string()).unwrap();
-        // SAFETY: the only test that reads XDG_CONFIG_HOME.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
-        reap_stale_infernet_daemons();
+        let pidfile = dir.join("infernet/daemon.pid");
+        std::fs::write(&pidfile, keep.id().to_string()).unwrap();
+        reap_stale_infernet_daemons_from(&pidfile);
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(
             stale.try_wait().unwrap().is_some(),
