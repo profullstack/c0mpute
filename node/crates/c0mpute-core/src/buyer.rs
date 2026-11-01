@@ -39,6 +39,9 @@ pub struct JobAuction {
     /// When non-empty, only bids from these peer ids are considered (the
     /// buyer's trusted workers). Others are ignored, not rejected.
     pub allowed_bidders: Vec<String>,
+    /// Bids from these peer ids are ignored. This is useful when retrying a
+    /// job after a selected worker cannot return its output.
+    pub excluded_bidders: Vec<String>,
 }
 
 impl JobAuction {
@@ -52,11 +55,17 @@ impl JobAuction {
             bid_window: DEFAULT_BID_WINDOW,
             receipt_timeout: DEFAULT_RECEIPT_TIMEOUT,
             allowed_bidders: Vec::new(),
+            excluded_bidders: Vec::new(),
         }
     }
 
     pub fn with_allowed_bidders(mut self, peers: Vec<String>) -> Self {
         self.allowed_bidders = peers;
+        self
+    }
+
+    pub fn with_excluded_bidders(mut self, peers: Vec<String>) -> Self {
+        self.excluded_bidders = peers;
         self
     }
 
@@ -140,6 +149,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             && !auction.allowed_bidders.contains(&bid.bidder_peer_id)
                         {
                             debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a worker outside the allowlist ignored");
+                            continue;
+                        }
+                        if auction.excluded_bidders.contains(&bid.bidder_peer_id) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from an excluded worker ignored");
                             continue;
                         }
                         if !source_matches_claim(&msg, &bid.bidder_peer_id) {

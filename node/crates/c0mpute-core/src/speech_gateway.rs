@@ -26,6 +26,7 @@ const MAX_TTS_CHARS: usize = 6_000;
 const MAX_CONCURRENT_SPEECH_JOBS: usize = 6;
 const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const MAX_WAV_BYTES: usize = 20 * 1024 * 1024;
+const MAX_SPEECH_WORKER_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -259,7 +260,7 @@ async fn synthesize(
         "speed": input.speed,
         "persona": input.persona,
     });
-    let outcome = run_speech_auction(
+    let (outcome, bytes) = run_speech_job(
         &state,
         "tts.synthesize",
         spec,
@@ -267,24 +268,6 @@ async fn synthesize(
             "c0mpute:role:tts".to_string(),
             format!("c0mpute:tts:engine:{}", input.engine),
         ],
-    )
-    .await?;
-    if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
-        return Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            "c0mpute worker failed the synthesis job".into(),
-        ));
-    }
-    let output_hash = outcome.receipt.output_hash.as_deref().ok_or_else(|| {
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "worker returned no audio result".into(),
-        )
-    })?;
-    let bytes = fetch_result(
-        &state,
-        output_hash,
-        &outcome.accepted_bid.bidder_peer_id,
         MAX_WAV_BYTES,
     )
     .await?;
@@ -350,7 +333,7 @@ async fn transcribe(
         "model": query.model,
         "language": query.language,
     });
-    let outcome = run_speech_auction(
+    let (outcome, bytes) = run_speech_job(
         &state,
         "stt.transcribe",
         spec,
@@ -358,24 +341,6 @@ async fn transcribe(
             "c0mpute:role:stt".to_string(),
             "c0mpute:stt:engine:faster-whisper".to_string(),
         ],
-    )
-    .await?;
-    if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
-        return Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            "c0mpute worker failed the transcription job".into(),
-        ));
-    }
-    let output_hash = outcome.receipt.output_hash.as_deref().ok_or_else(|| {
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "worker returned no transcript".into(),
-        )
-    })?;
-    let bytes = fetch_result(
-        &state,
-        output_hash,
-        &outcome.accepted_bid.bidder_peer_id,
         10 * 1024 * 1024,
     )
     .await?;
@@ -402,9 +367,11 @@ async fn run_speech_auction(
     workload: &str,
     spec: serde_json::Value,
     required: Vec<String>,
+    excluded_bidders: &[String],
 ) -> ApiResult<crate::AuctionOutcome> {
     let auction = JobAuction::new(workload, spec)
         .with_required_capabilities(required)
+        .with_excluded_bidders(excluded_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
         .with_bid_window(Duration::from_secs(4))
         .with_deadline(Duration::from_secs(20 * 60))
@@ -418,6 +385,89 @@ async fn run_speech_auction(
                 "no c0mpute worker completed the speech job".into(),
             )
         })
+}
+
+/// Run a speech job and retrieve its output. If the worker completed the job
+/// but cannot be reached to return the result, re-auction the same work on a
+/// different peer. Speech jobs are idempotent and the configured bid ceiling
+/// still applies on each attempt.
+async fn run_speech_job(
+    state: &GatewayState,
+    workload: &str,
+    spec: serde_json::Value,
+    required: Vec<String>,
+    max_bytes: usize,
+) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
+    let mut excluded_bidders = Vec::new();
+    let mut last_error = None;
+
+    for attempt in 1..=MAX_SPEECH_WORKER_ATTEMPTS {
+        let outcome = match run_speech_auction(
+            state,
+            workload,
+            spec.clone(),
+            required.clone(),
+            &excluded_bidders,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Err(last_error.unwrap_or(error)),
+        };
+        let worker = outcome.accepted_bid.bidder_peer_id.clone();
+        let result = if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
+            Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("c0mpute worker failed the {workload} job"),
+            ))
+        } else if let Some(output_hash) = outcome.receipt.output_hash.as_deref() {
+            match fetch_result(state, output_hash, &worker, max_bytes).await {
+                Ok(bytes) if valid_speech_result(workload, &bytes) => Ok(bytes),
+                Ok(_) => Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "worker returned an invalid speech result".into(),
+                )),
+                Err(error) => Err(error),
+            }
+        } else {
+            Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "worker returned no speech result".into(),
+            ))
+        };
+
+        match result {
+            Ok(bytes) => return Ok((outcome, bytes)),
+            Err(error) => {
+                tracing::warn!(
+                    workload,
+                    attempt,
+                    worker = %worker,
+                    err = %error.1,
+                    "speech worker failed to return a usable result; trying another worker"
+                );
+                excluded_bidders.push(worker);
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no c0mpute worker completed the speech job".into(),
+        )
+    }))
+}
+
+fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
+    match workload {
+        "tts.synthesize" => bytes.len() >= 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+        "stt.transcribe" => {
+            serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|value| value.is_object())
+        }
+        _ => true,
+    }
 }
 
 async fn fetch_result(
@@ -442,28 +492,61 @@ async fn fetch_result(
             "worker returned an invalid peer id".into(),
         )
     })?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let mut last_error = None;
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_secs(20);
+    let direct_deadline = (start + Duration::from_secs(3)).min(deadline);
+    let direct_error = match tokio::time::timeout_at(
+        direct_deadline,
+        state.net.fetch_from_peer(provider, &request),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "direct fetch timed out".into(),
+    };
+
+    // A job receipt can arrive before the provider record has reached this
+    // gateway's routing table. Try the normal DHT provider lookup before
+    // giving up on a worker whose result is otherwise complete.
+    let dht_deadline = (tokio::time::Instant::now() + Duration::from_secs(12)).min(deadline);
+    let mut last_error =
+        match tokio::time::timeout_at(dht_deadline, state.net.fetch(&request)).await {
+            Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
+            Ok(Err(error)) => format!("direct fetch: {direct_error}; DHT fetch: {error}"),
+            Err(_) => format!("direct fetch: {direct_error}; DHT provider fetch timed out"),
+        };
+
     while tokio::time::Instant::now() < deadline {
-        match state.net.fetch_from_peer(provider, &request).await {
-            Ok(bytes) if Hash::of(&bytes) == hash && bytes.len() <= max_bytes => return Ok(bytes),
-            Ok(_) => {
-                return Err(ApiError(
-                    StatusCode::BAD_GATEWAY,
-                    "worker result hash or size is invalid".into(),
-                ));
-            }
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+        let retry_deadline = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
+        match tokio::time::timeout_at(
+            retry_deadline,
+            state.net.fetch_from_peer(provider, &request),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => last_error = "direct fetch timed out".into(),
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    tracing::warn!(err = ?last_error, "timed out fetching c0mpute speech result");
+    tracing::warn!(err = %last_error, "timed out fetching c0mpute speech result");
     Err(ApiError(
         StatusCode::GATEWAY_TIMEOUT,
         "timed out fetching the c0mpute result".into(),
     ))
+}
+
+fn validate_result(bytes: Vec<u8>, hash: Hash, max_bytes: usize) -> ApiResult<Vec<u8>> {
+    if Hash::of(&bytes) == hash && bytes.len() <= max_bytes {
+        Ok(bytes)
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "worker result hash or size is invalid".into(),
+        ))
+    }
 }
 
 fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<()> {
