@@ -131,11 +131,39 @@ pub async fn upgrade_now(current_version: &str, release_feed_url: &str) -> Resul
             current: current_version.to_string(),
         });
     }
+    // Save the executable path before replacing its on-disk inode. After the
+    // swap, launch the new binary's full benchmark under this node's identity
+    // so its refreshed report is what the worker advertises on restart.
+    let new_exe = std::env::current_exe().ok();
     perform_upgrade(&manifest).await?;
+    if let Some(exe) = new_exe {
+        if let Err(error) = run_post_update_benchmark(exe).await {
+            warn!(err = %error, "post-update benchmark failed; continuing with the updated binary");
+        }
+    } else {
+        warn!("could not locate updated executable to run the post-update benchmark");
+    }
     Ok(UpgradeOutcome::Upgraded {
         from: current_version.to_string(),
         to: manifest.version,
     })
+}
+
+async fn run_post_update_benchmark(exe: std::path::PathBuf) -> Result<()> {
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(exe)
+            .arg("benchmark")
+            // The child already is the newly installed version; avoid another
+            // release-feed request before it starts measuring this machine.
+            .env("C0MPUTE_NO_AUTO_UPDATE", "1")
+            .status()
+    })
+    .await
+    .context("join post-update benchmark")??;
+    if !status.success() {
+        anyhow::bail!("`c0mpute benchmark` exited with {status}");
+    }
+    Ok(())
 }
 
 /// Map the compile-time target to the release artifact's os/arch tokens

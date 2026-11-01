@@ -63,6 +63,7 @@ enum Cmd {
     /// Benchmark this machine (fib / matmul / hash at 1…N threads) and record
     /// a score the worker advertises to the network. Report lands in
     /// `<data-dir>/bench.json`, same shape as fleetcode's runtime-benchmarks.
+    #[command(alias = "benchmark")]
     Bench {
         #[command(subcommand)]
         cmd: Option<BenchCmd>,
