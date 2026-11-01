@@ -175,6 +175,8 @@ pub struct Capabilities {
 pub enum Role {
     Storage,
     Transcode,
+    Tts,
+    Stt,
     Gateway,
     Verifier,
 }
@@ -199,10 +201,7 @@ mod tests {
 
     #[test]
     fn codec_encoder_lookup() {
-        assert_eq!(
-            Codec::Av1.ffmpeg_encoder(HardwarePref::Nvenc),
-            "av1_nvenc"
-        );
+        assert_eq!(Codec::Av1.ffmpeg_encoder(HardwarePref::Nvenc), "av1_nvenc");
         assert_eq!(Codec::H264.ffmpeg_encoder(HardwarePref::Cpu), "libx264");
     }
 }

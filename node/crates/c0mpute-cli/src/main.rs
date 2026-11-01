@@ -27,7 +27,7 @@ mod temporal;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use c0mpute_core::{
     Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing, run_auction,
     run_register,
@@ -41,7 +41,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in plugins:\n  transcode  (FFmpeg, in-process)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper or Kokoro, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
 )]
 struct Cli {
     /// Override the config file location.
@@ -115,6 +115,21 @@ enum Cmd {
     Transcode {
         #[command(subcommand)]
         cmd: TranscodeCmd,
+    },
+    /// Install and inspect local CPU TTS voices.
+    Tts {
+        #[command(subcommand)]
+        cmd: TtsCmd,
+    },
+    /// Install local CPU speech recognition models.
+    Stt {
+        #[command(subcommand)]
+        cmd: SttCmd,
+    },
+    /// Run the authenticated HTTP buyer bridge for P2P speech inference.
+    Speech {
+        #[command(subcommand)]
+        cmd: SpeechCmd,
     },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
@@ -291,6 +306,34 @@ enum TranscodeCmd {
 enum PresetCmd {
     /// List available presets.
     List,
+}
+
+#[derive(Subcommand, Debug)]
+enum TtsCmd {
+    /// Install CPU TTS runtime and voice models for this worker.
+    Setup {
+        #[arg(long, default_value = "all", value_parser = ["all", "piper", "kokoro"])]
+        engine: String,
+    },
+    /// Show supported voices and the recommended OpenProfile voice map.
+    Voices,
+}
+
+#[derive(Subcommand, Debug)]
+enum SttCmd {
+    /// Install multilingual faster-whisper base and its CPU runtime.
+    Setup,
+}
+
+#[derive(Subcommand, Debug)]
+enum SpeechCmd {
+    /// Serve /v1/tts and /v1/stt as a P2P buyer gateway.
+    Serve {
+        #[arg(long, env = "C0MPUTE_SPEECH_BIND", default_value = "127.0.0.1:8787")]
+        bind: std::net::SocketAddr,
+        #[arg(long, env = "C0MPUTE_SPEECH_MAX_PRICE_USD", default_value_t = 0.0)]
+        max_price_usd: f64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -500,6 +543,9 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Plugin { cmd } => run_plugin(cmd),
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
+        Cmd::Tts { cmd } => run_tts(cmd).await,
+        Cmd::Stt { cmd } => run_stt(cmd).await,
+        Cmd::Speech { cmd } => run_speech(cmd).await,
         Cmd::Chat { cmd } => run_chat(cmd),
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
@@ -696,24 +742,27 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
             }
-            // First run: auto-configure the infernet peer (init + register, plus
-            // token login if INFERNET_TOKEN is set) so the node shows up on the
-            // infernet control plane. Then make sure its node daemon is up so it
-            // picks up jobs (model pulls, inference). Both best-effort; c0mpute
-            // drives the plugins so the operator doesn't run them by hand.
+            // Only gateway workers run the Infernet provider bootstrap. A
+            // speech-only or storage-only worker should not start an unrelated
+            // inference agent as a side effect of joining c0mpute.
             let auto = cfg.update_auto;
             let interval_secs = cfg.update_interval_secs.max(60);
-            bootstrap_infernet_first_run();
-            ensure_infernet_daemon();
-            reap_stale_infernet_daemons();
-            // Opt-in: serve configured models over infernet RPC (builds llama.cpp
-            // in the background on first run, then serves once ready).
-            let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc);
+            let serves_infernet = cfg.roles.contains(&Role::Gateway);
+            if serves_infernet {
+                // First run: auto-configure the infernet peer (init + register,
+                // plus token login if INFERNET_TOKEN is set), then ensure its
+                // node daemon is available for managed inference jobs.
+                bootstrap_infernet_first_run();
+                ensure_infernet_daemon();
+                reap_stale_infernet_daemons();
+                // Opt-in: serve configured models over infernet RPC.
+                let _ = tokio::task::spawn_blocking(bootstrap_infernet_rpc);
+            }
             // Check every surface for upgrades on the poll cadence (default 5m):
             // c0mpute self-updates in the supervisor's poll loop; here we refresh
             // the plugins and (re)attempt RPC serving on the same interval. First
             // tick fires immediately.
-            if auto {
+            if auto && serves_infernet {
                 let interval = std::time::Duration::from_secs(interval_secs);
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
@@ -1264,6 +1313,63 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
     }
 }
 
+async fn run_tts(cmd: TtsCmd) -> Result<()> {
+    match cmd {
+        TtsCmd::Setup { engine } => {
+            c0mpute_core::speech::setup_tts(&engine).await?;
+            println!(
+                "installed {engine} CPU voices under {}",
+                c0mpute_core::speech::speech_root().display()
+            );
+            println!(
+                "start a worker with `c0mpute worker start --roles tts` to advertise TTS jobs"
+            );
+            Ok(())
+        }
+        TtsCmd::Voices => {
+            println!("Kokoro: af_sarah, af_bella, am_onyx, am_michael");
+            println!("Piper:  en_US-joe-medium, en_US-norman-medium");
+            println!("\nOpenProfile role map:");
+            for profile in c0mpute_core::speech_profiles::AGENTS {
+                println!(
+                    "@{}: {} / {}:{}",
+                    profile.slug, profile.persona, profile.engine, profile.voice
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn run_stt(cmd: SttCmd) -> Result<()> {
+    match cmd {
+        SttCmd::Setup => {
+            c0mpute_core::speech::setup_stt().await?;
+            println!(
+                "installed multilingual faster-whisper base for CPU under {}",
+                c0mpute_core::speech::speech_root().display()
+            );
+            println!(
+                "start a worker with `c0mpute worker start --roles stt` to advertise STT jobs"
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn run_speech(cmd: SpeechCmd) -> Result<()> {
+    match cmd {
+        SpeechCmd::Serve {
+            bind,
+            max_price_usd,
+        } => {
+            let token = std::env::var("C0MPUTE_SPEECH_TOKEN")
+                .context("set C0MPUTE_SPEECH_TOKEN to a random secret (at least 24 characters)")?;
+            c0mpute_core::speech_gateway::serve(bind, token, max_price_usd).await
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // secure-chat plugin (in-process)
 // ────────────────────────────────────────────────────────────────────────
@@ -1411,6 +1517,14 @@ fn run_plugin(cmd: PluginCmd) -> Result<()> {
         PluginCmd::List => {
             println!(
                 "transcode  v{:<8}  in-process  built-in",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "tts        v{:<8}  in-process  CPU (Piper / Kokoro)",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "stt        v{:<8}  in-process  CPU (faster-whisper)",
                 env!("CARGO_PKG_VERSION")
             );
             for bin in ["coinpay", "infernet"] {
@@ -1606,6 +1720,8 @@ fn parse_role(s: &str) -> Option<Role> {
     match s.trim().to_ascii_lowercase().as_str() {
         "storage" => Some(Role::Storage),
         "transcode" => Some(Role::Transcode),
+        "tts" => Some(Role::Tts),
+        "stt" => Some(Role::Stt),
         "gateway" => Some(Role::Gateway),
         "verifier" => Some(Role::Verifier),
         other => {

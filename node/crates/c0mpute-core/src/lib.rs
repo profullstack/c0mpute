@@ -11,6 +11,9 @@ pub mod dispatch;
 pub mod pricing;
 pub mod register;
 pub mod runner;
+pub mod speech;
+pub mod speech_gateway;
+pub mod speech_profiles;
 pub mod status_aggregator;
 pub mod supervisor;
 pub mod temporal;
@@ -23,7 +26,7 @@ pub use dispatch::{
     run_worker_subscriber_priced, workload_types_from_roles,
 };
 pub use register::{Registration, run_register};
-pub use runner::TranscodeJobInline;
+pub use runner::{SttJobInline, TranscodeJobInline, TtsJobInline};
 pub use supervisor::Supervisor;
 
 use anyhow::Result;

@@ -1,21 +1,17 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Text-to-speech synthesis. Suggested upstreams: Piper (fastest CPU,
-#   per-voice ONNX), Coqui XTTS (multilingual, voice-cloning), Kokoro
-#   (high quality, small). Input: {text, voice, format}. Output: WAV or
-#   OGG/Opus. Validation is hard — propose duration-bounds check + a
-#   second worker re-synth + perceptual-audio-hash agreement, or just
-#   single-worker with reputation slashing on user dispute.
+# CPU implementation lives in c0mpute-core. The node installs the selected
+# runtimes and model files into its per-user data directory; no API key or GPU
+# is required. Piper runtime is GPL-3.0; the selected Piper voice files have
+# individual licenses. Kokoro model files are Apache-2.0.
 
 [module]
 id          = "tts"
 name        = "TTS — text-to-speech"
-version     = "0.2.34"
+version     = "0.2.36"
 kind        = "workload"
 category    = "ai"
-description = "Decentralized text-to-speech synthesis (Piper, Coqui XTTS, Kokoro) for narration, audiobooks, and accessibility."
+description = "CPU text-to-speech inference over c0mpute using Piper or Kokoro."
 author      = "Profullstack"
 license     = "MIT"
 keywords    = ["tts", "piper", "xtts", "kokoro", "synthesis", "audio"]
@@ -24,19 +20,18 @@ keywords    = ["tts", "piper", "xtts", "kokoro", "synthesis", "audio"]
 c0mpute      = ">=0.1.0"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["gpu:nvidia?", "gpu:apple?"]
+capabilities = ["cpu"]
 
 [module.workloads]
-"tts.synthesize" = { command = "synthesize", validation = "duration_bounds_and_phash" }
+"tts.synthesize" = { command = "synthesize", validation = "valid_wav_and_size" }
 
 [module.dispatch]
-mode   = "subprocess"
-binary = "c0mpute-tts"
+mode = "in-process"
 
 [module.surfaces]
 cli = "c0mpute tts"
 
 [module.config.defaults]
-engine = "piper"
-voice  = "en_US-lessac-medium"
+engine = "kokoro"
+voice  = "af_sarah"
 format = "wav"
