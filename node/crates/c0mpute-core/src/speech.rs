@@ -83,15 +83,32 @@ pub fn available_tts_engines() -> Vec<&'static str> {
     engines
 }
 
+fn piper_ready() -> bool {
+    PIPER_VOICES
+        .iter()
+        .all(|voice| tts_voice_available("piper", voice))
+}
+
+fn kokoro_ready() -> bool {
+    KOKORO_VOICES
+        .iter()
+        .all(|voice| tts_voice_available("kokoro", voice))
+}
+
 pub async fn setup_tts(engine: &str) -> Result<()> {
     if engine != "piper" && engine != "kokoro" && engine != "all" {
         bail!("engine must be piper, kokoro, or all");
     }
+    let install_piper = (engine == "piper" || engine == "all") && !piper_ready();
+    let install_kokoro = (engine == "kokoro" || engine == "all") && !kokoro_ready();
+    if !install_piper && !install_kokoro {
+        return Ok(());
+    }
+
     ensure_venv().await?;
     let root = speech_root();
-    tokio::fs::create_dir_all(root.join("models/piper")).await?;
-    tokio::fs::create_dir_all(root.join("models/kokoro")).await?;
-    if engine == "piper" || engine == "all" {
+    if install_piper {
+        tokio::fs::create_dir_all(root.join("models/piper")).await?;
         pip_install(&["piper-tts==1.8.0"]).await?;
         let mut command = Command::new(python_path());
         command
@@ -101,7 +118,8 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
         run_checked(command, "download Piper voices").await?;
         tokio::fs::write(root.join(".piper-ready"), b"piper-tts 1.8.0\n").await?;
     }
-    if engine == "kokoro" || engine == "all" {
+    if install_kokoro {
+        tokio::fs::create_dir_all(root.join("models/kokoro")).await?;
         pip_install(&["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
         download_verified(
             KOKORO_MODEL_URL,
@@ -121,6 +139,9 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
 }
 
 pub async fn setup_stt() -> Result<()> {
+    if stt_ready() {
+        return Ok(());
+    }
     ensure_venv().await?;
     // faster-whisper 1.2.1 still passes `metadata_errors` to av.open;
     // PyAV 19 removed that keyword, so keep the runtime on the compatible API.
