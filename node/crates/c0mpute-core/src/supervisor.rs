@@ -164,7 +164,7 @@ impl Supervisor {
             });
         }
 
-        if self.config.update_auto {
+        if c0mpute_update::auto_update_enabled(self.config.update_auto) {
             let feed = self
                 .config
                 .update_feed_url

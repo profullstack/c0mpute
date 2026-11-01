@@ -14,7 +14,7 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.2.41"
+version     = "0.2.42"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized image generation (Stable Diffusion, SDXL, Flux) on consumer/prosumer GPUs."

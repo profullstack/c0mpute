@@ -165,15 +165,69 @@ pub async fn setup_stt() -> Result<()> {
 }
 
 async fn ensure_venv() -> Result<()> {
-    if python_path().is_file() {
-        return Ok(());
-    }
     let root = speech_root();
     tokio::fs::create_dir_all(&root).await?;
+    let venv = root.join("venv");
+    if python_path().is_file() {
+        let mut check_pip = Command::new(python_path());
+        check_pip
+            .args(["-m", "pip", "--version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if check_pip
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+
+        // A venv can survive a partial install with its interpreter present
+        // but pip missing. Repair it in place when ensurepip is available;
+        // otherwise rebuild it and clear readiness markers so packages are
+        // installed again against the new environment.
+        let mut ensure_pip = Command::new(python_path());
+        ensure_pip
+            .args(["-m", "ensurepip", "--upgrade"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if ensure_pip
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+        {
+            return Ok(());
+        }
+
+        tokio::fs::remove_dir_all(&venv).await?;
+        for marker in [".piper-ready", ".kokoro-ready", ".stt-ready"] {
+            let _ = tokio::fs::remove_file(root.join(marker)).await;
+        }
+    }
+
     let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
     let mut command = Command::new(python);
-    command.args(["-m", "venv"]).arg(root.join("venv"));
-    run_checked(command, "create the isolated speech Python environment").await
+    command.args(["-m", "venv"]).arg(&venv);
+    run_checked(command, "create the isolated speech Python environment").await?;
+
+    let mut check_pip = Command::new(python_path());
+    check_pip
+        .args(["-m", "pip", "--version"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if !check_pip
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+    {
+        bail!(
+            "the speech Python environment was created without pip; install Python venv support and retry"
+        );
+    }
+    Ok(())
 }
 
 async fn pip_install(packages: &[&str]) -> Result<()> {

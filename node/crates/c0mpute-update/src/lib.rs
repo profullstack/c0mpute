@@ -47,6 +47,15 @@ pub enum UpgradeOutcome {
     Available { current: String, latest: String },
 }
 
+/// Whether this process is allowed to update itself. Operators can disable
+/// background and opportunistic updates with `C0MPUTE_NO_AUTO_UPDATE=1`.
+pub fn auto_update_enabled(configured: bool) -> bool {
+    configured
+        && !std::env::var("C0MPUTE_NO_AUTO_UPDATE")
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
 /// Check if `manifest.version` is newer than `current` using simple semver
 /// comparison.
 pub fn should_upgrade(current: &str, manifest: &ReleaseManifest) -> Result<bool> {
