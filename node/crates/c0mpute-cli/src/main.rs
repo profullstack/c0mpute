@@ -2917,7 +2917,7 @@ fn prune_rpc_primaries(keep: &[String]) {
 
 /// (binary, self-update args) for the peer-CLI plugins c0mpute manages.
 const PLUGIN_UPDATERS: &[(&str, &[&str])] =
-    &[("coinpay", &["self", "update"]), ("infernet", &["update"])];
+    &[("coinpay", &["update"]), ("infernet", &["update"])];
 
 /// Upgrade every installed plugin in the foreground, streaming their output.
 /// Used by `c0mpute update` so a manual update always brings plugins along.
