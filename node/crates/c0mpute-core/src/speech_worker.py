@@ -1,7 +1,7 @@
 """Small CPU speech worker embedded into the c0mpute binary."""
 import json
-import subprocess
 import sys
+import wave
 from pathlib import Path
 
 
@@ -10,11 +10,12 @@ def tts(root: Path, output: Path, request: dict) -> None:
     engine = request["engine"]
     voice = request["voice"]
     if engine == "piper":
+        from piper import PiperVoice
+
         model = root / "models" / "piper" / f"{voice}.onnx"
-        subprocess.run(
-            [sys.executable, "-m", "piper", "--model", str(model), "--output_file", str(output)],
-            input=text + "\n", text=True, check=True,
-        )
+        piper_voice = PiperVoice.load(model)
+        with wave.open(str(output), "wb") as wav_file:
+            piper_voice.synthesize_wav(text, wav_file)
         return
     if engine == "kokoro":
         import soundfile as sf
