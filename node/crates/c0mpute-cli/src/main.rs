@@ -686,6 +686,35 @@ fn peer_status_text(bin: &str) -> String {
 // worker
 // ────────────────────────────────────────────────────────────────────────
 
+/// Ensure this worker has published a full benchmark from its current binary.
+/// Older c0mpute releases may update themselves without knowing about the
+/// post-update hook, so check the saved report on every worker start as a
+/// compatibility backstop. The report version also prevents repeat runs on
+/// ordinary restarts.
+fn ensure_current_version_benchmark() {
+    let report = c0mpute_bench::load(&bench_report_path()).ok().flatten();
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current_report = report.as_ref().is_some_and(|report| {
+        !report.metadata.quick && report.score > 0 && report.metadata.version == current_version
+    });
+    if current_report {
+        return;
+    }
+
+    tracing::info!(
+        version = current_version,
+        "worker benchmark is missing, quick, or stale; running a full benchmark before advertising"
+    );
+    match run_bench(None, false, false, None) {
+        Ok(()) => tracing::info!(version = current_version, "worker benchmark refreshed"),
+        Err(error) => tracing::warn!(
+            version = current_version,
+            err = %error,
+            "worker benchmark failed; continuing worker startup"
+        ),
+    }
+}
+
 async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
         WorkerCmd::Register => {
@@ -764,6 +793,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             daemon: _,
         } => {
             let mut cfg = Config::load_or_default(config_path)?;
+            ensure_current_version_benchmark();
             let default_speech_roles = roles.is_none();
             if let Some(rs) = roles {
                 cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
