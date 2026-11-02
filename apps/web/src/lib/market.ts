@@ -1,8 +1,9 @@
 /**
  * The c0mpute market fee: what c0mpute keeps from a job bought through the
- * market (c0mpute.com/market and the Infernet gateway). The node operator gets
- * the rest. Anthony set it on 2026-10-27; Infernet applies the same number as
- * its house fee on paid jobs.
+ * c0mpute market (c0mpute.com/market). The node operator gets the rest.
+ * Anthony set it on 2026-10-27. Infernet is a separate product with its own
+ * 2% house fee on paid inference (decided 2026-11-02: two products, two fees);
+ * the market fee never applies on top of an Infernet job.
  */
 export const MARKET_FEE_PCT = 5;
 export const OPERATOR_SHARE_PCT = 100 - MARKET_FEE_PCT;

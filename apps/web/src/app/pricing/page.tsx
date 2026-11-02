@@ -61,9 +61,19 @@ export default function PricingPage() {
               <td className="py-2 text-[var(--color-dim)] leading-6">
                 <strong className="text-[var(--color-fg)]">5% market fee when market settlement launches; not collected today.</strong>{" "}
                 Once it is live, jobs bought through <Link href="/market">c0mpute.com/market</Link>{" "}
-                and paid Infernet inference jobs will pay the node operator 95%
-                of the price, and c0mpute will keep 5% for matching, billing,
-                settlement and support. Direct protocol deals stay at 0%.
+                will pay the node operator 95% of the price, and c0mpute will
+                keep 5% for matching, billing, settlement and support. Direct
+                protocol deals stay at 0%.
+              </td>
+            </tr>
+            <tr>
+              <td className="py-2 pr-6 align-top accent whitespace-nowrap">infernet</td>
+              <td className="py-2 text-[var(--color-dim)] leading-6">
+                <strong className="text-[var(--color-fg)]">A separate product, 2% house fee.</strong>{" "}
+                Paid inference bought on{" "}
+                <a href="https://infernetprotocol.com" target="_blank" rel="noopener noreferrer">infernetprotocol.com</a>{" "}
+                runs on c0mpute nodes but is billed by Infernet: the operator
+                keeps 98%. The c0mpute market fee is never added on top.
               </td>
             </tr>
             <tr>
