@@ -10,8 +10,11 @@
 // What each link becomes:
 //   rssamplifier.com/topics/<a>[,<b>,...]  every feed filed under each topic -> their recent posts
 //   rssamplifier.com/<feed-slug>           that one feed's recent posts
-//   pit.world/search?q=<a>[,<b>,...]       each term searched on pit.world (web, news and scholar
-//                                          tabs, or the &t= tab in the link); every result page fetched
+//   pit.world/search?q=<a>[,<b>,...]       with PIT_CORPUS_KEY: every page in pit.world's own index
+//                                          matching any term, full text, paged from /api/corpus
+//                                          (--pit-pages per link, publishers' AI-training opt-outs
+//                                          already excluded). Without a key: each term searched on the
+//                                          web, news and scholar tabs and every result page fetched.
 //   anything else                          the page itself, as one document
 //
 // rssamplifier is public (no key): /api/topics, /api/feeds and the read_post tool
@@ -47,6 +50,9 @@ const FULL = Boolean(opts.full);
 const OUT = opts.out ?? 'data/corpus.jsonl';
 const MIN_CHARS = Number(opts['min-chars'] ?? 200);
 const CONCURRENCY = 3;
+const PIT_KEY = process.env.PIT_CORPUS_KEY;
+const PIT_PAGES = Number(opts['pit-pages'] ?? 1000);
+const corpusDocs = [];
 const PIT_TABS = String(opts['pit-tabs'] ?? 'web,news,scholar').split(',');
 const UA = 'business-strategist-agent harvester (+https://github.com/profullstack/c0mpute)';
 
@@ -138,6 +144,26 @@ for (const link of links) {
     // pit.world search returns 10 results per query and does not page, so a
     // comma list is one search per term, across several tabs.
     const terms = url.searchParams.get('q').split(',').map((t) => t.trim()).filter(Boolean);
+    if (PIT_KEY) {
+      // pit.world's own index, paged. Our key is free; others pay per page.
+      let cursor = '';
+      let got = 0;
+      while (got < PIT_PAGES) {
+        const qs = new URLSearchParams({ q: terms.join(','), limit: String(Math.min(100, PIT_PAGES - got)), ...(cursor ? { cursor } : {}) });
+        const res = await getJson(`${url.origin}/api/corpus?${qs}`, { headers: { authorization: `Bearer ${PIT_KEY}` } }).catch(
+          (e) => (console.error(`pit.world corpus: ${e.message}`), null),
+        );
+        if (!res) break;
+        for (const it of res.items ?? []) {
+          corpusDocs.push({ source: `pit-index:${terms.join(',')}`, feed: it.site, guid: null, url: it.url, title: clean(it.title), text: clean(it.text) });
+          got++;
+        }
+        if (!res.next_cursor) break;
+        cursor = res.next_cursor;
+      }
+      console.error(`pit.world index ${terms.join(',')}: ${got} pages`);
+      continue;
+    }
     const tabs = url.searchParams.get('t') ? [url.searchParams.get('t')] : PIT_TABS;
     for (const term of terms) {
       let found = 0;
@@ -178,6 +204,8 @@ function write(doc) {
 const tick = () => {
   if (++done % 25 === 0 || done === total) console.error(`${done}/${total} sources, ${kept} documents`);
 };
+
+for (const d of corpusDocs) write(d);
 
 await pool([...feedJobs.values()], async ({ origin, slug, source }) => {
   try {
