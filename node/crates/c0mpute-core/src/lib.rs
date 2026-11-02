@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod config;
 pub mod dispatch;
 pub mod pricing;
+pub mod private;
 pub mod register;
 pub mod resources;
 pub mod routing;

@@ -34,6 +34,14 @@ pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     Ok(kp)
 }
 
+/// The peer-id of the identity already stored in `<dir>/identity.key`,
+/// without generating one. `None` when there is no (readable) key.
+pub fn existing_peer_id(dir: &Path) -> Option<libp2p::PeerId> {
+    let bytes = std::fs::read(dir.join(KEY_FILE)).ok()?;
+    let kp = Keypair::from_protobuf_encoding(&bytes).ok()?;
+    Some(kp.public().to_peer_id())
+}
+
 #[cfg(unix)]
 fn write_locked_down(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
