@@ -1,0 +1,66 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md and
+# dips/0029-ad-generator-agent.md.
+#
+# ad-generator-agent is a BUYER-side agent: it designs a full ad set (every ad
+# type an ad network offers) from one landing-page URL by buying existing
+# c0mpute workloads, so it ships no worker code of its own. First consumer:
+# crawlproof.com /dashboard/ads/new, where it is on by default
+# (AD_GENERATOR_AGENT=off turns it off).
+#
+# Asset -> workload it buys:
+#   copy (banners, text link, terminal, feed, video lines)  infernet.inference
+#   narration (video pre-roll track, audio companion)       tts.synthesize
+#   hero artwork (image ads)                                 diffusion.txt2img
+#       (diffusion is still a CANDIDATE plugin with no live workers, so the
+#        agent uses the advertiser's own og:image and otherwise ships without
+#        artwork; it never falls back to a paid image API on its own)
+#   gif / video assembly                                     ffmpeg on the
+#       buyer's own render worker today; ffmpeg.transcode once creative
+#       uploads go through the storage plugin.
+
+[module]
+id          = "ad-generator-agent"
+name        = "Ad Generator Agent — every ad type from one URL"
+version     = "0.2.53"
+kind        = "service"
+category    = "applications"
+description = "Turns a landing-page URL into a complete ad set (display banners, text link, terminal, feed item, image, GIF, 5-second video pre-roll and audio) by buying c0mpute work: copy from Infernet inference, voiceover from CPU text-to-speech, artwork from diffusion when workers offer it. No paid AI API by default."
+author      = "Profullstack"
+license     = "MIT"
+homepage    = "https://crawlproof.com/dashboard/ads/new"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/ad-generator-agent"
+keywords    = ["ads", "advertising", "creative", "copywriting", "tts", "voiceover", "video", "agent"]
+
+[module.requirements]
+c0mpute      = ">=0.2.53"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:egress"]
+
+# Workloads this agent buys. Workers earn by serving these plugins; the agent
+# itself needs only a buyer key (an Infernet trusted client key, ifc_...) and a
+# speech gateway (`c0mpute speech serve`).
+[module.requirements.plugins]
+infernet = ">=0.2.53"   # infernet.inference: structured ad copy
+tts      = ">=0.2.53"   # tts.synthesize: narration (kokoro af_sarah by default)
+
+[module.requirements.optional_plugins]
+diffusion = ">=0.0.1"   # diffusion.txt2img: hero artwork (candidate, no workers yet)
+transcode = ">=0.2.0"   # ffmpeg.transcode: renditions, once uploads use storage
+
+[module.workloads]
+# None of its own: every step is one of the workloads above.
+
+[module.dispatch]
+mode = "in-process"
+# Runs inside the buyer's application (crawlproof: lib/ads/agent.ts).
+
+[module.surfaces]
+web = "https://crawlproof.com/dashboard/ads/new"
+
+[module.config.defaults]
+enabled        = true
+copy_route     = "infernet.inference"   # p2p_only, never the hosted fallback
+tts_engine     = "kokoro"
+tts_voice      = "af_sarah"
+paid_images    = false                  # gpt-image only with explicit opt-in
