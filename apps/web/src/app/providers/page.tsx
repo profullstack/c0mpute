@@ -136,10 +136,11 @@ $ c0mpute worker start --roles tts,stt`}</CodeBlock>
           When you win, your node runs the job and publishes a receipt; signed
           receipts and automatic settlement are not live yet. A direct protocol deal has{" "}
           <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
-          bought through the <Link href="/market">market</Link>, including paid
-          Infernet inference, will pay you{" "}
+          bought through the <Link href="/market">market</Link> will pay you{" "}
           <strong className="text-[var(--color-fg)]">95%</strong> once market
           settlement launches (a 5% market fee); no fee is collected today.
+          Paid Infernet inference is a separate product with its own 2% house
+          fee, so it pays you 98%.
         </p>
         <p className="text-[var(--color-dim)]">
           Your record is portable. Reputation is derived from signed receipts
