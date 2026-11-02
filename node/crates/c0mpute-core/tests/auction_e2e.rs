@@ -71,6 +71,7 @@ async fn auction_round_trip_publishes_receipt() {
                 status: JobStatus::Completed,
                 completed_at_ms: 0,
                 signature: None,
+                external_ref: job.accept.external_ref.clone(),
             };
             let topic = job_topic(&job.accept.workload_type);
             let payload = serde_json::to_vec(&receipt).unwrap();
@@ -100,7 +101,8 @@ async fn auction_round_trip_publishes_receipt() {
     let auction = JobAuction::new(workload_type, serde_json::to_value(&inline).unwrap())
         .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
         .with_max_price_usd(0.05)
-        .with_bid_window(Duration::from_secs(5));
+        .with_bid_window(Duration::from_secs(5))
+        .with_external_ref(Some("infernet:job_e2e".into()));
 
     let outcome = run_auction(buyer.clone(), auction)
         .await
@@ -108,6 +110,12 @@ async fn auction_round_trip_publishes_receipt() {
     assert_eq!(outcome.receipt.status, JobStatus::Completed);
     assert_eq!(outcome.accepted_bid.bidder_peer_id, worker.peer_id().to_base58());
     assert!(outcome.receipt.output_hash.is_some());
+    // The billing id travels offer -> accept -> worker -> receipt.
+    assert_eq!(outcome.receipt.external_ref.as_deref(), Some("infernet:job_e2e"));
+    assert_eq!(outcome.external_ref.as_deref(), Some("infernet:job_e2e"));
+    // Bids now carry an expiry and an ETA (default before any job ran).
+    assert!(outcome.accepted_bid.expires_at_ms.is_some());
+    assert_eq!(outcome.accepted_bid.eta_seconds, 60);
 }
 
 async fn wait_for_listen(net: &Libp2pNetwork) -> libp2p::Multiaddr {

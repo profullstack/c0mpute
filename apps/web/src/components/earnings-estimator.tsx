@@ -125,7 +125,7 @@ export function EarningsEstimator({ jobsCompleted24h }: { jobsCompleted24h: numb
           </table>
         </div>
         <p className="text-xs text-[var(--color-dim)] leading-6">
-          Direct peer-to-peer jobs have no c0mpute market fee. The after-fee column assumes every dollar comes through the c0mpute market and excludes electricity, internet, hardware, tax, and other costs.
+          Direct peer-to-peer jobs have no c0mpute market fee, and the market fee is not collected until market settlement launches. The after-fee column assumes every dollar comes through the c0mpute market and excludes electricity, internet, hardware, tax, and other costs.
         </p>
       </div>
 

@@ -1,11 +1,16 @@
 import "server-only";
 import { fetchFromAggregators } from "./aggregators";
 
-/** One row of the public node board, as served by the aggregator's `GET /nodes`. */
+/**
+ * One row of the public node board, as served by the aggregator's `GET /nodes`.
+ *
+ * Public fields only: short peer id, class, cores, bench, version, ref. Never
+ * the CPU model string (it fingerprints an operator's machine); older
+ * aggregators still send `cpu`, so `publicRow` strips it.
+ */
 export interface NodeRow {
   id: string;
   class: string;
-  cpu: string | null;
   cores: number | null;
   ram_bytes: number | null;
   bench_score: number | null;
@@ -58,9 +63,22 @@ export interface NodesPayload {
 /** The mission number. A goal, not a count. */
 export const NODE_GOAL = 100_000;
 
+/** Keep only the public fields of a row; drops `cpu` from older aggregators. */
+export function publicRow(row: NodeRow & { cpu?: unknown }): NodeRow {
+  const { cpu, ...rest } = row;
+  void cpu;
+  return rest;
+}
+
 export async function getNodesPayload(): Promise<NodesPayload> {
   const data = await fetchFromAggregators<Omit<NodesPayload, "source">>("/nodes");
-  if (data) return { ...data, source: "aggregator" };
+  if (data) {
+    return {
+      ...data,
+      nodes: Array.isArray(data.nodes) ? data.nodes.map(publicRow) : [],
+      source: "aggregator",
+    };
+  }
   return {
     generated_at: new Date().toISOString(),
     workers_online: 0,

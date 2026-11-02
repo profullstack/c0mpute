@@ -14,7 +14,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::Libp2pNetwork;
@@ -32,6 +33,75 @@ use tracing::{info, warn};
 #[derive(Clone, Debug)]
 pub struct AcceptedJob {
     pub accept: JobAccept,
+}
+
+/// A workload's share of the node's compute, shared between its runner and
+/// its dispatch loop so the worker only bids for work it can take now and
+/// quotes an ETA from how long its jobs actually run.
+///
+/// `compute_slots` is node-wide (every workload draws from it); the job
+/// duration average is per workload, since a transcode and a TTS line take
+/// very different times.
+#[derive(Clone, Debug)]
+pub struct WorkerLoad {
+    compute_slots: Arc<Semaphore>,
+    total_slots: usize,
+    /// Moving average of recent completed jobs' wall time in ms; 0 = none.
+    recent_job_ms: Arc<AtomicU64>,
+}
+
+impl WorkerLoad {
+    pub fn new(compute_slots: Arc<Semaphore>, total_slots: usize) -> Self {
+        Self {
+            compute_slots,
+            total_slots: total_slots.max(1),
+            recent_job_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn compute_slots(&self) -> Arc<Semaphore> {
+        self.compute_slots.clone()
+    }
+
+    /// Compute slots not held by a running job right now.
+    pub fn free_slots(&self) -> usize {
+        self.compute_slots.available_permits()
+    }
+
+    pub fn total_slots(&self) -> usize {
+        self.total_slots
+    }
+
+    /// Average wall time of recent completed jobs; `None` before the first.
+    pub fn recent_job_duration(&self) -> Option<Duration> {
+        match self.recent_job_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
+        }
+    }
+
+    /// Fold a completed job's wall time into the average (weight 0.3 on the
+    /// newest, so one outlier does not swing the quote).
+    pub fn record_job(&self, took: Duration) {
+        let ms = (took.as_millis() as u64).max(1);
+        let _ = self
+            .recent_job_ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                Some(if old == 0 { ms } else { (old * 7 + ms * 3) / 10 })
+            });
+    }
+}
+
+/// Remove a job's scratch directory once its result is stored (or the job
+/// failed). The stored result lives in the chunk store, not here.
+async fn cleanup_job_dir(cache_root: &std::path::Path, job_id: &str) {
+    if let Ok(dir) = safe_job_dir(cache_root, job_id) {
+        if let Err(e) = fs::remove_dir_all(&dir).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(%job_id, err = %e, "could not remove job directory");
+            }
+        }
+    }
 }
 
 /// Phase-1 inline schema for an `ffmpeg.transcode` workload. Lives in
@@ -92,17 +162,21 @@ pub fn spawn_tts_runner(
     net: Arc<Libp2pNetwork>,
     store: ChunkStore,
     cache_root: PathBuf,
-    compute_slots: Arc<Semaphore>,
+    load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
                 return;
             };
+            let started = Instant::now();
             let job_id = job.accept.job_id.clone();
-            match run_tts_job(&net, &store, &cache_root, &job).await {
+            let result = run_tts_job(&net, &store, &cache_root, &job).await;
+            cleanup_job_dir(&cache_root, &job_id).await;
+            match result {
                 Ok(hash) => {
+                    load.record_job(started.elapsed());
                     info!(%job_id, %hash, "tts runner: job complete");
                     publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
                 }
@@ -120,17 +194,21 @@ pub fn spawn_stt_runner(
     net: Arc<Libp2pNetwork>,
     store: ChunkStore,
     cache_root: PathBuf,
-    compute_slots: Arc<Semaphore>,
+    load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
                 return;
             };
+            let started = Instant::now();
             let job_id = job.accept.job_id.clone();
-            match run_stt_job(&net, &store, &cache_root, &job).await {
+            let result = run_stt_job(&net, &store, &cache_root, &job).await;
+            cleanup_job_dir(&cache_root, &job_id).await;
+            match result {
                 Ok(hash) => {
+                    load.record_job(started.elapsed());
                     info!(%job_id, %hash, "stt runner: job complete");
                     publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
                 }
@@ -253,9 +331,10 @@ fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
 /// dispatch loop so it can deliver `AcceptedJob`s.
 pub fn spawn_transcode_runner(
     net: Arc<Libp2pNetwork>,
+    store: ChunkStore,
     cache_root: PathBuf,
     ffmpeg_bin: PathBuf,
-    compute_slots: Arc<Semaphore>,
+    load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
     tokio::spawn(async move {
@@ -269,18 +348,24 @@ pub fn spawn_transcode_runner(
         };
         info!(?caps.encoders, "transcode runner ready");
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = compute_slots.clone().acquire_owned().await else {
+            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
                 return;
             };
+            let started = Instant::now();
             let job_id = job.accept.job_id.clone();
             let buyer_peer_id = job.accept.buyer_peer_id.clone();
-            match run_transcode_job(&net, &cache_root, &ffmpeg_bin, &caps, &job).await {
-                Ok((output_path, output_hash)) => {
+            let result =
+                run_transcode_job(&net, &store, &cache_root, &ffmpeg_bin, &caps, &job).await;
+            // The output now lives in the chunk store; the input, the
+            // ffmpeg output file and the directory go, success or not.
+            cleanup_job_dir(&cache_root, &job_id).await;
+            match result {
+                Ok(output_hash) => {
+                    load.record_job(started.elapsed());
                     info!(
                         %job_id,
-                        output = %output_path.display(),
                         hash = %output_hash,
-                        "transcode runner: job complete"
+                        "transcode runner: job complete, output stored and announced"
                     );
                     publish_receipt(&net, &job.accept, Some(output_hash), JobStatus::Completed)
                         .await;
@@ -296,12 +381,13 @@ pub fn spawn_transcode_runner(
 }
 
 async fn run_transcode_job(
-    _net: &Libp2pNetwork,
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
     cache_root: &std::path::Path,
     ffmpeg_bin: &std::path::Path,
     caps: &c0mpute_transcode::Capabilities,
     job: &AcceptedJob,
-) -> Result<(PathBuf, String)> {
+) -> Result<String> {
     let spec_inline = job
         .accept
         .spec_inline
@@ -338,11 +424,41 @@ async fn run_transcode_job(
     .await
     .context("ffmpeg")?;
 
-    let output_bytes = fs::read(&output_path).await?;
-    let hash = blake3::hash(&output_bytes);
     // The input is no longer needed once the output exists.
     let _ = fs::remove_file(&input_path).await;
-    Ok((output_path, hex::encode(hash.as_bytes())))
+    let hash = store_output(store, &output_path, MAX_OUTPUT_BYTES).await?;
+    net.announce(&hash).await.context("announce transcode output")?;
+    Ok(hash.to_hex())
+}
+
+/// Largest transcode output a worker stores and serves. The output is one
+/// content-addressed chunk (the same key format TTS/STT results use, so
+/// the buyer fetches it by `JobReceipt.output_hash` the same way). Over the
+/// cap the job fails with a clear error rather than filling the disk.
+pub const MAX_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Move a finished output into the chunk store (streamed, never loaded
+/// whole into memory) and return its key. Empty or over-`max` outputs are
+/// refused.
+pub(crate) async fn store_output(
+    store: &ChunkStore,
+    output_path: &std::path::Path,
+    max: u64,
+) -> Result<Hash> {
+    let len = fs::metadata(output_path)
+        .await
+        .context("transcode produced no output file")?
+        .len();
+    if len == 0 {
+        bail!("transcode output is empty");
+    }
+    if len > max {
+        bail!("transcode output is {len} bytes, over the {max}-byte result limit");
+    }
+    store
+        .put_file(output_path)
+        .await
+        .context("store transcode output")
 }
 
 /// Largest input a transcode job may download.
@@ -507,6 +623,7 @@ pub(crate) async fn publish_receipt(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         signature: None,
+        external_ref: accept.external_ref.clone(),
     };
     let topic = job_topic(&accept.workload_type);
     if let Ok(payload) = serde_json::to_vec(&receipt) {
@@ -565,6 +682,75 @@ mod tests {
             assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
         }
         assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("c0-runner-{name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn transcode_output_is_stored_under_the_receipt_hash() {
+        let root = scratch("out");
+        let store = ChunkStore::open(root.join("store")).await.unwrap();
+        let out = root.join("output.mp4");
+        fs::write(&out, b"not really an mp4").await.unwrap();
+
+        let hash = store_output(&store, &out, MAX_OUTPUT_BYTES).await.unwrap();
+        let hex = hash.to_hex();
+        // The receipt carries this hex; the buyer parses it with
+        // Hash::from_hex and fetches the chunk by it.
+        assert_eq!(hex, hex::encode(blake3::hash(b"not really an mp4").as_bytes()));
+        assert_eq!(Hash::from_hex(&hex).unwrap(), hash);
+        assert_eq!(store.get(&hash).await.unwrap(), b"not really an mp4");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn oversized_or_empty_output_fails_clearly() {
+        let root = scratch("cap");
+        let store = ChunkStore::open(root.join("store")).await.unwrap();
+        let out = root.join("output.mp4");
+        fs::write(&out, vec![0u8; 64]).await.unwrap();
+        let err = store_output(&store, &out, 63).await.unwrap_err();
+        assert!(format!("{err:#}").contains("result limit"), "{err:#}");
+        fs::write(&out, b"").await.unwrap();
+        assert!(store_output(&store, &out, 63).await.is_err());
+        assert!(store_output(&store, &root.join("missing"), 63).await.is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn job_dir_is_removed_after_the_job() {
+        let root = scratch("cleanup");
+        let id = "6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11";
+        let dir = safe_job_dir(&root, id).unwrap();
+        fs::create_dir_all(&dir).await.unwrap();
+        fs::write(dir.join("input.bin"), b"x").await.unwrap();
+        cleanup_job_dir(&root, id).await;
+        assert!(!dir.exists());
+        // Idempotent, and a bad id is a no-op rather than a traversal.
+        cleanup_job_dir(&root, id).await;
+        cleanup_job_dir(&root, "../../etc").await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worker_load_tracks_recent_job_time() {
+        let load = WorkerLoad::new(Arc::new(Semaphore::new(2)), 2);
+        assert_eq!(load.recent_job_duration(), None);
+        load.record_job(Duration::from_secs(10));
+        assert_eq!(load.recent_job_duration(), Some(Duration::from_secs(10)));
+        load.record_job(Duration::from_secs(20));
+        assert_eq!(load.recent_job_duration(), Some(Duration::from_secs(13)));
+        assert_eq!(load.free_slots(), 2);
+        let _held = load.compute_slots().try_acquire_owned().unwrap();
+        assert_eq!(load.free_slots(), 1);
     }
 
     #[tokio::test]

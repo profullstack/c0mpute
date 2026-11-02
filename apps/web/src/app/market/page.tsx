@@ -5,7 +5,7 @@ import { DYNAMIC_IDLE_SHARE, MARKET_FEE_PCT, UNDERCUT, OPERATOR_SHARE_PCT, split
 
 export const metadata = {
   title: "market — c0mpute",
-  description: `Rent GPU and CPU time from the c0mpute nodes online right now. The node operator keeps ${OPERATOR_SHARE_PCT}% of every job; c0mpute takes a ${MARKET_FEE_PCT}% market fee.`,
+  description: `Rent GPU and CPU time from the c0mpute nodes online right now. When market settlement launches, the node operator keeps ${OPERATOR_SHARE_PCT}% of every market job and c0mpute takes a ${MARKET_FEE_PCT}% market fee; direct protocol deals pay 0%.`,
   alternates: { canonical: "https://c0mpute.com/market" },
 };
 
@@ -29,19 +29,21 @@ export default async function MarketPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">market</h1>
         <p className="comment">
-          // rent compute from the nodes online now · operators keep {OPERATOR_SHARE_PCT}%
+          // rent compute from the nodes online now · operators will keep {OPERATOR_SHARE_PCT}% of market jobs
         </p>
       </header>
 
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ the split ]</h2>
         <p>
-          Every job bought through the market pays the node operator{" "}
+          When market settlement launches, every job bought through the market
+          will pay the node operator{" "}
           <strong className="text-[var(--color-fg)]">{OPERATOR_SHARE_PCT}%</strong> of
-          the price. c0mpute keeps a{" "}
+          the price, and c0mpute will keep a{" "}
           <strong className="text-[var(--color-fg)]">{MARKET_FEE_PCT}% market fee</strong>{" "}
-          for matching, billing, settlement and support. Payment-processor fees
-          come out of the payment, not out of the operator&apos;s share on top.
+          for matching, billing, settlement and support. No fee is collected
+          today: market settlement is not live yet. Payment-processor fees
+          will come out of the payment, not out of the operator&apos;s share on top.
         </p>
         <table className="w-full text-left border-collapse text-xs">
           <thead className="text-[var(--color-dim)]">
@@ -65,7 +67,7 @@ export default async function MarketPage() {
           </tbody>
         </table>
         <p className="text-xs text-[var(--color-dim)] leading-6">
-          The same {MARKET_FEE_PCT}% is the house fee on paid{" "}
+          The same {MARKET_FEE_PCT}% is planned as the house fee on paid{" "}
           <a href="https://infernetprotocol.com" target="_blank" rel="noopener noreferrer">Infernet</a>{" "}
           inference jobs, which run on these nodes. Two peers dealing directly
           over the open protocol, without the market, pay no protocol fee. →{" "}
@@ -161,7 +163,9 @@ $ c0mpute worker stop && c0mpute worker start -d   # apply`}</CodeBlock>
         <p className="text-xs text-[var(--color-dim)] leading-6">
           Your listing (mode and minimum) rides in the node&apos;s capability
           ad and shows in the table above and in <a href="/api/nodes">/api/nodes</a>.
-          The {MARKET_FEE_PCT}% market fee comes out of the price you win the job at.
+          Once market settlement launches, the {MARKET_FEE_PCT}% market fee will
+          come out of the price you win a market job at; direct protocol deals
+          pay 0%.
         </p>
         <p className="text-xs text-[var(--color-dim)]">
           → <Link href="/providers">running a node</Link>

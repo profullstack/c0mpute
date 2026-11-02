@@ -293,6 +293,11 @@ enum TranscodeCmd {
         preset: String,
         #[arg(long)]
         max_price: Option<f64>,
+        /// The job's id in the system billing it (an Infernet job id, a
+        /// CoinPay invoice id). Sent on the offer and echoed on the
+        /// receipt; billing keys on it, not on the per-auction job_id.
+        #[arg(long)]
+        external_ref: Option<String>,
     },
     /// Manage transcode presets.
     Preset {
@@ -1336,6 +1341,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             input,
             preset,
             max_price,
+            external_ref,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -1365,13 +1371,19 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
 
             let auction = JobAuction::new("ffmpeg.transcode", spec_inline)
                 .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
-                .with_max_price_usd(max_price.unwrap_or(1.0));
+                .with_max_price_usd(max_price.unwrap_or(1.0))
+                .with_external_ref(external_ref);
             let outcome = run_auction(net, auction).await?;
             println!("job_id        : {}", outcome.job_id);
+            if let Some(r) = &outcome.external_ref {
+                println!("external_ref  : {r}");
+            }
             println!("winner        : {}", outcome.accepted_bid.bidder_peer_id);
             println!("price_usd     : {}", outcome.accepted_bid.price_usd);
             println!("status        : {:?}", outcome.receipt.status);
             if let Some(h) = &outcome.receipt.output_hash {
+                // The worker stored the output in its chunk store under this
+                // hash and announced it on the DHT.
                 println!("output_hash   : {h}");
             }
             Ok(())

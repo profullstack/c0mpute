@@ -356,14 +356,15 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusPayload> {
 /// One row of the public node board (`GET /nodes`).
 ///
 /// Built only from fields of the capability ad, which every worker already
-/// gossips in the clear: a shortened peer id, hardware class and summary,
+/// gossips in the clear: a shortened peer id, hardware class, core count,
 /// benchmark score/details, version and optional referral handle. No address,
-/// hostname or region.
+/// hostname, region or CPU model string: the exact model ("AMD Ryzen 9
+/// 7950X3D 16-Core Processor") fingerprints an operator's machine, so the
+/// public board never carries it (rule since 2026-10-21).
 #[derive(Serialize, Debug, PartialEq)]
 struct NodeRow {
     id: String,
     class: String,
-    cpu: Option<String>,
     cores: Option<u64>,
     ram_bytes: Option<u64>,
     bench_score: Option<u32>,
@@ -480,11 +481,6 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
         .map(|(peer, ad)| NodeRow {
             id: short_id(peer),
             class: node_class(&ad.tags),
-            cpu: ad
-                .hardware
-                .get("cpu")
-                .and_then(|v| v.as_str())
-                .map(|s| s.chars().take(96).collect()),
             cores: ad.hardware.get("cores").and_then(|v| v.as_u64()),
             ram_bytes: ad.hardware.get("ram_bytes").and_then(|v| v.as_u64()),
             bench_score: ad.bench_score,
@@ -762,7 +758,6 @@ mod tests {
         assert_eq!(p.nodes[0].id, "BBBBBBBB");
         assert_eq!(p.nodes[0].class, "gpu:nvidia");
         assert_eq!(p.nodes[0].cores, Some(16));
-        assert_eq!(p.nodes[0].cpu.as_deref(), Some("Example CPU"));
         assert_eq!(p.nodes[0].ram_bytes, Some(68_719_476_736));
         assert_eq!(p.nodes[0].bench_at.as_deref(), Some("2026-11-01T12:00:00Z"));
         assert_eq!(
@@ -780,7 +775,8 @@ mod tests {
             }]
         );
         let json = serde_json::to_string(&p.nodes).unwrap();
-        assert!(json.contains("Example CPU"), "public CPU model included");
+        assert!(!json.contains("Example CPU"), "CPU model must never be public");
+        assert!(!json.contains("\"cpu\":"), "no cpu field on the public board");
     }
 
     #[test]
@@ -829,6 +825,7 @@ mod tests {
             workload_type: "ffmpeg.transcode".into(),
             spec_inline: None,
             published_at_ms: now - 5_000,
+            external_ref: None,
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 1);
@@ -842,6 +839,7 @@ mod tests {
             status: JobStatus::Completed,
             completed_at_ms: now,
             signature: None,
+            external_ref: None,
         })
         .await;
         // Cleared from in-flight, recorded as completed with ~5s latency.
@@ -864,6 +862,7 @@ mod tests {
             workload_type: "ffmpeg.transcode".into(),
             spec_inline: None,
             published_at_ms: now,
+            external_ref: None,
         })
         .await;
         jobs.on_receipt(JobReceipt {
@@ -875,6 +874,7 @@ mod tests {
             status: JobStatus::Failed,
             completed_at_ms: now,
             signature: None,
+            external_ref: None,
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 0);

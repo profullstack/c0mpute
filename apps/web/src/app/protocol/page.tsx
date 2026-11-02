@@ -244,8 +244,9 @@ $ c0mpute run job.json --gateway none      # prove it works without us`}</CodeBl
         </p>
         <table className="w-full text-left border-collapse text-xs">
           <tbody className="divide-y divide-[var(--color-rule)]">
-            <Row k="shipped" v="canonical serialization, native identity, signed envelopes, the four message types, cross-implementation test vectors, provider directory, offer book, buyer-side selection policies, receipt-derived reputation" />
-            <Row k="in progress" v="the transport: local daemon, DHT discovery, gossip job announcements, offer collection over the wire, relay paths for providers behind NAT" />
+            <Row k="live on the network" v="unsigned gossip auction (offer, bid, accept, receipt over libp2p gossipsub), sealed-bid lowest-price selection, buyer-side peer allowlist" />
+            <Row k="library (tested, not yet wired into the node)" v="canonical serialization, native identity, signed envelopes, the four signed message types, cross-implementation test vectors, provider directory, offer book, buyer-side selection policies, receipt-derived reputation — c0mpute-envelope and c0mpute-market pass their own tests; the running node does not use them yet" />
+            <Row k="in progress" v="wiring signed envelopes into the node, the transport: local daemon, DHT discovery, offer collection over the wire, relay paths for providers behind NAT" />
             <Row k="planned" v="settlement adapters, generic container workloads, private network overlays" />
           </tbody>
         </table>
