@@ -102,7 +102,7 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Res
     tokio::fs::write(&job_path, serde_json::to_vec_pretty(&spec.train_job)?).await?;
     let out_dir = job_dir.join("model");
     let timeout_s = spec.train_job["limits"]["timeout_s"].as_u64().unwrap_or(3600).clamp(1, 7 * 86_400);
-    let mut command = tokio::process::Command::new(infernet);
+    let mut command = tokio::process::Command::new(crate::live_bin(infernet));
     command
         .args(["model", "train", "--json", "--dataset"])
         .arg(&dataset)

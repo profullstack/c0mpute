@@ -52,7 +52,7 @@ pub struct RuntimeProc {
 impl RuntimeProc {
     /// Spawn `<infernet> model serve --stdio [extra]`.
     pub async fn spawn(infernet: &Path, extra: &[String]) -> Result<Arc<Self>> {
-        let mut command = Command::new(infernet);
+        let mut command = Command::new(crate::live_bin(infernet));
         command
             .args(["model", "serve", "--stdio"])
             .args(extra);

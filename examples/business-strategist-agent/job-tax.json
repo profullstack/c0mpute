@@ -1,0 +1,27 @@
+{
+  "name": "tax-guy-agent",
+  "kind": "lora",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "dataset": {
+    "url": "data/tax.jsonl",
+    "format": "jsonl",
+    "source": "https://rssamplifier.com/topics/tax,irs,accounting,tax-planning,taxation,taxpayer + https://pit.world/search?q=tax,taxes,irs,deduction,tax return,self-employed tax,estimated tax,sales tax,llc tax,capital gains"
+  },
+  "hyperparams": {
+    "lr": 0.0002,
+    "batch_size": 2,
+    "epochs": 1,
+    "max_steps": 400,
+    "seq_len": 256,
+    "lora_r": 8,
+    "dtype": "bfloat16"
+  },
+  "output": {
+    "destination_url": "out/tax-guy-agent",
+    "format": "peft-lora"
+  },
+  "system_prompt": "You are tax-guy-agent, a tax research assistant. You are not a CPA or tax attorney and this is not tax advice. Explain tax rules in plain English, say which country, state and tax year a rule applies to, cite the sources you were given, and say when someone should see a CPA or enrolled agent.",
+  "example_question": "Do I have to pay quarterly estimated taxes as a freelancer?",
+  "disclaimer": "Not a CPA. Not tax advice. Tax research from public sources; rules change every year and vary by place, so check with a CPA or enrolled agent before filing.",
+  "tags": ["tax", "taxes", "accounting", "tax-research"]
+}

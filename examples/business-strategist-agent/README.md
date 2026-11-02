@@ -11,6 +11,8 @@ your own CPU or on the c0mpute network, then publish the adapter to Hugging Face
 | 2 (network) | `c0mpute infernet text train` | the same job on a c0mpute worker, with a live progress bar |
 | 3 | `chat.py` | the agent: pit.world search for the question (corpus BM25 offline) + the adapter, answers with cited URLs |
 | 4 | `publish.py` | pushes the adapter + a model card to the Hugging Face Hub (private by default) |
+| 5 | `export_gguf.py` + `publish_gguf.py` | merges into the base, writes a Q8_0 GGUF, pushes it to `<repo>-GGUF` for Ollama |
+| (network) | `network_manifest.py` | turns `c0mpute infernet text train` output into a publishable dir, checks the receipt hash |
 
 ## Run it: saas-business-strategist-agent
 
@@ -37,6 +39,35 @@ c0mpute infernet text train --job job-saas.json --dataset data/saas-business.jso
 # 4. publish (free; private unless --public)
 HF_TOKEN=hf_... .venv/bin/python publish.py out/saas-business-strategist-agent --repo <user-or-org>/saas-business-strategist-agent
 ```
+
+## Same recipe, other agents: not-a-lawyer-agent and tax-guy-agent
+
+A job file is the whole agent: name, sources, system prompt, plus optional `example_question`,
+`disclaimer` and `tags`, which land in the manifest and the Hugging Face model cards.
+`job-legal.json` and `job-tax.json` are research assistants for law and tax, with a "not a
+lawyer / not a CPA, not advice" disclaimer in the system prompt and on both model cards.
+
+```bash
+export PIT_CORPUS_KEY=...   # optional; without it pit.world terms are searched and fetched one by one
+node harvest.mjs https://rssamplifier.com/topics/law,legal,lawyer,lawsuit,court,copyright,contract-law,legal-tech \
+  'https://pit.world/search?q=law,legal,lawyer,lawsuit,court ruling,contract law,copyright,tenant rights,employment law,small claims' \
+  --full --out data/legal.jsonl
+node harvest.mjs https://rssamplifier.com/topics/tax,irs,accounting,tax-planning,taxation,taxpayer \
+  'https://pit.world/search?q=tax,taxes,irs,deduction,tax return,self-employed tax,estimated tax,sales tax,llc tax,capital gains' \
+  --full --out data/tax.jsonl
+
+# train on the network, then make the result publishable (tokenizer, sources, eval, receipt check)
+c0mpute infernet text train --job job-legal.json --output out/not-a-lawyer-agent --json --yes \
+  --bind 0.0.0.0:47556 --public-url http://<reachable ip>:47556 > data/legal.ndjson
+.venv/bin/python network_manifest.py job-legal.json out/not-a-lawyer-agent data/legal.ndjson
+
+# adapter repo, then GGUF repo (system + params files so `ollama run hf.co/...` needs no Modelfile)
+.venv/bin/python publish.py out/not-a-lawyer-agent --repo profullstack/not-a-lawyer-agent --public
+.venv/bin/python export_gguf.py out/not-a-lawyer-agent --llama-cpp ../llama.cpp
+.venv/bin/python publish_gguf.py out/not-a-lawyer-agent --repo profullstack/not-a-lawyer-agent --public
+```
+
+`network_manifest.py` refuses an adapter whose sha256 does not match the receipt's output hash.
 
 ### What `harvest.mjs` accepts
 

@@ -105,7 +105,8 @@ def main():
     if args.dataset:
         job["dataset"] = {**job["dataset"], "url": args.dataset}
     name = job.get("name", "business-strategist-agent")
-    system = system_prompt(name)
+    # The job's own system_prompt wins (legal and tax agents need theirs, not the strategist's).
+    system = job.get("system_prompt") or system_prompt(name)
     hp = {
         "lr": 2e-4, "batch_size": 4, "epochs": 1, "max_steps": None,
         "seq_len": 256, "lora_r": 8, "threads": min(4, os.cpu_count()), "seed": 0, "dtype": "float32",
@@ -205,6 +206,7 @@ def main():
         "sources": sorted({d.get("source") or "corpus" for d in docs}),
         "steps": step,
         "system_prompt": system,
+        **{k: job[k] for k in ("example_question", "disclaimer", "tags") if job.get(k)},
         "hyperparams": hp,
     }, indent=2))
     emit(job_id, "checkpoint", step=step, path=str(out_dir), size_bytes=weights.stat().st_size,

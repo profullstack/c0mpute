@@ -47,7 +47,7 @@ pub struct RuntimeRef {
 pub async fn probe(infernet: &Path) -> Result<RuntimeCaps> {
     let out = tokio::time::timeout(
         Duration::from_secs(180),
-        tokio::process::Command::new(infernet)
+        tokio::process::Command::new(crate::live_bin(infernet))
             .args(["model", "capabilities", "--json"])
             .stdin(std::process::Stdio::null())
             .output(),
