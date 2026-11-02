@@ -1,59 +1,92 @@
 #!/usr/bin/env node
-// Build a training corpus from an rssamplifier topic page.
+// Build a training corpus from links.
 //
-//   node harvest.mjs https://rssamplifier.com/topics/business --feeds 200 --posts 10 --full
+//   node harvest.mjs https://rssamplifier.com/topics/business,saas,crypto --full --out data/corpus.jsonl
+//   node harvest.mjs https://rssamplifier.com/topics/saas https://example.com/some-post --full
+//   pbpaste | node harvest.mjs --links - --full          # a pasted list of links
+//   node harvest.mjs --links links.txt --full            # one per line (or space/comma separated)
+//   node harvest.mjs 'https://pit.world/search?q=saas,business,crypto' --full
 //
-// Every feed filed under the topic becomes training data:
-//   1. /api/topics/<slug>?group=<group>  pages through the feeds on the topic
-//   2. /api/feeds/<feed>                 lists each feed's recent posts
-//   3. read_post on /api/mcp             (with --full) fetches the article text;
-//                                        without it we train on title + summary
+// What each link becomes:
+//   rssamplifier.com/topics/<a>[,<b>,...]  every feed filed under each topic -> their recent posts
+//   rssamplifier.com/<feed-slug>           that one feed's recent posts
+//   pit.world/search?q=<a>[,<b>,...]       each term searched on pit.world (web, news and scholar
+//                                          tabs, or the &t= tab in the link); every result page fetched
+//   anything else                          the page itself, as one document
 //
-// No key needed: the directory is public. Requests run 3 at a time so we are
-// polite to rssamplifier and, through read_post, to the publishers behind it.
-// Output: one JSON object per line, {feed, guid, url, title, text}.
+// rssamplifier is public (no key): /api/topics, /api/feeds and the read_post tool
+// on /api/mcp, which returns full article text (--full) and caches it, so a
+// publisher is fetched once. Requests run 3 at a time.
+// Output: JSONL, one {source, feed, guid, url, title, text} per document.
 
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, readFileSync } from 'node:fs';
 
-const args = process.argv.slice(2);
-const topicUrl = args.find((a) => a.startsWith('http')) ?? 'https://rssamplifier.com/topics/business';
-const opt = (name, def) => {
-  const i = args.indexOf(`--${name}`);
-  return i === -1 ? def : args[i + 1];
-};
-const MAX_FEEDS = Number(opt('feeds', 200));
-const POSTS_PER_FEED = Number(opt('posts', 10));
-const GROUPS = String(opt('groups', 'blogs,news')).split(',');
-const FULL = args.includes('--full');
-const OUT = opt('out', 'corpus.jsonl');
-const MIN_CHARS = Number(opt('min-chars', 200));
+const argv = process.argv.slice(2);
+const flags = new Set(['--full']);
+const opts = {};
+const links = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (flags.has(a)) opts[a.slice(2)] = true;
+  else if (a.startsWith('--')) opts[a.slice(2)] = argv[++i];
+  else links.push(a);
+}
+if (opts.links) {
+  const raw = readFileSync(opts.links === '-' ? 0 : opts.links, 'utf8');
+  links.push(...raw.split(/\s+|,(?=\s*https?:\/\/)/).filter((s) => /^https?:\/\//.test(s)));
+}
+if (!links.length) {
+  console.error('usage: node harvest.mjs <url...> [--links file|-] [--full] [--feeds 200] [--posts 10] [--out data/corpus.jsonl]');
+  process.exit(1);
+}
+
+const MAX_FEEDS = Number(opts.feeds ?? 200); // per topic
+const POSTS_PER_FEED = Number(opts.posts ?? 10);
+const GROUPS = String(opts.groups ?? 'blogs,news').split(',');
+const FULL = Boolean(opts.full);
+const OUT = opts.out ?? 'data/corpus.jsonl';
+const MIN_CHARS = Number(opts['min-chars'] ?? 200);
 const CONCURRENCY = 3;
+const PIT_TABS = String(opts['pit-tabs'] ?? 'web,news,scholar').split(',');
+const UA = 'business-strategist-agent harvester (+https://github.com/profullstack/c0mpute)';
 
-const { origin, pathname } = new URL(topicUrl);
-const topic = pathname.split('/').filter(Boolean).pop();
-
-async function getJson(url, init) {
+async function fetchOk(url, init = {}) {
   for (let attempt = 1; ; attempt++) {
-    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) }).catch((e) => e);
-    if (res instanceof Response && res.ok) return res.json();
-    if (attempt >= 3) throw new Error(`${url}: ${res instanceof Response ? res.status : res.message}`);
+    const res = await fetch(url, {
+      ...init,
+      headers: { 'user-agent': UA, ...init.headers },
+      signal: AbortSignal.timeout(60_000),
+    }).catch((e) => e);
+    if (res instanceof Response && res.ok) return res;
+    if (attempt >= 3 || (res instanceof Response && res.status === 404)) {
+      throw new Error(`${url}: ${res instanceof Response ? res.status : res.message}`);
+    }
     await new Promise((r) => setTimeout(r, 2000 * attempt));
   }
 }
+const getJson = async (url, init) => (await fetchOk(url, init)).json();
 
-async function topicFeeds() {
-  const feeds = new Map();
-  for (const group of GROUPS) {
-    for (let offset = 0; feeds.size < MAX_FEEDS; offset += 100) {
-      const page = await getJson(`${origin}/api/topics/${topic}?group=${group}&limit=100&offset=${offset}`);
-      for (const f of page.feeds) if (feeds.size < MAX_FEEDS) feeds.set(f.slug, f);
-      if (page.feeds.length < 100) break;
-    }
-  }
-  return [...feeds.values()];
+const clean = (s) =>
+  String(s ?? '')
+    .replace(/<(script|style|nav|header|footer|aside|form|noscript)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&rsquo;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+
+async function pool(items, fn) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: CONCURRENCY }, async () => {
+      while (next < items.length) await fn(items[next++]);
+    }),
+  );
 }
 
-async function readPost(feed, guid) {
+async function readPost(origin, feed, guid) {
   const rpc = await getJson(`${origin}/api/mcp`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -67,57 +100,117 @@ async function readPost(feed, guid) {
   if (rpc.result?.isError) return null;
   const text = rpc.result?.content?.map((c) => c.text).join('\n') ?? '';
   try {
-    const parsed = JSON.parse(text);
-    return parsed.text ?? parsed.content ?? parsed.body ?? null;
+    return JSON.parse(text).text ?? null;
   } catch {
     return text;
   }
 }
 
-const clean = (s) =>
-  String(s ?? '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;|&#160;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+// --- work items: one per feed (rssamplifier) or per page (anything else) ---
 
-async function pool(items, fn) {
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: CONCURRENCY }, async () => {
-      while (next < items.length) await fn(items[next++]);
-    }),
-  );
+const feedJobs = new Map(); // `${origin}|${slug}` -> {origin, slug, source}
+const pageJobs = [];
+
+for (const link of links) {
+  const url = new URL(link);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const isAmp = /(^|\.)rssamplifier\.com$/.test(url.hostname);
+  if (isAmp && parts[0] === 'topics' && parts[1]) {
+    for (const topic of parts[1].split(',').map((t) => t.trim()).filter(Boolean)) {
+      let found = 0;
+      for (const group of GROUPS) {
+        for (let offset = 0; found < MAX_FEEDS; offset += 100) {
+          const page = await getJson(`${url.origin}/api/topics/${topic}?group=${group}&limit=100&offset=${offset}`).catch(
+            (e) => (console.error(`skip topic ${topic}/${group}: ${e.message}`), { feeds: [] }),
+          );
+          for (const f of page.feeds) {
+            if (found >= MAX_FEEDS) break;
+            const key = `${url.origin}|${f.slug}`;
+            if (!feedJobs.has(key)) feedJobs.set(key, { origin: url.origin, slug: f.slug, source: `topic:${topic}` });
+            found++;
+          }
+          if (page.feeds.length < 100) break;
+        }
+      }
+      console.error(`topic ${topic}: ${found} feeds`);
+    }
+  } else if (/(^|\.)pit\.world$/.test(url.hostname) && parts[0] === 'search' && url.searchParams.get('q')) {
+    // pit.world search returns 10 results per query and does not page, so a
+    // comma list is one search per term, across several tabs.
+    const terms = url.searchParams.get('q').split(',').map((t) => t.trim()).filter(Boolean);
+    const tabs = url.searchParams.get('t') ? [url.searchParams.get('t')] : PIT_TABS;
+    for (const term of terms) {
+      let found = 0;
+      for (const tab of tabs) {
+        const qs = new URLSearchParams({ q: term, ...(tab === 'web' ? {} : { t: tab }) });
+        const res = await getJson(`${url.origin}/api/search?${qs}`).catch(
+          (e) => (console.error(`skip search ${term}/${tab}: ${e.message}`), { results: [] }),
+        );
+        for (const r of res.results ?? []) {
+          if (!r.url || pageJobs.some((j) => j.url === r.url)) continue;
+          pageJobs.push({ url: r.url, source: `pit:${term}`, title: r.title, summary: r.description });
+          found++;
+        }
+      }
+      console.error(`pit.world ${term}: ${found} pages`);
+    }
+  } else if (isAmp && parts.length === 1) {
+    feedJobs.set(`${url.origin}|${parts[0]}`, { origin: url.origin, slug: parts[0], source: `feed:${parts[0]}` });
+  } else {
+    pageJobs.push({ url: link, source: 'link' });
+  }
 }
-
-const feeds = await topicFeeds();
-console.error(`${topic}: ${feeds.length} feeds (${GROUPS.join(', ')})`);
 
 const out = createWriteStream(OUT);
 const seen = new Set();
 let kept = 0;
 let done = 0;
+const total = feedJobs.size + pageJobs.length;
 
-await pool(feeds, async (f) => {
+function write(doc) {
+  const key = doc.url || doc.title.toLowerCase();
+  if (doc.text.length < MIN_CHARS || seen.has(key) || seen.has(doc.title.toLowerCase())) return;
+  seen.add(key);
+  seen.add(doc.title.toLowerCase());
+  out.write(JSON.stringify(doc) + '\n');
+  kept++;
+}
+const tick = () => {
+  if (++done % 25 === 0 || done === total) console.error(`${done}/${total} sources, ${kept} documents`);
+};
+
+await pool([...feedJobs.values()], async ({ origin, slug, source }) => {
   try {
-    const feed = await getJson(`${origin}/api/feeds/${f.slug}?limit=${POSTS_PER_FEED}`);
+    const feed = await getJson(`${origin}/api/feeds/${slug}?limit=${POSTS_PER_FEED}`);
     // The directory is multilingual; keep English (or unlabelled) feeds so a
-    // 135M model is not split across languages it cannot hold.
+    // small model is not split across languages it cannot hold.
     if (feed.language && !/^en/i.test(feed.language)) return;
     for (const item of feed.items ?? []) {
-      const title = clean(item.title);
       let text = clean(item.summary);
-      if (FULL) text = clean(await readPost(f.slug, item.guid).catch(() => null)) || text;
-      const key = title.toLowerCase();
-      if (text.length < MIN_CHARS || seen.has(key)) continue;
-      seen.add(key);
-      out.write(JSON.stringify({ feed: f.slug, guid: item.guid, url: item.url, title, text }) + '\n');
-      kept++;
+      if (FULL) text = clean(await readPost(origin, slug, item.guid).catch(() => null)) || text;
+      write({ source, feed: slug, guid: item.guid, url: item.url, title: clean(item.title), text });
     }
   } catch (e) {
-    console.error(`skip ${f.slug}: ${e.message}`);
+    console.error(`skip ${slug}: ${e.message}`);
   } finally {
-    if (++done % 25 === 0) console.error(`${done}/${feeds.length} feeds, ${kept} documents`);
+    tick();
+  }
+});
+
+await pool(pageJobs, async ({ url: link, source, title: knownTitle, summary }) => {
+  try {
+    const res = await fetchOk(link);
+    if (!/html|text\/plain/i.test(res.headers.get('content-type') ?? '')) throw new Error('not a web page');
+    const html = await res.text();
+    const title = clean(knownTitle ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? link);
+    const body = html.match(/<(article|main)[\s\S]*?<\/\1>/i)?.[0] ?? html.match(/<body[\s\S]*<\/body>/i)?.[0] ?? html;
+    write({ source, feed: null, guid: null, url: link, title, text: clean(body).slice(0, 24_000) });
+  } catch (e) {
+    // A blocked or non-HTML page still has its search snippet.
+    if (summary) write({ source, feed: null, guid: null, url: link, title: clean(knownTitle), text: clean(summary) });
+    else console.error(`skip ${link}: ${e.message}`);
+  } finally {
+    tick();
   }
 });
 

@@ -1,4 +1,5 @@
-torch==2.9.1
-transformers==4.57.3
-peft==0.18.0
-safetensors==0.7.0
+torch==2.15.0
+transformers==5.22.1
+peft==0.21.2
+safetensors==0.8.0
+huggingface_hub==2.4.0

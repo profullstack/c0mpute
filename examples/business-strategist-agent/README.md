@@ -1,62 +1,89 @@
 # business-strategist-agent
 
-Train a small, CPU-only business agent from every feed on an rssamplifier topic page,
-e.g. <https://rssamplifier.com/topics/business> (1,663 blogs + 579 news feeds).
+Train a small, CPU-only strategy agent from links: rssamplifier topic pages (every feed
+filed under them), pit.world searches, single feeds or any web page. Run the training on
+your own CPU or on the c0mpute network, then publish the adapter to Hugging Face.
 
 | step | file | what it does |
 | --- | --- | --- |
-| 1 | `harvest.mjs` | topic URL -> feeds -> posts -> full text, written to `data/corpus.jsonl` |
-| 2 | `train.py` + `job.json` | LoRA-tunes `SmolLM2-135M-Instruct` on CPU, streams Infernet training-protocol v1 events |
-| 3 | `chat.py` | the agent: pit.world search for the question (corpus BM25 offline) + the tuned adapter, answers with cited URLs |
+| 1 | `harvest.mjs` | links -> documents in a JSONL corpus |
+| 2 | `train.py` + `job.json` | LoRA-tunes `Qwen2.5-0.5B-Instruct` on CPU, streams Infernet training-protocol v1 events |
+| 2 (network) | `c0mpute infernet text train` | the same job on a c0mpute worker, with a live progress bar |
+| 3 | `chat.py` | the agent: pit.world search for the question (corpus BM25 offline) + the adapter, answers with cited URLs |
+| 4 | `publish.py` | pushes the adapter + a model card to the Hugging Face Hub (private by default) |
 
-## Run it
+## Run it: saas-business-strategist-agent
 
 ```bash
 cd examples/business-strategist-agent
 uv venv -p 3.12 .venv
 uv pip install -p .venv --torch-backend cpu -r requirements.txt   # CPU torch, not the 5 GB CUDA wheel
 
-# 1. corpus: 200 feeds x 10 posts, full article text where the publisher allows it
-node harvest.mjs https://rssamplifier.com/topics/business --feeds 200 --posts 10 --full --out data/corpus.jsonl
+# 1. corpus from rssamplifier topics AND pit.world searches (comma lists expand to one per term)
+node harvest.mjs https://rssamplifier.com/topics/business,saas,crypto \
+  'https://pit.world/search?q=saas,business,crypto' --full --out data/saas-business.jsonl
 
-# 2. train (stdout = NDJSON events, stderr = logs)
-.venv/bin/python train.py job.json | tee data/events.ndjson
+# 2a. train on the c0mpute network (job-saas.json carries the name and system prompt)
+c0mpute infernet text train --job job-saas.json --dataset data/saas-business.jsonl \
+  --output out/saas-business-strategist-agent --yes
+#     the worker must reach your machine: add --bind 0.0.0.0:<port> --public-url http://<reachable ip>:<port>
+
+# 2b. or train on this CPU
+.venv/bin/python train.py job.json --name saas-business-strategist-agent --dataset data/saas-business.jsonl
 
 # 3. ask it something
-.venv/bin/python chat.py "How should a 3-person SaaS price its first plan?"
+.venv/bin/python chat.py --model out/saas-business-strategist-agent "How should a 3-person SaaS price its first plan?"
+
+# 4. publish (free; private unless --public)
+HF_TOKEN=hf_... .venv/bin/python publish.py out/saas-business-strategist-agent --repo <user-or-org>/saas-business-strategist-agent
 ```
 
-Any topic works: swap the URL (`/topics/marketing`, `/topics/startups`, ...) and the
-`name` in `job.json`. `--groups blogs,news` is the default; add `podcasts` for show notes.
+### What `harvest.mjs` accepts
+
+| link | becomes |
+| --- | --- |
+| `rssamplifier.com/topics/<a>[,<b>,...]` | every feed filed under each topic (`--feeds 200` per topic, `--groups blogs,news`) -> their recent posts (`--posts 10`), full text with `--full` |
+| `rssamplifier.com/<feed-slug>` | that feed's recent posts |
+| `pit.world/search?q=<a>[,<b>,...]` | each term searched on the web, news and scholar tabs (`--pit-tabs`, or the link's `&t=`); every result page fetched, its snippet if the page blocks us |
+| any other URL | the page itself |
+
+Pass links as arguments, in a file (`--links links.txt`) or pasted on stdin
+(`pbpaste | node harvest.mjs --links - --full`). Duplicates (same URL or title) are dropped.
 
 ## What you get
 
-- Model: `SmolLM2-135M-Instruct` + a rank-8 LoRA on q/k/v/o (921,600 trainable params,
-  a 3.6 MB adapter). Runs in about 1 GB RAM on 4 threads; no GPU anywhere.
-- `out/business-strategist-agent/manifest.json` records the base model, the adapter's
-  `sha256` (the same `sha256:<hash>` form c0mpute receipts carry), the dataset and the system prompt.
-- Each post is trained as one chat turn ("Brief me on: <title>" -> post text), so the
-  instruct model keeps its chat format instead of drifting into raw blog prose.
+Measured 2026-11-02 on a shared 32-core box (load ~45, ~4 GB free RAM):
 
-Measured 2026-11-02 on a shared 32-core box (load ~45) with a 30-feed sample
-(111 posts, 32 of them full text, 160 blocks of 256 tokens, 2 epochs):
+| | business sample | saas-business-strategist-agent |
+| --- | --- | --- |
+| base model | SmolLM2-135M-Instruct | Qwen2.5-0.5B-Instruct (bf16) |
+| corpus | 111 posts (30 feeds) | 3,615 posts (business 1,514, crypto 1,471, saas 630) |
+| steps | 160 (2 epochs) | 400 (batch 2 x 256 tokens) |
+| held-out perplexity | 51.5 -> 45.9 | 44.5 -> 28.6 |
+| peak RAM | 1.6 GB | 2.4 GB |
+| adapter | 3.7 MB | 4.4 MB |
 
-| | |
-| --- | --- |
-| wall clock | 6 min 50 s, 4 threads, about 330 tokens/s |
-| peak RAM | 1.6 GB (gradient checkpointing; 3.2 GB without it) |
-| held-out perplexity | 51.5 -> 45.9 |
-| adapter | 3.7 MB safetensors |
+`out/<name>/manifest.json` records the base model, the adapter's `sha256` (the form c0mpute
+receipts carry), the dataset, its sources, the hyperparameters and the system prompt.
+Each document is trained as one chat turn ("Brief me on: <title>" -> text), so the instruct
+model keeps its chat format.
 
-The full 200-feed corpus is roughly 15x the tokens: plan on 1 to 2 hours on the same box.
+**Set expectations.** A sub-1B model learns the register and vocabulary, not the facts in
+thousands of posts. `chat.py` therefore searches pit.world for the question and puts the
+top pages in the prompt: the facts come from search, the tune supplies the voice. The
+135M model echoed questions back; 0.5B answers on topic ("One monthly price, one annual
+price at 10 times the monthly, and no other discounts", citing three SaaS-pricing guides),
+but still leans on the snippets it is given. A 1.5B base is the next step up and still CPU-trainable.
 
-**Set expectations.** 135M parameters learn the register and vocabulary of business
-writing, not the facts in thousands of posts. That is why `chat.py` searches pit.world
-for the question and puts the top pages in the prompt: the facts come from search, and
-the tune supplies the voice. The harvested corpus is only the offline fallback: one
-topic's posts rarely cover the question, and BM25 over them cited off-topic posts. For real strategy quality, keep the same pipeline and swap
-`base_model` for `SmolLM2-360M-Instruct` or `Qwen2.5-0.5B-Instruct` (still CPU-trainable,
-just slower).
+## Surviving a shared box
+
+`train.py` saves `out/<name>/resume.pt` every 25 steps and resumes from it when rerun with
+the same arguments, so an OOM killer costs minutes, not the run. earlyoom killed the
+saas run twice (exit 143, no traceback); a retry loop finished it:
+
+```bash
+until .venv/bin/python train.py job.json --name saas-business-strategist-agent --dataset data/saas-business.jsonl; do sleep 20; done
+```
 
 ## Threads
 
@@ -66,27 +93,27 @@ threads vs about 310 tokens/s with 4.
 
 ## On c0mpute
 
-`job.json` is the job config shape from `@infernetprotocol/training`
-(`kind`, `base_model`, `dataset`, `hyperparams`, `output`). `train.py` emits that
-package's v1 events (`meta`, `step`, `eval`, `checkpoint`, `done`), so it can stand in as
-the runner for a text-training backend.
+Text fine-tunes are a c0mpute workload since 0.2.50 (`infernet.text.train`, DIP 0027, with
+Infernet 0.1.79's `peft` backend). `job.json` is the `@infernetprotocol/training` job shape
+(`kind`, `base_model`, `dataset`, `hyperparams`, `output`, plus `name` and `system_prompt`),
+and `train.py` emits the same v1 events (`meta`, `step`, `eval`, `checkpoint`, `done`) the
+network runner does, so a job runs the same way on your CPU or on a worker.
 
-What is **not** there yet: c0mpute ships only the `infernet.temporal.train` and
-`infernet.temporal.infer` workloads (DIP 0026, liquid networks), and the training
-package's text backends (`deepspeed`, `petals`, `opendiloco`, `openrlhf`) still return
-`not_implemented`. To run this job on the network it needs:
+```bash
+# worker (once): infernet model runtime setup --peft --yes && c0mpute infernet text serve
+# buyer:
+c0mpute infernet text train --job job-saas.json --dataset data/saas-business.jsonl --output out/saas-business-strategist-agent --yes
+```
 
-1. a `local-cpu` (or `peft`) backend in `@infernetprotocol/training` that spawns `train.py`
-   and relays its stdout, so that `infernet model train --job job.json` works;
-2. an `infernet.text.train` workload in `plugins/infernet/module.toml` with a
-   `c0mpute infernet text train --yes` command, a copy of the temporal one in DIP 0026
-   (auction, receipt carrying the adapter hash).
-
-Until then, run it locally as above.
+The buyer runs a small token-gated transfer server that the worker posts progress events
+and the adapter to, so the worker must be able to reach it. On a box whose firewall drops
+inbound ports, either open one port (`--bind 0.0.0.0:47556 --public-url
+http://<public ip>:47556`) or join the worker's Tailscale network and pass the tailnet IP.
+The receipt's output hash is the adapter's sha256, checked on arrival.
 
 ## Data
 
-Everything comes from rssamplifier's public API (no key): `/api/topics/<slug>?group=`,
+Everything comes from public APIs (no key): pit.world `/api/search`, and rssamplifier's `/api/topics/<slug>?group=`,
 `/api/feeds/<slug>` and the `read_post` tool on `/api/mcp`, three requests at a time.
 `read_post` caches each article, so a publisher is fetched once rather than once per
 reader. Posts are the publishers' copyright: keep corpora and adapters trained on them

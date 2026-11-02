@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ask business-strategist-agent a question, on CPU.
 
-    uv run --with-requirements requirements.txt chat.py "How should a 3-person SaaS price its first plan?"
+    .venv/bin/python chat.py --model out/saas-business-strategist-agent "How should a 3-person SaaS price its first plan?"
 
 A 135M model cannot memorise thousands of posts, so the tune teaches it the
 register and search supplies the facts: the question goes to pit.world search
@@ -10,6 +10,7 @@ URL. The harvested corpus (data/corpus.jsonl, BM25) is the offline fallback:
 it holds one topic's posts, so most questions matched a stray word in it.
 """
 
+import argparse
 import json
 import math
 import re
@@ -24,8 +25,6 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 HERE = Path(__file__).parent
-ADAPTER = HERE / "out" / "business-strategist-agent"
-CORPUS = HERE / "data" / "corpus.jsonl"
 TOP_K = 3
 SEARCH = "https://pit.world/api/search"
 
@@ -74,8 +73,14 @@ def bm25(query, docs, k1=1.5, b=0.75):
 
 
 def main():
-    question = " ".join(sys.argv[1:]) or "What should a small business focus on next quarter?"
+    ap = argparse.ArgumentParser(description="Ask a trained strategist agent a question.")
+    ap.add_argument("question", nargs="*")
+    ap.add_argument("--model", default="out/business-strategist-agent", help="trained adapter dir")
+    args = ap.parse_args()
+    question = " ".join(args.question) or "What should a small business focus on next quarter?"
+    ADAPTER = HERE / args.model
     manifest = json.loads((ADAPTER / "manifest.json").read_text())
+    CORPUS = HERE / manifest["dataset"]
     torch.set_num_threads(4)
 
     hits = pit_search(question)
@@ -85,7 +90,7 @@ def main():
     context = "\n\n".join(f"[{i + 1}] {d['title']} ({d['url']})\n{d['text'][:700]}" for i, d in enumerate(hits))
 
     tok = AutoTokenizer.from_pretrained(ADAPTER)
-    model = AutoModelForCausalLM.from_pretrained(manifest["base_model"], dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(manifest["base_model"], dtype=torch.bfloat16)
     model = PeftModel.from_pretrained(model, ADAPTER).eval()
 
     prompt = tok.apply_chat_template(
