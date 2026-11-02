@@ -75,6 +75,7 @@ pub fn tags_from_config(config: &Config) -> Vec<String> {
             Role::Transcode => tags.push("c0mpute:role:transcode".to_string()),
             Role::Gateway => tags.push("c0mpute:role:gateway".to_string()),
             Role::Verifier => tags.push("c0mpute:role:verifier".to_string()),
+            Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
         }
     }
     tags.push(detect_hardware_tag());

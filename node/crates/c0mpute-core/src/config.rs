@@ -51,6 +51,7 @@ impl Default for Config {
                 Role::Verifier,
                 Role::Tts,
                 Role::Stt,
+                Role::WorkflowStep,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),

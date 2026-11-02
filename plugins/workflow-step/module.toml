@@ -1,0 +1,49 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Built in: the implementation lives in c0mpute-core (workflow.rs runner,
+# jobs_gateway.rs bridge). Nothing to install. See
+# dips/0030-workflow-step-and-jobs-bridge.md.
+#
+# Two step kinds, no code from the network ever runs:
+#   transform  JMESPath expression applied to the step input
+#   http_call  one outbound HTTP request, SSRF-guarded (public addresses
+#              only, connection pinned to the vetted IP, <=5 re-vetted
+#              redirects, 1 MiB body cap, 30 s max)
+# Step payloads are visible to the winning worker.
+
+[module]
+id          = "workflow-step"
+name        = "Workflow step — webhook workflow steps (meshhook)"
+version     = "0.2.53"
+kind        = "workload"
+category    = "infrastructure"
+description = "Runs one step of a webhook workflow on a c0mpute worker: a JMESPath transform or a guarded HTTP call. Applications reach it through `c0mpute jobs serve`."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/workflow-step"
+keywords    = ["workflow", "webhook", "meshhook", "jmespath", "http", "automation"]
+
+[module.requirements]
+c0mpute      = ">=0.2.54"
+os           = ["linux", "darwin", "windows"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["cpu", "network:egress"]
+
+[module.workloads]
+"workflow.step" = { command = "step", validation = "result_json_v1" }
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute jobs serve"
+
+[module.config.defaults]
+role                 = "workflow-step"
+max_spec_bytes       = 1_048_576
+max_response_bytes   = 1_048_576
+max_result_bytes     = 4_194_304
+http_timeout_ms      = 15_000
+http_timeout_max_ms  = 30_000
+max_redirects        = 5
+max_concurrent_steps = 16

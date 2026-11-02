@@ -129,7 +129,12 @@ impl Supervisor {
             info!(%workload_type, "subscribing to job topic");
             // Node-wide slots, per-workload job timing: the dispatch loop
             // reads this to stop bidding when full and to quote an ETA.
-            let load = runner::WorkerLoad::new(compute_slots.clone(), total_slots);
+            // workflow.step draws on its own light-work slots instead.
+            let load = if workload_type == crate::workflow::WORKLOAD {
+                crate::workflow::worker_load()
+            } else {
+                runner::WorkerLoad::new(compute_slots.clone(), total_slots)
+            };
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {
                     let ffmpeg_bin = which_ffmpeg().unwrap_or_else(|| "ffmpeg".into());
@@ -151,6 +156,11 @@ impl Supervisor {
                     net.clone(),
                     self.store.clone(),
                     cache_root.clone(),
+                    load.clone(),
+                )),
+                crate::workflow::WORKLOAD => Some(crate::workflow::spawn_workflow_runner(
+                    net.clone(),
+                    self.store.clone(),
                     load.clone(),
                 )),
                 _ => None,

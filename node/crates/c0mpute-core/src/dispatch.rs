@@ -337,7 +337,9 @@ struct BenchCache {
 
 impl BenchCache {
     fn get(&mut self) -> Option<u32> {
-        let stale = self.read_at.is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+        let stale = self
+            .read_at
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(600));
         if stale {
             self.score = crate::capabilities::local_bench_score();
             self.read_at = Some(std::time::Instant::now());
@@ -530,6 +532,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::Stt) {
         types.push("stt.transcribe".to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::WorkflowStep) {
+        types.push(crate::workflow::WORKLOAD.to_string());
+    }
     types
 }
 
@@ -603,13 +608,24 @@ mod tests {
     #[test]
     fn accept_after_bid_expiry_is_rejected() {
         let b = bid();
-        assert!(b.matches(&accept(), b.expires_at_ms + ACCEPT_GRACE_MS).is_ok());
-        assert!(b.matches(&accept(), b.expires_at_ms + ACCEPT_GRACE_MS + 1).is_err());
+        assert!(
+            b.matches(&accept(), b.expires_at_ms + ACCEPT_GRACE_MS)
+                .is_ok()
+        );
+        assert!(
+            b.matches(&accept(), b.expires_at_ms + ACCEPT_GRACE_MS + 1)
+                .is_err()
+        );
         assert!(!b.holds_capacity(b.expires_at_ms + ACCEPT_GRACE_MS + 1));
     }
 
     fn cap(queued: usize, queue_free: usize, free_slots: Option<usize>) -> Capacity {
-        Capacity { queued, queue_free, free_slots, total_slots: 4 }
+        Capacity {
+            queued,
+            queue_free,
+            free_slots,
+            total_slots: 4,
+        }
     }
 
     #[test]
@@ -630,7 +646,10 @@ mod tests {
         let c = cap(0, 16, Some(3));
         assert_eq!(c.budget(), 3);
         assert!(c.can_bid(2));
-        assert!(!c.can_bid(3), "three open bids already cover three free slots");
+        assert!(
+            !c.can_bid(3),
+            "three open bids already cover three free slots"
+        );
         // Without slot accounting the queue alone caps it.
         let q = cap(5, 3, None);
         assert!(q.can_bid(2));

@@ -14,7 +14,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use c0mpute_net::{Libp2pNetwork, Network};
-use c0mpute_proto::{ChunkRequest, Hash};
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -535,102 +534,41 @@ async fn fetch_result(
     provider_peer_id: &str,
     max_bytes: usize,
 ) -> ApiResult<Vec<u8>> {
-    let hash = Hash::from_hex(hash).map_err(|_| {
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "worker returned an invalid result hash".into(),
-        )
-    })?;
-    let request = ChunkRequest {
-        chunk_hash: hash,
-        shard_index: None,
-    };
-    let provider: c0mpute_net::PeerId = provider_peer_id.parse().map_err(|_| {
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "worker returned an invalid peer id".into(),
-        )
-    })?;
-    let start = tokio::time::Instant::now();
-    let deadline = start + Duration::from_secs(20);
-    let direct_deadline = (start + Duration::from_secs(3)).min(deadline);
-    let direct_error = match tokio::time::timeout_at(
-        direct_deadline,
-        state.net.fetch_from_peer(provider, &request),
+    use crate::gateway_util::{FetchError, fetch_verified};
+    match fetch_verified(
+        &state.net,
+        hash,
+        provider_peer_id,
+        max_bytes,
+        Duration::from_secs(20),
     )
     .await
     {
-        Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
-        Ok(Err(error)) => error.to_string(),
-        Err(_) => "direct fetch timed out".into(),
-    };
-
-    // A job receipt can arrive before the provider record has reached this
-    // gateway's routing table. Try the normal DHT provider lookup before
-    // giving up on a worker whose result is otherwise complete.
-    let dht_deadline = (tokio::time::Instant::now() + Duration::from_secs(12)).min(deadline);
-    let mut last_error =
-        match tokio::time::timeout_at(dht_deadline, state.net.fetch(&request)).await {
-            Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
-            Ok(Err(error)) => format!("direct fetch: {direct_error}; DHT fetch: {error}"),
-            Err(_) => format!("direct fetch: {direct_error}; DHT provider fetch timed out"),
-        };
-
-    while tokio::time::Instant::now() < deadline {
-        let retry_deadline = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
-        match tokio::time::timeout_at(
-            retry_deadline,
-            state.net.fetch_from_peer(provider, &request),
-        )
-        .await
-        {
-            Ok(Ok(bytes)) => return validate_result(bytes, hash, max_bytes),
-            Ok(Err(error)) => last_error = error.to_string(),
-            Err(_) => last_error = "direct fetch timed out".into(),
+        Ok(bytes) => Ok(bytes),
+        Err(FetchError::Invalid(message)) => Err(ApiError(StatusCode::BAD_GATEWAY, message.into())),
+        Err(FetchError::Timeout(last_error)) => {
+            tracing::warn!(err = %last_error, "timed out fetching c0mpute speech result");
+            Err(ApiError(
+                StatusCode::GATEWAY_TIMEOUT,
+                "timed out fetching the c0mpute result".into(),
+            ))
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    tracing::warn!(err = %last_error, "timed out fetching c0mpute speech result");
-    Err(ApiError(
-        StatusCode::GATEWAY_TIMEOUT,
-        "timed out fetching the c0mpute result".into(),
-    ))
-}
-
-fn validate_result(bytes: Vec<u8>, hash: Hash, max_bytes: usize) -> ApiResult<Vec<u8>> {
-    if Hash::of(&bytes) == hash && bytes.len() <= max_bytes {
-        Ok(bytes)
-    } else {
-        Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            "worker result hash or size is invalid".into(),
-        ))
     }
 }
 
 fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<()> {
-    let supplied = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "bearer token required".into()))?;
-    if constant_time_eq(supplied.as_bytes(), state.token.as_bytes()) {
-        Ok(())
-    } else {
-        Err(ApiError(
+    use crate::gateway_util::{BearerCheck, check_bearer};
+    match check_bearer(headers, &state.token) {
+        BearerCheck::Ok => Ok(()),
+        BearerCheck::Missing => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "bearer token required".into(),
+        )),
+        BearerCheck::Invalid => Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "invalid bearer token".into(),
-        ))
+        )),
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut difference = a.len() ^ b.len();
-    for index in 0..a.len().max(b.len()) {
-        difference |=
-            usize::from(a.get(index).copied().unwrap_or(0) ^ b.get(index).copied().unwrap_or(0));
-    }
-    difference == 0
 }
 
 fn valid_tts_voice(engine: &str, voice: &str) -> bool {

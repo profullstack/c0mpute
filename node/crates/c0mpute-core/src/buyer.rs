@@ -75,7 +75,10 @@ impl JobAuction {
         }
     }
 
-    pub fn with_accept_notify(mut self, tx: tokio::sync::mpsc::UnboundedSender<(String, JobBid)>) -> Self {
+    pub fn with_accept_notify(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<(String, JobBid)>,
+    ) -> Self {
         self.accept_notify = Some(tx);
         self
     }
@@ -125,6 +128,27 @@ impl JobAuction {
         self
     }
 }
+
+/// Why an auction ended without a result, for callers that map the outcome
+/// to a status (the jobs bridge answers 503 for [`Self::NoBids`] and 504 for
+/// [`Self::NoReceipt`]). Recover it with `err.downcast_ref::<AuctionFailure>()`.
+#[derive(Debug, Clone)]
+pub enum AuctionFailure {
+    /// No usable bid arrived inside the bid window.
+    NoBids(String),
+    /// A winner was accepted but its receipt did not arrive in time.
+    NoReceipt(String),
+}
+
+impl std::fmt::Display for AuctionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoBids(m) | Self::NoReceipt(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for AuctionFailure {}
 
 pub struct AuctionOutcome {
     pub job_id: String,
@@ -243,12 +267,17 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     info!(%job_id, count = bids.len(), expired = received - bids.len(), "buyer: bid window closed");
     if bids.is_empty() {
         if received > 0 {
-            bail!(
+            return Err(AuctionFailure::NoBids(format!(
                 "all {received} bids expired before the {:?} bid window closed",
                 auction.bid_window
-            );
+            ))
+            .into());
         }
-        bail!("no bids received within {:?}", auction.bid_window);
+        return Err(AuctionFailure::NoBids(format!(
+            "no bids received within {:?}",
+            auction.bid_window
+        ))
+        .into());
     }
 
     // ── pick winner: smart routing (most capable, not overloaded) or
@@ -333,11 +362,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         }
     }
 
-    bail!(
+    Err(AuctionFailure::NoReceipt(format!(
         "no receipt from winner {} within {:?}",
-        winner.bidder_peer_id,
-        auction.receipt_timeout
-    );
+        winner.bidder_peer_id, auction.receipt_timeout
+    ))
+    .into())
 }
 
 async fn publish_json<T: serde::Serialize>(
@@ -424,7 +453,11 @@ mod tests {
 
     #[test]
     fn expired_bids_are_ignored() {
-        let mut bids = vec![bid("old", None), bid("live", Some(2_000)), bid("stale", Some(1_000))];
+        let mut bids = vec![
+            bid("old", None),
+            bid("live", Some(2_000)),
+            bid("stale", Some(1_000)),
+        ];
         retain_live_bids(&mut bids, 1_500);
         let peers: Vec<_> = bids.iter().map(|b| b.bidder_peer_id.as_str()).collect();
         assert_eq!(peers, ["old", "live"]);
@@ -444,6 +477,9 @@ mod tests {
         let a = JobAuction::new("ffmpeg.transcode", serde_json::json!({}))
             .with_external_ref(Some("coinpay:inv_9".into()));
         assert_eq!(a.external_ref.as_deref(), Some("coinpay:inv_9"));
-        assert_eq!(JobAuction::new("x", serde_json::json!({})).external_ref, None);
+        assert_eq!(
+            JobAuction::new("x", serde_json::json!({})).external_ref,
+            None
+        );
     }
 }

@@ -66,6 +66,8 @@ const KNOWN_WORKLOADS: &[&str] = &[
     "infernet.inference",
     "infernet.temporal.train",
     "infernet.temporal.infer",
+    // DIP 0030: webhook workflow steps (meshhook via `c0mpute jobs serve`).
+    "workflow.step",
 ];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
@@ -775,8 +777,14 @@ mod tests {
             }]
         );
         let json = serde_json::to_string(&p.nodes).unwrap();
-        assert!(!json.contains("Example CPU"), "CPU model must never be public");
-        assert!(!json.contains("\"cpu\":"), "no cpu field on the public board");
+        assert!(
+            !json.contains("Example CPU"),
+            "CPU model must never be public"
+        );
+        assert!(
+            !json.contains("\"cpu\":"),
+            "no cpu field on the public board"
+        );
     }
 
     #[test]

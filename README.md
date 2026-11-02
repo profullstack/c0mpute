@@ -139,6 +139,37 @@ private network or HTTPS reverse proxy, then configure the app server with
 to a $0 maximum bid so speech stays free; set `C0MPUTE_SPEECH_MAX_PRICE_USD`
 above zero only when you explicitly want to pay workers that charge for jobs.
 
+### Webhook workflow steps (`workflow.step`, for meshhook)
+
+meshhook runs each step of a webhook workflow on c0mpute workers
+([DIP 0030](dips/0030-workflow-step-and-jobs-bridge.md)). A step is either a
+`transform` (a JMESPath expression applied to the step input) or an
+`http_call` (one outbound request the requester has fully resolved). No code
+from the network runs, and `http_call` only reaches public addresses: every
+resolved IP is vetted, the connection is pinned to it, redirects (at most 5)
+are re-vetted, bodies are capped at 1 MiB and calls at 30 s.
+
+Workers take steps by default (`c0mpute worker start`); the role is
+`workflow-step`, so `c0mpute worker start --roles storage,tts,stt` opts out.
+Applications reach the network through an authenticated bridge:
+
+```sh
+C0MPUTE_JOBS_TOKEN=<random-24+-char-secret> c0mpute jobs serve --listen 127.0.0.1:8788 --max-price 0
+
+curl -s http://127.0.0.1:8788/v1/jobs -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" -d '{
+  "workload": "workflow.step",
+  "spec": {"v": 1, "kind": "transform", "config": {"expression": "items[].name"},
+           "input": {"items": [{"name": "a"}, {"name": "b"}]}}
+}'
+# {"job_id":"…","worker":"12D3KooW…","price":0.0,"output_hash":"…",
+#  "result":{"v":1,"ok":true,"output":["a","b"],"duration_ms":0}}
+```
+
+Step payloads (inputs, URLs, headers, bodies) are visible to the worker that
+runs them. Keep secrets out of steps, or pin trusted workers with
+`allow_peers` per request or `C0MPUTE_JOBS_ALLOW_PEERS=peerA,peerB` on the
+bridge.
+
 ### Run the worker in the background
 
 ```sh
@@ -267,6 +298,7 @@ lifecycle. See the unit header for GPU/role customization via `systemctl --user 
 │       └── c0mpute-transcode/           # in-process FFmpeg workload
 ├── plugins/                           # marketplace manifests only
 │   ├── transcode/module.toml          # in-process; code at node/crates/c0mpute-transcode
+│   ├── workflow-step/module.toml      # in-process; code in c0mpute-core (workflow.rs, jobs_gateway.rs)
 │   ├── coinpay/module.toml            # subprocess; binary from upstream coinpay
 │   └── infernet/module.toml           # subprocess; binary from infernetprotocol/infernet-protocol
 ├── apps/
