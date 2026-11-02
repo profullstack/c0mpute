@@ -20,6 +20,7 @@ pub mod status_aggregator;
 pub mod supervisor;
 pub mod temporal;
 pub mod text;
+pub mod webhook;
 
 pub use buyer::{AuctionOutcome, JobAuction, run_auction};
 pub use capabilities::{Registry, advertise_loop, tags_from_config};

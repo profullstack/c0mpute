@@ -16,6 +16,7 @@
 //!   c0mpute transcode <sub>     # in-process FFmpeg workload
 //!   c0mpute coinpay   <args…>   # delegates to `coinpay`
 //!   c0mpute infernet  <args…>   # delegates to `infernet`
+//!   c0mpute webhook   <sub>     # paid, E2E encrypted webhook delivery
 //!
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
@@ -24,6 +25,7 @@ mod peers;
 mod storage;
 mod temporal;
 mod text;
+mod webhook;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -42,7 +44,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -136,6 +138,12 @@ enum Cmd {
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
         /// Arguments forwarded to `coinpay`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Paid, end-to-end encrypted webhook delivery on c0mpute workers
+    /// (`c0mpute webhook serve|send`, DIP-0028).
+    Webhook {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -589,6 +597,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
         Cmd::Login => run_login(),
+        Cmd::Webhook { args } => webhook::run(&args).await,
         Cmd::Infernet { args } if args.first().map(String::as_str) == Some("text") => {
             text::run(&args[1..]).await
         }
