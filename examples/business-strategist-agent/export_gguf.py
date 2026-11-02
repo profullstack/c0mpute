@@ -13,7 +13,7 @@ GGUF (Q8_0 by default) and a Modelfile carrying the agent's system prompt.
 
 import argparse
 import json
-import subprocess
+import runpy
 import sys
 import tempfile
 from pathlib import Path
@@ -27,9 +27,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("adapter")
     ap.add_argument("--llama-cpp", required=True, help="a llama.cpp checkout (for convert_hf_to_gguf.py)")
-    ap.add_argument("--outtype", default="q8_0", help="q8_0, f16, bf16 (default q8_0)")
+    ap.add_argument("--outtype", default="q8_0", choices=["q8_0", "f16", "bf16"])
     args = ap.parse_args()
 
+    converter = Path(args.llama_cpp).resolve() / "convert_hf_to_gguf.py"
+    if not converter.is_file():
+        raise SystemExit(f"no convert_hf_to_gguf.py in {args.llama_cpp}")
     adapter = Path(args.adapter)
     m = json.loads((adapter / "manifest.json").read_text())
     out_dir = adapter.with_name(adapter.name + "-gguf")
@@ -41,11 +44,14 @@ def main():
         base = AutoModelForCausalLM.from_pretrained(m["base_model"], dtype=torch.float16)
         PeftModel.from_pretrained(base, adapter).merge_and_unload().save_pretrained(merged, safe_serialization=True)
         AutoTokenizer.from_pretrained(adapter).save_pretrained(merged)
-        subprocess.run(
-            [sys.executable, str(Path(args.llama_cpp) / "convert_hf_to_gguf.py"), merged,
-             "--outtype", args.outtype, "--outfile", str(gguf)],
-            check=True,
-        )
+        # Run llama.cpp's converter in this process (it reads sys.argv).
+        sys.argv = [str(converter), merged, "--outtype", args.outtype, "--outfile", str(gguf)]
+        sys.path.insert(0, str(converter.parent))
+        try:
+            runpy.run_path(str(converter), run_name="__main__")
+        except SystemExit as e:
+            if e.code not in (0, None):
+                raise
 
     # The GGUF carries Qwen's chat template; the Modelfile adds the agent's system prompt.
     (out_dir / "Modelfile").write_text(
