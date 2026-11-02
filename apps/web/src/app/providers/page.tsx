@@ -96,6 +96,27 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
       </section>
 
       <section className="space-y-3 text-sm leading-7">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ house models ]</h2>
+        <p>
+          Every node pulls and serves the models Infernet publishes at{" "}
+          <a href="https://infernetprotocol.com/house-models.json">infernetprotocol.com/house-models.json</a>{" "}
+          that fit it, so a request for one can reach any node, not only ours. A model is pulled
+          only when the machine has its listed RAM and the download leaves 10% of the disk free;
+          one at a time, never while a job runs, and checked against its pinned digest. Models
+          you pulled yourself are never removed.
+        </p>
+        <CodeBlock>{`$ c0mpute worker status                 # lists house models + disk used
+$ infernet house-models off              # opt out (removes what it pulled)
+$ infernet house-models uncensored off   # skip uncensored models only
+$ infernet house-models cap 20           # at most 20 GB`}</CodeBlock>
+        <p className="text-[var(--color-dim)]">
+          At install: <code>--no-house-models</code> or <code>--no-uncensored-models</code>.
+          The list and how to add a model:{" "}
+          <a href="https://infernetprotocol.com/docs/house-models">infernetprotocol.com/docs/house-models</a>.
+        </p>
+      </section>
+
+      <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ CPU voice inference ]</h2>
         <p>
           Voice inference runs on ordinary CPUs. Workers can install Piper, Kokoro, or Pocket
