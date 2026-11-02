@@ -33,6 +33,15 @@ background daemon otherwise). Check it with `c0mpute worker status`, then run
 - **What you get:** paid inference is billed through CoinPay (16 coins or PayPal) and you set
   your payout address with `infernet payout set <coin> <address>`. Paid demand is early, so
   expect small, irregular earnings for now.
+- **House models (on by default):** the node pulls and serves the models Infernet publishes at
+  [infernetprotocol.com/house-models.json](https://infernetprotocol.com/house-models.json) that fit
+  it (RAM, and always leaving 10% of the disk free), today Profullstack's
+  `saas-business-strategist-agent` and the uncensored `huihui_ai/qwen3.5-abliterated:4b`/`:9b`.
+  `c0mpute worker status` lists them and the disk they use. Opt out at install with
+  `--no-house-models` (uncensored only: `--no-uncensored-models`), or later with
+  `infernet house-models off` / `infernet house-models uncensored off`; cap the disk with
+  `infernet house-models cap <gb>`. Models you pulled yourself are never removed.
+  Details: [infernetprotocol.com/docs/house-models](https://infernetprotocol.com/docs/house-models).
 - **Invite people:** share `https://c0mpute.com/r/<your-handle>`. Nodes installed from it
   show your handle on the board (`C0MPUTE_REF=<handle>` does the same by hand).
 

@@ -21,6 +21,12 @@
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
 #   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF)
+#   --no-house-models       Don't pull Infernet house models (same as
+#                           INFERNET_NO_HOUSE_MODELS=1). They are ON by default:
+#                           the node pulls and serves the models listed at
+#                           https://infernetprotocol.com/house-models.json that fit it.
+#   --no-uncensored-models  Skip uncensored house models only
+#                           (same as INFERNET_NO_UNCENSORED_MODELS=1)
 #   --no-exec       Don't auto-exec a fresh shell at the end
 #                   (CI-friendly; default is to drop you into a new
 #                   shell with c0mpute already on $PATH)
@@ -81,8 +87,10 @@ while [ $# -gt 0 ]; do
     --no-exec)      NO_EXEC=1 ;;
     --ref)          shift; C0MPUTE_REF="${1:-}" ;;
     --ref=*)        C0MPUTE_REF="${1#--ref=}" ;;
+    --no-house-models)      INFERNET_NO_HOUSE_MODELS=1 ;;
+    --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
     --help|-h)
-      sed -n '2,20p' "$0"
+      sed -n '2,32p' "$0"
       exit 0
       ;;
     *)
@@ -306,6 +314,27 @@ chain_install() {
     warn "$name install/upgrade failed (continuing without it)"
     return 1
   fi
+}
+
+# House models: Infernet nodes pull and serve the models Infernet publishes
+# (https://infernetprotocol.com/house-models.json) that fit the box. Persist any
+# opt-out into infernet's config and say clearly what will happen.
+house_models_notice() {
+  command -v infernet >/dev/null 2>&1 || return 0
+  if [ "${INFERNET_NO_HOUSE_MODELS:-}" = "1" ]; then
+    infernet house-models off >/dev/null 2>&1 || true
+    ok "house models: off (--no-house-models)"
+    return 0
+  fi
+  if [ "${INFERNET_NO_UNCENSORED_MODELS:-}" = "1" ]; then
+    infernet house-models uncensored off >/dev/null 2>&1 || true
+  fi
+  say "house models: ON — this node pulls and serves the models listed at"
+  say "  https://infernetprotocol.com/house-models.json that fit it (RAM; keeps 10% of disk free)."
+  if [ "${INFERNET_NO_UNCENSORED_MODELS:-}" = "1" ]; then
+    say "  uncensored house models: off (--no-uncensored-models)"
+  fi
+  say "  opt out any time: infernet house-models off  (uncensored only: infernet house-models uncensored off)"
 }
 
 # transcode is in-process (no separate binary), but it depends on
@@ -761,7 +790,13 @@ main() {
 
   if [ "$INSTALL_C0MPUTE" -eq 1 ]; then install_c0mpute "$platform"; fi
   if [ "$INSTALL_COINPAY" -eq 1 ];  then chain_install coinpay  "$COINPAY_INSTALL_URL"; fi
-  if [ "$INSTALL_INFERNET" -eq 1 ]; then chain_install infernet "$INFERNET_INSTALL_URL"; fi
+  if [ "$INSTALL_INFERNET" -eq 1 ]; then
+    # House-model opt-outs reach infernet's installer through the environment.
+    export INFERNET_NO_HOUSE_MODELS="${INFERNET_NO_HOUSE_MODELS:-}"
+    export INFERNET_NO_UNCENSORED_MODELS="${INFERNET_NO_UNCENSORED_MODELS:-}"
+    chain_install infernet "$INFERNET_INSTALL_URL" || true
+    house_models_notice
+  fi
 
   # Symlink the shard data dir onto the biggest writable volume so the
   # overlay/root fs doesn't fill up. Idempotent + opt-out via

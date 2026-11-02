@@ -792,6 +792,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 None => println!("bench: not run — `c0mpute bench` publishes a capacity score"),
             }
             print_served_models_eligibility();
+            print_house_models();
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
@@ -2876,6 +2877,99 @@ fn print_served_models_eligibility() {
     }
 }
 
+/// Infernet house models (infernet >= 0.1.82): the models Infernet publishes
+/// at https://infernetprotocol.com/house-models.json, which the infernet daemon
+/// pulls and serves when they fit. Read from infernet's config (opt-outs) and
+/// its state file, so this works without the daemon answering.
+fn print_house_models() {
+    let Some(cfg_path) = infernet_config_path() else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&cfg_path) else {
+        return;
+    };
+    let config: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let state: serde_json::Value = cfg_path
+        .parent()
+        .map(|d| d.join("house-models-state.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    for line in house_models_lines(&config, &state, |k| std::env::var(k).ok()) {
+        println!("{line}");
+    }
+}
+
+/// The house-models lines for `worker status`. Env beats config, as in infernet.
+fn house_models_lines(
+    config: &serde_json::Value,
+    state: &serde_json::Value,
+    env: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let off = |v: Option<String>| {
+        v.map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
+    };
+    let one = |v: Option<String>| v.map(|s| s.trim() == "1").unwrap_or(false);
+    let hm = &config["houseModels"];
+    let enabled = hm["enabled"].as_bool() != Some(false)
+        && !off(env("INFERNET_HOUSE_MODELS"))
+        && !one(env("INFERNET_NO_HOUSE_MODELS"));
+    let uncensored = hm["uncensored"].as_bool() != Some(false)
+        && !off(env("INFERNET_UNCENSORED_MODELS"))
+        && !one(env("INFERNET_NO_UNCENSORED_MODELS"));
+    let cap = env("INFERNET_HOUSE_MODELS_MAX_GB")
+        .and_then(|v| v.parse::<f64>().ok())
+        .or_else(|| hm["maxDiskGb"].as_f64());
+    let gb = |b: f64| format!("{:.1} GB", b / 1024f64.powi(3));
+    let mut lines = vec![format!(
+        "house models: {}; uncensored: {}; disk cap: {}",
+        if enabled { "on" } else { "off" },
+        if uncensored { "on" } else { "off" },
+        cap.map(|c| format!("{c} GB"))
+            .unwrap_or_else(|| "none".into())
+    )];
+    let mut total = 0f64;
+    if let Some(owned) = state["owned"].as_object() {
+        for (name, o) in owned {
+            let size = o["size_bytes"].as_f64().unwrap_or(0.0);
+            total += size;
+            let tag = if o["uncensored"].as_bool() == Some(true) {
+                "  [uncensored]"
+            } else {
+                ""
+            };
+            lines.push(format!("  {:<52} {:>8}{}", name, gb(size), tag));
+        }
+    }
+    if total == 0.0 {
+        lines.push("  (none pulled yet)".into());
+    }
+    lines.push(format!("  disk used by house models: {}", gb(total)));
+    if let Some(at) = state["last_sync"]["at"].as_str() {
+        let errors = state["last_sync"]["errors"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let note = if errors > 0 {
+            format!(" ({errors} error(s); see `infernet house-models`)")
+        } else {
+            String::new()
+        };
+        lines.push(format!("  last sync: {at}{note}"));
+    }
+    lines.push(
+        "  opt out: infernet house-models off  (uncensored only: infernet house-models uncensored off)"
+            .into(),
+    );
+    lines
+}
+
 /// Total GPU VRAM in bytes (NVIDIA via nvidia-smi), or None if there's no GPU.
 fn gpu_vram_bytes() -> Option<u64> {
     let out = Command::new("nvidia-smi")
@@ -3179,6 +3273,37 @@ pub(crate) fn which_on_path(bin: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod infernet_tests {
     use super::*;
+
+    #[test]
+    fn house_models_lines_show_models_and_opt_outs() {
+        let state = serde_json::json!({
+            "owned": {
+                "huihui_ai/qwen3.5-abliterated:4b": { "size_bytes": 3315333475u64, "uncensored": true },
+                "hf.co/profullstack/saas-business-strategist-agent-GGUF:latest": { "size_bytes": 531070268u64 }
+            },
+            "last_sync": { "at": "2026-11-02T12:00:00Z", "errors": [] }
+        });
+        let none = |_: &str| None;
+        let lines = house_models_lines(&serde_json::json!({}), &state, none);
+        assert_eq!(lines[0], "house models: on; uncensored: on; disk cap: none");
+        assert!(lines.iter().any(|l| l.contains("qwen3.5-abliterated:4b")
+            && l.contains("3.1 GB")
+            && l.contains("[uncensored]")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("disk used by house models: 3.6 GB")));
+
+        let cfg = serde_json::json!({ "houseModels": { "uncensored": false, "maxDiskGb": 20 } });
+        assert_eq!(
+            house_models_lines(&cfg, &state, none)[0],
+            "house models: on; uncensored: off; disk cap: 20 GB"
+        );
+
+        let env_off = |k: &str| (k == "INFERNET_HOUSE_MODELS").then(|| "0".to_string());
+        let lines = house_models_lines(&serde_json::json!({}), &serde_json::json!({}), env_off);
+        assert!(lines[0].starts_with("house models: off"));
+        assert!(lines.iter().any(|l| l.contains("none pulled yet")));
+    }
 
     #[test]
     fn infernet_daemon_cmdline_matching() {

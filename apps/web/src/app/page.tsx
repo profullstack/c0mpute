@@ -84,6 +84,14 @@ export default async function HomePage() {
             forwarding needed to join. → <Link href="/providers">what running a node involves</Link> ·{" "}
             <Link href="/nodes#refer">invite people with your own link</Link>
           </p>
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            Nodes also pull and serve Infernet&apos;s{" "}
+            <a href="https://infernetprotocol.com/docs/house-models">house models</a>{" "}
+            that fit them (on by default, never your own models). Opt out with{" "}
+            <code>--no-house-models</code> (uncensored only:{" "}
+            <code>--no-uncensored-models</code>) or later{" "}
+            <code>infernet house-models off</code>.
+          </p>
         </div>
 
         <p className="text-xs text-[var(--color-dim)]">
