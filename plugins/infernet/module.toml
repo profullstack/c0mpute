@@ -10,15 +10,15 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.47"
+version     = "0.2.50"
 kind        = "workload"
 category    = "ai"
-description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) on CPU or GPU."
+description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) and fine-tunes language models (LoRA) with live progress, on CPU or GPU."
 author      = "Infernet Protocol"
 license     = "MIT"
 homepage    = "https://infernetprotocol.com"
 source      = "https://github.com/infernetprotocol/infernet-protocol"
-keywords    = ["ai", "llm", "inference", "gpu", "temporal-policy", "liquid-neural-network", "cfc"]
+keywords    = ["ai", "llm", "inference", "gpu", "temporal-policy", "liquid-neural-network", "cfc", "lora", "fine-tuning"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"
@@ -36,6 +36,13 @@ capabilities = ["gpu:nvidia?", "model-runtime"]
 # what `infernet model capabilities` reports. Receipts carry the model hash.
 "infernet.temporal.train" = { command = "model train", validation = "model_hash_and_eval_manifest", min_version = "0.1.66" }
 "infernet.temporal.infer" = { command = "model serve", validation = "model_hash_session_affinity", min_version = "0.1.66" }
+# Text fine-tunes (LoRA, @infernetprotocol/training peft backend). Executed by
+# Infernet >= 0.1.79 (`infernet model train --job <job.json> --json`) once the
+# operator installed the runtime with `infernet model runtime setup --peft --yes`.
+# Workers opt in with `c0mpute infernet text serve`; buyers run
+# `c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes` and
+# watch the worker's training events live. Receipts carry the adapter hash.
+"infernet.text.train" = { command = "model train", validation = "adapter_hash", min_version = "0.1.79" }
 
 [module.dispatch]
 mode   = "subprocess"
@@ -47,6 +54,13 @@ runtime = "infernet:temporal:runtime:<version>"
 devices = ["infernet:temporal:device:cpu", "infernet:temporal:device:cuda", "infernet:temporal:device:mps"]
 ram     = "c0mpute:ram:<n>gb+"
 model   = "infernet:temporal:model:<sha256-hex>"
+
+[module.capabilities.text]
+# Tags a text-training worker advertises; buyers require a subset.
+workload = "infernet:text:train"
+runtime  = "infernet:text:runtime:peft"
+devices  = ["infernet:text:device:cpu", "infernet:text:device:cuda"]
+ram      = "c0mpute:ram:<n>gb+"
 
 [module.surfaces]
 cli = "infernet"

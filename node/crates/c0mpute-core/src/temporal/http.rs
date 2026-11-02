@@ -15,18 +15,23 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use rand::RngCore;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 pub const ARTIFACTS: [&str; 3] = ["manifest.json", "model.safetensors", "eval.json"];
 const MAX_UPLOAD: usize = 1 << 30;
+
+/// A progress event a worker posted for a slot (`infernet.text.train`).
+pub type SlotEvent = (String, serde_json::Value);
 
 #[derive(Clone)]
 struct St {
     token: String,
     dataset: Arc<Vec<u8>>,
     uploads: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+    artifacts: &'static [&'static str],
+    events: Option<mpsc::UnboundedSender<SlotEvent>>,
 }
 
 pub struct TransferServer {
@@ -48,25 +53,55 @@ async fn get_dataset(State(st): State<St>, Path(token): Path<String>) -> Result<
 }
 
 async fn put_artifact(State(st): State<St>, Path((token, slot, file)): Path<(String, String, String)>, body: Bytes) -> StatusCode {
-    if token != st.token || !ok_slot(&slot) || !ARTIFACTS.contains(&file.as_str()) {
+    if token != st.token || !ok_slot(&slot) || !st.artifacts.contains(&file.as_str()) {
         return StatusCode::NOT_FOUND;
     }
     st.uploads.lock().await.insert((slot, file), body.to_vec());
     StatusCode::CREATED
 }
 
+/// One progress event (a training-protocol v1 object) from the worker.
+async fn post_event(State(st): State<St>, Path((token, slot)): Path<(String, String)>, body: Bytes) -> StatusCode {
+    if token != st.token || !ok_slot(&slot) {
+        return StatusCode::NOT_FOUND;
+    }
+    let Some(tx) = &st.events else {
+        return StatusCode::NOT_FOUND;
+    };
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(v) if v.is_object() => {
+            let _ = tx.send((slot, v));
+            StatusCode::ACCEPTED
+        }
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
 impl TransferServer {
     /// Bind `bind` and serve `dataset`. `public_base` is how the worker
     /// reaches this server (defaults to `http://<bound addr>`).
     pub async fn start(bind: SocketAddr, public_base: Option<String>, dataset: Vec<u8>) -> Result<Self> {
+        Self::start_with(bind, public_base, dataset, &ARTIFACTS, None).await
+    }
+
+    /// As [`start`](Self::start), accepting `artifacts` as upload names and,
+    /// with `events`, progress events at [`events_url`](Self::events_url).
+    pub async fn start_with(
+        bind: SocketAddr,
+        public_base: Option<String>,
+        dataset: Vec<u8>,
+        artifacts: &'static [&'static str],
+        events: Option<mpsc::UnboundedSender<SlotEvent>>,
+    ) -> Result<Self> {
         let mut t = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut t);
         let token = hex::encode(t);
         let uploads = Arc::new(Mutex::new(HashMap::new()));
-        let st = St { token: token.clone(), dataset: Arc::new(dataset), uploads: uploads.clone() };
+        let st = St { token: token.clone(), dataset: Arc::new(dataset), uploads: uploads.clone(), artifacts, events };
         let app = Router::new()
             .route("/t/{token}/dataset.json", get(get_dataset))
             .route("/t/{token}/a/{slot}/{file}", put(put_artifact))
+            .route("/t/{token}/e/{slot}", post(post_event))
             .layer(DefaultBodyLimit::max(MAX_UPLOAD))
             .with_state(st);
         let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -84,6 +119,10 @@ impl TransferServer {
 
     pub fn upload_url(&self, slot: &str) -> String {
         format!("{}/t/{}/a/{}", self.base_url, self.token, slot)
+    }
+
+    pub fn events_url(&self, slot: &str) -> String {
+        format!("{}/t/{}/e/{}", self.base_url, self.token, slot)
     }
 
     /// Artifacts uploaded for `slot`, by file name.
@@ -112,5 +151,24 @@ mod tests {
         let got = s.take("cfc").await;
         assert_eq!(got.get("model.safetensors").map(|v| v.as_slice()), Some(&b"w"[..]));
         assert!(s.take("cfc").await.is_empty());
+        // No event channel: the endpoint does not exist.
+        assert_eq!(c.post(s.events_url("cfc")).body("{}").send().await.unwrap().status(), 404);
+    }
+
+    #[tokio::test]
+    async fn custom_artifacts_and_events() {
+        const ADAPTER: [&str; 1] = ["adapter_model.safetensors"];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let s = TransferServer::start_with("127.0.0.1:0".parse().unwrap(), None, b"x".to_vec(), &ADAPTER, Some(tx)).await.unwrap();
+        let c = reqwest::Client::new();
+        assert_eq!(c.put(format!("{}/adapter_model.safetensors", s.upload_url("j"))).body("a").send().await.unwrap().status(), 201);
+        assert_eq!(c.put(format!("{}/model.safetensors", s.upload_url("j"))).body("a").send().await.unwrap().status(), 404);
+        assert_eq!(c.post(s.events_url("j")).body(r#"{"type":"step","step":1}"#).send().await.unwrap().status(), 202);
+        assert_eq!(c.post(s.events_url("j")).body("nope").send().await.unwrap().status(), 400);
+        let (slot, ev) = rx.recv().await.unwrap();
+        assert_eq!(slot, "j");
+        assert_eq!(ev["step"], 1);
+        let wrong = s.events_url("j").replace(&s.token, &"0".repeat(32));
+        assert_eq!(c.post(wrong).body("{}").send().await.unwrap().status(), 404);
     }
 }
