@@ -1162,7 +1162,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"; // gitleaks:allow (public Standard Webhooks spec test key)
         let mut c = call(&format!("{base}/ok"));
         c.secret = Some(secret.into());
         c.headers.push(("authorization".into(), "Bearer sk_live_topsecret".into()));
