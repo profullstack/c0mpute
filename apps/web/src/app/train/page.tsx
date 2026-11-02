@@ -80,7 +80,8 @@ infernet model runtime setup --peft --yes           # PyTorch + transformers + p
 c0mpute infernet text serve                         # take training and chat jobs`}</Code>
         <p>
           A worker trains one job at a time, answers chat requests between them, and advertises only what its
-          Infernet can run (CPU or CUDA, RAM bucket). Earnings follow the bid on each receipt.{" "}
+          Infernet can run (CPU or CUDA, RAM bucket). Each receipt records the winning bid; payouts for these jobs
+          are not settled yet.{" "}
           <Link href="/nodes">See who is online.</Link>
         </p>
       </section>
