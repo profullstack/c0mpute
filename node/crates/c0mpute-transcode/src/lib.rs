@@ -332,7 +332,10 @@ pub async fn transcode_with_limits(
     command
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // On timeout the wait future is dropped; without this ffmpeg
+        // keeps running past the job budget.
+        .kill_on_drop(true);
     if let Some(devices) = cuda_visible_devices {
         command.env("CUDA_VISIBLE_DEVICES", devices);
     }

@@ -155,6 +155,13 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from an excluded worker ignored");
                             continue;
                         }
+                        if !bid.price_usd.is_finite()
+                            || bid.price_usd < 0.0
+                            || bid.price_usd > offer.max_price_usd
+                        {
+                            warn!(%job_id, bidder = %bid.bidder_peer_id, price = bid.price_usd, cap = offer.max_price_usd, "buyer: discarding bid outside the offer cap");
+                            continue;
+                        }
                         if !source_matches_claim(&msg, &bid.bidder_peer_id) {
                             warn!(
                                 %job_id,

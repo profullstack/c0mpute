@@ -309,8 +309,9 @@ async fn run_transcode_job(
         .context("accept missing spec_inline (Phase 1 requires inline)")?;
     let inline: TranscodeJobInline = serde_json::from_value(spec_inline.clone())
         .context("decode spec_inline as TranscodeJobInline")?;
+    validate_transcode_spec(&inline.spec)?;
 
-    let job_dir = cache_root.join("jobs").join(&job.accept.job_id);
+    let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     fs::create_dir_all(&job_dir).await?;
     let input_path = job_dir.join("input.bin");
     let output_path = job_dir.join("output.mp4");
@@ -339,17 +340,85 @@ async fn run_transcode_job(
 
     let output_bytes = fs::read(&output_path).await?;
     let hash = blake3::hash(&output_bytes);
+    // The input is no longer needed once the output exists.
+    let _ = fs::remove_file(&input_path).await;
     Ok((output_path, hex::encode(hash.as_bytes())))
 }
 
+/// Largest input a transcode job may download.
+const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Whole-download budget, separate from the ffmpeg budget.
+const INPUT_FETCH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// A transcode spec arrives from an untrusted peer. Bound every number
+/// and refuse raw ffmpeg arguments: appended flags could add inputs or
+/// outputs (`-i /etc/passwd`, a second output path) and read or write
+/// the operator's files.
+pub(crate) fn validate_transcode_spec(spec: &TranscodeSpec) -> Result<()> {
+    if !spec.extra_ffmpeg_args.is_empty() {
+        bail!("extra_ffmpeg_args are not accepted from the network");
+    }
+    if !(16..=7680).contains(&spec.width) || !(16..=4320).contains(&spec.height) {
+        bail!("resolution {}x{} is out of range", spec.width, spec.height);
+    }
+    if !(32_000..=200_000_000).contains(&spec.bitrate_bps) {
+        bail!("bitrate {} is out of range", spec.bitrate_bps);
+    }
+    if !(1..=1000).contains(&spec.keyframe_interval) {
+        bail!("keyframe interval {} is out of range", spec.keyframe_interval);
+    }
+    Ok(())
+}
+
 async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
     validate_url(url)?;
-    let resp = reqwest::get(url).await.context("GET input_url")?;
+    let parsed = url::Url::parse(url).context("invalid URL")?;
+    let host = parsed.host_str().context("URL missing host")?.to_string();
+    let port = parsed.port_or_known_default().context("URL missing port")?;
+
+    // Resolve once, require every address to be public, then pin the
+    // request to those addresses so a second lookup cannot rebind to a
+    // private one. Redirects are off: each hop would need the same check.
+    let lookup_host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((lookup_host.as_str(), port))
+        .await
+        .context("resolve input_url host")?
+        .collect();
+    if addrs.is_empty() {
+        bail!("input_url host did not resolve");
+    }
+    if let Some(bad) = addrs.iter().find(|a| !is_public_ip(a.ip())) {
+        bail!("input_url resolves to a non-public address ({})", bad.ip());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(INPUT_FETCH_TIMEOUT)
+        .resolve_to_addrs(&host, &addrs)
+        .build()
+        .context("build input http client")?;
+
+    let mut resp = client.get(url).send().await.context("GET input_url")?;
     if !resp.status().is_success() {
         bail!("input fetch returned {}", resp.status());
     }
-    let bytes = resp.bytes().await?;
-    fs::write(path, &bytes).await?;
+    if resp.content_length().is_some_and(|n| n > MAX_INPUT_BYTES) {
+        bail!("input exceeds the {MAX_INPUT_BYTES}-byte limit");
+    }
+    let mut file = fs::File::create(path).await?;
+    let mut written: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.context("read input_url body")? {
+        written += chunk.len() as u64;
+        if written > MAX_INPUT_BYTES {
+            drop(file);
+            let _ = fs::remove_file(path).await;
+            bail!("input exceeds the {MAX_INPUT_BYTES}-byte limit");
+        }
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
     Ok(())
 }
 
@@ -385,7 +454,10 @@ fn validate_url(url: &str) -> Result<()> {
 fn is_public_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
-            !ipv4.is_loopback()           // 127.0.0.0/8
+            ipv4.octets()[0] != 0             // 0.0.0.0/8
+                && !ipv4.is_multicast()       // 224.0.0.0/4
+                && ipv4.octets()[0] < 240     // 240.0.0.0/4 reserved
+                && !ipv4.is_loopback()        // 127.0.0.0/8
                 && !ipv4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 && !ipv4.is_link_local()  // 169.254.0.0/16 (includes cloud metadata)
                 && !ipv4.is_broadcast()   // 255.255.255.255
@@ -441,5 +513,65 @@ pub(crate) async fn publish_receipt(
         if let Err(e) = net.publish(&topic, payload).await {
             warn!(err = %e, "publish receipt");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use c0mpute_proto::Codec;
+
+    fn spec() -> TranscodeSpec {
+        TranscodeSpec {
+            codec: Codec::H264,
+            bitrate_bps: 2_000_000,
+            width: 1280,
+            height: 720,
+            keyframe_interval: 60,
+            hardware_pref: None,
+            extra_ffmpeg_args: vec![],
+        }
+    }
+
+    #[test]
+    fn normal_spec_passes() {
+        assert!(validate_transcode_spec(&spec()).is_ok());
+    }
+
+    #[test]
+    fn extra_ffmpeg_args_are_refused() {
+        let mut s = spec();
+        s.extra_ffmpeg_args = vec!["-i".into(), "/etc/passwd".into()];
+        assert!(validate_transcode_spec(&s).is_err());
+    }
+
+    #[test]
+    fn absurd_dimensions_are_refused() {
+        let mut s = spec();
+        s.width = 100_000;
+        assert!(validate_transcode_spec(&s).is_err());
+    }
+
+    #[test]
+    fn job_dir_rejects_traversal() {
+        let root = std::path::Path::new("/cache");
+        assert!(safe_job_dir(root, "../../home/op/.ssh").is_err());
+        assert!(safe_job_dir(root, "6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11").is_ok());
+    }
+
+    #[test]
+    fn non_public_ips_are_rejected() {
+        for ip in ["0.1.2.3", "224.0.0.1", "240.0.0.1", "127.0.0.1", "10.0.0.1", "169.254.169.254"] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn hostname_resolving_to_loopback_is_refused() {
+        let dir = std::env::temp_dir().join(format!("c0-dl-{}", std::process::id()));
+        let err = download_to_file("http://localtest.me:9/x", &dir).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("non-public") || msg.contains("resolve"), "{msg}");
     }
 }
