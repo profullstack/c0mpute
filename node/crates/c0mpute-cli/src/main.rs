@@ -21,6 +21,7 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod ai_chat;
 mod peers;
 mod storage;
 mod temporal;
@@ -44,7 +45,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -163,8 +164,17 @@ enum Cmd {
     /// Sign in to every c0mpute network (coinpay + infernet), one at a time.
     Login,
 
-    /// Secure chat — E2E encrypted p2p messaging (DIP-0018).
+    /// Chat with open models on the c0mpute network (`c0mpute chat login`,
+    /// then `c0mpute chat "prompt"`, or no prompt for a session). Also
+    /// `models`, `whoami`, `logout`, `mcp`. Run `c0mpute chat --help`.
+    #[command(disable_help_flag = true)]
     Chat {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Secure DMs — E2E encrypted p2p messaging (DIP-0018). Was `c0mpute chat`.
+    Dm {
         #[command(subcommand)]
         cmd: ChatCmd,
     },
@@ -362,6 +372,18 @@ enum SpeechCmd {
         #[arg(long, env = "C0MPUTE_SPEECH_MAX_PRICE_USD", default_value_t = 0.0)]
         max_price_usd: f64,
     },
+}
+
+/// `c0mpute dm` subcommands, still accepted after `c0mpute chat` for old scripts.
+const SECURE_CHAT_CMDS: &[&str] = &[
+    "keygen", "key", "restore", "send", "pull", "lookup", "contacts", "block",
+];
+
+#[derive(Parser, Debug)]
+#[command(name = "c0mpute dm")]
+struct DmCli {
+    #[command(subcommand)]
+    cmd: ChatCmd,
 }
 
 #[derive(Subcommand, Debug)]
@@ -629,7 +651,14 @@ async fn run_app(cli: Cli) -> Result<()> {
             start_auto_update_poller(cfg.update_auto);
             run_jobs(cmd).await
         }
-        Cmd::Chat { cmd } => run_chat(cmd),
+        Cmd::Dm { cmd } => run_chat(cmd),
+        // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
+        Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
+            let dm = DmCli::try_parse_from(std::iter::once("c0mpute dm".to_string()).chain(args))
+                .unwrap_or_else(|e| e.exit());
+            run_chat(dm.cmd)
+        }
+        Cmd::Chat { args } => ai_chat::run(&args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
@@ -1567,7 +1596,7 @@ fn run_chat(cmd: ChatCmd) -> Result<()> {
             if path.exists() {
                 eprintln!(
                     "A keyfile already exists at {}.\n\
-                     Use `c0mpute chat key rotate` to generate a new one, or\n\
+                     Use `c0mpute dm key rotate` to generate a new one, or\n\
                      delete the file manually to start fresh.",
                     path.display()
                 );
@@ -1588,7 +1617,7 @@ fn run_chat(cmd: ChatCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&kf)?);
             println!("─────────────────────────────────────────────────");
             println!();
-            println!("restore with: c0mpute chat restore --from-backup <file>");
+            println!("restore with: c0mpute dm restore --from-backup <file>");
             Ok(())
         }
 
@@ -1622,7 +1651,7 @@ fn run_chat(cmd: ChatCmd) -> Result<()> {
                 println!("[v0.2] key rotation requires DHT re-announcement (not yet live)");
                 println!("       Generate a new keypair manually:");
                 println!("         1. Delete ~/.config/c0mpute/chat.key");
-                println!("         2. Run: c0mpute chat keygen");
+                println!("         2. Run: c0mpute dm keygen");
                 Ok(())
             }
         },

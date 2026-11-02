@@ -44,7 +44,7 @@ HF_TOKEN=hf_... .venv/bin/python publish.py out/saas-business-strategist-agent -
 | --- | --- |
 | `rssamplifier.com/topics/<a>[,<b>,...]` | every feed filed under each topic (`--feeds 200` per topic, `--groups blogs,news`) -> their recent posts (`--posts 10`), full text with `--full` |
 | `rssamplifier.com/<feed-slug>` | that feed's recent posts |
-| `pit.world/search?q=<a>[,<b>,...]` | each term searched on the web, news and scholar tabs (`--pit-tabs`, or the link's `&t=`); every result page fetched, its snippet if the page blocks us |
+| `pit.world/search?q=<a>[,<b>,...]` | with `PIT_CORPUS_KEY` set: every page in pit.world's own index matching any term, full text from the paid `/api/corpus` (free for us, `--pit-pages 1000` per link, publishers' AI-training opt-outs already excluded). Without a key: each term searched on the web, news and scholar tabs and every result page fetched |
 | any other URL | the page itself |
 
 Pass links as arguments, in a file (`--links links.txt`) or pasted on stdin

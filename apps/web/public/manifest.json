@@ -1,10 +1,10 @@
 {
-  "name": "P2P One",
-  "short_name": "P2P One",
-  "start_url": "/",
+  "name": "c0mpute",
+  "short_name": "c0mpute",
+  "start_url": "/chat",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#0ea5e9",
+  "background_color": "#0a0a0b",
+  "theme_color": "#0a0a0b",
   "icons": [
     {
       "src": "/icon-192.png",
@@ -20,5 +20,16 @@
     }
   ],
   "id": "/",
-  "description": "The open compute network. Run jobs anywhere, sell unused compute, and pay only for verified work."
+  "description": "Chat with open models on the c0mpute network, and run or sell compute. Sign in with CoinPay.",
+  "scope": "/",
+  "shortcuts": [
+    {
+      "name": "New chat",
+      "url": "/chat"
+    },
+    {
+      "name": "Network status",
+      "url": "/status"
+    }
+  ]
 }
