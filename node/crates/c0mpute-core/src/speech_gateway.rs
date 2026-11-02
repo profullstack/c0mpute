@@ -94,6 +94,8 @@ struct AgentVoice {
     persona: &'static str,
     engine: &'static str,
     voice: &'static str,
+    pocket_voice: &'static str,
+    pocket_voice_gender: &'static str,
     language: &'static str,
     locale: &'static str,
     accent: &'static str,
@@ -160,6 +162,11 @@ async fn voices() -> Json<VoiceCatalog> {
                         presentation: "feminine",
                     },
                     VoiceItem {
+                        id: "af_nicole",
+                        label: "Nicole",
+                        presentation: "feminine",
+                    },
+                    VoiceItem {
                         id: "am_onyx",
                         label: "Onyx",
                         presentation: "masculine",
@@ -167,6 +174,11 @@ async fn voices() -> Json<VoiceCatalog> {
                     VoiceItem {
                         id: "am_michael",
                         label: "Michael",
+                        presentation: "masculine",
+                    },
+                    VoiceItem {
+                        id: "am_echo",
+                        label: "Echo",
                         presentation: "masculine",
                     },
                 ],
@@ -186,6 +198,51 @@ async fn voices() -> Json<VoiceCatalog> {
                     },
                 ],
             },
+            VoiceEngine {
+                id: "pocket",
+                voices: vec![
+                    VoiceItem {
+                        id: "alba",
+                        label: "Alba · CC-BY-4.0",
+                        presentation: "feminine",
+                    },
+                    VoiceItem {
+                        id: "anna",
+                        label: "Anna · CC-BY-4.0",
+                        presentation: "feminine",
+                    },
+                    VoiceItem {
+                        id: "caro_davy",
+                        label: "Caro Davy",
+                        presentation: "feminine",
+                    },
+                    VoiceItem {
+                        id: "marius",
+                        label: "Marius",
+                        presentation: "masculine",
+                    },
+                    VoiceItem {
+                        id: "javert",
+                        label: "Javert",
+                        presentation: "masculine",
+                    },
+                    VoiceItem {
+                        id: "bill_boerst",
+                        label: "Bill Boerst",
+                        presentation: "masculine",
+                    },
+                    VoiceItem {
+                        id: "peter_yearsley",
+                        label: "Peter Yearsley",
+                        presentation: "masculine",
+                    },
+                    VoiceItem {
+                        id: "stuart_bell",
+                        label: "Stuart Bell",
+                        presentation: "masculine",
+                    },
+                ],
+            },
         ],
         agent_profiles: crate::speech_profiles::AGENTS
             .iter()
@@ -194,6 +251,8 @@ async fn voices() -> Json<VoiceCatalog> {
                 persona: p.persona,
                 engine: p.engine,
                 voice: p.voice,
+                pocket_voice: p.pocket_voice,
+                pocket_voice_gender: p.pocket_voice_gender,
                 language: p.language,
                 locale: p.locale,
                 accent: p.accent,
@@ -576,8 +635,27 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn valid_tts_voice(engine: &str, voice: &str) -> bool {
     match engine {
-        "kokoro" => ["af_sarah", "af_bella", "am_onyx", "am_michael"].contains(&voice),
+        "kokoro" => [
+            "af_sarah",
+            "af_bella",
+            "af_nicole",
+            "am_onyx",
+            "am_michael",
+            "am_echo",
+        ]
+        .contains(&voice),
         "piper" => ["en_US-joe-medium", "en_US-norman-medium"].contains(&voice),
+        "pocket" => [
+            "alba",
+            "anna",
+            "caro_davy",
+            "marius",
+            "javert",
+            "bill_boerst",
+            "peter_yearsley",
+            "stuart_bell",
+        ]
+        .contains(&voice),
         _ => false,
     }
 }

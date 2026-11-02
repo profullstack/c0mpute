@@ -41,7 +41,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper or Kokoro, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json"
 )]
 struct Cli {
     /// Override the config file location.
@@ -313,7 +313,7 @@ enum PresetCmd {
 enum TtsCmd {
     /// Install CPU TTS runtime and voice models for this worker.
     Setup {
-        #[arg(long, default_value = "all", value_parser = ["all", "piper", "kokoro"])]
+        #[arg(long, default_value = "all", value_parser = ["all", "piper", "kokoro", "pocket"])]
         engine: String,
     },
     /// Show supported voices and the recommended OpenProfile voice map.
@@ -1399,20 +1399,30 @@ async fn run_tts(cmd: TtsCmd) -> Result<()> {
             c0mpute_core::speech::setup_tts(&engine).await?;
             let ready = c0mpute_core::speech::available_tts_engines();
             println!("ready TTS engines: {}", ready.join(", "));
-            println!("voices and models under {}", c0mpute_core::speech::speech_root().display());
+            println!(
+                "voices and models under {}",
+                c0mpute_core::speech::speech_root().display()
+            );
             println!(
                 "start a worker with `c0mpute worker start --roles tts` to advertise TTS jobs"
             );
             Ok(())
         }
         TtsCmd::Voices => {
-            println!("Kokoro: af_sarah, af_bella, am_onyx, am_michael");
+            println!("Kokoro: af_sarah, af_bella, af_nicole, am_onyx, am_michael, am_echo");
             println!("Piper:  en_US-joe-medium, en_US-norman-medium");
+            println!(
+                "Pocket: alba, anna, caro_davy, marius, javert, bill_boerst, peter_yearsley, stuart_bell"
+            );
             println!("\nOpenProfile role map:");
             for profile in c0mpute_core::speech_profiles::AGENTS {
                 println!(
-                    "@{}: {} / {}:{}",
-                    profile.slug, profile.persona, profile.engine, profile.voice
+                    "@{}: {} / {}:{} (Pocket: {})",
+                    profile.slug,
+                    profile.persona,
+                    profile.engine,
+                    profile.voice,
+                    profile.pocket_voice
                 );
             }
             Ok(())
@@ -2916,8 +2926,7 @@ fn prune_rpc_primaries(keep: &[String]) {
 }
 
 /// (binary, self-update args) for the peer-CLI plugins c0mpute manages.
-const PLUGIN_UPDATERS: &[(&str, &[&str])] =
-    &[("coinpay", &["update"]), ("infernet", &["update"])];
+const PLUGIN_UPDATERS: &[(&str, &[&str])] = &[("coinpay", &["update"]), ("infernet", &["update"])];
 
 /// Upgrade every installed plugin in the foreground, streaming their output.
 /// Used by `c0mpute update` so a manual update always brings plugins along.
