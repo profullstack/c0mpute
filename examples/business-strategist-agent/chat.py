@@ -4,14 +4,18 @@
     uv run --with-requirements requirements.txt chat.py "How should a 3-person SaaS price its first plan?"
 
 A 135M model cannot memorise thousands of posts, so the tune teaches it the
-register and the corpus supplies the facts: the question is matched against
-data/corpus.jsonl with BM25 and the best posts go into the prompt, cited by URL.
+register and search supplies the facts: the question goes to pit.world search
+(https://pit.world/api/search) and the top pages go into the prompt, cited by
+URL. The harvested corpus (data/corpus.jsonl, BM25) is the offline fallback:
+it holds one topic's posts, so most questions matched a stray word in it.
 """
 
 import json
 import math
 import re
 import sys
+import urllib.parse
+import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -23,6 +27,27 @@ HERE = Path(__file__).parent
 ADAPTER = HERE / "out" / "business-strategist-agent"
 CORPUS = HERE / "data" / "corpus.jsonl"
 TOP_K = 3
+SEARCH = "https://pit.world/api/search"
+
+
+def pit_search(query, k=TOP_K):
+    """Top web results from pit.world search as {title, url, text}; [] if unreachable."""
+    url = f"{SEARCH}?{urllib.parse.urlencode({'q': query})}"
+    req = urllib.request.Request(url, headers={"accept": "application/json", "user-agent": "c0mpute-bsa/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            body = json.load(r)
+    except Exception as e:  # offline, timeout, bad JSON: fall back to the corpus
+        print(f"(pit.world search unavailable: {e}; using the local corpus)", file=sys.stderr)
+        return []
+    hits = []
+    for item in body.get("results") or []:
+        if not item.get("url") or not item.get("title"):
+            continue
+        hits.append({"title": item["title"], "url": item["url"], "text": item.get("description") or ""})
+        if len(hits) >= k:
+            break
+    return hits
 
 words = lambda s: re.findall(r"[a-z0-9']+", s.lower())
 
@@ -41,7 +66,11 @@ def bm25(query, docs, k1=1.5, b=0.75):
             for w in set(words(query)) if w in tf
         )
         scored.append((s, d))
-    return [d for s, d in sorted(scored, key=lambda x: -x[0])[:TOP_K] if s > 0]
+    ranked = sorted(scored, key=lambda x: -x[0])[:TOP_K]
+    # Drop weak matches: a post scoring under half the best one is usually a
+    # stray word overlap (an OS review matching "my"), and it misleads the model.
+    best = ranked[0][0] if ranked else 0
+    return [d for s, d in ranked if s > 0 and s >= best * 0.5]
 
 
 def main():
@@ -49,8 +78,10 @@ def main():
     manifest = json.loads((ADAPTER / "manifest.json").read_text())
     torch.set_num_threads(4)
 
-    docs = [json.loads(l) for l in CORPUS.read_text().splitlines() if l.strip()]
-    hits = bm25(question, docs)
+    hits = pit_search(question)
+    if not hits and CORPUS.exists():
+        docs = [json.loads(l) for l in CORPUS.read_text().splitlines() if l.strip()]
+        hits = bm25(question, docs)
     context = "\n\n".join(f"[{i + 1}] {d['title']} ({d['url']})\n{d['text'][:700]}" for i, d in enumerate(hits))
 
     tok = AutoTokenizer.from_pretrained(ADAPTER)
@@ -60,15 +91,16 @@ def main():
     prompt = tok.apply_chat_template(
         [
             {"role": "system", "content": manifest["system_prompt"]},
-            {"role": "user", "content": f"Recent posts:\n{context}\n\nQuestion: {question}" if hits else question},
+            {"role": "user", "content": f"Background from the web:\n{context}\n\nUsing the background where it helps, answer: {question}" if hits else question},
         ],
         tokenize=False,
         add_generation_prompt=True,
     )
     ids = tok(prompt, return_tensors="pt")
     with torch.no_grad():
-        out = model.generate(**ids, max_new_tokens=250, do_sample=True, temperature=0.4,
-                             top_p=0.9, repetition_penalty=1.15)
+        # Greedy: sampling on a sub-1B model is what produced echoed questions
+        # and rambling; deterministic decoding stays on topic.
+        out = model.generate(**ids, max_new_tokens=350, do_sample=False, repetition_penalty=1.1)
     print(tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=True).strip())
     for i, d in enumerate(hits):
         print(f"  [{i + 1}] {d['url']}")

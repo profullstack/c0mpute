@@ -7,7 +7,7 @@ e.g. <https://rssamplifier.com/topics/business> (1,663 blogs + 579 news feeds).
 | --- | --- | --- |
 | 1 | `harvest.mjs` | topic URL -> feeds -> posts -> full text, written to `data/corpus.jsonl` |
 | 2 | `train.py` + `job.json` | LoRA-tunes `SmolLM2-135M-Instruct` on CPU, streams Infernet training-protocol v1 events |
-| 3 | `chat.py` | the agent: BM25 retrieval over the corpus + the tuned adapter, answers with cited URLs |
+| 3 | `chat.py` | the agent: pit.world search for the question (corpus BM25 offline) + the tuned adapter, answers with cited URLs |
 
 ## Run it
 
@@ -51,9 +51,10 @@ Measured 2026-11-02 on a shared 32-core box (load ~45) with a 30-feed sample
 The full 200-feed corpus is roughly 15x the tokens: plan on 1 to 2 hours on the same box.
 
 **Set expectations.** 135M parameters learn the register and vocabulary of business
-writing, not the facts in thousands of posts. That is why `chat.py` retrieves the
-relevant posts and puts them in the prompt: the facts come from retrieval, and the tune
-supplies the voice. For real strategy quality, keep the same pipeline and swap
+writing, not the facts in thousands of posts. That is why `chat.py` searches pit.world
+for the question and puts the top pages in the prompt: the facts come from search, and
+the tune supplies the voice. The harvested corpus is only the offline fallback: one
+topic's posts rarely cover the question, and BM25 over them cited off-topic posts. For real strategy quality, keep the same pipeline and swap
 `base_model` for `SmolLM2-360M-Instruct` or `Qwen2.5-0.5B-Instruct` (still CPU-trainable,
 just slower).
 
