@@ -75,6 +75,30 @@ top pages in the prompt: the facts come from search, the tune supplies the voice
 price at 10 times the monthly, and no other discounts", citing three SaaS-pricing guides),
 but still leans on the snippets it is given. A 1.5B base is the next step up and still CPU-trainable.
 
+## Run it in Ollama
+
+The published model is on Hugging Face as a GGUF, so Ollama (0.3.13 or newer; update with
+`curl -fsSL https://ollama.com/install.sh | sh` on Linux, `brew upgrade ollama` on a Mac) runs it directly:
+
+```bash
+ollama run hf.co/profullstack/saas-business-strategist-agent-GGUF "How should a 3-person SaaS price its first plan?"
+```
+
+To make a GGUF of your own adapter (Ollama takes safetensors LoRA adapters only for Llama,
+Mistral and Gemma bases, so a Qwen adapter is merged into the base first):
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/llama.cpp ../llama.cpp
+uv pip install -p .venv -e ../llama.cpp/gguf-py sentencepiece
+.venv/bin/python export_gguf.py out/saas-business-strategist-agent --llama-cpp ../llama.cpp
+ollama create saas-strategist -f out/saas-business-strategist-agent-gguf/Modelfile
+```
+
+`export_gguf.py` writes a Q8_0 GGUF (531 MB for the 0.5B model) and a Modelfile with the
+agent's system prompt. Uploaded to Hugging Face with `system` and `params` files beside it,
+`ollama run hf.co/...` picks those up too. On its own, without search results in the prompt,
+the 0.5B model answers in the right register but invents details; `chat.py` is the better front end.
+
 ## Surviving a shared box
 
 `train.py` saves `out/<name>/resume.pt` every 25 steps and resumes from it when rerun with
