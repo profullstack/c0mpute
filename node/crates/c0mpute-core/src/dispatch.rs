@@ -129,6 +129,9 @@ pub fn run_worker_subscriber_with_load(
         info!(%topic, "dispatch: subscribed for workload");
 
         let our_peer_id = net.peer_id().to_base58();
+        // This node's bench score rides on every bid for smart routing;
+        // re-read every 10 minutes so a fresh `c0mpute bench` shows up.
+        let mut bench = BenchCache::default();
         let mut rx = net.messages();
         // What the market clears at, learned from accepts on auctions we
         // bid in, plus our open bids keyed by job_id. An accept is only
@@ -192,6 +195,8 @@ pub fn run_worker_subscriber_with_load(
                     queue_load(tx),
                     &market,
                     eta,
+                    bench.get(),
+                    capacity.load_fraction(queue_load(tx)),
                 )
                 .await
                 {
@@ -316,6 +321,24 @@ fn queue_load(tx: &mpsc::Sender<AcceptedJob>) -> f64 {
     (max - tx.capacity()) as f64 / max as f64
 }
 
+/// The local `c0mpute bench` score, read from disk at most every 10 minutes.
+#[derive(Default)]
+struct BenchCache {
+    score: Option<u32>,
+    read_at: Option<std::time::Instant>,
+}
+
+impl BenchCache {
+    fn get(&mut self) -> Option<u32> {
+        let stale = self.read_at.is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+        if stale {
+            self.score = crate::capabilities::local_bench_score();
+            self.read_at = Some(std::time::Instant::now());
+        }
+        self.score
+    }
+}
+
 /// What this workload can take on right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Capacity {
@@ -348,6 +371,19 @@ impl Capacity {
             .map(|free| free.saturating_sub(self.queued))
             .unwrap_or(usize::MAX);
         idle.min(self.queue_free)
+    }
+
+    /// How busy this workload's node is, 0.0 idle .. 1.0 saturated, for
+    /// smart routing on the buyer: busy slots plus queued jobs over total
+    /// slots, or the runner queue's fill when there is no slot accounting.
+    pub fn load_fraction(&self, queue_fill: f64) -> f32 {
+        match self.free_slots {
+            Some(free) if self.total_slots > 0 => {
+                let busy = self.total_slots.saturating_sub(free) + self.queued;
+                (busy as f32 / self.total_slots as f32).clamp(0.0, 1.0)
+            }
+            _ => (queue_fill as f32).clamp(0.0, 1.0),
+        }
     }
 
     /// Bid only while open bids (each a job we could be handed) stay under
@@ -385,6 +421,8 @@ async fn handle_offer(
     load: f64,
     market: &MarketLearner,
     eta_seconds: u64,
+    bench_score: Option<u32>,
+    bid_load: f32,
 ) -> Option<(f64, u64)> {
     let now_ms = unix_ms();
     if now_ms.saturating_sub(offer.published_at_ms) > MAX_OFFER_AGE.as_millis() as u64 {
@@ -439,6 +477,8 @@ async fn handle_offer(
         eta_seconds,
         published_at_ms: now_ms,
         expires_at_ms: Some(expires_at_ms),
+        bench_score,
+        load: Some(bid_load),
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,

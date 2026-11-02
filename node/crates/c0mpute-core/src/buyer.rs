@@ -48,6 +48,9 @@ pub struct JobAuction {
     /// [`c0mpute_net::topics::JobOffer::external_ref`]). Reuse the same
     /// value when re-auctioning a job.
     pub external_ref: Option<String>,
+    /// How the winner is chosen. Default: the most capable worker that is
+    /// not overloaded ([`crate::routing`]).
+    pub policy: crate::routing::SelectionPolicy,
 }
 
 impl JobAuction {
@@ -63,7 +66,13 @@ impl JobAuction {
             allowed_bidders: Vec::new(),
             excluded_bidders: Vec::new(),
             external_ref: None,
+            policy: crate::routing::SelectionPolicy::default(),
         }
+    }
+
+    pub fn with_policy(mut self, policy: crate::routing::SelectionPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     pub fn with_external_ref(mut self, external_ref: Option<String>) -> Self {
@@ -232,27 +241,22 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         bail!("no bids received within {:?}", auction.bid_window);
     }
 
-    // ── pick winner: lowest price, tie-break on earliest published. ─
-    bids.sort_by(|a, b| {
-        a.price_usd
-            .partial_cmp(&b.price_usd)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.published_at_ms.cmp(&b.published_at_ms))
-    });
-    let cheapest_price = bids[0].price_usd;
-    let equal_price_count = bids
-        .iter()
-        .take_while(|bid| bid.price_usd == cheapest_price)
-        .count();
-    if equal_price_count > 1 {
-        let offset = NEXT_EQUAL_PRICE_BID.fetch_add(1, Ordering::Relaxed) % equal_price_count;
-        bids[..equal_price_count].rotate_left(offset);
+    // ── pick winner: smart routing (most capable, not overloaded) or
+    //    cheapest, per auction.policy; exact ties rotate across chunks. ─
+    let tied = crate::routing::rank(&mut bids, auction.policy, auction.deadline.as_secs());
+    if tied > 1 {
+        let offset = NEXT_EQUAL_PRICE_BID.fetch_add(1, Ordering::Relaxed) % tied;
+        bids[..tied].rotate_left(offset);
     }
     let winner = bids.remove(0);
     info!(
         %job_id,
         winner = %winner.bidder_peer_id,
         price = winner.price_usd,
+        bench = ?winner.bench_score,
+        load = ?winner.load,
+        eta = winner.eta_seconds,
+        policy = ?auction.policy,
         "buyer: winner chosen"
     );
 
@@ -400,6 +404,8 @@ mod tests {
             eta_seconds: 60,
             published_at_ms: 0,
             expires_at_ms,
+            bench_score: None,
+            load: None,
         }
     }
 
