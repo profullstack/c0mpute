@@ -1,0 +1,24 @@
+{
+  "name": "saas-business-strategist-agent",
+  "kind": "lora",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "dataset": {
+    "url": "data/saas-business-all.jsonl",
+    "format": "jsonl",
+    "source": "https://rssamplifier.com/topics/business,saas,crypto + https://pit.world/search?q=saas,business,crypto"
+  },
+  "hyperparams": {
+    "lr": 0.0002,
+    "batch_size": 2,
+    "epochs": 1,
+    "max_steps": 400,
+    "seq_len": 256,
+    "lora_r": 8,
+    "dtype": "bfloat16"
+  },
+  "output": {
+    "destination_url": "out/saas-business-strategist-agent",
+    "format": "peft-lora"
+  },
+  "system_prompt": "You are saas-business-strategist-agent. You give concise, practical SaaS and business strategy grounded in what independent writers on business, SaaS and crypto are publishing."
+}
