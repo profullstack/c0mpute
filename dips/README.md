@@ -124,6 +124,7 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0021 | ads-manager — shared ad operations layer for the ad plugins       | Draft      |
 | 0022 | podcasting + podcasts — p2p podcast publishing and listening      | Draft      |
 | 0023 | podcast-ads — dynamic ad insertion for p2p podcasts               | Draft      |
+| 0029 | ad-generator-agent — every ad type from one URL, generated on c0mpute | Accepted |
 
 ### v2.x (`dips/v2.x/`)
 
