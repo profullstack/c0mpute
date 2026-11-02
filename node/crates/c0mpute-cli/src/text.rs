@@ -1,5 +1,6 @@
-//! `c0mpute infernet text serve|train`: LoRA fine-tunes of language models
-//! (`infernet.text.train`) on c0mpute workers, with live progress.
+//! `c0mpute infernet text serve|train|chat`: LoRA fine-tunes of language
+//! models (`infernet.text.train`) on c0mpute workers with live progress, and
+//! answers from a trained adapter on a worker (`infernet.text.infer`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
-#[command(name = "c0mpute infernet text", about = "Fine-tune language models (LoRA) on c0mpute workers")]
+#[command(name = "c0mpute infernet text", about = "Fine-tune language models (LoRA) on c0mpute workers and chat with the result")]
 struct TextCli {
     #[command(subcommand)]
     cmd: Sub,
@@ -35,6 +36,38 @@ struct NetArgs {
 enum Sub {
     /// Accept infernet.text.train jobs on this node (needs `infernet model runtime setup --peft --yes`).
     Serve {
+        #[command(flatten)]
+        net: NetArgs,
+    },
+    /// Ask a trained adapter a question on a remote worker (sources from pit.world search).
+    Chat {
+        /// The adapter dir `text train` wrote (adapter_model.safetensors + manifest.json).
+        #[arg(long, default_value = "adapter")]
+        adapter: PathBuf,
+        /// The question.
+        question: Vec<String>,
+        /// Skip the pit.world search (answer from the adapter alone).
+        #[arg(long)]
+        no_search: bool,
+        #[arg(long, default_value = text::PIT_WORLD_SEARCH)]
+        search_url: String,
+        #[arg(long, default_value_t = 350)]
+        max_new_tokens: u32,
+        #[arg(long)]
+        worker: Vec<String>,
+        #[arg(long, default_value_t = 0.05)]
+        max_price: f64,
+        /// How the worker reaches this machine's transfer server (use https off-LAN).
+        #[arg(long)]
+        public_url: Option<String>,
+        #[arg(long, default_value = "0.0.0.0:0")]
+        bind: std::net::SocketAddr,
+        #[arg(long, default_value_t = 600)]
+        timeout_s: u64,
+        #[arg(long, default_value_t = 4)]
+        bid_window_s: u64,
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         net: NetArgs,
     },
@@ -100,12 +133,49 @@ pub async fn run(args: &[String]) -> Result<()> {
     match cli.cmd {
         Sub::Serve { net } => {
             let s = text::serve(&net_opts(&net, "serve"), infernet_bin()?, data_dir().join("cache")).await?;
-            eprintln!("serving infernet.text.train as {}  (torch {}, peft {}, cuda {})", s.net.peer_id().to_base58(), s.runtime["torch"].as_str().unwrap_or("?"), s.runtime["peft"].as_str().unwrap_or("?"), s.runtime["cuda"]);
+            eprintln!(
+                "serving infernet.text.train{} as {}  (torch {}, peft {}, cuda {})",
+                if s.infer { " + infernet.text.infer" } else { " (chat needs Infernet >= 0.1.80)" },
+                s.net.peer_id().to_base58(),
+                s.runtime["torch"].as_str().unwrap_or("?"),
+                s.runtime["peft"].as_str().unwrap_or("?"),
+                s.runtime["cuda"]
+            );
             for a in s.net.listen_addrs().await.unwrap_or_default() {
                 eprintln!("  listening {a}/p2p/{}", s.net.peer_id().to_base58());
             }
             eprintln!("  tags {}", s.tags.join(" "));
             tokio::signal::ctrl_c().await?;
+            Ok(())
+        }
+        Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {
+            let question = question.join(" ");
+            anyhow::ensure!(!question.trim().is_empty(), "ask a question: c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"");
+            let req = text::ChatRequest {
+                adapter_dir: adapter,
+                question,
+                search: if no_search { None } else { Some(search_url) },
+                max_new_tokens,
+                workers: worker,
+                max_price_usd: max_price,
+                public_url,
+                bind,
+                timeout_s,
+                bid_window: Duration::from_secs(bid_window_s),
+            };
+            let n = c0mpute_core::temporal::node::spawn_node(&net_opts(&net, "client")).await?;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            eprintln!("asking a c0mpute worker ...");
+            let out = text::chat(n, &req).await?;
+            if as_json {
+                println!("{}", serde_json::to_string(&out)?);
+            } else {
+                println!("{}", out["text"].as_str().unwrap_or(""));
+                for (i, s) in out["sources"].as_array().into_iter().flatten().enumerate() {
+                    println!("  [{}] {}", i + 1, s["url"].as_str().unwrap_or(""));
+                }
+                eprintln!("(worker {}, {} tokens in {}s, ${})", out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"), out["tokens"], out["seconds"], out["receipt"]["price_usd"]);
+            }
             Ok(())
         }
         Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, public_url, bind, timeout_s, retries, bid_window_s, yes, json: as_json, net } => {

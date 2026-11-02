@@ -10,7 +10,7 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.50"
+version     = "0.2.51"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) and fine-tunes language models (LoRA) with live progress, on CPU or GPU."
@@ -43,6 +43,9 @@ capabilities = ["gpu:nvidia?", "model-runtime"]
 # `c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes` and
 # watch the worker's training events live. Receipts carry the adapter hash.
 "infernet.text.train" = { command = "model train", validation = "adapter_hash", min_version = "0.1.79" }
+# Answers from a trained adapter (`c0mpute infernet text chat`); Infernet >= 0.1.80
+# (`infernet model generate --input --json`). Receipts carry the answer hash.
+"infernet.text.infer" = { command = "model generate", validation = "answer_hash", min_version = "0.1.80" }
 
 [module.dispatch]
 mode   = "subprocess"

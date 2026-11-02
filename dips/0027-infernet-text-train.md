@@ -1,6 +1,6 @@
 # DIP 0027: `infernet.text.train` (LoRA fine-tunes with live progress)
 
-Status: shipped in c0mpute 0.2.50 with Infernet 0.1.79.
+Status: training shipped in c0mpute 0.2.50 (Infernet 0.1.79); chat in 0.2.51 (Infernet 0.1.80).
 
 ## What
 
@@ -58,8 +58,26 @@ Same offer → bid → accept → receipt flow as every workload.
 - The transfer URL token gates access; use `--public-url https://...` off-LAN.
 - Training runs under the node's job resource limits.
 
+## Chat: `infernet.text.infer` (0.2.51, Infernet 0.1.80)
+
+```
+c0mpute infernet text chat --adapter ./adapter "How should I price my SaaS?"
+```
+
+- The buyer searches pit.world (`/api/search`) for the question and puts the
+  top 3 results in the prompt as numbered background; `--no-search` skips it.
+- Offer `spec_inline` (`TextInferSpec`): `adapter_hash`, `base_model` (from the
+  adapter's manifest), `messages` (system prompt from the manifest + the user
+  turn), `max_new_tokens`, `adapter_url`, `answer_upload_url`.
+- The adapter travels as a bundle on the buyer's transfer server and is fetched
+  only on a cache miss; the worker keeps it under its cache by hash and refuses
+  one whose weights hash differs. Any `text serve` worker on Infernet >= 0.1.80
+  advertises `infernet:text:infer`.
+- The worker runs `infernet model generate --input request.json --json`, uploads
+  `answer.json`, and the receipt's `output_hash` is its sha256, which the buyer
+  checks before printing the answer and its sources.
+
 ## Not yet
 
-- Serving a trained adapter for chat (`infernet.text.infer`).
 - Multi-worker / sharded training.
 - Payment settlement beyond the bid price recorded on the receipt.
