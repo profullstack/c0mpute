@@ -4,7 +4,7 @@
 // Storage is the site's SQLite Cloud database (SQLITE_CLOUD_URL). The store is
 // written against a two-method `Sql` interface so tests run it on bun:sqlite.
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 
 export type Row = Record<string, unknown>;
 export interface Sql {
@@ -72,9 +72,8 @@ export function isValidDid(did: unknown): did is string {
 }
 
 export function userCode(): string {
-  const b = randomBytes(8);
   let s = "";
-  for (let i = 0; i < 8; i++) s += USER_CODE_ALPHABET[b[i] % USER_CODE_ALPHABET.length];
+  for (let i = 0; i < 8; i++) s += USER_CODE_ALPHABET[randomInt(USER_CODE_ALPHABET.length)];
   return `${s.slice(0, 4)}-${s.slice(4)}`;
 }
 

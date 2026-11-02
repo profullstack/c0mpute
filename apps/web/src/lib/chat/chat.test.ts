@@ -14,7 +14,7 @@ function memSql(): Sql {
   };
 }
 
-const DID = "did:key:z6MkswFb62xmEDrqnknM3TP112AiH6A5YETp7gc2Qz4Wqkar";
+const DID = "did:key:test-user-one";
 
 describe("store", () => {
   test("refuses a CoinPay account without a DID", async () => {

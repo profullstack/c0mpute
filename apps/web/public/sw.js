@@ -21,6 +21,6 @@ self.addEventListener('activate',event=>event.waitUntil((async()=>{for(const key
 self.addEventListener('fetch',event=>{
  const request=event.request,url=new URL(request.url);
  if(request.method!=='GET'||url.origin!==self.location.origin||url.pathname.startsWith('/api/'))return;
- if(request.mode==='navigate'&&SHELLS.includes(url.pathname)){event.respondWith(fetch(request).catch(()=>caches.match(url.pathname)));return}
+ if(request.mode==='navigate'&&url.pathname==='/'){event.respondWith(fetch(request).catch(()=>caches.match('/')));return}
  if(EXT.test(url.pathname)){event.respondWith(fetch(new Request(request,{credentials:'omit'})).then(response=>{if(response.ok)caches.open(CACHE).then(cache=>cache.put(request,response.clone()));return response}).catch(()=>caches.match(request)))}
 });
