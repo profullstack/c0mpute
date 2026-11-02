@@ -23,7 +23,27 @@ const PIP_BOOTSTRAP_SHA256: &str =
     "2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af";
 const PIP_BOOTSTRAP_WHEEL: &str = "pip-25.1.1-py3-none-any.whl";
 const PIPER_VOICES: &[&str] = &["en_US-joe-medium", "en_US-norman-medium"];
-const KOKORO_VOICES: &[&str] = &["af_sarah", "af_bella", "am_onyx", "am_michael"];
+const KOKORO_VOICES: &[&str] = &[
+    "af_sarah",
+    "af_bella",
+    "af_nicole",
+    "am_onyx",
+    "am_michael",
+    "am_echo",
+];
+// Use the tiny English checkpoint so CPU workers can load Pocket TTS without
+// carrying the full-size model. These preset voices use permissive licenses.
+const POCKET_VOICES: &[&str] = &[
+    "alba",
+    "anna",
+    "caro_davy",
+    "marius",
+    "javert",
+    "bill_boerst",
+    "peter_yearsley",
+    "stuart_bell",
+];
+const POCKET_LANGUAGE: &str = "english_2m_2026-10";
 
 pub fn speech_root() -> PathBuf {
     crate::config::data_dir()
@@ -63,6 +83,7 @@ pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
                 && root.join("models/kokoro/kokoro-v1.0.int8.onnx").is_file()
                 && root.join("models/kokoro/voices-v1.0.bin").is_file()
         }
+        "pocket" => POCKET_VOICES.contains(&voice) && root.join(".pocket-ready").is_file(),
         _ => false,
     }
 }
@@ -85,6 +106,12 @@ pub fn available_tts_engines() -> Vec<&'static str> {
     {
         engines.push("kokoro");
     }
+    if POCKET_VOICES
+        .iter()
+        .any(|voice| tts_voice_available("pocket", voice))
+    {
+        engines.push("pocket");
+    }
     engines
 }
 
@@ -100,13 +127,20 @@ fn kokoro_ready() -> bool {
         .all(|voice| tts_voice_available("kokoro", voice))
 }
 
+fn pocket_ready() -> bool {
+    POCKET_VOICES
+        .iter()
+        .all(|voice| tts_voice_available("pocket", voice))
+}
+
 pub async fn setup_tts(engine: &str) -> Result<()> {
-    if engine != "piper" && engine != "kokoro" && engine != "all" {
-        bail!("engine must be piper, kokoro, or all");
+    if engine != "piper" && engine != "kokoro" && engine != "pocket" && engine != "all" {
+        bail!("engine must be piper, kokoro, pocket, or all");
     }
     let install_piper = (engine == "piper" || engine == "all") && !piper_ready();
     let install_kokoro = (engine == "kokoro" || engine == "all") && !kokoro_ready();
-    if !install_piper && !install_kokoro {
+    let install_pocket = (engine == "pocket" || engine == "all") && !pocket_ready();
+    if !install_piper && !install_kokoro && !install_pocket {
         return Ok(());
     }
 
@@ -151,7 +185,40 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
             }
         }
     }
+    if install_pocket {
+        pip_install_pocket().await?;
+        let cache = root.join("cache/huggingface");
+        tokio::fs::create_dir_all(&cache).await?;
+        let warmup = format!(
+            "from pocket_tts import TTSModel; model = TTSModel.load_model(language={POCKET_LANGUAGE:?}); "
+        ) + &format!(
+            "[model.get_state_for_audio_prompt(voice) for voice in {POCKET_VOICES:?}]"
+        );
+        let mut command = Command::new(python_path());
+        command.arg("-c").arg(warmup).env("HF_HOME", &cache);
+        run_checked(
+            command,
+            "download the Pocket TTS CPU model and preset voices",
+        )
+        .await?;
+        tokio::fs::write(
+            root.join(".pocket-ready"),
+            format!("pocket-tts 4.0.1 {POCKET_LANGUAGE}\n"),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+async fn pip_install_pocket() -> Result<()> {
+    let mut command = Command::new(python_path());
+    command.args(["-m", "pip", "install", "--disable-pip-version-check"]);
+    // On Linux, PyPI's default torch wheel includes CUDA libraries. Pocket is a
+    // CPU workload, so prefer the smaller official CPU wheel index.
+    #[cfg(target_os = "linux")]
+    command.args(["--extra-index-url", "https://download.pytorch.org/whl/cpu"]);
+    command.arg("pocket-tts==4.0.1");
+    run_checked(command, "install the Pocket TTS CPU runtime").await
 }
 
 pub async fn setup_stt() -> Result<()> {
@@ -218,7 +285,12 @@ async fn ensure_venv() -> Result<()> {
         }
 
         tokio::fs::remove_dir_all(&venv).await?;
-        for marker in [".piper-ready", ".kokoro-ready", ".stt-ready"] {
+        for marker in [
+            ".piper-ready",
+            ".kokoro-ready",
+            ".pocket-ready",
+            ".stt-ready",
+        ] {
             let _ = tokio::fs::remove_file(root.join(marker)).await;
         }
     }
@@ -237,8 +309,11 @@ async fn ensure_venv() -> Result<()> {
         let python = std::env::var_os("C0MPUTE_PYTHON").unwrap_or_else(|| "python3".into());
         let mut command = Command::new(python);
         command.args(["-m", "venv", "--without-pip"]).arg(&venv);
-        run_checked(command, "create the isolated speech Python environment without system pip")
-            .await?;
+        run_checked(
+            command,
+            "create the isolated speech Python environment without system pip",
+        )
+        .await?;
     }
 
     if !python_has_pip().await {
@@ -257,10 +332,7 @@ async fn python_has_pip() -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    check
-        .status()
-        .await
-        .is_ok_and(|status| status.success())
+    check.status().await.is_ok_and(|status| status.success())
 }
 
 async fn bootstrap_pip() -> Result<()> {
@@ -280,7 +352,10 @@ async fn bootstrap_pip() -> Result<()> {
     tokio::fs::write(&wheel_path, &wheel).await?;
     let mut locate_site_packages = Command::new(python_path());
     locate_site_packages
-        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ])
         .stdin(Stdio::null());
     let output = locate_site_packages.output().await?;
     if !output.status.success() {
@@ -294,8 +369,7 @@ async fn bootstrap_pip() -> Result<()> {
     }
     tokio::fs::create_dir_all(&site_packages).await?;
 
-    let extract_wheel =
-        "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
+    let extract_wheel = "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
     let mut install = Command::new(python_path());
     install
         .args(["-c", extract_wheel])
@@ -374,6 +448,7 @@ async fn run_worker(action: &str, args: &[&str], request: &serde_json::Value) ->
     let mut command = Command::new(python_path());
     command.arg("-c").arg(WORKER).arg(action).arg(speech_root());
     crate::resources::apply_job_limits(&mut command);
+    command.env("HF_HOME", speech_root().join("cache/huggingface"));
     command
         .args(args)
         .stdin(Stdio::piped())

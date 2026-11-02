@@ -98,9 +98,9 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ CPU voice inference ]</h2>
         <p>
-          Voice inference runs on ordinary CPUs. Workers can install Piper or Kokoro for
-          text-to-speech and faster-whisper for transcription, then advertise only the voice
-          workloads they have installed:
+          Voice inference runs on ordinary CPUs. Workers can install Piper, Kokoro, or Pocket
+          TTS for text-to-speech and faster-whisper for transcription, then advertise only the
+          voice workloads they have installed:
         </p>
         <CodeBlock>{`$ c0mpute tts setup --engine all
 $ c0mpute stt setup

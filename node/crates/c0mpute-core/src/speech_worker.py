@@ -104,6 +104,23 @@ def tts(root: Path, output: Path, request: dict) -> None:
         finally:
             kokoro.voices.close()
         return
+    if engine == "pocket":
+        if str(request.get("locale", "en-US")).lower().split("-", 1)[0] != "en":
+            raise ValueError("Pocket TTS currently supports English voice jobs only")
+
+        import os
+        import numpy as np
+        import torch
+        from pocket_tts import TTSModel
+        from scipy.io import wavfile
+
+        torch.set_num_threads(max(1, int(os.environ.get("OMP_NUM_THREADS", "2"))))
+        model = TTSModel.load_model(language="english_2m_2026-10")
+        voice_state = model.get_state_for_audio_prompt(voice)
+        audio = model.generate_audio(voice_state, text).detach().cpu().numpy().reshape(-1)
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
+        wavfile.write(str(output), model.sample_rate, pcm)
+        return
     raise ValueError("unsupported TTS engine")
 
 

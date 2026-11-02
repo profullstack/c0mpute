@@ -3,18 +3,20 @@
 # CPU implementation lives in c0mpute-core. The node installs the selected
 # runtimes and model files into its per-user data directory; no API key or GPU
 # is required. Piper runtime is GPL-3.0; the selected Piper voice files have
-# individual licenses. Kokoro model files are Apache-2.0.
+# individual licenses. Kokoro model files are Apache-2.0. Pocket TTS weights are
+# CC-BY-4.0; most enabled Pocket preset voices are CC0, while Alba and Anna are
+# CC-BY-4.0.
 
 [module]
 id          = "tts"
 name        = "TTS — text-to-speech"
-version     = "0.2.45"
+version     = "0.2.47"
 kind        = "workload"
 category    = "ai"
-description = "CPU text-to-speech inference over c0mpute using Piper or Kokoro."
+description = "CPU text-to-speech inference over c0mpute using Piper, Kokoro, or Pocket TTS."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["tts", "piper", "xtts", "kokoro", "synthesis", "audio"]
+keywords    = ["tts", "piper", "kokoro", "pocket-tts", "synthesis", "audio"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"

@@ -1,7 +1,7 @@
 # c0mpute
 
 > Decentralized compute network. CLI-first. Five modules out of the box:
-> **transcode** (FFmpeg), **tts** (Piper / Kokoro), **stt** (faster-whisper),
+> **transcode** (FFmpeg), **tts** (Piper / Kokoro / Pocket), **stt** (faster-whisper),
 > **coinpay** (DID + escrow), and **infernet** (AI inference).
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -72,7 +72,7 @@ c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p --ma
 c0mpute infernet chat --model qwen2.5:7b "hello"
 
 # free local CPU speech models + P2P speech worker roles
-c0mpute tts setup --engine all      # Kokoro and Piper; model files install per user
+c0mpute tts setup --engine all      # Kokoro, Piper, and Pocket; models install per user
 c0mpute stt setup                   # multilingual faster-whisper base, CPU int8
 c0mpute worker start --roles tts,stt
 
@@ -96,9 +96,11 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 
 ### CPU speech inference
 
-TTS (`tts.synthesize`) supports Kokoro and Piper on CPU. STT
+TTS (`tts.synthesize`) supports Kokoro, Piper, and Pocket on CPU. Pocket uses
+Kyutai's small 1.9M-parameter English checkpoint and eight preset voices; on Linux,
+setup selects CPU-only PyTorch wheels. STT
 (`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8. A normal
-worker start installs both speech engines and STT on first run, then advertises
+worker start installs the speech engines and STT on first run, then advertises
 both roles automatically:
 
 ```sh
@@ -107,10 +109,11 @@ c0mpute worker start
 
 Pass `--roles` to choose an explicit role set. For example,
 `c0mpute worker start --roles storage` skips speech setup. Speech inference
-limits ONNX and Whisper CPU threads to the node's container quota when one is
-available.
+limits its CPU threads to the node's container quota when one is available.
 
-The Kokoro model files are Apache-2.0. Piper's runtime is GPL-3.0 and its
+The Kokoro model files are Apache-2.0. Pocket TTS model weights are CC-BY-4.0;
+the selected Pocket preset voices are CC0, except Alba and Anna, which are
+CC-BY-4.0. Piper's runtime is GPL-3.0 and its
 individual voice files carry their own licenses; the bundled Joe voice is
 CC0 and Norman is public domain. faster-whisper is MIT. Agent voice presets
 are based on their public OpenProfiles and can be listed with
