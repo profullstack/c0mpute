@@ -184,6 +184,36 @@ c0mpute worker stop
 c0mpute worker start -a
 ```
 
+### Private mode: only your own machines
+
+Not everyone wants to sell their box to the open market. A private node runs
+the same workloads but only for you:
+
+```sh
+c0mpute private on                    # or: c0mpute worker start --private, or C0MPUTE_PRIVATE=1
+c0mpute private                       # mode, this machine's identities, allowed buyers
+c0mpute private allow 12D3KooW...     # let another of your machines hire this node
+c0mpute private deny 12D3KooW...
+c0mpute private off                   # back to the open market
+```
+
+In private mode the worker:
+
+- bids only on jobs whose **signed gossip publisher** is an identity on this
+  machine (`c0mpute chat`, `infernet text`, `webhook send` from the same box) or
+  a peer-id you allowed. The offer body's buyer field is not trusted on its own,
+  so nobody can claim to be you;
+- stops publishing its capability ad, so it is not on the public status page;
+- does not register with Infernet as a public provider or RPC slice.
+
+It is stored as `[private] enabled / buyers` in `config.toml`; restart the
+worker to apply a change.
+
+What it does not hide: job offers still travel over the network's gossip
+topics, and an offer carries its spec inline. Private mode decides who can
+*hire* your node, not who can *see* the offers your own buyers publish. Keep
+secrets out of job specs, or talk to your node directly.
+
 ### Distributed inference ("Distribute across all nodes") — automatic
 
 The worker automatically makes every node count toward infernet's distributed

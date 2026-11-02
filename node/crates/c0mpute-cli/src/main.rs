@@ -90,6 +90,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<PricingCmd>,
     },
+    /// Private mode: serve only your own machines, stay off the public list.
+    ///
+    /// A private node only bids on jobs whose signed publisher is one of the
+    /// identities on this machine or a peer-id you allow (your other boxes),
+    /// and it stops advertising itself to the network. A running worker
+    /// picks a change up on restart. `C0MPUTE_PRIVATE=1` also turns it on.
+    Private {
+        #[command(subcommand)]
+        cmd: Option<PrivateCmd>,
+    },
     /// Worker lifecycle.
     Worker {
         #[command(subcommand)]
@@ -260,6 +270,10 @@ enum WorkerCmd {
         storage: Option<String>,
         #[arg(long)]
         gpu: bool,
+        /// Private mode for this run: only your own buyers, not advertised.
+        /// (`c0mpute private on` makes it permanent.)
+        #[arg(long)]
+        private: bool,
         /// Start the worker as a background daemon, then stay attached and
         /// stream its log. Press Ctrl-D or Ctrl-C to detach — the worker keeps
         /// running (use `worker stop` to stop it). Attaches to an already
@@ -545,11 +559,15 @@ fn main() -> Result<()> {
                 roles,
                 storage,
                 gpu,
+                private,
                 daemon: _,
             },
     }) = &cli.command
     {
         let mut passthrough = Vec::new();
+        if *private {
+            passthrough.push("--private".to_string());
+        }
         if let Some(rs) = roles {
             passthrough.push("--roles".to_string());
             passthrough.push(rs.join(","));
@@ -600,6 +618,14 @@ fn start_auto_update_poller(configured: bool) {
 async fn run_app(cli: Cli) -> Result<()> {
     let config_path = cli.config.unwrap_or_else(config::default_config_path);
 
+    // Private mode is process-wide: every worker loop (transcode, speech,
+    // text, temporal, webhook) checks it before bidding. An unreadable
+    // config still honours C0MPUTE_PRIVATE.
+    let private_cfg = Config::load_or_default(&config_path)
+        .map(|c| c.private)
+        .unwrap_or_default();
+    c0mpute_core::private::install_from(&private_cfg);
+
     // No subcommand: open the interactive menu in a terminal, else print help
     // (keeps piped/non-TTY and CI usage unchanged).
     let Some(command) = cli.command else {
@@ -633,6 +659,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             c0mpute_core::status_aggregator::run(bind).await
         }
         Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
+        Cmd::Private { cmd } => run_private(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
         Cmd::Storage { cmd } => storage::run(cmd, &config_path).await,
@@ -877,12 +904,24 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             roles,
             storage: _,
             gpu,
+            private,
             // Both handled in `main` before the runtime started; at this point
             // we are the (possibly detached) worker process itself.
             attach: _,
             daemon: _,
         } => {
             let mut cfg = Config::load_or_default(config_path)?;
+            if private {
+                cfg.private.enabled = true;
+            }
+            let policy = c0mpute_core::private::install_from(&cfg.private);
+            if policy.enabled {
+                eprintln!(
+                    "private mode: serving {} trusted buyer identit{} only; not advertised to the network",
+                    policy.trusted.len(),
+                    if policy.trusted.len() == 1 { "y" } else { "ies" }
+                );
+            }
             ensure_current_version_benchmark();
             let default_speech_roles = roles.is_none();
             if let Some(rs) = roles {
@@ -917,7 +956,12 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // inference agent as a side effect of joining c0mpute.
             let auto = cfg.update_auto;
             let interval_secs = config::UPDATE_CHECK_INTERVAL_SECS;
-            let serves_infernet = cfg.roles.contains(&Role::Gateway);
+            // Private mode never joins Infernet as a public provider or RPC
+            // slice: that would share this machine with the whole network.
+            let serves_infernet = cfg.roles.contains(&Role::Gateway) && !policy.enabled;
+            if policy.enabled && cfg.roles.contains(&Role::Gateway) {
+                eprintln!("private mode: not registering with Infernet as a public provider");
+            }
             if serves_infernet {
                 // First run: auto-configure the infernet peer (init + register,
                 // plus token login if INFERNET_TOKEN is set), then ensure its
@@ -970,6 +1014,77 @@ enum PricingCmd {
         #[arg(long)]
         dynamic: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum PrivateCmd {
+    /// Print the mode, this machine's identities and the allowed buyers (the default).
+    Show,
+    /// Turn private mode on.
+    On,
+    /// Turn private mode off (back to the open market).
+    Off,
+    /// Allow a buyer peer-id (another machine of yours) to hire this node.
+    Allow { peer_id: String },
+    /// Remove a buyer peer-id from the list.
+    Deny { peer_id: String },
+}
+
+fn run_private(cmd: Option<PrivateCmd>, config_path: &std::path::Path) -> Result<()> {
+    let mut cfg = Config::load_or_default(config_path)?;
+    let changed = match cmd.unwrap_or(PrivateCmd::Show) {
+        PrivateCmd::Show => false,
+        PrivateCmd::On => {
+            cfg.private.enabled = true;
+            true
+        }
+        PrivateCmd::Off => {
+            cfg.private.enabled = false;
+            true
+        }
+        PrivateCmd::Allow { peer_id } => {
+            if !c0mpute_core::private::valid_peer_id(&peer_id) {
+                anyhow::bail!("{peer_id:?} is not a libp2p peer-id (12D3KooW...)");
+            }
+            if !cfg.private.allow(&peer_id) {
+                println!("{} is already allowed", peer_id.trim());
+            }
+            true
+        }
+        PrivateCmd::Deny { peer_id } => {
+            if !cfg.private.deny(&peer_id) {
+                println!("{} was not on the list", peer_id.trim());
+            }
+            true
+        }
+    };
+    if changed {
+        cfg.save(config_path)?;
+        println!(
+            "saved to {} (apply: c0mpute worker stop && c0mpute worker start -d)",
+            config_path.display()
+        );
+    }
+    let forced = c0mpute_core::private::env_forces_private();
+    let mode = match (cfg.private.enabled, forced) {
+        (true, _) => "private",
+        (false, true) => "private (C0MPUTE_PRIVATE is set)",
+        (false, false) => "public (open market)",
+    };
+    println!("mode     : {mode}");
+    let local = c0mpute_core::private::local_identities();
+    println!("this machine ({}, always allowed):", local.len());
+    for id in &local {
+        println!("  {id}");
+    }
+    println!("allowed buyers ({}):", cfg.private.buyers.len());
+    for id in &cfg.private.buyers {
+        println!("  {id}");
+    }
+    if local.is_empty() && cfg.private.buyers.is_empty() {
+        println!("  (none yet: run `c0mpute worker register` or allow a peer-id)");
+    }
+    Ok(())
 }
 
 fn run_pricing(cmd: Option<PricingCmd>, config_path: &std::path::Path) -> Result<()> {

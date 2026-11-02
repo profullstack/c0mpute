@@ -34,6 +34,9 @@ pub struct Config {
     /// The operator's listing: dynamic or fixed price per job, with a floor.
     #[serde(default)]
     pub pricing: crate::pricing::PricingConfig,
+    /// Private mode: serve only your own buyers, stay off the public list.
+    #[serde(default)]
+    pub private: crate::private::PrivateConfig,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             update_interval_secs: default_update_interval_secs(),
             update_feed_url: None,
             pricing: Default::default(),
+            private: Default::default(),
         }
     }
 }

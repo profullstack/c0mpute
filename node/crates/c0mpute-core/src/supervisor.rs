@@ -94,13 +94,22 @@ impl Supervisor {
                 "advertising capabilities (no bench score — run `c0mpute bench` to publish one)"
             ),
         }
-        tokio::spawn(capabilities::advertise_loop(
-            net.clone(),
-            tags.clone(),
-            hardware,
-            bench_score,
-            capabilities::DEFAULT_ADVERTISE_INTERVAL,
-        ));
+        // Private mode keeps the node off the public listing: no ad.
+        let policy = crate::private::current();
+        if policy.advertises() {
+            tokio::spawn(capabilities::advertise_loop(
+                net.clone(),
+                tags.clone(),
+                hardware,
+                bench_score,
+                capabilities::DEFAULT_ADVERTISE_INTERVAL,
+            ));
+        } else {
+            info!(
+                trusted_buyers = policy.trusted.len(),
+                "private mode: serving trusted buyers only, not advertising"
+            );
+        }
 
         // Job dispatch: subscribe to c0mpute/jobs/<workload> for each
         // workload our roles imply. Today: only ffmpeg.transcode if

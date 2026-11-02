@@ -21,24 +21,43 @@ from huggingface_hub import HfApi
 
 def model_card(m, repo):
     hp = m.get("hyperparams", {})
+    ev = m.get("eval") or {}
+    net = m.get("trained_on") or {}
+    sources = ", ".join(m.get("sources") or [m["dataset"]])
+    ppl = f"{ev['perplexity_before']:.1f} to {ev['perplexity_after']:.1f}" if ev else "n/a"
+    where = (f"on the c0mpute network (`{net['workload']}`, job `{net['job_id']}`, receipt hash "
+             f"`{net['receipt_output_hash']}` matches this adapter)") if net else "on a CPU"
     return f"""---
 base_model: {m['base_model']}
 library_name: peft
 pipeline_tag: text-generation
-tags: [lora, peft, business, strategy, cpu, c0mpute]
+license: apache-2.0
+tags: [lora, peft, business, saas, crypto, strategy, cpu, c0mpute, ollama]
 ---
 
 # {m['name']}
 
-A LoRA adapter for [{m['base_model']}](https://huggingface.co/{m['base_model']}) that answers
-in the register of independent business writing. Trained on CPU with the
-[c0mpute business-strategist-agent example](https://github.com/profullstack/c0mpute/tree/master/examples/business-strategist-agent).
+**Quick start (Ollama, runs on a CPU):**
 
-- Training data: {m['documents']} posts harvested from `{', '.join(m.get('sources') or [m['dataset']])}` (rssamplifier.com topic feeds; not redistributed here)
-- Steps: {m['steps']}, LoRA r={hp.get('lora_r')}, seq_len={hp.get('seq_len')}, lr={hp.get('lr')}, dtype={hp.get('dtype')}
-- Adapter sha256: `{m['adapter_sha256']}`
+```bash
+ollama run hf.co/{repo}-GGUF "How should a 3-person SaaS price its first plan?"
+```
 
-## Use
+Needs Ollama 0.3.13 or newer (`curl -fsSL https://ollama.com/install.sh | sh`, or `w3bs install ollama`).
+The GGUF is at [{repo}-GGUF](https://huggingface.co/{repo}-GGUF); this repo is the LoRA adapter.
+
+| | |
+| --- | --- |
+| base | {m['base_model']} |
+| corpus | {m['documents']} documents from {sources} |
+| training | {m['steps']} LoRA steps (r={hp.get('lora_r')}, seq_len={hp.get('seq_len')}, lr={hp.get('lr')}) {where} |
+| held-out perplexity | {ppl} |
+| adapter sha256 | `{m['adapter_sha256']}` |
+
+Built with the [c0mpute example](https://github.com/profullstack/c0mpute/tree/master/examples/business-strategist-agent).
+Sources are rssamplifier.com topic feeds and pit.world search; the corpus is not redistributed here.
+
+## Use from Python (adapter)
 
 ```python
 from peft import PeftModel

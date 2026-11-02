@@ -10,7 +10,9 @@
 //!   4. Reject if we are full: no runner, runner queue full, no free
 //!      compute slot, or already holding as many open bids as we have free
 //!      capacity (each open bid is a job we could be handed).
-//!   5. Otherwise: publish a `JobBid` on the same topic, with an ETA from
+//!   5. Private mode ([`crate::private`]): reject unless the signed
+//!      publisher is the offer's buyer and that buyer is trusted.
+//!   6. Otherwise: publish a `JobBid` on the same topic, with an ETA from
 //!      queue depth x recent job time and an `expires_at_ms`.
 //!
 //! After winning bid (received as `JobAccept`), the worker fetches the
@@ -156,6 +158,11 @@ pub fn run_worker_subscriber_with_load(
             // are what we PUBLISH, receipts are for the buyer.)
             if let Ok(offer) = serde_json::from_slice::<JobOffer>(&msg.data) {
                 if offer.workload_type != workload_type {
+                    continue;
+                }
+                // Private mode: only trusted buyers (by signed publisher).
+                if !crate::private::current().admits(&msg, &offer, &our_peer_id) {
+                    debug!(job_id = %offer.job_id, buyer = %offer.buyer_peer_id, "dispatch: private mode, buyer not trusted");
                     continue;
                 }
                 if let Some(f) = &filter {
