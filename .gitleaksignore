@@ -24,3 +24,10 @@
 # `worktree-c0mpute-v2-protocol-spine` (PR #30), which remains reachable
 # until that branch is deleted.
 8680fe8bfc104e376b89e780f73bda2075178ab2:node/crates/c0mpute-envelope/src/identity.rs:generic-api-key:276
+
+# The Standard Webhooks specification's published test signing key
+# (whsec_MfKQ9r8G..., from the spec's reference vectors), used by the
+# webhook.deliver e2e test (DIP-0028). Public by construction. The line carries
+# an inline `gitleaks:allow`; this entry covers the pre-squash commit on branch
+# `feat/webhook-plugin` (PR #104) until that branch is deleted.
+c429b7a6b38238f67f348c2323c1fbff41348a5e:node/crates/c0mpute-core/src/webhook.rs:generic-api-key:1165

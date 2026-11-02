@@ -1,0 +1,46 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# webhook is a first-party in-tree plugin: its workload code is compiled
+# INTO the c0mpute binary (mode = "in-process"). The implementation lives at
+# node/crates/c0mpute-core/src/webhook.rs. Design: dips/0028-webhook-plugin.md.
+
+[module]
+id          = "webhook"
+name        = "Webhooks — paid, end-to-end encrypted delivery"
+version     = "0.2.53"
+kind        = "workload"
+category    = "infrastructure"
+description = "Send webhooks from c0mpute workers, paid per delivery. The URL, headers, body and signing secret are sealed to the one worker that wins the job; relays and the market see only ciphertext. Standard Webhooks signatures, bounded retries with backoff, SSRF-guarded delivery (public addresses only, no redirects)."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/webhook"
+keywords    = ["webhook", "http", "delivery", "e2e", "encryption", "standard-webhooks", "hmac", "paid"]
+
+[module.requirements]
+c0mpute      = ">=0.2.53"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:egress"]
+
+[module.workloads]
+# One job = one webhook with all its retries. Receipt output_hash is the
+# sha256 of the sealed result the buyer receives.
+"webhook.deliver" = { command = "deliver", validation = "sealed_result_hash" }
+
+[module.dispatch]
+mode = "in-process"
+# Compiled into the c0mpute binary; `c0mpute webhook serve` runs a worker.
+
+[module.surfaces]
+cli = "c0mpute webhook"
+
+[module.config.defaults]
+# Worker price per delivery (USD). Never below 0.0001: there is no free path.
+price_usd       = 0.001
+# Buyer cap per delivery (USD), `c0mpute webhook send --max-price`.
+max_price_usd   = 0.002
+concurrency     = 8
+max_attempts    = 5        # per delivery, retries included
+max_timeout_ms  = 30000    # per attempt
+max_body_bytes  = 32768
+max_response_bytes = 16384

@@ -90,6 +90,10 @@ c0mpute pool qwen                        # live nodes per model
 c0mpute infernet model list --node <id>  # one node's advertised models
 c0mpute infernet reservation pricing     # managed endpoints, by GPU class
 
+# webhooks: paid per delivery, sealed to the one worker that sends it (DIP-0028)
+c0mpute webhook serve --price 0.001      # earn per delivery
+c0mpute webhook send https://example.com/hook -d '{"event":"paid"}' --secret whsec_...
+
 # monitor
 c0mpute job status <job-id>
 c0mpute tui                              # interactive dashboard (hqtui)

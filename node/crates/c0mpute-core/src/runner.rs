@@ -540,7 +540,7 @@ async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
 
 /// Validate URL to prevent SSRF attacks.
 /// Only allows http/https schemes and rejects private/internal addresses.
-fn validate_url(url: &str) -> Result<()> {
+pub(crate) fn validate_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("invalid URL")?;
 
     // Only allow http and https schemes
@@ -567,7 +567,7 @@ fn validate_url(url: &str) -> Result<()> {
 }
 
 /// Check if an IP address is publicly routable (not private, loopback, link-local, etc.)
-fn is_public_ip(ip: std::net::IpAddr) -> bool {
+pub(crate) fn is_public_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
             ipv4.octets()[0] != 0             // 0.0.0.0/8
@@ -584,6 +584,7 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(ipv6) => {
             !ipv6.is_loopback()           // ::1
                 && !ipv6.is_unspecified() // ::
+                && !ipv6.is_multicast()   // ff00::/8
                 && !is_ipv6_private_or_local(&ipv6)
         }
     }
@@ -603,6 +604,12 @@ fn is_ipv6_private_or_local(ip: &std::net::Ipv6Addr) -> bool {
         || (segments[0] & 0xffc0) == 0xfe80
         // ::ffff:0:0/96 - IPv4-mapped addresses (check the mapped IPv4)
         || (segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
+        // ::/96 - deprecated IPv4-compatible addresses
+        || segments[0..6] == [0, 0, 0, 0, 0, 0]
+        // 64:ff9b::/96 and 64:ff9b:1::/48 - NAT64, which can reach any IPv4
+        || (segments[0] == 0x64 && segments[1] == 0xff9b)
+        // 2001:db8::/32 - documentation
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
 pub(crate) async fn publish_receipt(

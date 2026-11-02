@@ -51,6 +51,10 @@ pub struct JobAuction {
     /// How the winner is chosen. Default: the most capable worker that is
     /// not overloaded ([`crate::routing`]).
     pub policy: crate::routing::SelectionPolicy,
+    /// Told `(job_id, winning bid)` the moment the accept is published, for
+    /// workloads that exchange more with the winner before its receipt
+    /// (`webhook.deliver` seals its request to the winner's key).
+    pub accept_notify: Option<tokio::sync::mpsc::UnboundedSender<(String, JobBid)>>,
 }
 
 impl JobAuction {
@@ -67,7 +71,13 @@ impl JobAuction {
             excluded_bidders: Vec::new(),
             external_ref: None,
             policy: crate::routing::SelectionPolicy::default(),
+            accept_notify: None,
         }
+    }
+
+    pub fn with_accept_notify(mut self, tx: tokio::sync::mpsc::UnboundedSender<(String, JobBid)>) -> Self {
+        self.accept_notify = Some(tx);
+        self
     }
 
     pub fn with_policy(mut self, policy: crate::routing::SelectionPolicy) -> Self {
@@ -272,6 +282,9 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         external_ref: auction.external_ref.clone(),
     };
     publish_json(&net, &topic, &accept).await?;
+    if let Some(tx) = &auction.accept_notify {
+        let _ = tx.send((job_id.clone(), winner.clone()));
+    }
 
     // ── wait for receipt ────────────────────────────────────────────
     let recv_deadline = Instant::now() + auction.receipt_timeout;

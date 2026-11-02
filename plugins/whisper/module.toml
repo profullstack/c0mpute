@@ -7,7 +7,7 @@
 [module]
 id          = "whisper"
 name        = "Whisper — speech-to-text"
-version     = "0.2.52"
+version     = "0.2.53"
 kind        = "workload"
 category    = "ai"
 description = "CPU speech-to-text inference over c0mpute using faster-whisper."
