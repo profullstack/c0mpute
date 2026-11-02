@@ -155,6 +155,15 @@ pub struct JobBid {
     /// bids when picking a winner. `None` (old workers) never expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
+    /// The worker's `c0mpute bench` score (the same one its capability ad
+    /// carries). Buyers route to the most capable worker. `None` when never
+    /// benchmarked or from workers older than 0.2.49.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_score: Option<u32>,
+    /// How busy the worker is when it bids: 0.0 idle .. 1.0 saturated.
+    /// Buyers skip overloaded workers when a free one bids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<f32>,
 }
 
 impl JobBid {
@@ -243,6 +252,8 @@ mod tests {
             eta_seconds: 30,
             published_at_ms: 1,
             expires_at_ms: Some(1000),
+            bench_score: None,
+            load: None,
         };
         let json = serde_json::to_value(&bid).unwrap();
         assert_eq!(json["expires_at_ms"], 1000);
@@ -285,6 +296,8 @@ mod tests {
             eta_seconds: 30,
             published_at_ms: 1,
             expires_at_ms: None,
+            bench_score: None,
+            load: None,
         };
         assert!(bid.is_live(u64::MAX), "old bids never expire");
         bid.expires_at_ms = Some(100);

@@ -298,6 +298,10 @@ enum TranscodeCmd {
         /// receipt; billing keys on it, not on the per-auction job_id.
         #[arg(long)]
         external_ref: Option<String>,
+        /// How the winning worker is picked: `smart` (most capable worker
+        /// that is not overloaded, the default) or `cheapest` (lowest bid).
+        #[arg(long, default_value = "smart")]
+        policy: c0mpute_core::routing::SelectionPolicy,
     },
     /// Manage transcode presets.
     Preset {
@@ -1342,6 +1346,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             preset,
             max_price,
             external_ref,
+            policy,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -1372,7 +1377,8 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             let auction = JobAuction::new("ffmpeg.transcode", spec_inline)
                 .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
                 .with_max_price_usd(max_price.unwrap_or(1.0))
-                .with_external_ref(external_ref);
+                .with_external_ref(external_ref)
+                .with_policy(policy);
             let outcome = run_auction(net, auction).await?;
             println!("job_id        : {}", outcome.job_id);
             if let Some(r) = &outcome.external_ref {
