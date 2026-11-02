@@ -87,9 +87,10 @@ pub fn run_worker_subscriber_priced(
         let our_peer_id = net.peer_id().to_base58();
         let mut rx = net.messages();
         // What the market clears at, learned from accepts on auctions we
-        // bid in, plus our open bids (job_id -> cap, our price).
+        // bid in, plus our open bids keyed by job_id. An accept is only
+        // honoured when it matches a bid we actually placed.
         let mut market = MarketLearner::default();
-        let mut open_bids: std::collections::HashMap<String, (f64, f64)> =
+        let mut open_bids: std::collections::HashMap<String, OpenBid> =
             std::collections::HashMap::new();
         loop {
             let msg: GossipMessage = match rx.recv().await {
@@ -131,7 +132,15 @@ pub fn run_worker_subscriber_priced(
                     if open_bids.len() >= MAX_OPEN_BIDS {
                         open_bids.clear();
                     }
-                    open_bids.insert(offer.job_id.clone(), (offer.max_price_usd, price));
+                    open_bids.insert(
+                        offer.job_id.clone(),
+                        OpenBid {
+                            cap: offer.max_price_usd,
+                            price,
+                            buyer_peer_id: offer.buyer_peer_id.clone(),
+                            spec_inline: offer.spec_inline.clone(),
+                        },
+                    );
                 }
                 continue;
             }
@@ -139,11 +148,26 @@ pub fn run_worker_subscriber_priced(
                 if accept.workload_type != workload_type {
                     continue;
                 }
-                let won = accept.winning_bidder_peer_id == our_peer_id;
-                if let Some((cap, ours)) = open_bids.remove(&accept.job_id) {
-                    market.observe(cap, ours, accept.agreed_price_usd, won);
-                    debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
+                // Only the buyer that published the offer may accept it.
+                // Gossipsub runs Signed + Strict, so `msg.source` is the
+                // authenticated publisher and cannot be spoofed.
+                if !crate::buyer::source_matches_claim(&msg, &accept.buyer_peer_id) {
+                    warn!(job_id = %accept.job_id, "dispatch: discarding accept, gossip source is not the claimed buyer");
+                    continue;
                 }
+                let won = accept.winning_bidder_peer_id == our_peer_id;
+                let Some(bid) = open_bids.remove(&accept.job_id) else {
+                    if won {
+                        warn!(job_id = %accept.job_id, "dispatch: discarding accept for a job we never bid on");
+                    }
+                    continue;
+                };
+                if let Err(reason) = bid.matches(&accept) {
+                    warn!(job_id = %accept.job_id, reason, "dispatch: discarding accept that does not match our bid");
+                    continue;
+                }
+                market.observe(bid.cap, bid.price, accept.agreed_price_usd, won);
+                debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
                 if !won {
                     debug!(
                         job_id = %accept.job_id,
@@ -170,6 +194,35 @@ pub fn run_worker_subscriber_priced(
             }
         }
     });
+}
+
+/// A bid we published and are waiting to hear back on.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenBid {
+    pub cap: f64,
+    pub price: f64,
+    pub buyer_peer_id: String,
+    pub spec_inline: Option<serde_json::Value>,
+}
+
+impl OpenBid {
+    /// An accept is only honoured when it comes from the offer's buyer,
+    /// carries exactly the spec we bid on, and stays within the cap.
+    pub(crate) fn matches(&self, accept: &JobAccept) -> Result<(), &'static str> {
+        if accept.buyer_peer_id != self.buyer_peer_id {
+            return Err("buyer differs from the offer");
+        }
+        if accept.spec_inline != self.spec_inline {
+            return Err("spec differs from the offer we bid on");
+        }
+        if !accept.agreed_price_usd.is_finite()
+            || accept.agreed_price_usd < 0.0
+            || accept.agreed_price_usd > self.cap
+        {
+            return Err("agreed price outside the offer cap");
+        }
+        Ok(())
+    }
 }
 
 /// How full the runner's queue is: 0.0 empty, 1.0 full.
@@ -280,4 +333,58 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
         types.push("stt.transcribe".to_string());
     }
     types
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bid() -> OpenBid {
+        OpenBid {
+            cap: 1.0,
+            price: 0.6,
+            buyer_peer_id: "buyer".into(),
+            spec_inline: Some(serde_json::json!({"input_url": "https://example.com/a.mp4"})),
+        }
+    }
+
+    fn accept() -> JobAccept {
+        JobAccept {
+            job_id: "j".into(),
+            buyer_peer_id: "buyer".into(),
+            winning_bidder_peer_id: "us".into(),
+            agreed_price_usd: 0.6,
+            workload_type: "ffmpeg.transcode".into(),
+            spec_inline: Some(serde_json::json!({"input_url": "https://example.com/a.mp4"})),
+            published_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn matching_accept_is_honoured() {
+        assert!(bid().matches(&accept()).is_ok());
+    }
+
+    #[test]
+    fn accept_from_another_buyer_is_rejected() {
+        let mut a = accept();
+        a.buyer_peer_id = "mallory".into();
+        assert!(bid().matches(&a).is_err());
+    }
+
+    #[test]
+    fn accept_with_swapped_spec_is_rejected() {
+        let mut a = accept();
+        a.spec_inline = Some(serde_json::json!({"input_url": "http://169.254.169.254/"}));
+        assert!(bid().matches(&a).is_err());
+    }
+
+    #[test]
+    fn accept_over_cap_or_nan_is_rejected() {
+        let mut a = accept();
+        a.agreed_price_usd = 1.5;
+        assert!(bid().matches(&a).is_err());
+        a.agreed_price_usd = f64::NAN;
+        assert!(bid().matches(&a).is_err());
+    }
 }
