@@ -23,9 +23,6 @@ use serde_json::{Value, json};
 
 const DEFAULT_URL: &str = "https://c0mpute.com";
 
-/// Names that belong to `c0mpute chat`'s own subcommands.
-pub const SUBCOMMANDS: &[&str] = &["login", "logout", "whoami", "models", "mcp"];
-
 #[derive(Parser, Debug)]
 #[command(
     name = "c0mpute chat",
