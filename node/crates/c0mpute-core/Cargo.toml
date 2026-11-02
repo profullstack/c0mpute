@@ -33,6 +33,7 @@ uuid = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+jmespath = { workspace = true }
 sha2 = { workspace = true }
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }

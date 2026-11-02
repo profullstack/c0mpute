@@ -44,7 +44,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -134,6 +134,12 @@ enum Cmd {
     Speech {
         #[command(subcommand)]
         cmd: SpeechCmd,
+    },
+    /// Run the authenticated HTTP buyer bridge for generic jobs
+    /// (`workflow.step`, DIP 0030): POST /v1/jobs, GET /healthz.
+    Jobs {
+        #[command(subcommand)]
+        cmd: JobsCmd,
     },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
@@ -235,6 +241,9 @@ enum WorkerCmd {
     Register,
     /// Start the worker daemon and accept jobs.
     Start {
+        /// Comma-separated roles: storage, transcode, tts, stt, gateway,
+        /// verifier, workflow-step. Default: the config's roles plus tts,
+        /// stt and workflow-step.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -352,6 +361,30 @@ enum SpeechCmd {
         bind: std::net::SocketAddr,
         #[arg(long, env = "C0MPUTE_SPEECH_MAX_PRICE_USD", default_value_t = 0.0)]
         max_price_usd: f64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum JobsCmd {
+    /// Serve POST /v1/jobs as a P2P buyer bridge (meshhook workflow steps).
+    ///
+    /// Requires C0MPUTE_JOBS_TOKEN (24-256 chars); callers send it as
+    /// `Authorization: Bearer <token>`. Binds loopback by default; put it
+    /// behind HTTPS or a private network if callers are remote.
+    /// C0MPUTE_JOBS_ALLOW_PEERS=peerA,peerB limits which workers may bid.
+    ///
+    /// Step payloads (inputs, URLs, headers, bodies) are visible to the
+    /// winning worker: keep secrets off the network or pin trusted workers.
+    #[command(verbatim_doc_comment)]
+    Serve {
+        #[arg(long, env = "C0MPUTE_JOBS_LISTEN", default_value = c0mpute_core::jobs_gateway::DEFAULT_BIND)]
+        listen: std::net::SocketAddr,
+        /// Highest price per job in USD; a request's max_price may only lower it.
+        #[arg(long, env = "C0MPUTE_JOBS_MAX_PRICE_USD", default_value_t = 0.0)]
+        max_price: f64,
+        /// How long each auction collects bids, in milliseconds.
+        #[arg(long, env = "C0MPUTE_JOBS_BID_WINDOW_MS", default_value_t = 2000)]
+        bid_window_ms: u64,
     },
 }
 
@@ -591,6 +624,11 @@ async fn run_app(cli: Cli) -> Result<()> {
             start_auto_update_poller(cfg.update_auto);
             run_speech(cmd).await
         }
+        Cmd::Jobs { cmd } => {
+            let cfg = Config::load_or_default(&config_path)?;
+            start_auto_update_poller(cfg.update_auto);
+            run_jobs(cmd).await
+        }
         Cmd::Chat { cmd } => run_chat(cmd),
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
@@ -821,7 +859,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if let Some(rs) = roles {
                 cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
             } else {
-                for role in [Role::Tts, Role::Stt] {
+                for role in [Role::Tts, Role::Stt, Role::WorkflowStep] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
                     }
@@ -842,7 +880,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if default_speech_roles {
                 eprintln!(
-                    "TTS and STT are enabled by default; pass --roles to choose a specific role set"
+                    "TTS, STT and workflow-step are enabled by default; pass --roles to choose a specific role set"
                 );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
@@ -1491,6 +1529,33 @@ async fn run_speech(cmd: SpeechCmd) -> Result<()> {
     }
 }
 
+async fn run_jobs(cmd: JobsCmd) -> Result<()> {
+    match cmd {
+        JobsCmd::Serve {
+            listen,
+            max_price,
+            bid_window_ms,
+        } => {
+            let token = std::env::var("C0MPUTE_JOBS_TOKEN")
+                .context("set C0MPUTE_JOBS_TOKEN to a random secret (24 to 256 characters)")?;
+            let allow_peers = c0mpute_core::jobs_gateway::parse_allow_peers(
+                &std::env::var("C0MPUTE_JOBS_ALLOW_PEERS").unwrap_or_default(),
+            );
+            if !(200..=30_000).contains(&bid_window_ms) {
+                anyhow::bail!("--bid-window-ms must be between 200 and 30000");
+            }
+            c0mpute_core::jobs_gateway::serve(
+                listen,
+                token,
+                max_price,
+                allow_peers,
+                std::time::Duration::from_millis(bid_window_ms),
+            )
+            .await
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // secure-chat plugin (in-process)
 // ────────────────────────────────────────────────────────────────────────
@@ -1845,6 +1910,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "stt" => Some(Role::Stt),
         "gateway" => Some(Role::Gateway),
         "verifier" => Some(Role::Verifier),
+        "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None
@@ -3298,9 +3364,11 @@ mod infernet_tests {
         assert!(lines.iter().any(|l| l.contains("qwen3.5-abliterated:4b")
             && l.contains("3.1 GB")
             && l.contains("[uncensored]")));
-        assert!(lines
-            .iter()
-            .any(|l| l.contains("disk used by house models: 3.6 GB")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("disk used by house models: 3.6 GB"))
+        );
 
         let cfg = serde_json::json!({ "houseModels": { "uncensored": false, "maxDiskGb": 20 } });
         assert_eq!(

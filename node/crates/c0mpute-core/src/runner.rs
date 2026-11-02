@@ -87,7 +87,11 @@ impl WorkerLoad {
         let _ = self
             .recent_job_ms
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
-                Some(if old == 0 { ms } else { (old * 7 + ms * 3) / 10 })
+                Some(if old == 0 {
+                    ms
+                } else {
+                    (old * 7 + ms * 3) / 10
+                })
             });
     }
 }
@@ -427,7 +431,9 @@ async fn run_transcode_job(
     // The input is no longer needed once the output exists.
     let _ = fs::remove_file(&input_path).await;
     let hash = store_output(store, &output_path, MAX_OUTPUT_BYTES).await?;
-    net.announce(&hash).await.context("announce transcode output")?;
+    net.announce(&hash)
+        .await
+        .context("announce transcode output")?;
     Ok(hash.to_hex())
 }
 
@@ -481,7 +487,10 @@ pub(crate) fn validate_transcode_spec(spec: &TranscodeSpec) -> Result<()> {
         bail!("bitrate {} is out of range", spec.bitrate_bps);
     }
     if !(1..=1000).contains(&spec.keyframe_interval) {
-        bail!("keyframe interval {} is out of range", spec.keyframe_interval);
+        bail!(
+            "keyframe interval {} is out of range",
+            spec.keyframe_interval
+        );
     }
     Ok(())
 }
@@ -489,30 +498,20 @@ pub(crate) fn validate_transcode_spec(spec: &TranscodeSpec) -> Result<()> {
 async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
-    validate_url(url)?;
-    let parsed = url::Url::parse(url).context("invalid URL")?;
-    let host = parsed.host_str().context("URL missing host")?.to_string();
-    let port = parsed.port_or_known_default().context("URL missing port")?;
-
     // Resolve once, require every address to be public, then pin the
     // request to those addresses so a second lookup cannot rebind to a
     // private one. Redirects are off: each hop would need the same check.
-    let lookup_host = host.trim_start_matches('[').trim_end_matches(']').to_string();
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((lookup_host.as_str(), port))
+    let target = crate::net_guard::vet_url(url, crate::net_guard::is_public_ip)
         .await
-        .context("resolve input_url host")?
-        .collect();
-    if addrs.is_empty() {
-        bail!("input_url host did not resolve");
+        .context("input_url")?;
+    let mut builder = reqwest::Client::builder();
+    if let Some(host) = &target.pin_host {
+        builder = builder.resolve_to_addrs(host, &target.addrs);
     }
-    if let Some(bad) = addrs.iter().find(|a| !is_public_ip(a.ip())) {
-        bail!("input_url resolves to a non-public address ({})", bad.ip());
-    }
-    let client = reqwest::Client::builder()
+    let client = builder
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(INPUT_FETCH_TIMEOUT)
-        .resolve_to_addrs(&host, &addrs)
         .build()
         .context("build input http client")?;
 
@@ -538,78 +537,40 @@ async fn download_to_file(url: &str, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Validate URL to prevent SSRF attacks.
-/// Only allows http/https schemes and rejects private/internal addresses.
+/// Syntactic SSRF check (scheme, `localhost`, private IP literals) for
+/// callers that resolve and pin addresses themselves (`webhook.deliver`).
+/// [`crate::net_guard::vet_url`] does the full resolve-and-vet.
 pub(crate) fn validate_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("invalid URL")?;
-
-    // Only allow http and https schemes
     match parsed.scheme() {
         "http" | "https" => {}
         scheme => bail!("disallowed URL scheme: {}", scheme),
     }
-
-    let host = parsed.host_str().context("URL missing host")?;
-
-    // Reject localhost variants
-    if host == "localhost" || host.ends_with(".localhost") {
-        bail!("localhost URLs are not allowed");
-    }
-
-    // Parse as IP and reject private/internal ranges
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if !is_public_ip(ip) {
-            bail!("private or internal IP addresses are not allowed");
+    match parsed.host().context("URL missing host")? {
+        url::Host::Domain(host) => {
+            let host = host.to_ascii_lowercase();
+            let host = host.trim_end_matches('.');
+            if host == "localhost" || host.ends_with(".localhost") {
+                bail!("localhost URLs are not allowed");
+            }
+        }
+        url::Host::Ipv4(ip) => {
+            if !is_public_ip(ip.into()) {
+                bail!("private or internal IP addresses are not allowed");
+            }
+        }
+        url::Host::Ipv6(ip) => {
+            if !is_public_ip(ip.into()) {
+                bail!("private or internal IP addresses are not allowed");
+            }
         }
     }
-
     Ok(())
 }
 
-/// Check if an IP address is publicly routable (not private, loopback, link-local, etc.)
+/// Publicly routable? See [`crate::net_guard::is_public_ip`].
 pub(crate) fn is_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.octets()[0] != 0             // 0.0.0.0/8
-                && !ipv4.is_multicast()       // 224.0.0.0/4
-                && ipv4.octets()[0] < 240     // 240.0.0.0/4 reserved
-                && !ipv4.is_loopback()        // 127.0.0.0/8
-                && !ipv4.is_private()     // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                && !ipv4.is_link_local()  // 169.254.0.0/16 (includes cloud metadata)
-                && !ipv4.is_broadcast()   // 255.255.255.255
-                && !ipv4.is_unspecified() // 0.0.0.0
-                && !ipv4.is_documentation() // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-                && !is_shared_nat(ipv4) // 100.64.0.0/10 (Carrier-grade NAT)
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            !ipv6.is_loopback()           // ::1
-                && !ipv6.is_unspecified() // ::
-                && !ipv6.is_multicast()   // ff00::/8
-                && !is_ipv6_private_or_local(&ipv6)
-        }
-    }
-}
-
-fn is_shared_nat(ip: std::net::Ipv4Addr) -> bool {
-    // 100.64.0.0/10 - Shared address space (RFC 6598)
-    let octets = ip.octets();
-    octets[0] == 100 && (octets[1] & 0xC0) == 64
-}
-
-fn is_ipv6_private_or_local(ip: &std::net::Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    // fc00::/7 - Unique local addresses
-    (segments[0] & 0xfe00) == 0xfc00
-        // fe80::/10 - Link-local addresses
-        || (segments[0] & 0xffc0) == 0xfe80
-        // ::ffff:0:0/96 - IPv4-mapped addresses (check the mapped IPv4)
-        || (segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
-        // ::/96 - deprecated IPv4-compatible addresses
-        || segments[0..6] == [0, 0, 0, 0, 0, 0]
-        // 64:ff9b::/96 and 64:ff9b:1::/48 - NAT64, which can reach any IPv4
-        || (segments[0] == 0x64 && segments[1] == 0xff9b)
-        // 2001:db8::/32 - documentation
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+    crate::net_guard::is_public_ip(ip)
 }
 
 pub(crate) async fn publish_receipt(
@@ -685,10 +646,17 @@ mod tests {
 
     #[test]
     fn non_public_ips_are_rejected() {
-        for ip in ["0.1.2.3", "224.0.0.1", "240.0.0.1", "127.0.0.1", "10.0.0.1", "169.254.169.254"] {
-            assert!(!is_public_ip(ip.parse().unwrap()), "{ip}");
+        for ip in [
+            "0.1.2.3",
+            "224.0.0.1",
+            "240.0.0.1",
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+        ] {
+            assert!(!crate::net_guard::is_public_ip(ip.parse().unwrap()), "{ip}");
         }
-        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+        assert!(crate::net_guard::is_public_ip("1.1.1.1".parse().unwrap()));
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -696,7 +664,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("c0-runner-{name}-{}-{nanos}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("c0-runner-{name}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -712,7 +681,10 @@ mod tests {
         let hex = hash.to_hex();
         // The receipt carries this hex; the buyer parses it with
         // Hash::from_hex and fetches the chunk by it.
-        assert_eq!(hex, hex::encode(blake3::hash(b"not really an mp4").as_bytes()));
+        assert_eq!(
+            hex,
+            hex::encode(blake3::hash(b"not really an mp4").as_bytes())
+        );
         assert_eq!(Hash::from_hex(&hex).unwrap(), hash);
         assert_eq!(store.get(&hash).await.unwrap(), b"not really an mp4");
         let _ = std::fs::remove_dir_all(&root);
@@ -728,7 +700,11 @@ mod tests {
         assert!(format!("{err:#}").contains("result limit"), "{err:#}");
         fs::write(&out, b"").await.unwrap();
         assert!(store_output(&store, &out, 63).await.is_err());
-        assert!(store_output(&store, &root.join("missing"), 63).await.is_err());
+        assert!(
+            store_output(&store, &root.join("missing"), 63)
+                .await
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -763,8 +739,13 @@ mod tests {
     #[tokio::test]
     async fn hostname_resolving_to_loopback_is_refused() {
         let dir = std::env::temp_dir().join(format!("c0-dl-{}", std::process::id()));
-        let err = download_to_file("http://localtest.me:9/x", &dir).await.unwrap_err();
+        let err = download_to_file("http://localtest.me:9/x", &dir)
+            .await
+            .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("non-public") || msg.contains("resolve"), "{msg}");
+        assert!(
+            msg.contains("non-public") || msg.contains("resolve"),
+            "{msg}"
+        );
     }
 }

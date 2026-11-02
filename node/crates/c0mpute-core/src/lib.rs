@@ -8,6 +8,9 @@ pub mod buyer;
 pub mod capabilities;
 pub mod config;
 pub mod dispatch;
+pub(crate) mod gateway_util;
+pub mod jobs_gateway;
+pub mod net_guard;
 pub mod pricing;
 pub mod register;
 pub mod resources;
@@ -21,6 +24,7 @@ pub mod supervisor;
 pub mod temporal;
 pub mod text;
 pub mod webhook;
+pub mod workflow;
 
 pub use buyer::{AuctionOutcome, JobAuction, run_auction};
 pub use capabilities::{Registry, advertise_loop, tags_from_config};

@@ -179,6 +179,10 @@ pub enum Role {
     Stt,
     Gateway,
     Verifier,
+    /// `workflow.step` (DIP 0030): JMESPath transforms and guarded HTTP
+    /// calls for webhook workflows. Config/CLI spelling: `workflow-step`.
+    #[serde(rename = "workflow-step", alias = "workflowstep")]
+    WorkflowStep,
 }
 
 #[cfg(test)]
