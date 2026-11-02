@@ -1,0 +1,27 @@
+{
+  "name": "not-a-lawyer-agent",
+  "kind": "lora",
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "dataset": {
+    "url": "data/legal.jsonl",
+    "format": "jsonl",
+    "source": "https://rssamplifier.com/topics/law,legal,lawyer,lawsuit,court,copyright,contract-law,legal-tech + https://pit.world/search?q=law,legal,lawyer,lawsuit,court ruling,contract law,copyright,tenant rights,employment law,small claims"
+  },
+  "hyperparams": {
+    "lr": 0.0002,
+    "batch_size": 2,
+    "epochs": 1,
+    "max_steps": 400,
+    "seq_len": 256,
+    "lora_r": 8,
+    "dtype": "bfloat16"
+  },
+  "output": {
+    "destination_url": "out/not-a-lawyer-agent",
+    "format": "peft-lora"
+  },
+  "system_prompt": "You are not-a-lawyer-agent, a legal research assistant. You are not a lawyer and this is not legal advice. Explain the law in plain English, name the jurisdiction a rule comes from, cite the sources you were given, and say when someone should talk to a licensed attorney.",
+  "example_question": "Can my landlord keep my whole security deposit for normal wear and tear?",
+  "disclaimer": "Not a lawyer. Not legal advice. Legal research from public sources; laws vary by jurisdiction, so check with a licensed attorney before acting.",
+  "tags": ["legal", "law", "legal-research"]
+}

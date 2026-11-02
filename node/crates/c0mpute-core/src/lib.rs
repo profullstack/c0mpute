@@ -61,3 +61,52 @@ pub fn init_tracing() -> Result<()> {
     info!("tracing initialised");
     Ok(())
 }
+
+/// The path to run for a peer binary that was resolved once at startup.
+///
+/// Long-running workers (`infernet text serve`, temporal serve) resolve
+/// `infernet` when they start, but Infernet's installer and self-update can
+/// move or prune the copy they found (0.1.87 pruned stray mise shims), and
+/// every later job then failed with "No such file or directory". If the cached
+/// path is gone, look the same file name up on PATH again.
+pub fn live_bin(cached: &std::path::Path) -> std::path::PathBuf {
+    if cached.is_file() {
+        return cached.to_path_buf();
+    }
+    let found = cached.file_name().and_then(|name| {
+        std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file()))
+    });
+    match found {
+        Some(p) => {
+            tracing::warn!(old = %cached.display(), new = %p.display(), "peer binary moved; using the copy now on PATH");
+            p
+        }
+        None => cached.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod live_bin_tests {
+    use super::live_bin;
+
+    #[test]
+    fn keeps_an_existing_path() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(live_bin(&exe), exe);
+    }
+
+    #[test]
+    fn re_resolves_a_vanished_path_by_name_on_path() {
+        // `sh` is on PATH everywhere the tests run; a cached path under a
+        // directory that no longer exists must resolve to the PATH copy.
+        let got = live_bin(std::path::Path::new("/nonexistent-c0mpute-dir/sh"));
+        assert!(got.is_file(), "{got:?}");
+        assert_ne!(got, std::path::Path::new("/nonexistent-c0mpute-dir/sh"));
+    }
+
+    #[test]
+    fn leaves_an_unknown_binary_alone() {
+        let p = std::path::Path::new("/nonexistent-c0mpute-dir/no-such-bin-c0mpute-test");
+        assert_eq!(live_bin(p), p);
+    }
+}

@@ -25,6 +25,9 @@ def model_card(m, repo):
     net = m.get("trained_on") or {}
     sources = ", ".join(m.get("sources") or [m["dataset"]])
     ppl = f"{ev['perplexity_before']:.1f} to {ev['perplexity_after']:.1f}" if ev else "n/a"
+    q = m.get("example_question") or "How should a 3-person SaaS price its first plan?"
+    tags = ", ".join(["lora", "peft", *(m.get("tags") or ["business", "saas", "crypto", "strategy"]), "cpu", "c0mpute", "ollama"])
+    disclaimer = f"\n> **{m['disclaimer']}**\n" if m.get("disclaimer") else ""
     where = (f"on the c0mpute network (`{net['workload']}`, job `{net['job_id']}`, receipt hash "
              f"`{net['receipt_output_hash']}` matches this adapter)") if net else "on a CPU"
     return f"""---
@@ -32,15 +35,15 @@ base_model: {m['base_model']}
 library_name: peft
 pipeline_tag: text-generation
 license: apache-2.0
-tags: [lora, peft, business, saas, crypto, strategy, cpu, c0mpute, ollama]
+tags: [{tags}]
 ---
 
 # {m['name']}
-
+{disclaimer}
 **Quick start (Ollama, runs on a CPU):**
 
 ```bash
-ollama run hf.co/{repo}-GGUF "How should a 3-person SaaS price its first plan?"
+ollama run hf.co/{repo}-GGUF {json.dumps(q)}
 ```
 
 Needs Ollama 0.3.13 or newer (`curl -fsSL https://ollama.com/install.sh | sh`, or `w3bs install ollama`).
@@ -66,7 +69,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 tok = AutoTokenizer.from_pretrained("{repo}")
 model = PeftModel.from_pretrained(AutoModelForCausalLM.from_pretrained("{m['base_model']}"), "{repo}")
 msgs = [{{"role": "system", "content": {json.dumps(m['system_prompt'])}}},
-        {{"role": "user", "content": "How should a 3-person SaaS price its first plan?"}}]
+        {{"role": "user", "content": {json.dumps(q)}}}]
 ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
 print(tok.decode(model.generate(ids, max_new_tokens=300)[0][ids.shape[1]:], skip_special_tokens=True))
 ```

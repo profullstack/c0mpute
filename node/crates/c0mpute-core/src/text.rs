@@ -99,7 +99,7 @@ pub fn sha256_hex(b: &[u8]) -> String {
 pub async fn probe(infernet: &Path) -> Result<Value> {
     let out = tokio::time::timeout(
         Duration::from_secs(120),
-        tokio::process::Command::new(infernet).args(["model", "runtime", "status", "--peft", "--json"]).stdin(std::process::Stdio::null()).output(),
+        tokio::process::Command::new(crate::live_bin(infernet)).args(["model", "runtime", "status", "--peft", "--json"]).stdin(std::process::Stdio::null()).output(),
     )
     .await
     .context("infernet model runtime status --peft timed out")?
@@ -165,7 +165,7 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
     tokio::fs::write(&job_path, serde_json::to_vec_pretty(&job)?).await?;
     let timeout_s = job["limits"]["timeout_s"].as_u64().unwrap_or(4 * 3600).clamp(60, 7 * 86_400);
 
-    let mut command = tokio::process::Command::new(infernet);
+    let mut command = tokio::process::Command::new(crate::live_bin(infernet));
     command
         .args(["model", "train", "--json", "--job"])
         .arg(&job_path)
@@ -418,7 +418,7 @@ pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &
     tokio::fs::create_dir_all(&dir).await?;
     let req = dir.join("request.json");
     tokio::fs::write(&req, serde_json::to_vec(&json!({"adapter_dir": adapter, "base_model": spec.base_model, "messages": spec.messages, "max_new_tokens": spec.max_new_tokens}))?).await?;
-    let mut command = tokio::process::Command::new(infernet);
+    let mut command = tokio::process::Command::new(crate::live_bin(infernet));
     command.args(["model", "generate", "--json", "--input"]).arg(&req).stdin(std::process::Stdio::null()).kill_on_drop(true);
     crate::resources::apply_job_limits(&mut command);
     let out = tokio::time::timeout(Duration::from_secs(900), command.output()).await.map_err(|_| anyhow::anyhow!("E_TIMEOUT: generation exceeded 900s"))??;
@@ -477,7 +477,7 @@ pub fn infer_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter
 /// Does the local Infernet have `model generate` (>= 0.1.80)? It answers a
 /// bare call with a usage error naming `--adapter`; older ones do not know it.
 pub async fn supports_generate(infernet: &Path) -> bool {
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), tokio::process::Command::new(infernet).args(["model", "generate"]).stdin(std::process::Stdio::null()).output()).await else {
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), tokio::process::Command::new(crate::live_bin(infernet)).args(["model", "generate"]).stdin(std::process::Stdio::null()).output()).await else {
         return false;
     };
     String::from_utf8_lossy(&out.stderr).contains("--adapter")
