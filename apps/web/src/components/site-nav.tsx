@@ -7,6 +7,7 @@ import { useEffect, useRef } from "react";
 const LINKS: { href: string; label: string; accent?: boolean }[] = [
   { href: "/getting-started", label: "getting-started" },
   { href: "/protocol", label: "protocol" },
+  { href: "/train", label: "train an AI agent", accent: true },
   { href: "/providers", label: "run a node", accent: true },
   { href: "/estimates", label: "GPU earnings", accent: true },
   { href: "/market", label: "market" },

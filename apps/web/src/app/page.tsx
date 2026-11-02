@@ -190,6 +190,7 @@ $ c0mpute uninstall --all     # remove c0mpute and peer binaries`}</CodeBlock>
       <section className="space-y-3 rule pt-8">
         <p className="comment">// next</p>
         <ul className="space-y-1 text-sm">
+          <li>→ <Link href="/train">train your own AI agent</Link></li>
           <li>→ <Link href="/getting-started">getting-started</Link></li>
           <li>→ <Link href="/protocol">protocol</Link></li>
           <li>→ <Link href="/providers">providers</Link></li>
