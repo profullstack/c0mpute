@@ -1,0 +1,21 @@
+{
+  "name": "business-strategist-agent",
+  "kind": "lora",
+  "base_model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "dataset": {
+    "url": "data/corpus.jsonl",
+    "format": "jsonl",
+    "source": "https://rssamplifier.com/topics/business"
+  },
+  "hyperparams": {
+    "lr": 0.0002,
+    "batch_size": 2,
+    "epochs": 2,
+    "seq_len": 256,
+    "lora_r": 8
+  },
+  "output": {
+    "destination_url": "out/business-strategist-agent",
+    "format": "peft-lora"
+  }
+}
