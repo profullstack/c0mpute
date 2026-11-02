@@ -1,4 +1,5 @@
-//! Infernet text fine-tunes on c0mpute: workload `infernet.text.train`.
+//! Infernet text fine-tunes on c0mpute: workloads `infernet.text.train` and
+//! `infernet.text.infer` (answers from a trained adapter, further down).
 //!
 //! A buyer has a job file (`@infernetprotocol/training` job config, `kind:
 //! "lora"`) and a JSONL corpus. `c0mpute infernet text train` serves the
@@ -295,27 +296,225 @@ pub fn train_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter
     })
 }
 
+// ── inference (infernet.text.infer) ─────────────────────────────────────
+
+pub const INFER_WORKLOAD: &str = "infernet.text.infer";
+/// The adapter files a chat request carries (bundled, base64) and the worker caches.
+pub const ADAPTER_FILES: [&str; 3] = ["adapter_model.safetensors", "adapter_config.json", "manifest.json"];
+/// What the worker uploads back.
+pub const ANSWER_ARTIFACTS: [&str; 1] = ["answer.json"];
+const MAX_BUNDLE: u64 = 128 << 20;
+const MAX_MESSAGES: usize = 24;
+const MAX_PROMPT_BYTES: usize = 32 * 1024;
+const ANSWER_SLOT: &str = "answer";
+
+/// `JobOffer.spec_inline` for `infernet.text.infer`: one answer from a base
+/// model + LoRA adapter. The adapter travels with the request (a bundle on
+/// the buyer's transfer server) and is cached by hash, so any worker can
+/// serve any adapter; the buyer does retrieval, the worker only generates.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TextInferSpec {
+    /// `sha256:` of adapter_model.safetensors.
+    pub adapter_hash: String,
+    pub base_model: String,
+    pub messages: Vec<Value>,
+    pub max_new_tokens: u32,
+    /// `{"files": {"<name>": "<base64>"}}` for the adapter, fetched only on a cache miss.
+    pub adapter_url: String,
+    /// Base URL the worker PUTs `answer.json` to.
+    pub answer_upload_url: String,
+}
+
+fn valid_repo_id(base: &str) -> bool {
+    !(base.is_empty() || base.len() > 200 || base.starts_with('/') || base.contains("..") || base.contains("://"))
+}
+
+impl TextInferSpec {
+    pub fn validate(&self) -> Result<()> {
+        if !crate::temporal::is_sha256_ref(&self.adapter_hash) {
+            bail!("adapter_hash must be sha256:<64 lowercase hex>");
+        }
+        if !valid_repo_id(&self.base_model) {
+            bail!("base_model must be a model repo id like org/name");
+        }
+        if self.messages.is_empty() || self.messages.len() > MAX_MESSAGES {
+            bail!("messages must hold 1..={MAX_MESSAGES} entries");
+        }
+        let mut bytes = 0;
+        for m in &self.messages {
+            let role = m["role"].as_str().unwrap_or("");
+            if !["system", "user", "assistant"].contains(&role) {
+                bail!("message role must be system, user or assistant");
+            }
+            bytes += m["content"].as_str().context("message content must be a string")?.len();
+        }
+        if bytes > MAX_PROMPT_BYTES {
+            bail!("messages exceed {MAX_PROMPT_BYTES} bytes");
+        }
+        if !(1..=1024).contains(&self.max_new_tokens) {
+            bail!("max_new_tokens must be 1..=1024");
+        }
+        if !is_http(&self.adapter_url) || !is_http(&self.answer_upload_url) {
+            bail!("adapter and answer URLs must be http(s)");
+        }
+        Ok(())
+    }
+}
+
+/// The adapter files as the bundle a chat request serves.
+pub fn adapter_bundle(dir: &Path) -> Result<(Vec<u8>, String, Value)> {
+    use base64::Engine;
+    let mut files = serde_json::Map::new();
+    for f in ADAPTER_FILES {
+        let p = dir.join(f);
+        if p.exists() {
+            files.insert(f.into(), json!(base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p)?)));
+        }
+    }
+    let weights = std::fs::read(dir.join("adapter_model.safetensors")).with_context(|| format!("{} has no adapter_model.safetensors", dir.display()))?;
+    let manifest: Value = std::fs::read(dir.join("manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    Ok((serde_json::to_vec(&json!({"files": files}))?, sha256_hex(&weights), manifest))
+}
+
+/// Fetch, verify and unpack an adapter bundle into `dir` (a cache entry).
+async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
+    use base64::Engine;
+    let resp = reqwest::get(url).await?.error_for_status()?;
+    if resp.content_length().is_some_and(|n| n > MAX_BUNDLE) {
+        bail!("adapter bundle larger than {} MiB", MAX_BUNDLE >> 20);
+    }
+    let bytes = resp.bytes().await?;
+    if bytes.len() as u64 > MAX_BUNDLE {
+        bail!("adapter bundle larger than {} MiB", MAX_BUNDLE >> 20);
+    }
+    let v: Value = serde_json::from_slice(&bytes).context("adapter bundle is not JSON")?;
+    let tmp = dir.with_extension("partial");
+    let _ = tokio::fs::remove_dir_all(&tmp).await;
+    tokio::fs::create_dir_all(&tmp).await?;
+    for f in ADAPTER_FILES {
+        if let Some(b64) = v["files"][f].as_str() {
+            tokio::fs::write(tmp.join(f), base64::engine::general_purpose::STANDARD.decode(b64).context("bad base64 in adapter bundle")?).await?;
+        }
+    }
+    let got = crate::temporal::worker::file_sha256(&tmp.join("adapter_model.safetensors")).context("bundle lacks adapter_model.safetensors")?;
+    if got != want {
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        bail!("adapter {got} differs from the offer's {want}");
+    }
+    let _ = tokio::fs::remove_dir_all(dir).await;
+    tokio::fs::rename(&tmp, dir).await?;
+    Ok(())
+}
+
+/// Answer one request: adapter from the cache (or fetched), then `infernet model generate`.
+pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec) -> Result<Vec<u8>> {
+    spec.validate()?;
+    let adapter = cache_root.join("text").join("adapters").join(spec.adapter_hash.trim_start_matches("sha256:"));
+    let cached = crate::temporal::worker::file_sha256(&adapter.join("adapter_model.safetensors")).ok();
+    if cached.as_deref() != Some(spec.adapter_hash.as_str()) {
+        fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?;
+    }
+    let dir = cache_root.join("text").join("infer").join(job_id);
+    tokio::fs::create_dir_all(&dir).await?;
+    let req = dir.join("request.json");
+    tokio::fs::write(&req, serde_json::to_vec(&json!({"adapter_dir": adapter, "base_model": spec.base_model, "messages": spec.messages, "max_new_tokens": spec.max_new_tokens}))?).await?;
+    let mut command = tokio::process::Command::new(infernet);
+    command.args(["model", "generate", "--json", "--input"]).arg(&req).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    crate::resources::apply_job_limits(&mut command);
+    let out = tokio::time::timeout(Duration::from_secs(900), command.output()).await.map_err(|_| anyhow::anyhow!("E_TIMEOUT: generation exceeded 900s"))??;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let line = String::from_utf8_lossy(&out.stdout).lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("").to_string();
+    let ans: Value = serde_json::from_str(&line).unwrap_or(json!({}));
+    if !out.status.success() || ans["type"] != json!("answer") {
+        bail!("infernet model generate failed: {}", ans["message"].as_str().unwrap_or(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")));
+    }
+    if ans["adapter"].as_str() != Some(spec.adapter_hash.as_str()) {
+        bail!("generate used adapter {} instead of {}", ans["adapter"], spec.adapter_hash);
+    }
+    Ok(serde_json::to_vec(&ans)?)
+}
+
+pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>) -> mpsc::Sender<AcceptedJob> {
+    let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
+    tokio::spawn(async move {
+        while let Some(job) = rx.recv().await {
+            let accept = job.accept.clone();
+            busy.store(true, Ordering::Relaxed);
+            let result: Result<String> = async {
+                let spec: TextInferSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
+                let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec).await?;
+                reqwest::Client::new().put(format!("{}/answer.json", spec.answer_upload_url)).body(answer.clone()).send().await?.error_for_status()?;
+                Ok(sha256_hex(&answer))
+            }
+            .await;
+            busy.store(false, Ordering::Relaxed);
+            match result {
+                Ok(hash) => {
+                    info!(job_id = %accept.job_id, "text: answered");
+                    publish_receipt(&net, &accept, Some(hash), JobStatus::Completed).await;
+                }
+                Err(e) => {
+                    warn!(job_id = %accept.job_id, err = %format!("{e:#}"), "text: answer failed");
+                    publish_receipt(&net, &accept, None, JobStatus::Failed).await;
+                }
+            }
+        }
+    });
+    tx
+}
+
+pub fn infer_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter {
+    Arc::new(move |offer| {
+        !busy.load(Ordering::Relaxed)
+            && offer
+                .spec_inline
+                .as_ref()
+                .and_then(|v| serde_json::from_value::<TextInferSpec>(v.clone()).ok())
+                .is_some_and(|s| s.validate().is_ok())
+    })
+}
+
+/// Does the local Infernet have `model generate` (>= 0.1.80)? It answers a
+/// bare call with a usage error naming `--adapter`; older ones do not know it.
+pub async fn supports_generate(infernet: &Path) -> bool {
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), tokio::process::Command::new(infernet).args(["model", "generate"]).stdin(std::process::Stdio::null()).output()).await else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stderr).contains("--adapter")
+}
+
 pub struct Serving {
     pub net: Arc<Libp2pNetwork>,
     pub tags: Vec<String>,
     pub runtime: Value,
+    pub infer: bool,
 }
 
-/// `c0mpute infernet text serve`: advertise and take `infernet.text.train` jobs.
+/// `c0mpute infernet text serve`: advertise and take `infernet.text.train`
+/// jobs, and `infernet.text.infer` requests when the local Infernet can.
 pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf) -> Result<Serving> {
     let runtime = probe(&infernet).await?;
+    let infer = supports_generate(&infernet).await;
     let ram_mb = local_ram_mb();
-    let tags = worker_tags(&runtime, ram_mb);
+    let mut tags = worker_tags(&runtime, ram_mb);
+    if infer {
+        tags.push(tag(INFER_WORKLOAD));
+    }
     let net = spawn_node(net_opts).await?;
     let hardware = json!({"version": env!("CARGO_PKG_VERSION"), "text_runtime": "peft", "ram_mb": ram_mb, "cuda": runtime["cuda"]});
     tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
     let busy = Arc::new(AtomicBool::new(false));
     let slots = Arc::new(Semaphore::new(1));
-    let tx = spawn_train_runner(net.clone(), cache_root, infernet, busy.clone(), slots);
+    let tx = spawn_train_runner(net.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots);
     crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy)));
+    if infer {
+        let ibusy = Arc::new(AtomicBool::new(false));
+        let itx = spawn_infer_runner(net.clone(), cache_root, infernet, ibusy.clone());
+        crate::dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(itx), Some(infer_offer_filter(ibusy)));
+    }
     info!(peer = %net.peer_id().to_base58(), ?tags, "text: serving");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Serving { net, tags, runtime })
+    Ok(Serving { net, tags, runtime, infer })
 }
 
 // ── buyer ───────────────────────────────────────────────────────────────
@@ -475,9 +674,171 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
     }))
 }
 
+// ── chat (buyer) ────────────────────────────────────────────────────────
+
+pub const PIT_WORLD_SEARCH: &str = "https://pit.world/api/search";
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Source {
+    pub title: String,
+    pub url: String,
+    pub text: String,
+}
+
+/// Top web results for the question from pit.world search; empty when unreachable.
+pub async fn pit_search(base: &str, query: &str, k: usize) -> Vec<Source> {
+    let Ok(mut url) = url::Url::parse(base) else { return vec![] };
+    url.query_pairs_mut().append_pair("q", query);
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(20)).user_agent(concat!("c0mpute/", env!("CARGO_PKG_VERSION"))).build() else {
+        return vec![];
+    };
+    let Ok(resp) = client.get(url).send().await else { return vec![] };
+    let Ok(body) = resp.json::<Value>().await else { return vec![] };
+    body["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some(Source { title: r["title"].as_str()?.to_string(), url: r["url"].as_str()?.to_string(), text: r["description"].as_str().unwrap_or("").to_string() })
+        })
+        .take(k)
+        .collect()
+}
+
+/// The user turn: the question, with the sources as background when there are any.
+pub fn chat_prompt(question: &str, sources: &[Source]) -> String {
+    if sources.is_empty() {
+        return question.to_string();
+    }
+    let ctx: Vec<String> = sources.iter().enumerate().map(|(i, s)| format!("[{}] {} ({})\n{}", i + 1, s.title, s.url, s.text.chars().take(700).collect::<String>())).collect();
+    format!("Background from the web:\n{}\n\nUsing the background where it helps, answer: {question}", ctx.join("\n\n"))
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatRequest {
+    pub adapter_dir: PathBuf,
+    pub question: String,
+    /// pit.world search base; None skips retrieval.
+    pub search: Option<String>,
+    pub max_new_tokens: u32,
+    pub workers: Vec<String>,
+    pub max_price_usd: f64,
+    pub public_url: Option<String>,
+    pub bind: SocketAddr,
+    pub timeout_s: u64,
+    pub bid_window: Duration,
+}
+
+/// Ask a worker; returns the answer, its sources and the receipt.
+pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
+    let (bundle, adapter_hash, manifest) = adapter_bundle(&req.adapter_dir)?;
+    let base_model = manifest["base_model"].as_str().context("the adapter's manifest.json has no base_model")?.to_string();
+    let sources = match &req.search {
+        Some(base) => pit_search(base, &req.question, 3).await,
+        None => vec![],
+    };
+    let mut messages = Vec::new();
+    if let Some(system) = manifest["system_prompt"].as_str() {
+        messages.push(json!({"role": "system", "content": system}));
+    }
+    messages.push(json!({"role": "user", "content": chat_prompt(&req.question, &sources)}));
+    let server = TransferServer::start_with(req.bind, req.public_url.clone(), bundle, &ANSWER_ARTIFACTS, None).await?;
+    let spec = TextInferSpec {
+        adapter_hash: adapter_hash.clone(),
+        base_model: base_model.clone(),
+        messages,
+        max_new_tokens: req.max_new_tokens,
+        adapter_url: server.dataset_url(),
+        answer_upload_url: server.upload_url(ANSWER_SLOT),
+    };
+    spec.validate()?;
+    let spec_v = serde_json::to_value(&spec)?;
+    let make = || {
+        JobAuction::new(INFER_WORKLOAD, spec_v.clone())
+            .with_required_capabilities(vec![tag(INFER_WORKLOAD)])
+            .with_allowed_bidders(req.workers.clone())
+            .with_max_price_usd(req.max_price_usd)
+            .with_bid_window(req.bid_window)
+            .with_deadline(Duration::from_secs(req.timeout_s + 120))
+            .with_receipt_timeout(Duration::from_secs(req.timeout_s + 60))
+    };
+    let o = auction_with_mesh_retry(net, make).await?;
+    if o.receipt.status != JobStatus::Completed {
+        bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
+    }
+    let files = server.take(ANSWER_SLOT).await;
+    let answer = files.get("answer.json").context("worker did not upload answer.json")?;
+    let got = sha256_hex(answer);
+    if Some(got.as_str()) != o.receipt.output_hash.as_deref() {
+        bail!("answer {got} does not match the receipt's {:?}", o.receipt.output_hash);
+    }
+    let ans: Value = serde_json::from_slice(answer)?;
+    Ok(json!({
+        "text": ans["text"], "sources": sources, "base_model": base_model, "adapter_hash": adapter_hash,
+        "tokens": ans["tokens"], "seconds": ans["seconds"],
+        "receipt": {"job_id": o.receipt.job_id, "worker_peer_id": o.receipt.worker_peer_id, "output_hash": o.receipt.output_hash, "price_usd": o.accepted_bid.price_usd}
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn infer_spec() -> TextInferSpec {
+        TextInferSpec {
+            adapter_hash: format!("sha256:{}", "b".repeat(64)),
+            base_model: "HuggingFaceTB/SmolLM2-135M-Instruct".into(),
+            messages: vec![json!({"role": "user", "content": "hi"})],
+            max_new_tokens: 200,
+            adapter_url: "http://127.0.0.1:1/t/x/dataset.json".into(),
+            answer_upload_url: "http://127.0.0.1:1/t/x/a/answer".into(),
+        }
+    }
+
+    #[test]
+    fn infer_spec_validation() {
+        assert!(infer_spec().validate().is_ok());
+        let mut s = infer_spec();
+        s.messages = vec![json!({"role": "tool", "content": "x"})];
+        assert!(s.validate().is_err());
+        let mut s = infer_spec();
+        s.messages = vec![json!({"role": "user", "content": "x".repeat(40 * 1024)})];
+        assert!(s.validate().is_err());
+        let mut s = infer_spec();
+        s.max_new_tokens = 0;
+        assert!(s.validate().is_err());
+        let mut s = infer_spec();
+        s.base_model = "../../etc".into();
+        assert!(s.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn adapter_bundle_round_trips_through_the_cache_fetch() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("adapter_model.safetensors"), b"weights").unwrap();
+        std::fs::write(src.path().join("adapter_config.json"), b"{}").unwrap();
+        std::fs::write(src.path().join("manifest.json"), br#"{"base_model":"org/m","system_prompt":"be brief"}"#).unwrap();
+        let (bundle, hash, manifest) = adapter_bundle(src.path()).unwrap();
+        assert_eq!(hash, sha256_hex(b"weights"));
+        assert_eq!(manifest["base_model"], "org/m");
+        let srv = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, bundle).await.unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let dst = cache.path().join("a");
+        fetch_adapter(&srv.dataset_url(), &hash, &dst).await.unwrap();
+        assert_eq!(std::fs::read(dst.join("adapter_model.safetensors")).unwrap(), b"weights");
+        let bad = format!("sha256:{}", "0".repeat(64));
+        assert!(fetch_adapter(&srv.dataset_url(), &bad, &cache.path().join("b")).await.is_err());
+        assert!(!cache.path().join("b").exists());
+    }
+
+    #[test]
+    fn prompt_carries_numbered_sources() {
+        let s = vec![Source { title: "How to price".into(), url: "https://x/p".into(), text: "value".into() }];
+        let p = chat_prompt("Pricing?", &s);
+        assert!(p.starts_with("Background from the web:\n[1] How to price (https://x/p)"));
+        assert!(p.ends_with("answer: Pricing?"));
+        assert_eq!(chat_prompt("Q", &[]), "Q");
+    }
 
     fn spec() -> TextTrainSpec {
         TextTrainSpec {
