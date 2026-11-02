@@ -3577,6 +3577,24 @@ mod infernet_tests {
                 ok
             });
             assert!(ready, "fake daemon never showed the infernet cmdline");
+            // Also wait for its `sleep` child to have exec'd. Between sh's fork and the
+            // child's exec, the child carries the same infernet cmdline under its own pid, so a
+            // reaper pass in that window stops keep's `sleep` and keep exits on its own: the
+            // "recorded daemon was killed" flake on CI.
+            let children = format!("/proc/{0}/task/{0}/children", child.id());
+            let forked = (0..250).any(|_| {
+                let ok = std::fs::read_to_string(&children).is_ok_and(|kids| {
+                    kids.split_whitespace().any(|kid| {
+                        std::fs::read(format!("/proc/{kid}/cmdline"))
+                            .is_ok_and(|c| c.starts_with(b"sleep\0"))
+                    })
+                });
+                if !ok {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                ok
+            });
+            assert!(forked, "fake daemon never started its sleep child");
         }
         let pidfile = dir.join("infernet/daemon.pid");
         std::fs::write(&pidfile, keep.id().to_string()).unwrap();
