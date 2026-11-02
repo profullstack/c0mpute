@@ -31,3 +31,6 @@
 # an inline `gitleaks:allow`; this entry covers the pre-squash commit on branch
 # `feat/webhook-plugin` (PR #104) until that branch is deleted.
 c429b7a6b38238f67f348c2323c1fbff41348a5e:node/crates/c0mpute-core/src/webhook.rs:generic-api-key:1165
+
+# Public ed25519 test vector (docs/protocol/identity.md, seed 0x77) used as a test DID in an earlier commit of PR #107.
+7b92c1c6edb562f3ecb746eab039be5b5f1f2135:apps/web/src/lib/chat/chat.test.ts:generic-api-key:17

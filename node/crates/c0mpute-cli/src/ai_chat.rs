@@ -1,0 +1,512 @@
+//! `c0mpute chat`: chat with models on the c0mpute network through c0mpute.com.
+//!
+//! ```text
+//! c0mpute chat login                     # device sign-in: approve on c0mpute.com with CoinPay (DID required)
+//! c0mpute chat "explain LoRA"            # one answer, streamed
+//! c0mpute chat                           # interactive session (TTY)
+//! cat notes.md | c0mpute chat --system "summarize"
+//! c0mpute chat models | whoami | logout
+//! c0mpute chat mcp                       # stdio MCP bridge to https://c0mpute.com/api/mcp
+//! ```
+//!
+//! The key lives in `~/.c0mpute/chat.json` (0600). `C0MPUTE_API_KEY` and
+//! `C0MPUTE_URL` override it, for CI and other machines.
+
+use std::io::{BufRead, IsTerminal, Read, Write};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use clap::Parser;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+const DEFAULT_URL: &str = "https://c0mpute.com";
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "c0mpute chat",
+    about = "Chat with open models on the c0mpute network",
+    long_about = "Chat with open models on the c0mpute network (served by Infernet provider nodes).\n\n\
+Sign in once with `c0mpute chat login` (CoinPay, a DID is required), then:\n\n  \
+c0mpute chat \"what is a LoRA adapter?\"\n  \
+c0mpute chat                      # interactive\n  \
+cat file.md | c0mpute chat --system \"summarize this\"\n  \
+c0mpute chat models | whoami | logout\n  \
+c0mpute chat mcp                  # stdio MCP server for Claude Code, Cursor, ...\n\n\
+Secure p2p messaging moved to `c0mpute dm`."
+)]
+struct Args {
+    /// Model id (see `c0mpute chat models`); default: any live model.
+    #[arg(long, short)]
+    model: Option<String>,
+    /// System prompt.
+    #[arg(long, short)]
+    system: Option<String>,
+    /// Cap on generated tokens.
+    #[arg(long)]
+    max_tokens: Option<u32>,
+    /// Sampling temperature (0-2).
+    #[arg(long)]
+    temperature: Option<f32>,
+    /// Print the full JSON response instead of streaming text.
+    #[arg(long)]
+    json: bool,
+    /// c0mpute site URL (default https://c0mpute.com, or $C0MPUTE_URL).
+    #[arg(long)]
+    url: Option<String>,
+    /// The prompt. Omit for an interactive session, or pipe it on stdin.
+    prompt: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Saved {
+    url: Option<String>,
+    key: Option<String>,
+}
+
+fn config_path() -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".c0mpute").join("chat.json"))
+}
+
+fn load() -> Saved {
+    config_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn store(saved: &Saved) -> Result<PathBuf> {
+    let path = config_path()?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let body = serde_json::to_string_pretty(saved)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(body.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+fn base_url(flag: Option<&str>) -> String {
+    flag.map(str::to_string)
+        .or_else(|| std::env::var("C0MPUTE_URL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| load().url)
+        .unwrap_or_else(|| DEFAULT_URL.into())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn api_key() -> Option<String> {
+    std::env::var("C0MPUTE_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| load().key)
+}
+
+fn require_key() -> Result<String> {
+    api_key().ok_or_else(|| anyhow!("not signed in: run `c0mpute chat login` (or set C0MPUTE_API_KEY)"))
+}
+
+fn client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("c0mpute-cli/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .build()?)
+}
+
+/// Pull `error.message` (or `error`) out of an API error body.
+fn api_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let msg = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .or_else(|| v.get("error"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.chars().take(300).collect());
+    anyhow!("HTTP {}: {msg}", status.as_u16())
+}
+
+pub async fn run(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("login") => return login(args.get(1..).unwrap_or_default()).await,
+        Some("logout") => return logout(),
+        Some("whoami") => return whoami(&base_url(None)).await,
+        Some("models") => return models(&base_url(None)).await,
+        Some("mcp") => return mcp_stdio(&base_url(None)).await,
+        _ => {}
+    }
+    let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
+        .unwrap_or_else(|e| e.exit());
+    let url = base_url(a.url.as_deref());
+    let key = require_key()?;
+
+    let mut prompt = a.prompt.join(" ");
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        let mut piped = String::new();
+        stdin.lock().read_to_string(&mut piped)?;
+        if !piped.trim().is_empty() {
+            prompt = if prompt.is_empty() { piped } else { format!("{prompt}\n\n{piped}") };
+        }
+    }
+
+    let mut messages = Vec::new();
+    if let Some(s) = &a.system {
+        messages.push(json!({"role": "system", "content": s}));
+    }
+    if prompt.trim().is_empty() {
+        if !std::io::stdin().is_terminal() {
+            bail!("no prompt: pass it as an argument or pipe it on stdin");
+        }
+        return repl(&url, &key, &a, messages).await;
+    }
+    messages.push(json!({"role": "user", "content": prompt}));
+    let answer = complete(&url, &key, &a, &messages, a.json).await?;
+    if a.json {
+        println!("{answer}");
+    }
+    Ok(())
+}
+
+/// One completion. Streams text to stdout (returns it too), or returns raw JSON with `json`.
+async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool) -> Result<String> {
+    let mut body = json!({"messages": messages, "stream": !json_out});
+    if let Some(m) = &a.model {
+        body["model"] = json!(m);
+    }
+    if let Some(t) = a.max_tokens {
+        body["max_tokens"] = json!(t);
+    }
+    if let Some(t) = a.temperature {
+        body["temperature"] = json!(t);
+    }
+    let mut res = client()?
+        .post(format!("{url}/api/v1/chat/completions"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("could not reach {url}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            bail!("{}\nrun `c0mpute chat login`", api_error(status, &text));
+        }
+        return Err(api_error(status, &text));
+    }
+    if json_out {
+        return Ok(res.text().await?);
+    }
+
+    let mut out = std::io::stdout();
+    let mut answer = String::new();
+    let mut buf = String::new();
+    'read: while let Some(chunk) = res.chunk().await? {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim().to_string();
+            buf.drain(..=nl);
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
+            if data == "[DONE]" {
+                break 'read;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
+                out.flush().ok();
+                bail!("{msg}");
+            }
+            if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                answer.push_str(t);
+                print!("{t}");
+                out.flush().ok();
+            }
+        }
+    }
+    println!();
+    Ok(answer)
+}
+
+async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Result<()> {
+    let mut model = a.model.clone();
+    eprintln!(
+        "c0mpute chat · {} · /model <id>, /models, /reset, /exit",
+        model.as_deref().unwrap_or("any live model")
+    );
+    let stdin = std::io::stdin();
+    let base = messages.clone();
+    loop {
+        eprint!("\x1b[32m> \x1b[0m");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line)? == 0 {
+            eprintln!();
+            return Ok(());
+        }
+        let line = line.trim();
+        match line {
+            "" => continue,
+            "/exit" | "/quit" => return Ok(()),
+            "/reset" => {
+                messages = base.clone();
+                eprintln!("(new conversation)");
+                continue;
+            }
+            "/models" => {
+                models(url).await?;
+                continue;
+            }
+            _ if line.starts_with("/model") => {
+                let m = line.trim_start_matches("/model").trim();
+                model = (!m.is_empty() && m != "auto").then(|| m.to_string());
+                eprintln!("(model: {})", model.as_deref().unwrap_or("any live model"));
+                continue;
+            }
+            _ => {}
+        }
+        messages.push(json!({"role": "user", "content": line}));
+        let args = Args { model: model.clone(), ..clone_args(a) };
+        match complete(url, key, &args, &messages, false).await {
+            Ok(answer) => messages.push(json!({"role": "assistant", "content": answer})),
+            Err(e) => {
+                messages.pop();
+                eprintln!("error: {e:#}");
+            }
+        }
+    }
+}
+
+fn clone_args(a: &Args) -> Args {
+    Args {
+        model: a.model.clone(),
+        system: a.system.clone(),
+        max_tokens: a.max_tokens,
+        temperature: a.temperature,
+        json: false,
+        url: a.url.clone(),
+        prompt: vec![],
+    }
+}
+
+async fn login(rest: &[String]) -> Result<()> {
+    let mut url_flag = None;
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--url" => url_flag = it.next().cloned(),
+            "-h" | "--help" => {
+                println!("c0mpute chat login [--url https://c0mpute.com]\n\nSigns this machine in: approve the code on c0mpute.com with CoinPay (a DID is required).");
+                return Ok(());
+            }
+            other => bail!("unknown argument: {other}"),
+        }
+    }
+    let url = base_url(url_flag.as_deref());
+    let host = std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "this machine".into());
+    let http = client()?;
+    let res = http
+        .post(format!("{url}/api/v1/cli/device"))
+        .json(&json!({"label": format!("c0mpute cli on {host}")}))
+        .send()
+        .await
+        .with_context(|| format!("could not reach {url}"))?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    let d: Value = serde_json::from_str(&text)?;
+    let device = d["device_code"].as_str().context("no device_code")?.to_string();
+    let code = d["user_code"].as_str().unwrap_or_default();
+    let link = d["verification_uri_complete"].as_str().unwrap_or_default();
+    let interval = d["interval"].as_u64().unwrap_or(3).max(1);
+    let expires = d["expires_in"].as_u64().unwrap_or(600);
+
+    println!("Open this link and sign in with CoinPay (a DID is required):\n\n  {link}\n\nand check it shows the code  {code}\n");
+    open_browser(link);
+    eprint!("waiting for approval");
+    let deadline = std::time::Instant::now() + Duration::from_secs(expires);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+        eprint!(".");
+        let res = match http
+            .post(format!("{url}/api/v1/cli/token"))
+            .json(&json!({"device_code": device}))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        match res.status().as_u16() {
+            200 => {
+                let v: Value = res.json().await?;
+                let key = v["key"].as_str().context("no key in response")?.to_string();
+                let saved = Saved { url: (url != DEFAULT_URL).then(|| url.clone()), key: Some(key) };
+                let path = store(&saved)?;
+                eprintln!();
+                println!("signed in; key saved to {}", path.display());
+                return whoami(&url).await;
+            }
+            428 | 429 => continue,
+            410 => break,
+            s => {
+                let t = res.text().await.unwrap_or_default();
+                eprintln!();
+                return Err(api_error(reqwest::StatusCode::from_u16(s)?, &t));
+            }
+        }
+    }
+    eprintln!();
+    bail!("the code expired before it was approved; run `c0mpute chat login` again")
+}
+
+fn open_browser(link: &str) {
+    if link.is_empty() || std::env::var_os("SSH_CONNECTION").is_some() {
+        return;
+    }
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener)
+        .arg(link)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+fn logout() -> Result<()> {
+    let path = config_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+        println!("signed out (removed {}). Revoke the key itself at https://c0mpute.com/chat → CLI / API / MCP keys.", path.display());
+    } else {
+        println!("not signed in");
+    }
+    Ok(())
+}
+
+async fn whoami(url: &str) -> Result<()> {
+    let key = require_key()?;
+    let res = client()?.get(format!("{url}/api/v1/me")).bearer_auth(&key).send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    match v["name"].as_str() {
+        Some(n) => println!("{n}  {}", v["did"].as_str().unwrap_or_default()),
+        None => println!("{}", v["did"].as_str().unwrap_or_default()),
+    }
+    Ok(())
+}
+
+async fn models(url: &str) -> Result<()> {
+    let res = client()?.get(format!("{url}/v1/models")).send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let list = v["data"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("(no models online right now)");
+    }
+    for m in list {
+        println!("{}", m["id"].as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// stdio MCP server: each JSON-RPC line on stdin is POSTed to /api/mcp and the
+/// answer written back as one line. Logs go to stderr only.
+async fn mcp_stdio(url: &str) -> Result<()> {
+    let key = require_key()?;
+    let http = client()?;
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let id = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("id").cloned());
+        let id_present = id.is_some();
+        let res = http
+            .post(format!("{url}/api/mcp"))
+            .bearer_auth(&key)
+            .header("content-type", "application/json")
+            .body(line)
+            .send()
+            .await;
+        let reply = match res {
+            Ok(r) if r.status().as_u16() == 202 => None,
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                if serde_json::from_str::<Value>(&text).is_ok() {
+                    Some(text)
+                } else {
+                    Some(rpc_error(id, &format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>())))
+                }
+            }
+            Err(e) => Some(rpc_error(id, &format!("could not reach {url}: {e}"))),
+        };
+        // Notifications (no id) never get an answer, even an error.
+        if let (Some(r), true) = (reply, id_present) {
+            writeln!(out, "{}", r.replace('\n', " "))?;
+            out.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn rpc_error(id: Option<Value>, msg: &str) -> String {
+    json!({"jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "error": {"code": -32000, "message": msg}}).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_prompt_and_flags() {
+        let a = Args::try_parse_from(["c0mpute chat", "--model", "qwen2.5:7b", "-s", "terse", "what", "is", "2+2"]).unwrap();
+        assert_eq!(a.model.as_deref(), Some("qwen2.5:7b"));
+        assert_eq!(a.system.as_deref(), Some("terse"));
+        assert_eq!(a.prompt.join(" "), "what is 2+2");
+    }
+
+    #[test]
+    fn api_error_reads_openai_envelope() {
+        let e = api_error(reqwest::StatusCode::UNAUTHORIZED, r#"{"error":{"message":"nope"}}"#);
+        assert_eq!(e.to_string(), "HTTP 401: nope");
+        let e = api_error(reqwest::StatusCode::GONE, r#"{"error":"expired_token"}"#);
+        assert_eq!(e.to_string(), "HTTP 410: expired_token");
+    }
+
+    #[test]
+    fn rpc_error_keeps_id() {
+        let v: Value = serde_json::from_str(&rpc_error(Some(json!(7)), "x")).unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["error"]["message"], "x");
+    }
+}
