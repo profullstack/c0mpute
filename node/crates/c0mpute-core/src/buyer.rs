@@ -42,6 +42,12 @@ pub struct JobAuction {
     /// Bids from these peer ids are ignored. This is useful when retrying a
     /// job after a selected worker cannot return its output.
     pub excluded_bidders: Vec<String>,
+    /// The job's id in the system that bills it (Infernet job id, CoinPay
+    /// invoice id). Carried on the offer, accept and receipt; billing keys
+    /// on it, not on the per-auction `job_id` (see
+    /// [`c0mpute_net::topics::JobOffer::external_ref`]). Reuse the same
+    /// value when re-auctioning a job.
+    pub external_ref: Option<String>,
 }
 
 impl JobAuction {
@@ -56,7 +62,13 @@ impl JobAuction {
             receipt_timeout: DEFAULT_RECEIPT_TIMEOUT,
             allowed_bidders: Vec::new(),
             excluded_bidders: Vec::new(),
+            external_ref: None,
         }
+    }
+
+    pub fn with_external_ref(mut self, external_ref: Option<String>) -> Self {
+        self.external_ref = external_ref;
+        self
     }
 
     pub fn with_allowed_bidders(mut self, peers: Vec<String>) -> Self {
@@ -99,6 +111,9 @@ pub struct AuctionOutcome {
     pub job_id: String,
     pub accepted_bid: JobBid,
     pub receipt: JobReceipt,
+    /// The auction's `external_ref`, as the buyer set it. Use this rather
+    /// than `receipt.external_ref`, which workers older than 0.2.49 omit.
+    pub external_ref: Option<String>,
 }
 
 /// Run the full buyer-side auction synchronously: subscribe → publish
@@ -107,6 +122,14 @@ pub struct AuctionOutcome {
 /// Returns once the receipt arrives (or the timeout expires). The caller
 /// is responsible for any further verification of `output_hash`.
 pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result<AuctionOutcome> {
+    if let Some(r) = auction.external_ref.as_deref()
+        && !c0mpute_net::topics::valid_external_ref(r)
+    {
+        bail!(
+            "external_ref must be 1 to {} printable ASCII characters without spaces",
+            c0mpute_net::topics::MAX_EXTERNAL_REF_LEN
+        );
+    }
     let topic = job_topic(&auction.workload_type);
     net.subscribe(&topic).await?;
 
@@ -127,6 +150,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         max_price_usd: auction.max_price_usd,
         deadline_unix_ms: now_ms + auction.deadline.as_millis() as u64,
         published_at_ms: now_ms,
+        external_ref: auction.external_ref.clone(),
     };
 
     info!(
@@ -162,6 +186,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             warn!(%job_id, bidder = %bid.bidder_peer_id, price = bid.price_usd, cap = offer.max_price_usd, "buyer: discarding bid outside the offer cap");
                             continue;
                         }
+                        if !bid.is_live(unix_ms()) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid already expired, ignored");
+                            continue;
+                        }
                         if !source_matches_claim(&msg, &bid.bidder_peer_id) {
                             warn!(
                                 %job_id,
@@ -189,8 +217,18 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         }
     }
 
-    info!(%job_id, count = bids.len(), "buyer: bid window closed");
+    let received = bids.len();
+    // A bid that expired while the window was open is no longer backed by
+    // the worker's capacity; accepting it would overbook that worker.
+    retain_live_bids(&mut bids, unix_ms());
+    info!(%job_id, count = bids.len(), expired = received - bids.len(), "buyer: bid window closed");
     if bids.is_empty() {
+        if received > 0 {
+            bail!(
+                "all {received} bids expired before the {:?} bid window closed",
+                auction.bid_window
+            );
+        }
         bail!("no bids received within {:?}", auction.bid_window);
     }
 
@@ -227,6 +265,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         workload_type: auction.workload_type.clone(),
         spec_inline: Some(auction.spec_inline.clone()),
         published_at_ms: unix_ms(),
+        external_ref: auction.external_ref.clone(),
     };
     publish_json(&net, &topic, &accept).await?;
 
@@ -246,6 +285,13 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             );
                             continue;
                         }
+                        if !receipt_ref_matches(
+                            auction.external_ref.as_deref(),
+                            receipt.external_ref.as_deref(),
+                        ) {
+                            warn!(%job_id, "buyer: discarding receipt with a different external_ref");
+                            continue;
+                        }
                         info!(
                             %job_id,
                             status = ?receipt.status,
@@ -256,6 +302,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             job_id,
                             accepted_bid: winner,
                             receipt,
+                            external_ref: auction.external_ref.clone(),
                         });
                     }
                 }
@@ -309,6 +356,18 @@ pub(crate) fn source_matches_claim(msg: &GossipMessage, claimed_peer_id: &str) -
     }
 }
 
+/// Drop bids whose `expires_at_ms` has passed (bids from old workers carry
+/// none and never expire).
+pub(crate) fn retain_live_bids(bids: &mut Vec<JobBid>, now_ms: u64) {
+    bids.retain(|bid| bid.is_live(now_ms));
+}
+
+/// A receipt's `external_ref` must be ours when present; workers older than
+/// 0.2.49 do not echo it, so absence is accepted.
+pub(crate) fn receipt_ref_matches(ours: Option<&str>, theirs: Option<&str>) -> bool {
+    theirs.is_none() || theirs == ours
+}
+
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -326,4 +385,46 @@ fn blake3_hex(s: &str) -> String {
 #[allow(dead_code)]
 fn _status_link(s: JobStatus) -> JobStatus {
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bid(peer: &str, expires_at_ms: Option<u64>) -> JobBid {
+        JobBid {
+            job_id: "j".into(),
+            bidder_peer_id: peer.into(),
+            bidder_did: None,
+            price_usd: 0.1,
+            eta_seconds: 60,
+            published_at_ms: 0,
+            expires_at_ms,
+        }
+    }
+
+    #[test]
+    fn expired_bids_are_ignored() {
+        let mut bids = vec![bid("old", None), bid("live", Some(2_000)), bid("stale", Some(1_000))];
+        retain_live_bids(&mut bids, 1_500);
+        let peers: Vec<_> = bids.iter().map(|b| b.bidder_peer_id.as_str()).collect();
+        assert_eq!(peers, ["old", "live"]);
+    }
+
+    #[test]
+    fn receipt_external_ref_must_match_when_echoed() {
+        assert!(receipt_ref_matches(Some("inf:1"), Some("inf:1")));
+        assert!(receipt_ref_matches(Some("inf:1"), None), "old worker");
+        assert!(receipt_ref_matches(None, None));
+        assert!(!receipt_ref_matches(Some("inf:1"), Some("inf:2")));
+        assert!(!receipt_ref_matches(None, Some("inf:2")));
+    }
+
+    #[test]
+    fn external_ref_builder() {
+        let a = JobAuction::new("ffmpeg.transcode", serde_json::json!({}))
+            .with_external_ref(Some("coinpay:inv_9".into()));
+        assert_eq!(a.external_ref.as_deref(), Some("coinpay:inv_9"));
+        assert_eq!(JobAuction::new("x", serde_json::json!({})).external_ref, None);
+    }
 }

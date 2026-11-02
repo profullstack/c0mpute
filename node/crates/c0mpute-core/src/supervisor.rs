@@ -108,7 +108,8 @@ impl Supervisor {
         let cache_root = config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("cache");
-        let compute_slots = Arc::new(Semaphore::new(crate::resources::max_concurrent_cpu_jobs()));
+        let total_slots = crate::resources::max_concurrent_cpu_jobs();
+        let compute_slots = Arc::new(Semaphore::new(total_slots));
         info!(
             cpu_threads_per_job = crate::resources::cpu_threads_per_job(),
             max_concurrent_jobs = crate::resources::max_concurrent_cpu_jobs(),
@@ -117,37 +118,42 @@ impl Supervisor {
         );
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
             info!(%workload_type, "subscribing to job topic");
+            // Node-wide slots, per-workload job timing: the dispatch loop
+            // reads this to stop bidding when full and to quote an ETA.
+            let load = runner::WorkerLoad::new(compute_slots.clone(), total_slots);
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {
                     let ffmpeg_bin = which_ffmpeg().unwrap_or_else(|| "ffmpeg".into());
                     Some(runner::spawn_transcode_runner(
                         net.clone(),
+                        self.store.clone(),
                         cache_root.clone(),
                         ffmpeg_bin,
-                        compute_slots.clone(),
+                        load.clone(),
                     ))
                 }
                 "tts.synthesize" => Some(runner::spawn_tts_runner(
                     net.clone(),
                     self.store.clone(),
                     cache_root.clone(),
-                    compute_slots.clone(),
+                    load.clone(),
                 )),
                 "stt.transcribe" => Some(runner::spawn_stt_runner(
                     net.clone(),
                     self.store.clone(),
                     cache_root.clone(),
-                    compute_slots.clone(),
+                    load.clone(),
                 )),
                 _ => None,
             };
-            dispatch::run_worker_subscriber_priced(
+            dispatch::run_worker_subscriber_with_load(
                 net.clone(),
                 workload_type,
                 tags.clone(),
                 runner_tx,
                 None,
                 Some(self.config.pricing.clone()),
+                Some(load),
             );
         }
 

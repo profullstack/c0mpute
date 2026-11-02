@@ -68,6 +68,22 @@ impl CapabilityAd {
 // ────────────────────────────────────────────────────────────────────────
 // Job dispatch (DIP-0011, DIP-0006)
 // ────────────────────────────────────────────────────────────────────────
+//
+// Wire compatibility: nodes on the network run mixed versions. Every field
+// added after the first release is an `Option` with
+// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so an old
+// node parses a new message (serde ignores unknown fields; none of these
+// structs use `deny_unknown_fields`) and a new node parses an old one.
+
+/// Longest `external_ref` a node accepts or forwards.
+pub const MAX_EXTERNAL_REF_LEN: usize = 128;
+
+/// An `external_ref` is 1 to [`MAX_EXTERNAL_REF_LEN`] printable ASCII
+/// characters with no spaces (an Infernet job id, a CoinPay invoice id, a
+/// UUID). Anything else is refused rather than echoed back.
+pub fn valid_external_ref(s: &str) -> bool {
+    !s.is_empty() && s.len() <= MAX_EXTERNAL_REF_LEN && s.bytes().all(|b| b.is_ascii_graphic())
+}
 
 /// Buyer publishes this to `c0mpute/jobs/<workload-type>` to start the
 /// auction. The actual job spec is opaque to the network — workers
@@ -106,6 +122,18 @@ pub struct JobOffer {
     /// When the offer was posted (unix-ms). Workers reject offers older
     /// than ~5 min.
     pub published_at_ms: u64,
+    /// The job's id in the system that bills it (an Infernet job id, a
+    /// CoinPay invoice/escrow id), set by the buyer. Carried unchanged on
+    /// the `JobAccept` and echoed on the `JobReceipt`, so one job is
+    /// identified once across c0mpute, Infernet and CoinPay.
+    ///
+    /// Billing systems MUST key on `external_ref`, not `job_id`: `job_id` is
+    /// minted per auction, and a job that is re-auctioned (worker failed,
+    /// result unreachable) gets a new `job_id` but keeps its `external_ref`.
+    /// Keying on `job_id` would bill a retried job twice. Optional; old
+    /// buyers and workers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 /// Worker bid in response to a `JobOffer`. Sent on the same job topic;
@@ -122,6 +150,18 @@ pub struct JobBid {
     /// Estimated seconds to completion.
     pub eta_seconds: u64,
     pub published_at_ms: u64,
+    /// Unix-ms after which the worker no longer stands behind this bid (it
+    /// may have committed the capacity elsewhere). Buyers ignore expired
+    /// bids when picking a winner. `None` (old workers) never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
+impl JobBid {
+    /// Whether the bid can still be accepted at `now_ms`.
+    pub fn is_live(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_none_or(|t| now_ms < t)
+    }
 }
 
 /// Buyer's accept message. Names the winning bidder; other bidders see
@@ -141,6 +181,10 @@ pub struct JobAccept {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_inline: Option<serde_json::Value>,
     pub published_at_ms: u64,
+    /// Same value as `JobOffer.external_ref`. Billing keys on this; see
+    /// [`JobOffer::external_ref`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 /// Worker's completion receipt. Includes the output hash so the buyer
@@ -159,6 +203,11 @@ pub struct JobReceipt {
     /// Today this is opaque bytes; signature scheme lives in coinpay.
     #[serde(default)]
     pub signature: Option<String>,
+    /// Echo of `JobAccept.external_ref`, so a billing system settling from
+    /// the receipt alone sees the id it issued. Billing keys on this; see
+    /// [`JobOffer::external_ref`]. `None` from workers older than 0.2.49.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -167,4 +216,89 @@ pub enum JobStatus {
     Completed,
     Failed,
     Timeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_offer_without_external_ref_still_parses() {
+        let old = r#"{"job_id":"j","workload_type":"ffmpeg.transcode","buyer_peer_id":"b","buyer_did":null,
+            "spec_hash":"h","required_capabilities":[],"max_price_usd":1.0,"deadline_unix_ms":2,"published_at_ms":1}"#;
+        let offer: JobOffer = serde_json::from_str(old).unwrap();
+        assert_eq!(offer.external_ref, None);
+        // And a new offer omits the field entirely when unset, so the bytes
+        // an old node sees are unchanged.
+        assert!(!serde_json::to_string(&offer).unwrap().contains("external_ref"));
+    }
+
+    #[test]
+    fn new_fields_round_trip_and_old_shapes_ignore_them() {
+        let bid = JobBid {
+            job_id: "j".into(),
+            bidder_peer_id: "w".into(),
+            bidder_did: None,
+            price_usd: 0.1,
+            eta_seconds: 30,
+            published_at_ms: 1,
+            expires_at_ms: Some(1000),
+        };
+        let json = serde_json::to_value(&bid).unwrap();
+        assert_eq!(json["expires_at_ms"], 1000);
+        // A struct without the new field (an old node) parses it fine.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldBid {
+            job_id: String,
+            bidder_peer_id: String,
+            bidder_did: Option<String>,
+            price_usd: f64,
+            eta_seconds: u64,
+            published_at_ms: u64,
+        }
+        let _: OldBid = serde_json::from_value(json).unwrap();
+
+        let receipt = JobReceipt {
+            job_id: "j".into(),
+            worker_peer_id: "w".into(),
+            worker_did: None,
+            buyer_peer_id: "b".into(),
+            output_hash: None,
+            status: JobStatus::Completed,
+            completed_at_ms: 0,
+            signature: None,
+            external_ref: Some("infernet:job_42".into()),
+        };
+        let back: JobReceipt =
+            serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(back.external_ref.as_deref(), Some("infernet:job_42"));
+    }
+
+    #[test]
+    fn bid_expiry() {
+        let mut bid = JobBid {
+            job_id: "j".into(),
+            bidder_peer_id: "w".into(),
+            bidder_did: None,
+            price_usd: 0.1,
+            eta_seconds: 30,
+            published_at_ms: 1,
+            expires_at_ms: None,
+        };
+        assert!(bid.is_live(u64::MAX), "old bids never expire");
+        bid.expires_at_ms = Some(100);
+        assert!(bid.is_live(99));
+        assert!(!bid.is_live(100));
+    }
+
+    #[test]
+    fn external_ref_validation() {
+        assert!(valid_external_ref("infernet:job_42"));
+        assert!(valid_external_ref("6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11"));
+        assert!(!valid_external_ref(""));
+        assert!(!valid_external_ref("has space"));
+        assert!(!valid_external_ref("line\nbreak"));
+        assert!(!valid_external_ref(&"x".repeat(MAX_EXTERNAL_REF_LEN + 1)));
+    }
 }

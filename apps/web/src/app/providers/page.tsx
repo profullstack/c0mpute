@@ -133,13 +133,13 @@ $ c0mpute worker start --roles tts,stt`}</CodeBlock>
           itself by default (it learns the winning price, undercuts it, and asks
           more when busy) and never goes under the minimum you set with{" "}
           <code>c0mpute pricing set --min 0.05</code>; or ask one fixed price.
-          When you win and the work validates, settlement releases and both
-          sides sign a receipt. A direct protocol deal has{" "}
+          When you win, your node runs the job and publishes a receipt; signed
+          receipts and automatic settlement are not live yet. A direct protocol deal has{" "}
           <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
           bought through the <Link href="/market">market</Link>, including paid
-          Infernet inference, pay you{" "}
-          <strong className="text-[var(--color-fg)]">95%</strong>; c0mpute keeps a
-          5% market fee.
+          Infernet inference, will pay you{" "}
+          <strong className="text-[var(--color-fg)]">95%</strong> once market
+          settlement launches (a 5% market fee); no fee is collected today.
         </p>
         <p className="text-[var(--color-dim)]">
           Your record is portable. Reputation is derived from signed receipts

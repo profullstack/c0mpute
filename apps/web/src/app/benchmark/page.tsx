@@ -60,7 +60,7 @@ function NodeLabel({ node }: { node: NodeRow }) {
   return (
     <span className="font-mono">
       <span className="accent">{node.id}</span>
-      <span className="block text-[var(--color-dim)]">{node.cpu || node.class}</span>
+      <span className="block text-[var(--color-dim)]">{node.class}</span>
     </span>
   );
 }

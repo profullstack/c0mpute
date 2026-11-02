@@ -89,6 +89,43 @@ impl ChunkStore {
         Ok(hash)
     }
 
+    /// Move a file into the store without loading it into memory (a
+    /// transcode output can be gigabytes). The file is hashed by streaming,
+    /// then renamed into place (copied when the store is on another
+    /// filesystem); `src` is consumed either way. The key is the same blake3
+    /// hash [`ChunkStore::put`] gives the same bytes.
+    pub async fn put_file(&self, src: &Path) -> Result<Hash> {
+        let to_hash = src.to_path_buf();
+        let hash = tokio::task::spawn_blocking(move || -> Result<Hash> {
+            let mut file = std::fs::File::open(&to_hash)
+                .with_context(|| format!("open {}", to_hash.display()))?;
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut file, &mut hasher)
+                .with_context(|| format!("hash {}", to_hash.display()))?;
+            Ok(Hash(*hasher.finalize().as_bytes()))
+        })
+        .await
+        .context("hash task panicked")??;
+        if self.has(&hash).await {
+            let _ = fs::remove_file(src).await;
+            return Ok(hash);
+        }
+        let path = self.chunk_path(&hash);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let tmp = path.with_extension("tmp");
+        if fs::rename(src, &tmp).await.is_err() {
+            fs::copy(src, &tmp)
+                .await
+                .with_context(|| format!("copy {} into the store", src.display()))?;
+            let _ = fs::remove_file(src).await;
+        }
+        fs::rename(&tmp, &path).await?;
+        debug!(hash = %hash, "stored file chunk");
+        Ok(hash)
+    }
+
     /// Read and verify the hash. Returns an error if the on-disk bytes don't
     /// match the requested hash — that means corruption or tampering.
     pub async fn get(&self, hash: &Hash) -> Result<Vec<u8>> {
@@ -154,6 +191,25 @@ mod tests {
 
         let err = store.get(&h).await.unwrap_err();
         assert!(err.to_string().contains("integrity"));
+    }
+
+    #[tokio::test]
+    async fn put_file_moves_the_file_under_the_same_key_as_put() {
+        let dir = tempdir();
+        let store = ChunkStore::open(dir.join("store")).await.unwrap();
+        let src = dir.join("output.mp4");
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&src, &body).await.unwrap();
+
+        let h = store.put_file(&src).await.unwrap();
+        assert_eq!(h, Hash::of(&body), "same key as put()");
+        assert_eq!(store.get(&h).await.unwrap(), body);
+        assert!(!src.exists(), "source consumed");
+
+        // Storing the same bytes again is a no-op that still consumes src.
+        tokio::fs::write(&src, &body).await.unwrap();
+        assert_eq!(store.put_file(&src).await.unwrap(), h);
+        assert!(!src.exists());
     }
 
     fn tempdir() -> PathBuf {

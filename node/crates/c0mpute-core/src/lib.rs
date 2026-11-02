@@ -24,10 +24,10 @@ pub use capabilities::{Registry, advertise_loop, tags_from_config};
 pub use config::Config;
 pub use dispatch::{
     OfferFilter, run_worker_subscriber, run_worker_subscriber_filtered,
-    run_worker_subscriber_priced, workload_types_from_roles,
+    run_worker_subscriber_priced, run_worker_subscriber_with_load, workload_types_from_roles,
 };
 pub use register::{Registration, run_register};
-pub use runner::{SttJobInline, TranscodeJobInline, TtsJobInline};
+pub use runner::{SttJobInline, TranscodeJobInline, TtsJobInline, WorkerLoad};
 pub use supervisor::Supervisor;
 
 use anyhow::Result;
