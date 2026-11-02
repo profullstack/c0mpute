@@ -69,6 +69,28 @@ c0mpute infernet text train --job job-legal.json --output out/not-a-lawyer-agent
 
 `network_manifest.py` refuses an adapter whose sha256 does not match the receipt's output hash.
 
+Measured 2026-11-02, both trained on the c0mpute network (buyer dev3, worker bonita, one job at a time):
+
+| | not-a-lawyer-agent | tax-guy-agent |
+| --- | --- | --- |
+| corpus | 5,963 docs (8 rssamplifier topics + 1,000 pit.world corpus pages) | 2,614 docs (6 topics + 1,000 pit pages) |
+| held-out perplexity | 35.4 -> 20.6 | 33.6 -> 17.8 |
+| wall time | 3 h (step-0 and final eval about 30 min each) | 2.5 h |
+| published | [adapter](https://huggingface.co/profullstack/not-a-lawyer-agent), [GGUF](https://huggingface.co/profullstack/not-a-lawyer-agent-GGUF) | [adapter](https://huggingface.co/profullstack/tax-guy-agent), [GGUF](https://huggingface.co/profullstack/tax-guy-agent-GGUF) |
+
+Both are Infernet house models and `w3bs ask legal` / `w3bs ask tax` agents, with a disclaimer
+printed under every answer.
+
+**Quality, honestly.** The sources are good (Nolo, state law libraries, IRS pages), the answers
+are not. Asked about a security deposit, the first live answer invented a Texas Supreme Court
+justice and three rulings; a sources-only runtime prompt in the w3bs registry ("never invent
+cases, judges, statutes, dates or numbers", 220 tokens) stopped the invented authorities in
+our tests but not wrong substance, and tax still invented dollar thresholds through Ollama.
+Temperature 0 did not help. The cause is the recipe: each document trains as
+"Brief me on: <title>" -> the whole article, so a 0.5B model learns to write articles, not to
+answer from notes. Next: Q&A pairs generated from the corpus by a larger model (on c0mpute),
+a 1.5B or 3B base, and the eval split capped (5% of a full-text corpus is 400-800 blocks).
+
 ### What `harvest.mjs` accepts
 
 | link | becomes |
