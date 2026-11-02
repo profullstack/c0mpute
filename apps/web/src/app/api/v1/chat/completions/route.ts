@@ -28,6 +28,14 @@ export async function POST(req: Request) {
   } catch (e) {
     return err(502, `network unreachable: ${e instanceof Error ? e.message : e}`);
   }
+  const type = upstream.headers.get("content-type") ?? "";
+  if (!upstream.ok && !type.includes("json")) {
+    // An nginx/HTML page (Infernet restarting, a deploy): never hand HTML to an API client.
+    await upstream.body?.cancel().catch(() => {});
+    return err(503, `the c0mpute network is restarting or busy (upstream HTTP ${upstream.status}); try again in a minute`, {
+      "retry-after": "30",
+    });
+  }
   // Pass Infernet's body straight through: JSON, OpenAI SSE chunks, or its error envelope.
   return new Response(upstream.body, {
     status: upstream.status,

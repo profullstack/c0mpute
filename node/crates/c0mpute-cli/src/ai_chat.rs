@@ -215,7 +215,11 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
     let mut out = std::io::stdout();
     let mut answer = String::new();
     let mut buf = String::new();
-    'read: while let Some(chunk) = res.chunk().await? {
+    'read: while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|_| anyhow!("the answer stream was cut off (the serving node or the network restarted); try again"))?
+    {
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim().to_string();
