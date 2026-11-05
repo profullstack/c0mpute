@@ -1,5 +1,5 @@
 import { forwardChat, parseChatRequest } from "@/lib/chat/completions";
-import { currentUser, infernet, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -24,7 +24,9 @@ export async function POST(req: Request) {
 
   let upstream: Response;
   try {
-    upstream = await forwardChat(infernet, parsed, req.signal);
+    // Billed to this person's compute balance when they have one; otherwise
+    // Infernet serves it on its free tier exactly as before.
+    upstream = await forwardChat(infernetFor(user.coinpay_sub), parsed, req.signal);
   } catch (e) {
     return err(502, `network unreachable: ${e instanceof Error ? e.message : e}`);
   }

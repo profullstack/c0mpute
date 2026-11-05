@@ -5,10 +5,43 @@ import { CodeBlock } from "@/components/CodeBlock";
 
 type Msg = { role: "user" | "assistant" | "system"; content: string };
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
-type Me = { id: string; did: string; name: string | null };
+type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
+type Me = { id: string; did: string; name: string | null; balance?: Balance | null };
 type Key = { id: string; label: string; prefix: string; created_at: string; last_used_at: string | null };
 
 const STORE = "c0_chats_v1";
+
+/**
+ * What this person can spend on inference: money they topped up on Infernet
+ * plus what their own nodes earned. Chat still works at zero - the network
+ * serves the free, rate-limited tier - so this is information, not a gate.
+ */
+function BalanceLine({ balance }: { balance: Balance | null }) {
+  if (!balance) {
+    return (
+      <p className="text-[var(--color-dim)]">
+        no balance ·{" "}
+        <a className="hover:text-[var(--color-fg)] underline" href="https://infernetprotocol.com/dashboard/billing" target="_blank" rel="noreferrer">
+          top up
+        </a>
+      </p>
+    );
+  }
+  const spendable = Number(balance.spendable_usd ?? 0);
+  const earned = Number(balance.earned_spendable_usd ?? 0);
+  return (
+    <p title={`prepaid $${balance.prepaid_available_usd} · earned $${balance.earned_spendable_usd}`}>
+      balance{" "}
+      <span className={spendable > 0 ? "accent" : "text-[var(--color-warn)]"}>
+        ${spendable < 0.01 && spendable > 0 ? spendable.toFixed(6) : spendable.toFixed(2)}
+      </span>
+      {earned > 0 ? <span className="text-[var(--color-dim)]"> (incl. earned)</span> : null} ·{" "}
+      <a className="hover:text-[var(--color-fg)] underline" href="https://infernetprotocol.com/dashboard/billing" target="_blank" rel="noreferrer">
+        top up
+      </a>
+    </p>
+  );
+}
 
 function load(): Convo[] {
   try {
@@ -258,6 +291,7 @@ export function ChatApp({ error }: { error: string | null }) {
             {me.name ? `${me.name} · ` : ""}
             {me.did}
           </p>
+          <BalanceLine balance={me.balance ?? null} />
           <button onClick={signOut} className="hover:text-[var(--color-fg)]">
             sign out
           </button>

@@ -147,15 +147,48 @@ export async function coinpayUserinfo(accessToken: string) {
 // ── Infernet upstream ────────────────────────────────────────────────────────
 const infernetBase = () => (env("INFERNET_URL") || "https://infernetprotocol.com").replace(/\/$/, "");
 
-export async function infernet(path: string, init: RequestInit = {}) {
+export async function infernet(path: string, init: RequestInit = {}, opts: { subject?: string | null } = {}) {
   const key = env("INFERNET_CLIENT_KEY");
   return fetch(`${infernetBase()}${path}`, {
     ...init,
     headers: {
       ...(init.headers as Record<string, string>),
       ...(key ? { authorization: `Bearer ${key}` } : {}),
+      // Name the person this call is for, so Infernet bills their compute
+      // balance rather than treating every c0mpute user as one anonymous
+      // caller. Infernet resolves it through coinpay_identities on the
+      // verified CoinPay sub, and only accepts it from a trusted client key.
+      ...(opts.subject ? { "x-infernet-billed-subject": opts.subject } : {}),
     },
   });
+}
+
+/**
+ * An upstream bound to one signed-in person: every call it makes is billed to
+ * that person's compute balance (topped up, or what their nodes earned).
+ *
+ * Pass this instead of `infernet` wherever a request is made on a user's
+ * behalf. Without it the request still works, it is just unbilled and served
+ * on Infernet's free, rate-limited tier.
+ */
+export function infernetFor(subject: string | null | undefined) {
+  return (path: string, init: RequestInit = {}) => infernet(path, init, { subject: subject ?? null });
+}
+
+/**
+ * The person's spendable compute balance, as Infernet reports it.
+ * Returns null when it cannot be read: the chat must not break over a balance
+ * panel, and an unlinked CoinPay identity simply has no balance yet.
+ */
+export async function balanceFor(subject: string | null | undefined) {
+  if (!subject) return null;
+  try {
+    const res = await infernet("/api/v1/billing/balance", { signal: AbortSignal.timeout(10_000) }, { subject });
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 // ── per-user rate limit (one container, so memory is the source of truth) ────
