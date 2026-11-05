@@ -124,6 +124,26 @@ Pass `--roles` to choose an explicit role set. For example,
 `c0mpute worker start --roles storage` skips speech setup. Speech inference
 limits its CPU threads to the node's container quota when one is available.
 
+Kokoro — an int8 ONNX export of
+[hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M), ~115 MB of
+model plus voices — is the engine every node is expected to carry, so a worker
+keeps provisioning it in the background until it succeeds and advertises
+`c0mpute:role:tts` as soon as it is ready, without a restart. A failed install
+never blocks the worker: storage, gateway and verifier work carry on, the node
+simply does not offer TTS, and provisioning is retried after 6 hours. Opt out
+with `c0mpute tts auto off`, `C0MPUTE_TTS_AUTO=0`, or `[speech] auto_install =
+false`; opting out removes nothing already installed.
+
+Kokoro needs a Python between 3.10 and 3.13. A node whose only interpreter is
+3.14+ gets Kokoro its own virtualenv, built from an older interpreter when the
+box has one and otherwise by [uv](https://docs.astral.sh/uv/), which fetches a
+managed CPython itself; Piper, Pocket and Whisper keep the shared venv. With
+neither available the worker logs what to install (`python3.13-venv`, or uv)
+and runs on without TTS. The `kokoro-onnx` pin is tied to the model build:
+releases old enough to install on 3.14 feed the `model-files-v1.1` graph int32
+where it wants float, and synthesis fails with `INVALID_ARGUMENT`, so matching
+the runtime to the model wins over matching it to the newest Python.
+
 The Kokoro model files are Apache-2.0. Pocket TTS model weights are CC-BY-4.0;
 the selected Pocket preset voices are CC0, except Alba and Anna, which are
 CC-BY-4.0. Piper's runtime is GPL-3.0 and its

@@ -8,6 +8,7 @@ use c0mpute_net::{ChunkSource, Libp2pNetwork, Network, NetworkConfig, bootstrap}
 use crate::capabilities::{self, Registry};
 use crate::dispatch;
 use crate::runner;
+use crate::speech;
 use c0mpute_proto::Hash;
 use c0mpute_store::ChunkStore;
 use tokio::sync::Semaphore;
@@ -97,9 +98,13 @@ impl Supervisor {
         // Private mode keeps the node off the public listing: no ad.
         let policy = crate::private::current();
         if policy.advertises() {
-            tokio::spawn(capabilities::advertise_loop(
+            // Live tags: TTS can appear a minute or two into the run, once
+            // Kokoro finishes provisioning, and should be advertised then
+            // rather than at the next restart.
+            tokio::spawn(capabilities::advertise_loop_live(
                 net.clone(),
-                tags.clone(),
+                self.config.clone(),
+                capabilities::detect_hardware_tag(),
                 hardware,
                 bench_score,
                 capabilities::DEFAULT_ADVERTISE_INTERVAL,
@@ -126,7 +131,6 @@ impl Supervisor {
             "node compute budget configured"
         );
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
-            info!(%workload_type, "subscribing to job topic");
             // Node-wide slots, per-workload job timing: the dispatch loop
             // reads this to stop bidding when full and to quote an ETA.
             // workflow.step draws on its own light-work slots instead.
@@ -135,6 +139,38 @@ impl Supervisor {
             } else {
                 runner::WorkerLoad::new(compute_slots.clone(), total_slots)
             };
+            // Speech is the one workload whose runtime we install ourselves.
+            // Provision it first, in the background, then subscribe with the
+            // tag set that install produced — a node advertising TTS it cannot
+            // perform would win auctions only to fail them.
+            if workload_type == "tts.synthesize" {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !speech::ensure_kokoro(&config.speech).await
+                        && speech::available_tts_engines().is_empty()
+                    {
+                        info!("no TTS engine installed; not subscribing to tts.synthesize");
+                        return;
+                    }
+                    let runner_tx =
+                        runner::spawn_tts_runner(net.clone(), store, cache_root, load.clone());
+                    info!(workload_type = "tts.synthesize", "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        "tts.synthesize".to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
+            info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {
                     let ffmpeg_bin = which_ffmpeg().unwrap_or_else(|| "ffmpeg".into());
@@ -146,12 +182,7 @@ impl Supervisor {
                         load.clone(),
                     ))
                 }
-                "tts.synthesize" => Some(runner::spawn_tts_runner(
-                    net.clone(),
-                    self.store.clone(),
-                    cache_root.clone(),
-                    load.clone(),
-                )),
+                // tts.synthesize is handled above, after provisioning.
                 "stt.transcribe" => Some(runner::spawn_stt_runner(
                     net.clone(),
                     self.store.clone(),
