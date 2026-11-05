@@ -106,7 +106,10 @@ async fn auction_round_trip_publishes_receipt() {
         .await
         .expect("auction completes");
     assert_eq!(outcome.receipt.status, JobStatus::Completed);
-    assert_eq!(outcome.accepted_bid.bidder_peer_id, worker.peer_id().to_base58());
+    assert_eq!(
+        outcome.accepted_bid.bidder_peer_id,
+        worker.peer_id().to_base58()
+    );
     assert!(outcome.receipt.output_hash.is_some());
 }
 

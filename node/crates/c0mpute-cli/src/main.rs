@@ -317,6 +317,15 @@ enum TtsCmd {
     },
     /// Show supported voices and the recommended OpenProfile voice map.
     Voices,
+    /// Turn automatic Kokoro provisioning on or off for this node.
+    ///
+    /// Every node serves text-to-speech by default: a worker installs Kokoro
+    /// in the background on first start. `off` leaves TTS to nodes that
+    /// opted in, and removes nothing already installed.
+    Auto {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -543,7 +552,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Plugin { cmd } => run_plugin(cmd),
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
-        Cmd::Tts { cmd } => run_tts(cmd).await,
+        Cmd::Tts { cmd } => run_tts(cmd, &config_path).await,
         Cmd::Stt { cmd } => run_stt(cmd).await,
         Cmd::Speech { cmd } => run_speech(cmd).await,
         Cmd::Chat { cmd } => run_chat(cmd),
@@ -742,6 +751,14 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
+            }
+            // Speech is a house capability: Kokoro is ~115 MB of model and
+            // runs on any CPU, so every node offers it unless its operator
+            // said otherwise (`c0mpute tts auto off`, `C0MPUTE_TTS_AUTO=0`).
+            // Existing config files predate the role, so this is applied to
+            // the loaded config rather than written back to their TOML.
+            if cfg.speech.auto_install_enabled() && !cfg.roles.contains(&Role::Tts) {
+                cfg.roles.push(Role::Tts);
             }
             // Only gateway workers run the Infernet provider bootstrap. A
             // speech-only or storage-only worker should not start an unrelated
@@ -1314,8 +1331,23 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
     }
 }
 
-async fn run_tts(cmd: TtsCmd) -> Result<()> {
+async fn run_tts(cmd: TtsCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
+        TtsCmd::Auto { state } => {
+            let mut cfg = Config::load_or_default(config_path)?;
+            cfg.speech.auto_install = state == "on";
+            cfg.save(config_path)?;
+            println!(
+                "automatic Kokoro provisioning is {state} (apply: c0mpute worker stop && c0mpute worker start -d)"
+            );
+            if state == "off" {
+                println!(
+                    "already-installed voices are left alone; remove them by deleting {}",
+                    c0mpute_core::speech::speech_root().display()
+                );
+            }
+            Ok(())
+        }
         TtsCmd::Setup { engine } => {
             c0mpute_core::speech::setup_tts(&engine).await?;
             println!(

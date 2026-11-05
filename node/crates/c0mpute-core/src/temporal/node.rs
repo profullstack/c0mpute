@@ -27,13 +27,32 @@ pub struct NetOptions {
 
 pub async fn spawn_node(o: &NetOptions) -> Result<Arc<Libp2pNetwork>> {
     std::fs::create_dir_all(&o.identity_dir)?;
-    let parse = |v: &[String]| -> Result<Vec<Multiaddr>> { v.iter().map(|s| s.parse::<Multiaddr>().with_context(|| format!("bad multiaddr {s}"))).collect() };
+    let parse = |v: &[String]| -> Result<Vec<Multiaddr>> {
+        v.iter()
+            .map(|s| {
+                s.parse::<Multiaddr>()
+                    .with_context(|| format!("bad multiaddr {s}"))
+            })
+            .collect()
+    };
     let mut boot = parse(&o.bootstrap)?;
     if o.default_bootstrap {
-        boot.extend(bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, bootstrap::default_seeds()).await);
+        boot.extend(
+            bootstrap::fetch_or_fallback(
+                bootstrap::DEFAULT_BOOTSTRAP_URL,
+                bootstrap::default_seeds(),
+            )
+            .await,
+        );
     }
-    let listen = if o.listen.is_empty() { vec!["/ip4/0.0.0.0/tcp/0".to_string()] } else { o.listen.clone() };
-    let cfg = NetworkConfig::for_dir(o.identity_dir.clone()).with_listen(parse(&listen)?).with_bootstrap(boot);
+    let listen = if o.listen.is_empty() {
+        vec!["/ip4/0.0.0.0/tcp/0".to_string()]
+    } else {
+        o.listen.clone()
+    };
+    let cfg = NetworkConfig::for_dir(o.identity_dir.clone())
+        .with_listen(parse(&listen)?)
+        .with_bootstrap(boot);
     Ok(Arc::new(Libp2pNetwork::spawn(cfg).await?))
 }
 
@@ -69,24 +88,57 @@ pub async fn serve(o: &ServeOptions) -> Result<Serving> {
     for m in &o.models {
         resolved.push(o.store.resolve(m)?);
     }
-    let infer = if resolved.is_empty() { None } else { Some(InferServer::start(&o.infernet, &resolved, &me, o.max_sessions).await?) };
+    let infer = if resolved.is_empty() {
+        None
+    } else {
+        Some(InferServer::start(&o.infernet, &resolved, &me, o.max_sessions).await?)
+    };
     let models: Vec<String> = infer.as_ref().map(|s| s.models.clone()).unwrap_or_default();
     let tags = caps::tags(&caps, &models, o.train, infer.is_some());
     let mut hardware = serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "temporal_runtime": caps.runtime.version, "ram_mb": caps.ram_mb, "cuda": caps.devices.cuda});
     hardware["models"] = serde_json::json!(models);
-    tokio::spawn(capabilities::advertise_loop(net.clone(), tags.clone(), hardware, capabilities::local_bench_score(), capabilities::DEFAULT_ADVERTISE_INTERVAL));
+    tokio::spawn(capabilities::advertise_loop(
+        net.clone(),
+        tags.clone(),
+        hardware,
+        capabilities::local_bench_score(),
+        capabilities::DEFAULT_ADVERTISE_INTERVAL,
+    ));
     if o.train {
         let busy = Arc::new(AtomicBool::new(false));
-        let tx = worker::spawn_train_runner(net.clone(), o.cache_root.clone(), o.infernet.clone(), o.store.clone(), busy.clone());
-        dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(worker::train_offer_filter(busy)));
+        let tx = worker::spawn_train_runner(
+            net.clone(),
+            o.cache_root.clone(),
+            o.infernet.clone(),
+            o.store.clone(),
+            busy.clone(),
+        );
+        dispatch::run_worker_subscriber_filtered(
+            net.clone(),
+            TRAIN_WORKLOAD.into(),
+            tags.clone(),
+            Some(tx),
+            Some(worker::train_offer_filter(busy)),
+        );
     }
     if let Some(server) = &infer {
         let tx = worker::spawn_infer_runner(net.clone(), server.clone());
-        dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(tx), Some(worker::infer_offer_filter(models.clone())));
+        dispatch::run_worker_subscriber_filtered(
+            net.clone(),
+            INFER_WORKLOAD.into(),
+            tags.clone(),
+            Some(tx),
+            Some(worker::infer_offer_filter(models.clone())),
+        );
         worker::spawn_call_listener(net.clone(), server.clone());
     }
     info!(peer = %me, ?tags, "temporal: serving");
     // Let the subscriptions land before callers start publishing.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Serving { net, caps, tags, infer })
+    Ok(Serving {
+        net,
+        caps,
+        tags,
+        infer,
+    })
 }

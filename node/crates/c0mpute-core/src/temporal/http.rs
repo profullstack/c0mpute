@@ -37,17 +37,27 @@ pub struct TransferServer {
 }
 
 fn ok_slot(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 
-async fn get_dataset(State(st): State<St>, Path(token): Path<String>) -> Result<Vec<u8>, StatusCode> {
+async fn get_dataset(
+    State(st): State<St>,
+    Path(token): Path<String>,
+) -> Result<Vec<u8>, StatusCode> {
     if token != st.token {
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(st.dataset.as_ref().clone())
 }
 
-async fn put_artifact(State(st): State<St>, Path((token, slot, file)): Path<(String, String, String)>, body: Bytes) -> StatusCode {
+async fn put_artifact(
+    State(st): State<St>,
+    Path((token, slot, file)): Path<(String, String, String)>,
+    body: Bytes,
+) -> StatusCode {
     if token != st.token || !ok_slot(&slot) || !ARTIFACTS.contains(&file.as_str()) {
         return StatusCode::NOT_FOUND;
     }
@@ -58,12 +68,20 @@ async fn put_artifact(State(st): State<St>, Path((token, slot, file)): Path<(Str
 impl TransferServer {
     /// Bind `bind` and serve `dataset`. `public_base` is how the worker
     /// reaches this server (defaults to `http://<bound addr>`).
-    pub async fn start(bind: SocketAddr, public_base: Option<String>, dataset: Vec<u8>) -> Result<Self> {
+    pub async fn start(
+        bind: SocketAddr,
+        public_base: Option<String>,
+        dataset: Vec<u8>,
+    ) -> Result<Self> {
         let mut t = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut t);
         let token = hex::encode(t);
         let uploads = Arc::new(Mutex::new(HashMap::new()));
-        let st = St { token: token.clone(), dataset: Arc::new(dataset), uploads: uploads.clone() };
+        let st = St {
+            token: token.clone(),
+            dataset: Arc::new(dataset),
+            uploads: uploads.clone(),
+        };
         let app = Router::new()
             .route("/t/{token}/dataset.json", get(get_dataset))
             .route("/t/{token}/a/{slot}/{file}", put(put_artifact))
@@ -74,8 +92,16 @@ impl TransferServer {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let base_url = public_base.unwrap_or_else(|| format!("http://{local_addr}")).trim_end_matches('/').to_string();
-        Ok(Self { base_url, local_addr, token, uploads })
+        let base_url = public_base
+            .unwrap_or_else(|| format!("http://{local_addr}"))
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Self {
+            base_url,
+            local_addr,
+            token,
+            uploads,
+        })
     }
 
     pub fn dataset_url(&self) -> String {
@@ -90,7 +116,9 @@ impl TransferServer {
     pub async fn take(&self, slot: &str) -> HashMap<String, Vec<u8>> {
         let mut u = self.uploads.lock().await;
         let keys: Vec<_> = u.keys().filter(|(s, _)| s == slot).cloned().collect();
-        keys.into_iter().filter_map(|k| u.remove(&k).map(|v| (k.1, v))).collect()
+        keys.into_iter()
+            .filter_map(|k| u.remove(&k).map(|v| (k.1, v)))
+            .collect()
     }
 }
 
@@ -100,9 +128,21 @@ mod tests {
 
     #[tokio::test]
     async fn token_gates_dataset_and_uploads() {
-        let s = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, b"{\"x\":1}".to_vec()).await.unwrap();
+        let s = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, b"{\"x\":1}".to_vec())
+            .await
+            .unwrap();
         let c = reqwest::Client::new();
-        assert_eq!(c.get(s.dataset_url()).send().await.unwrap().bytes().await.unwrap().as_ref(), b"{\"x\":1}");
+        assert_eq!(
+            c.get(s.dataset_url())
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            b"{\"x\":1}"
+        );
         let wrong = s.dataset_url().replace(&s.token, &"0".repeat(32));
         assert_eq!(c.get(wrong).send().await.unwrap().status(), 404);
         let up = format!("{}/model.safetensors", s.upload_url("cfc"));
@@ -110,7 +150,10 @@ mod tests {
         let bad = format!("{}/evil.sh", s.upload_url("cfc"));
         assert_eq!(c.put(&bad).body("x").send().await.unwrap().status(), 404);
         let got = s.take("cfc").await;
-        assert_eq!(got.get("model.safetensors").map(|v| v.as_slice()), Some(&b"w"[..]));
+        assert_eq!(
+            got.get("model.safetensors").map(|v| v.as_slice()),
+            Some(&b"w"[..])
+        );
         assert!(s.take("cfc").await.is_empty());
     }
 }

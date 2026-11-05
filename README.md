@@ -97,14 +97,30 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 ### CPU speech inference
 
 TTS (`tts.synthesize`) supports Kokoro and Piper on CPU. STT
-(`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8. Install the
-models once on each worker, then start it with the role it should advertise:
+(`stt.transcribe`) uses multilingual faster-whisper `base` with CPU int8.
+
+**Every node serves Kokoro TTS by default.** Kokoro is an int8 ONNX export of
+[hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) — about 115 MB
+of model and voices, CPU-only — so a worker provisions it in the background on
+first start and advertises `c0mpute:role:tts` as soon as it is ready, without
+a restart. Nothing is advertised until it actually works: a node that cannot
+provision simply does not offer TTS.
 
 ```sh
-c0mpute tts setup --engine all
-c0mpute stt setup
+c0mpute tts auto off                # opt out (C0MPUTE_TTS_AUTO=0 does the same)
+c0mpute tts setup --engine all      # add Piper too, up front
+c0mpute stt setup                   # STT stays opt-in
 c0mpute worker start --roles tts,stt
 ```
+
+Kokoro needs a Python between 3.10 and 3.13. A node whose only interpreter is
+3.14+ gets Kokoro its own virtualenv, built from an older interpreter when the
+box has one and otherwise by [uv](https://docs.astral.sh/uv/), which fetches a
+managed CPython itself. With neither available the worker logs what to install
+(`python3.13-venv`, or uv) and carries on without TTS. The library pin is tied
+to the model build: older kokoro-onnx releases feed the `model-files-v1.1`
+graph int32 where it wants float, so matching the runtime to the model matters
+more than running on the newest Python.
 
 The Kokoro model files are Apache-2.0. Piper's runtime is GPL-3.0 and its
 individual voice files carry their own licenses; the bundled Joe voice is

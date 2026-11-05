@@ -65,7 +65,10 @@ pub async fn probe(infernet: &Path) -> Result<RuntimeCaps> {
 }
 
 pub fn model_tag(model_hash: &str) -> String {
-    format!("infernet:temporal:model:{}", model_hash.trim_start_matches("sha256:"))
+    format!(
+        "infernet:temporal:model:{}",
+        model_hash.trim_start_matches("sha256:")
+    )
 }
 
 fn ram_tag(gb: u64) -> String {
@@ -122,7 +125,11 @@ pub fn required_tags(workload: &str, r: &Requirements) -> Vec<String> {
         t.push("infernet:temporal:device:cuda".into());
     }
     if let Some(min) = r.min_ram_gb {
-        let bucket = RAM_BUCKETS_GB.iter().copied().find(|b| *b >= min).unwrap_or(*RAM_BUCKETS_GB.last().unwrap());
+        let bucket = RAM_BUCKETS_GB
+            .iter()
+            .copied()
+            .find(|b| *b >= min)
+            .unwrap_or(*RAM_BUCKETS_GB.last().unwrap());
         t.push(ram_tag(bucket));
     }
     if let Some(v) = &r.runtime_version {
@@ -142,10 +149,18 @@ mod tests {
         RuntimeCaps {
             workloads: vec![TRAIN_WORKLOAD.into(), INFER_WORKLOAD.into()],
             families: vec!["cfc".into(), "ltc".into(), "gru".into()],
-            devices: Devices { cpu: true, cuda, mps: false },
+            devices: Devices {
+                cpu: true,
+                cuda,
+                mps: false,
+            },
             ram_mb,
             threads: 8,
-            runtime: RuntimeRef { name: "infernet-liquid".into(), version: "0.1.0".into(), lock_hash: format!("sha256:{}", "0".repeat(64)) },
+            runtime: RuntimeRef {
+                name: "infernet-liquid".into(),
+                version: "0.1.0".into(),
+                lock_hash: format!("sha256:{}", "0".repeat(64)),
+            },
         }
     }
 
@@ -158,19 +173,52 @@ mod tests {
         let m = format!("sha256:{}", "d".repeat(64));
         let cpu16 = tags(&caps(false, 16 * 1024), &[m.clone()], true, true);
         let gpu64 = tags(&caps(true, 64 * 1024), &[], true, false);
-        let train_cpu = required_tags(TRAIN_WORKLOAD, &Requirements { min_ram_gb: Some(12), ..Default::default() });
+        let train_cpu = required_tags(
+            TRAIN_WORKLOAD,
+            &Requirements {
+                min_ram_gb: Some(12),
+                ..Default::default()
+            },
+        );
         assert!(eligible(&cpu16, &train_cpu));
         assert!(eligible(&gpu64, &train_cpu));
-        let train_gpu = required_tags(TRAIN_WORKLOAD, &Requirements { gpu: true, ..Default::default() });
+        let train_gpu = required_tags(
+            TRAIN_WORKLOAD,
+            &Requirements {
+                gpu: true,
+                ..Default::default()
+            },
+        );
         assert!(!eligible(&cpu16, &train_gpu));
         assert!(eligible(&gpu64, &train_gpu));
-        let big = required_tags(TRAIN_WORKLOAD, &Requirements { min_ram_gb: Some(40), ..Default::default() });
+        let big = required_tags(
+            TRAIN_WORKLOAD,
+            &Requirements {
+                min_ram_gb: Some(40),
+                ..Default::default()
+            },
+        );
         assert!(!eligible(&cpu16, &big));
         assert!(eligible(&gpu64, &big));
-        let infer = required_tags(INFER_WORKLOAD, &Requirements { model_hash: Some(m.clone()), ..Default::default() });
+        let infer = required_tags(
+            INFER_WORKLOAD,
+            &Requirements {
+                model_hash: Some(m.clone()),
+                ..Default::default()
+            },
+        );
         assert!(eligible(&cpu16, &infer));
-        assert!(!eligible(&gpu64, &infer), "gpu64 did not opt into infer nor load the model");
-        let ver = required_tags(TRAIN_WORKLOAD, &Requirements { runtime_version: Some("9.9.9".into()), ..Default::default() });
+        assert!(
+            !eligible(&gpu64, &infer),
+            "gpu64 did not opt into infer nor load the model"
+        );
+        let ver = required_tags(
+            TRAIN_WORKLOAD,
+            &Requirements {
+                runtime_version: Some("9.9.9".into()),
+                ..Default::default()
+            },
+        );
         assert!(!eligible(&cpu16, &ver));
     }
 
@@ -179,6 +227,9 @@ mod tests {
         let mut c = caps(false, 8192);
         c.workloads = vec![];
         let t = tags(&c, &[], true, true);
-        assert!(!t.iter().any(|x| x == "infernet:temporal:train" || x == "infernet:temporal:infer"));
+        assert!(
+            !t.iter()
+                .any(|x| x == "infernet:temporal:train" || x == "infernet:temporal:infer")
+        );
     }
 }

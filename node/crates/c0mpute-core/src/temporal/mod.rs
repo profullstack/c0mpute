@@ -51,8 +51,11 @@ pub struct TrainSpec {
 }
 
 pub fn is_sha256_ref(s: &str) -> bool {
-    s.strip_prefix("sha256:")
-        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    s.strip_prefix("sha256:").is_some_and(|h| {
+        h.len() == 64
+            && h.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    })
 }
 
 fn is_http(u: &str) -> bool {
@@ -61,11 +64,17 @@ fn is_http(u: &str) -> bool {
 
 impl TrainSpec {
     pub fn family(&self) -> &str {
-        self.train_job.get("model_type").and_then(|v| v.as_str()).unwrap_or("")
+        self.train_job
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
     }
 
     pub fn idempotency_key(&self) -> &str {
-        self.train_job.get("idempotency_key").and_then(|v| v.as_str()).unwrap_or("")
+        self.train_job
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
     }
 
     /// The checks a worker runs before bidding. A remote job without the
@@ -126,7 +135,10 @@ impl SessionSpec {
         }
         if self.session_id.is_empty()
             || self.session_id.len() > 64
-            || !self.session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            || !self
+                .session_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
         {
             bail!("session_id must be 1-64 of [A-Za-z0-9_.-]");
         }
@@ -174,7 +186,10 @@ pub struct SessionReply {
 /// The liquid-agent rule: a liquid family is chosen only when it beats the
 /// GRU baseline on the predeclared metric (`episode_success`).
 pub fn select_family(results: &[(String, f64)]) -> Option<String> {
-    let baseline = results.iter().find(|(f, _)| f == "gru").or(results.first())?;
+    let baseline = results
+        .iter()
+        .find(|(f, _)| f == "gru")
+        .or(results.first())?;
     results
         .iter()
         .filter(|(f, s)| f != &baseline.0 && *s > baseline.1)
@@ -207,7 +222,12 @@ mod tests {
         assert!(spec().validate().is_ok());
         let mut s = spec();
         s.train_job["privacy"]["upload_approved"] = json!(false);
-        assert!(s.validate().unwrap_err().to_string().contains("upload_approved"));
+        assert!(
+            s.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("upload_approved")
+        );
         let mut s = spec();
         s.train_job["privacy"]["mode"] = json!("local_only");
         assert!(s.validate().is_err());
@@ -245,10 +265,19 @@ mod tests {
 
     #[test]
     fn liquid_wins_only_by_beating_gru() {
-        let r = |v: &[(&str, f64)]| select_family(&v.iter().map(|(f, s)| (f.to_string(), *s)).collect::<Vec<_>>());
+        let r = |v: &[(&str, f64)]| {
+            select_family(
+                &v.iter()
+                    .map(|(f, s)| (f.to_string(), *s))
+                    .collect::<Vec<_>>(),
+            )
+        };
         assert_eq!(r(&[("cfc", 0.9), ("gru", 0.9)]).as_deref(), Some("gru"));
         assert_eq!(r(&[("cfc", 0.95), ("gru", 0.9)]).as_deref(), Some("cfc"));
-        assert_eq!(r(&[("cfc", 0.8), ("gru", 0.9), ("ltc", 0.92)]).as_deref(), Some("ltc"));
+        assert_eq!(
+            r(&[("cfc", 0.8), ("gru", 0.9), ("ltc", 0.92)]).as_deref(),
+            Some("ltc")
+        );
         assert_eq!(r(&[("cfc", 0.8)]).as_deref(), Some("cfc"));
     }
 }

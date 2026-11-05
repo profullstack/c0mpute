@@ -51,6 +51,19 @@ pub const DEFAULT_ADVERTISE_INTERVAL: Duration = Duration::from_secs(60);
 /// configured role, plus exactly one hardware tag so schedulers can match
 /// GPU-only work (transcode/inference) to GPU boxes.
 pub fn tags_from_config(config: &Config) -> Vec<String> {
+    let mut tags = role_tags(config);
+    tags.push(detect_hardware_tag());
+    tags
+}
+
+/// The role half of the tag set, without the hardware tag.
+///
+/// Kept separate because it is cheap and can change while a worker runs: a
+/// node that finishes provisioning Kokoro a minute after boot should start
+/// advertising `c0mpute:role:tts` on the next tick rather than at the next
+/// restart. The hardware tag, which shells out to `nvidia-smi`, is probed
+/// once and reused.
+pub fn role_tags(config: &Config) -> Vec<String> {
     let mut tags = Vec::new();
     for role in &config.roles {
         match role {
@@ -77,7 +90,6 @@ pub fn tags_from_config(config: &Config) -> Vec<String> {
             Role::Verifier => tags.push("c0mpute:role:verifier".to_string()),
         }
     }
-    tags.push(detect_hardware_tag());
     tags
 }
 
@@ -187,10 +199,73 @@ pub fn sanitize_ref(raw: &str) -> Option<String> {
     ok.then_some(code)
 }
 
+/// Where each tick's tag set comes from.
+enum TagSource {
+    /// A set fixed at boot.
+    Fixed(Vec<String>),
+    /// Role tags re-derived from config every tick, plus the hardware tag
+    /// probed once. Lets a capability that appears after boot be advertised
+    /// without restarting the worker.
+    Live {
+        config: Box<Config>,
+        hardware_tag: String,
+    },
+}
+
+impl TagSource {
+    fn tags(&self) -> Vec<String> {
+        match self {
+            Self::Fixed(tags) => tags.clone(),
+            Self::Live {
+                config,
+                hardware_tag,
+            } => {
+                let mut tags = role_tags(config);
+                tags.push(hardware_tag.clone());
+                tags
+            }
+        }
+    }
+}
+
 /// Periodically publish this worker's capability ad.
 pub async fn advertise_loop(
     net: Arc<Libp2pNetwork>,
     tags: Vec<String>,
+    hardware: serde_json::Value,
+    bench_score: Option<u32>,
+    interval: Duration,
+) {
+    advertise(net, TagSource::Fixed(tags), hardware, bench_score, interval).await
+}
+
+/// Like [`advertise_loop`], but re-derives the role tags from `config` on
+/// every tick, so TTS appearing once Kokoro finishes installing is
+/// advertised within one interval instead of needing a worker restart.
+pub async fn advertise_loop_live(
+    net: Arc<Libp2pNetwork>,
+    config: Config,
+    hardware_tag: String,
+    hardware: serde_json::Value,
+    bench_score: Option<u32>,
+    interval: Duration,
+) {
+    advertise(
+        net,
+        TagSource::Live {
+            config: Box::new(config),
+            hardware_tag,
+        },
+        hardware,
+        bench_score,
+        interval,
+    )
+    .await
+}
+
+async fn advertise(
+    net: Arc<Libp2pNetwork>,
+    tag_source: TagSource,
     hardware: serde_json::Value,
     bench_score: Option<u32>,
     interval: Duration,
@@ -212,8 +287,12 @@ pub async fn advertise_loop(
     let mut ticker = tokio::time::interval(interval);
     loop {
         ticker.tick().await;
-        let ad =
-            CapabilityAd::with_score(peer_id.clone(), tags.clone(), hardware.clone(), bench_score);
+        let ad = CapabilityAd::with_score(
+            peer_id.clone(),
+            tag_source.tags(),
+            hardware.clone(),
+            bench_score,
+        );
         let payload = match serde_json::to_vec(&ad) {
             Ok(b) => b,
             Err(e) => {
@@ -460,8 +539,34 @@ mod tests {
     }
 
     #[test]
+    fn role_tags_carry_no_hardware_tag() {
+        // The hardware tag is probed once and appended by the caller, so the
+        // role half can be recomputed cheaply on every advertise tick.
+        let tags = super::role_tags(&Config::default());
+        assert!(
+            !tags
+                .iter()
+                .any(|tag| tag.starts_with("c0mpute:gpu:") || tag == "c0mpute:cpu"),
+            "role tags should not include the hardware tag: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn tts_is_only_advertised_once_an_engine_is_installed() {
+        // Role::Tts is on by default, but a node with no Kokoro and no Piper
+        // must not claim it: it would win speech auctions it cannot serve.
+        let tags = super::role_tags(&Config::default());
+        let claims_tts = tags.iter().any(|tag| tag == "c0mpute:role:tts");
+        assert_eq!(
+            claims_tts,
+            !crate::speech::available_tts_engines().is_empty(),
+            "the tts tag must track what is actually installed"
+        );
+    }
+
+    #[test]
     fn tags_from_config_includes_roles_and_exactly_one_hardware_tag() {
-        let cfg = Config::default(); // roles: storage, gateway, verifier
+        let cfg = Config::default(); // roles: storage, gateway, verifier, tts
         let tags = super::tags_from_config(&cfg);
         assert!(tags.contains(&"c0mpute:role:storage".to_string()));
         assert!(tags.contains(&"c0mpute:role:gateway".to_string()));

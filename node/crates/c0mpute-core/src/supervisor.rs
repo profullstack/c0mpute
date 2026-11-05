@@ -8,6 +8,7 @@ use c0mpute_net::{ChunkSource, Libp2pNetwork, Network, NetworkConfig, bootstrap}
 use crate::capabilities::{self, Registry};
 use crate::dispatch;
 use crate::runner;
+use crate::speech;
 use c0mpute_proto::Hash;
 use c0mpute_store::ChunkStore;
 use tracing::info;
@@ -93,9 +94,12 @@ impl Supervisor {
                 "advertising capabilities (no bench score — run `c0mpute bench` to publish one)"
             ),
         }
-        tokio::spawn(capabilities::advertise_loop(
+        // Live tags: TTS can appear a minute or two into the run, once Kokoro
+        // finishes provisioning, and should be advertised without a restart.
+        tokio::spawn(capabilities::advertise_loop_live(
             net.clone(),
-            tags.clone(),
+            self.config.clone(),
+            capabilities::detect_hardware_tag(),
             hardware,
             bench_score,
             capabilities::DEFAULT_ADVERTISE_INTERVAL,
@@ -108,6 +112,35 @@ impl Supervisor {
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("cache");
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
+            // Speech is the one workload whose runtime we install ourselves.
+            // Provision it first, in the background, then subscribe with the
+            // tag set that install produced — a node that advertises TTS it
+            // cannot perform would win auctions only to fail them.
+            if workload_type == "tts.synthesize" {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !speech::ensure_kokoro(&config.speech).await
+                        && speech::available_tts_engines().is_empty()
+                    {
+                        info!("no TTS engine installed; not subscribing to tts.synthesize");
+                        return;
+                    }
+                    let runner_tx = runner::spawn_tts_runner(net.clone(), store, cache_root);
+                    info!(workload_type = "tts.synthesize", "subscribing to job topic");
+                    dispatch::run_worker_subscriber_priced(
+                        net,
+                        "tts.synthesize".to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                    );
+                });
+                continue;
+            }
             info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {
@@ -118,11 +151,7 @@ impl Supervisor {
                         ffmpeg_bin,
                     ))
                 }
-                "tts.synthesize" => Some(runner::spawn_tts_runner(
-                    net.clone(),
-                    self.store.clone(),
-                    cache_root.clone(),
-                )),
+                // tts.synthesize is handled above, after provisioning.
                 "stt.transcribe" => Some(runner::spawn_stt_runner(
                     net.clone(),
                     self.store.clone(),
