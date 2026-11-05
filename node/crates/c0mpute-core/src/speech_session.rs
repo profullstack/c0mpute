@@ -117,6 +117,12 @@ impl WarmWorker {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // espeak-ng is extracted to a temp dir and dlopen'd, and Docker's
+        // default /tmp is noexec, which fails at the first word rather than at
+        // load. See `speech::speech_tmpdir`.
+        if let Some(tmp) = crate::speech::speech_tmpdir().await {
+            command.env("TMPDIR", tmp);
+        }
         crate::resources::apply_job_limits(&mut command);
         let mut child = command.spawn().context(
             "start the warm speech worker; run `c0mpute tts setup --engine kokoro` first",

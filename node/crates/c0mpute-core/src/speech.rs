@@ -323,7 +323,7 @@ async fn pip_install_pocket() -> Result<()> {
     command.args(["--extra-index-url", "https://download.pytorch.org/whl/cpu"]);
     command.arg("pocket-tts==4.0.1");
     // Torch is the biggest wheel we install; a small /tmp fails hardest here.
-    if let Some(tmp) = pip_tmpdir().await {
+    if let Some(tmp) = speech_tmpdir().await {
         command.env("TMPDIR", tmp);
     }
     run_checked(command, "install the Pocket TTS CPU runtime").await
@@ -692,24 +692,31 @@ async fn pip_install_with(python: &Path, packages: &[&str]) -> Result<()> {
     command
         .args(["-m", "pip", "install", "--disable-pip-version-check"])
         .args(packages);
-    if let Some(tmp) = pip_tmpdir().await {
+    if let Some(tmp) = speech_tmpdir().await {
         command.env("TMPDIR", tmp);
     }
     run_checked(command, "install speech runtime packages").await
 }
 
-/// Unpack wheels beside the models rather than in `/tmp`.
+/// A scratch directory beside the models, used instead of `/tmp`.
 ///
-/// A container's `/tmp` is routinely a 64 MB tmpfs, and onnxruntime alone
-/// needs more than that unpacked, so pip dies with
-/// `OSError: [Errno 28] No space left on device` while the volume holding the
-/// models has tens of gigabytes free — an error that points at the wrong
-/// thing entirely. Observed on dev2's speech gateway container, 2026-11-05.
+/// Docker's default `/tmp` is a 64 MB tmpfs mounted `noexec`, and that breaks
+/// Kokoro twice over — both observed on dev2's speech gateway container on
+/// 2026-11-05:
 ///
-/// None means "leave pip alone": if we cannot create our own directory, the
-/// default is still better than failing here.
-async fn pip_tmpdir() -> Option<PathBuf> {
-    let dir = speech_root().join("pip-tmp");
+/// - **Installing**: onnxruntime needs more than 64 MB unpacked, so pip dies
+///   with `OSError: [Errno 28] No space left on device` while the volume
+///   holding the models has tens of gigabytes free.
+/// - **Speaking**: `espeakng-loader` extracts `libespeak-ng.so` to a temp dir
+///   and `dlopen`s it, which `noexec` refuses —
+///   `failed to map segment from shared object`. The install succeeds and the
+///   model loads; the failure only appears at the first word.
+///
+/// The speech root is on the same volume as the models, so it is sized for
+/// them and mounted normally. None means "leave the default alone": if we
+/// cannot create the directory, the default is still better than failing.
+pub(crate) async fn speech_tmpdir() -> Option<PathBuf> {
+    let dir = speech_root().join("tmp");
     tokio::fs::create_dir_all(&dir).await.ok()?;
     Some(dir)
 }
@@ -784,6 +791,11 @@ async fn run_worker(action: &str, args: &[&str], request: &serde_json::Value) ->
     command.arg("-c").arg(WORKER).arg(action).arg(speech_root());
     crate::resources::apply_job_limits(&mut command);
     command.env("HF_HOME", speech_root().join("cache/huggingface"));
+    // espeak-ng is extracted to a temp dir and dlopen'd, so the temp dir has
+    // to allow execution — Docker's default /tmp does not. See speech_tmpdir.
+    if let Some(tmp) = speech_tmpdir().await {
+        command.env("TMPDIR", tmp);
+    }
     command
         .args(args)
         .stdin(Stdio::piped())
