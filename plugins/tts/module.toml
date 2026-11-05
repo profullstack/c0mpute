@@ -15,7 +15,7 @@
 [module]
 id          = "tts"
 name        = "TTS — text-to-speech"
-version     = "0.2.58"
+version     = "0.2.59"
 kind        = "workload"
 category    = "ai"
 description = "CPU text-to-speech inference over c0mpute using Piper, Kokoro, or Pocket TTS."
