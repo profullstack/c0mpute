@@ -322,6 +322,10 @@ async fn pip_install_pocket() -> Result<()> {
     #[cfg(target_os = "linux")]
     command.args(["--extra-index-url", "https://download.pytorch.org/whl/cpu"]);
     command.arg("pocket-tts==4.0.1");
+    // Torch is the biggest wheel we install; a small /tmp fails hardest here.
+    if let Some(tmp) = pip_tmpdir().await {
+        command.env("TMPDIR", tmp);
+    }
     run_checked(command, "install the Pocket TTS CPU runtime").await
 }
 
@@ -688,7 +692,26 @@ async fn pip_install_with(python: &Path, packages: &[&str]) -> Result<()> {
     command
         .args(["-m", "pip", "install", "--disable-pip-version-check"])
         .args(packages);
+    if let Some(tmp) = pip_tmpdir().await {
+        command.env("TMPDIR", tmp);
+    }
     run_checked(command, "install speech runtime packages").await
+}
+
+/// Unpack wheels beside the models rather than in `/tmp`.
+///
+/// A container's `/tmp` is routinely a 64 MB tmpfs, and onnxruntime alone
+/// needs more than that unpacked, so pip dies with
+/// `OSError: [Errno 28] No space left on device` while the volume holding the
+/// models has tens of gigabytes free — an error that points at the wrong
+/// thing entirely. Observed on dev2's speech gateway container, 2026-11-05.
+///
+/// None means "leave pip alone": if we cannot create our own directory, the
+/// default is still better than failing here.
+async fn pip_tmpdir() -> Option<PathBuf> {
+    let dir = speech_root().join("pip-tmp");
+    tokio::fs::create_dir_all(&dir).await.ok()?;
+    Some(dir)
 }
 
 async fn run_checked(mut command: Command, task: &str) -> Result<()> {
