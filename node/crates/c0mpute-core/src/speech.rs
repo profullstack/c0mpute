@@ -279,9 +279,9 @@ async fn ensure_kokoro_venv() -> Result<PathBuf> {
         create_venv(&interpreter, &dir).await?;
         return Ok(venv_python(&dir));
     }
-    if on_path("uv") {
+    if let Some(uv) = find_uv() {
         let dir = kokoro_venv_dir();
-        let mut command = Command::new("uv");
+        let mut command = Command::new(uv);
         command
             .args(["venv", "--seed", "--python", KOKORO_UV_PYTHON])
             .arg(&dir);
@@ -290,8 +290,9 @@ async fn ensure_kokoro_venv() -> Result<PathBuf> {
     }
     bail!(
         "Kokoro needs Python {}.{} to {}.{} and this box has none (default python3 is {}). \
-         Install python3.13 (Debian/Ubuntu: apt install python3.13-venv), or install uv, \
-         or point C0MPUTE_PYTHON at a suitable interpreter.",
+         Install python3.13 (Debian/Ubuntu: apt install python3.13-venv), or install uv \
+         (curl -LsSf https://astral.sh/uv/install.sh | sh), or point C0MPUTE_PYTHON at a \
+         suitable interpreter.",
         KOKORO_PY_MIN.0,
         KOKORO_PY_MIN.1,
         KOKORO_PY_MAX_EXCLUSIVE.0,
@@ -438,6 +439,28 @@ fn on_path(program: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+}
+
+/// Locate `uv`, including where its installer puts it.
+///
+/// A daemon started by systemd inherits a minimal PATH that usually omits
+/// `~/.local/bin`, which is exactly where `astral.sh/uv/install.sh` lands, so
+/// PATH alone would miss an interpreter source the box actually has.
+fn find_uv() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(found) = std::env::split_paths(&path)
+            .map(|dir| dir.join("uv"))
+            .find(|candidate| candidate.is_file())
+    {
+        return Some(found);
+    }
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/bin/uv"));
+    }
+    candidates.push(PathBuf::from("/usr/local/bin/uv"));
+    candidates.push(PathBuf::from("/opt/homebrew/bin/uv"));
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 fn retry_marker() -> PathBuf {
