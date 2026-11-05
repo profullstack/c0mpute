@@ -1,5 +1,5 @@
 import { NoDidError } from "@/lib/chat/store";
-import { coinpayUserinfo, exchangeCode, SESSION_COOKIE, siteUrl, store } from "@/lib/chat/server";
+import { coinpayUserinfo, exchangeCode, linkInfernetAccount, SESSION_COOKIE, siteUrl, store } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +29,10 @@ export async function GET(req: Request) {
     const token = await exchangeCode(code, saved.verifier);
     const info = await coinpayUserinfo(token);
     const user = await store().upsertCoinpayUser(info);
+    // Make sure the network that serves this person can bill them: without an
+    // Infernet account bound to their CoinPay sub, their balance and their
+    // nodes' earnings cannot pay for anything here. Non-fatal by design.
+    await linkInfernetAccount(info);
     const session = await store().createSession(user.id);
     const next = saved.next && /^\/(?![\/\\])/.test(saved.next) ? saved.next : "/chat";
     return back(next, [

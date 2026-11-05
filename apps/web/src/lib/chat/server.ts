@@ -176,6 +176,41 @@ export function infernetFor(subject: string | null | undefined) {
 }
 
 /**
+ * Give this person an account on the network that serves them, so their
+ * compute balance can be billed and topped up.
+ *
+ * Billing on Infernet resolves a c0mpute user through their verified CoinPay
+ * sub. That mapping only existed if they had also signed in to
+ * infernetprotocol.com with the same CoinPay account, which almost nobody had,
+ * so c0mpute users were unbillable and the "top up" link sent them to a site
+ * they had no account on. Calling this once at sign-in fixes that.
+ *
+ * Never throws and never blocks the sign-in: if Infernet is down the person
+ * still gets into chat, just on the free tier until the next sign-in links
+ * them. Idempotent upstream, so calling it on every sign-in is fine.
+ */
+export async function linkInfernetAccount(info: { sub?: string; email?: string | null; name?: string | null }) {
+  const sub = typeof info?.sub === "string" ? info.sub.trim() : "";
+  if (!sub) return null;
+  try {
+    const res = await infernet("/api/v1/coinpay/link-trusted", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sub, email: info.email ?? null, name: info.name ?? null }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      console.warn(`infernet account link failed: HTTP ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as Record<string, unknown>;
+  } catch (e) {
+    console.warn(`infernet account link failed: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
+/**
  * The person's spendable compute balance, as Infernet reports it.
  * Returns null when it cannot be read: the chat must not break over a balance
  * panel, and an unlinked CoinPay identity simply has no balance yet.
