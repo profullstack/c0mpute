@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -148,6 +149,91 @@ def stt(root: Path, audio: Path, output: Path, request: dict) -> None:
     output.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
+def load_kokoro(root: Path):
+    """Load Kokoro once and hand back a `create`-able model.
+
+    Spawning this process and loading the model is most of what a one-shot
+    `tts` call spends its time on, which is why `serve` does it once and then
+    answers utterance after utterance from the loaded model.
+    """
+    import onnxruntime as ort
+    import kokoro_onnx
+    from kokoro_onnx import Kokoro
+
+    kokoro_onnx.create_session = lambda path: ort.InferenceSession(
+        path, sess_options=session_options(), providers=["CPUExecutionProvider"]
+    )
+    model_root = root / "models" / "kokoro"
+    return Kokoro(
+        str(model_root / "kokoro-v1.0.int8.onnx"), str(model_root / "voices-v1.0.bin")
+    )
+
+
+def serve(root: Path) -> None:
+    """Answer utterances from a model held in memory, one JSON line each.
+
+    Protocol, so a caller never has to guess how far along we are:
+
+        <- {"ready": true, "engine": "kokoro", "load_ms": 1234}
+        -> {"id": "1", "text": "hello", "voice": "am_michael", "out": "/path.wav"}
+        <- {"id": "1", "ok": true, "seconds": 0.8, "ms": 210}
+        -> {"op": "close"}
+
+    A failed utterance answers {"ok": false, "error": ...} and the loop stays
+    up: one bad line should not cost the caller its warm model.
+    """
+    import soundfile as sf
+
+    started = time.monotonic()
+    kokoro = load_kokoro(root)
+    load_ms = int((time.monotonic() - started) * 1000)
+    print(json.dumps({"ready": True, "engine": "kokoro", "load_ms": load_ms}), flush=True)
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except ValueError:
+            print(json.dumps({"ok": False, "error": "not json"}), flush=True)
+            continue
+        if request.get("op") == "close":
+            break
+        request_id = str(request.get("id", ""))
+        began = time.monotonic()
+        try:
+            output = Path(request["out"])
+            audio, sample_rate = kokoro.create(
+                request["text"],
+                voice=request.get("voice", "am_michael"),
+                speed=float(request.get("speed", 1.0)),
+                lang=str(request.get("locale", "en-US")).lower(),
+            )
+            sf.write(str(output), audio, sample_rate, subtype="PCM_16")
+            print(
+                json.dumps(
+                    {
+                        "id": request_id,
+                        "ok": True,
+                        "seconds": round(len(audio) / float(sample_rate), 3),
+                        "ms": int((time.monotonic() - began) * 1000),
+                    }
+                ),
+                flush=True,
+            )
+        except Exception as error:  # noqa: BLE001 - report, keep serving
+            print(
+                json.dumps({"id": request_id, "ok": False, "error": f"{error}"[:300]}),
+                flush=True,
+            )
+
+    try:
+        kokoro.voices.close()
+    except Exception:  # noqa: BLE001 - we are on the way out anyway
+        pass
+
+
 def main() -> None:
     action = sys.argv[1]
     root = Path(sys.argv[2])
@@ -155,6 +241,8 @@ def main() -> None:
         tts(root, Path(sys.argv[3]), json.load(sys.stdin))
     elif action == "stt":
         stt(root, Path(sys.argv[3]), Path(sys.argv[4]), json.load(sys.stdin))
+    elif action == "serve":
+        serve(root)
     else:
         raise ValueError("unknown speech action")
 

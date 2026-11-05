@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use c0mpute_net::{Libp2pNetwork, Network};
 use c0mpute_store::ChunkStore;
@@ -35,6 +35,8 @@ struct GatewayState {
     max_price_usd: f64,
     tts_slots: Arc<Semaphore>,
     stt_slots: Arc<Semaphore>,
+    /// Warm, pinned sessions this node is holding (see `speech_session`).
+    sessions: crate::speech_session::SessionStore,
 }
 
 #[derive(Debug)]
@@ -123,12 +125,18 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         // workers instead of serializing most of its synthesis jobs here.
         tts_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SPEECH_JOBS)),
         stt_slots: Arc::new(Semaphore::new(2)),
+        sessions: crate::speech_session::SessionStore::new(),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
+        // Warm, pinned sessions: open once per call, then say a sentence at a
+        // time with no auction and no model reload in the way.
+        .route("/v1/sessions", post(open_session).get(list_sessions))
+        .route("/v1/sessions/{session}/say", post(say_on_session))
+        .route("/v1/sessions/{session}", delete(close_session))
         .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -554,6 +562,121 @@ async fn fetch_result(
             ))
         }
     }
+}
+
+// ---- warm, pinned sessions ----------------------------------------------
+//
+// The one-shot /v1/tts path pays a 4 second bid window and a Kokoro model load
+// on every request. These endpoints pay both once per call instead: `open`
+// pins a warm worker on this node, `say` speaks one sentence on it, `close`
+// lets the model go. See `speech_session` for the measured numbers, and for
+// why a caller should send a sentence at a time rather than a paragraph.
+
+#[derive(Debug, Deserialize)]
+struct OpenSessionRequest {
+    /// A kokoro voice this node serves; defaults to riotcoder's.
+    #[serde(default = "default_session_voice")]
+    voice: String,
+}
+
+fn default_session_voice() -> String {
+    "am_michael".into()
+}
+
+#[derive(Debug, Deserialize)]
+struct SayRequest {
+    text: String,
+    #[serde(default = "default_locale")]
+    locale: String,
+    #[serde(default = "default_speed")]
+    speed: f32,
+}
+
+async fn open_session(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<OpenSessionRequest>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    let opened = state
+        .sessions
+        .open(&input.voice)
+        .await
+        .map_err(|error| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{error:#}")))?;
+    Ok((StatusCode::CREATED, Json(opened)).into_response())
+}
+
+async fn list_sessions(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    let sessions = state.sessions.list().await;
+    Ok(Json(serde_json::json!({ "sessions": sessions })).into_response())
+}
+
+async fn say_on_session(
+    State(state): State<GatewayState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<SayRequest>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    if input.text.trim().is_empty() || input.text.chars().count() > MAX_TTS_CHARS {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("text must contain 1 to {MAX_TTS_CHARS} characters"),
+        ));
+    }
+    if !(0.65..=1.5).contains(&input.speed) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "speed must be between 0.65 and 1.5".into(),
+        ));
+    }
+
+    let spoken = state
+        .sessions
+        .say(&session, input.text.trim(), &input.locale, input.speed)
+        .await
+        .map_err(|error| {
+            let message = format!("{error:#}");
+            let status = if message.contains("no warm speech session") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            ApiError(status, message)
+        })?;
+
+    let wav = tokio::fs::read(&spoken.wav).await.map_err(|error| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not read the synthesized audio: {error}"),
+        )
+    })?;
+    // The caller is about to play this down a phone line, so the timings ride
+    // in headers: it can watch its realtime factor without parsing the body.
+    let mut response = (StatusCode::OK, wav).into_response();
+    let out = response.headers_mut();
+    out.insert(header::CONTENT_TYPE, HeaderValue::from_static("audio/wav"));
+    if let Ok(value) = HeaderValue::from_str(&spoken.synth_ms.to_string()) {
+        out.insert("x-c0mpute-synth-ms", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!("{:.3}", spoken.seconds)) {
+        out.insert("x-c0mpute-audio-seconds", value);
+    }
+    Ok(response)
+}
+
+async fn close_session(
+    State(state): State<GatewayState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    let closed = state.sessions.close(&session).await;
+    Ok(Json(serde_json::json!({ "closed": closed })).into_response())
 }
 
 fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<()> {

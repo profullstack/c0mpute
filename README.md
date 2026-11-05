@@ -159,6 +159,32 @@ private network or HTTPS reverse proxy, then configure the app server with
 to a $0 maximum bid so speech stays free; set `C0MPUTE_SPEECH_MAX_PRICE_USD`
 above zero only when you explicitly want to pay workers that charge for jobs.
 
+#### Warm sessions, for anything that has to talk back
+
+`POST /v1/tts` auctions a job per request, and the auction's bid window alone
+is 4 seconds — fine for a readback, hopeless for a conversation. A **session**
+pins a warm Kokoro on the node running the bridge and pays the model load once:
+
+```sh
+curl -XPOST $URL/v1/sessions -H "authorization: Bearer $TOKEN" \
+  -d '{"voice":"am_michael"}'                     # -> {"session": "...", "load_ms": 1219}
+curl -XPOST $URL/v1/sessions/$ID/say -H "authorization: Bearer $TOKEN" \
+  -d '{"text":"Yes, I can hear you fine."}' -o turn.wav
+curl -XDELETE $URL/v1/sessions/$ID -H "authorization: Bearer $TOKEN"
+```
+
+Each `say` answers with a WAV plus `x-c0mpute-synth-ms` and
+`x-c0mpute-audio-seconds`, so a caller can watch its realtime factor. Measured
+on a Ryzen 9 7950X3D: open 1.27 s once, then 433 ms for a short line and
+1,187 ms for four seconds of audio — roughly a third of realtime. The same
+request on a loaded 6-core box takes 11-40 s, so put sessions on nodes that
+can hold them.
+
+Send **one sentence per `say`** and start playing it while the next renders;
+`GET /v1/sessions` shows what a node is holding. A session idle for five
+minutes is reaped, a node holds at most four, and a worker that dies takes its
+session with it — the next call just opens a new one.
+
 ### Webhook workflow steps (`workflow.step`, for meshhook)
 
 meshhook runs each step of a webhook workflow on c0mpute workers

@@ -12,6 +12,8 @@ use tokio::process::Command;
 use tracing::warn;
 
 const WORKER: &str = include_str!("speech_worker.py");
+/// The same worker source, for the warm-session path in `speech_session`.
+pub(crate) const WORKER_SOURCE: &str = WORKER;
 const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx";
 const KOKORO_MODEL_SHA256: &str =
     "ae315a79b623f244700e4afb9246c46a26066782e049ba174bf3ba433970ee9c";

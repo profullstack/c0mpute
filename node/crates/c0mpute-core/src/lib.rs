@@ -20,6 +20,7 @@ pub mod runner;
 pub mod speech;
 pub mod speech_gateway;
 pub mod speech_profiles;
+pub mod speech_session;
 pub mod status_aggregator;
 pub mod supervisor;
 pub mod temporal;
@@ -74,7 +75,11 @@ pub fn live_bin(cached: &std::path::Path) -> std::path::PathBuf {
         return cached.to_path_buf();
     }
     let found = cached.file_name().and_then(|name| {
-        std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file()))
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .find(|p| p.is_file())
+        })
     });
     match found {
         Some(p) => {
