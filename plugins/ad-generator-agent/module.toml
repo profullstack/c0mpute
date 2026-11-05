@@ -21,7 +21,7 @@
 [module]
 id          = "ad-generator-agent"
 name        = "Ad Generator Agent — every ad type from one URL"
-version     = "0.2.57"
+version     = "0.2.58"
 kind        = "service"
 category    = "applications"
 description = "Turns a landing-page URL into a complete ad set (display banners, text link, terminal, feed item, image, GIF, 5-second video pre-roll and audio) by buying c0mpute work: copy from Infernet inference, voiceover from CPU text-to-speech, artwork from diffusion when workers offer it. No paid AI API by default."
