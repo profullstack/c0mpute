@@ -6,6 +6,11 @@
 # individual licenses. Kokoro model files are Apache-2.0. Pocket TTS weights are
 # CC-BY-4.0; most enabled Pocket preset voices are CC0, while Alba and Anna are
 # CC-BY-4.0.
+#
+# Kokoro (an int8 ONNX export of hexgrad/Kokoro-82M) is the engine every node
+# carries: a worker provisions it in the background until it succeeds, giving
+# it its own virtualenv when the box's Python is too new for kokoro-onnx.
+# `c0mpute tts auto off` opts out.
 
 [module]
 id          = "tts"
