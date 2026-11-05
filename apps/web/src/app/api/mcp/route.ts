@@ -1,5 +1,5 @@
 import { handleRpc } from "@/lib/chat/mcp";
-import { currentUser, infernet, json, rateLimit, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernetFor, json, rateLimit, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -22,7 +22,9 @@ export async function POST(req: Request) {
       return json({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "rate limit: too many chats this hour" } }, 429);
     }
   }
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream: infernet })))).filter(Boolean);
+  // Billed to this person's compute balance, same as the HTTP chat API.
+  const upstream = infernetFor(user.coinpay_sub);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }
