@@ -7,6 +7,12 @@ any failure.
 Published as `ghcr.io/profullstack/c0mpute-video-runner`. The tag a node pulls
 is the one in [`../module.toml`](../module.toml) under `[module.dispatch]`.
 
+**The registry is a convenience, not a dependency.** `c0mpute video setup`
+pulls the image, and if the registry will not serve it — private package,
+rate limit, outage — it shallow-clones this public repo and builds the same
+image locally. `c0mpute video setup --build` skips the pull entirely. A node
+with a card can therefore always serve video, with no registry account.
+
 ## The contract
 
 The node bind-mounts a job directory at `/job` and a weights cache at

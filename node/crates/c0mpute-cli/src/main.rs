@@ -394,8 +394,13 @@ enum SttCmd {
 
 #[derive(Subcommand, Debug)]
 enum VideoCmd {
-    /// Pull the runner image so this node can serve video jobs.
-    Setup,
+    /// Pull the runner image so this node can serve video jobs, building it
+    /// from source if the registry will not serve it.
+    Setup {
+        /// Build from source without trying the registry first.
+        #[arg(long)]
+        build: bool,
+    },
     /// Report whether this node can serve video, and why not if it cannot.
     Check {
         /// Also run the runner's own selftest inside the container. Needs the
@@ -1711,6 +1716,62 @@ async fn run_stt(cmd: SttCmd) -> Result<()> {
     }
 }
 
+/// Build the runner image from a shallow clone of the public repo.
+///
+/// The fallback for `c0mpute video setup` when the registry will not serve
+/// the image. Slower than a pull (it downloads the Python stack rather than
+/// finished layers) but it needs no registry account, which is the point.
+async fn build_video_runner() -> Result<()> {
+    use c0mpute_core::video;
+
+    for bin in ["docker", "git"] {
+        if tokio::process::Command::new(bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_err()
+        {
+            anyhow::bail!("building the runner needs both docker and git; {bin} is missing");
+        }
+    }
+
+    // A fresh directory per run: a half-finished clone from a previous
+    // attempt would make `git clone` fail rather than resume.
+    let checkout = std::env::temp_dir().join(format!("c0mpute-video-src-{}", std::process::id()));
+    let _ = tokio::fs::remove_dir_all(&checkout).await;
+
+    println!("cloning {} (shallow)", video::RUNNER_SOURCE_REPO);
+    let status = tokio::process::Command::new("git")
+        .args(["clone", "--depth", "1", video::RUNNER_SOURCE_REPO])
+        .arg(&checkout)
+        .status()
+        .await
+        .context("could not run git")?;
+    if !status.success() {
+        anyhow::bail!("git clone failed with {status}");
+    }
+
+    println!("building {} (several minutes)", video::RUNNER_IMAGE);
+    let args = video::build_argv(&checkout, video::RUNNER_IMAGE);
+    let status = tokio::process::Command::new("docker")
+        .args(&args)
+        .status()
+        .await
+        .context("could not run docker build")?;
+
+    // Clean up whether or not the build worked: the checkout is scratch and
+    // a stale one in /tmp is worse than no cache at all.
+    let _ = tokio::fs::remove_dir_all(&checkout).await;
+
+    if !status.success() {
+        anyhow::bail!("docker build failed with {status}");
+    }
+    println!("built {}", video::RUNNER_IMAGE);
+    Ok(())
+}
+
 /// `c0mpute video` — the surface `plugins/video/module.toml` declares.
 ///
 /// Everything here talks to the runner image rather than to the network: a
@@ -1720,15 +1781,29 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
     use c0mpute_core::video;
 
     match cmd {
-        VideoCmd::Setup => {
-            println!("pulling {} (this is a large image)", video::RUNNER_IMAGE);
-            let status = tokio::process::Command::new("docker")
-                .args(["pull", video::RUNNER_IMAGE])
-                .status()
-                .await
-                .context("could not run docker; install a container runtime first")?;
-            if !status.success() {
-                anyhow::bail!("docker pull failed with {status}");
+        VideoCmd::Setup { build } => {
+            let mut have_image = false;
+            if !build {
+                println!("pulling {} (this is a large image)", video::RUNNER_IMAGE);
+                let status = tokio::process::Command::new("docker")
+                    .args(["pull", video::RUNNER_IMAGE])
+                    .status()
+                    .await
+                    .context("could not run docker; install a container runtime first")?;
+                have_image = status.success();
+                if !have_image {
+                    // A registry is the kind of dependency that is private by
+                    // default, rate-limited or down, and none of those are a
+                    // reason a node with a card cannot serve video. The repo
+                    // is public, so build the same image from source.
+                    println!();
+                    println!("could not pull the runner image (private, rate-limited or offline).");
+                    println!("building it from source instead — same Dockerfile, same result.");
+                    println!();
+                }
+            }
+            if !have_image {
+                build_video_runner().await?;
             }
             match video::readiness(video::RUNNER_IMAGE) {
                 None => {
@@ -1740,7 +1815,7 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
                 Some(not_ready) => {
                     // The image is in place but something else is missing, so
                     // say so now rather than at the first auction.
-                    println!("image pulled, but this node still cannot serve video:");
+                    println!("the runner image is ready, but this node still cannot serve video:");
                     println!("  {}", not_ready.reason());
                 }
             }

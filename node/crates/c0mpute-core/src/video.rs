@@ -48,6 +48,14 @@ pub const ROLE_TAG: &str = "c0mpute:role:video";
 /// `plugins/video/module.toml` [module.dispatch].
 pub const RUNNER_IMAGE: &str = "ghcr.io/profullstack/c0mpute-video-runner:candidate";
 
+/// Where a node can build the runner itself when it cannot pull it.
+///
+/// The registry is a convenience, not a dependency: this repo is public, so
+/// any node with docker and git can produce the same image from source. That
+/// matters because a container registry is exactly the kind of thing that is
+/// private by default, rate-limited, or down.
+pub const RUNNER_SOURCE_REPO: &str = "https://github.com/profullstack/c0mpute.git";
+
 /// Caps, mirroring the runner's own. The node checks first so it never pays
 /// to start a container for a job it would have to fail.
 pub const MAX_FRAMES: u32 = 241;
@@ -249,6 +257,23 @@ pub fn docker_argv(run: &ContainerRun) -> Vec<String> {
         run.command.clone(),
         "--job".to_string(),
         "/job/job.json".to_string(),
+    ]
+}
+
+/// `docker build` argv for the runner, from a checkout of this repo.
+///
+/// The context is `plugins/video`, not the runner directory: the image needs
+/// `module.toml` (its model registry), which lives one level up.
+pub fn build_argv(checkout: &Path, image: &str) -> Vec<String> {
+    let context = checkout.join("plugins").join("video");
+    let dockerfile = context.join("runner").join("Dockerfile");
+    vec![
+        "build".to_string(),
+        "-t".to_string(),
+        image.to_string(),
+        "-f".to_string(),
+        dockerfile.display().to_string(),
+        context.display().to_string(),
     ]
 }
 
@@ -642,6 +667,20 @@ mod tests {
         assert!(image_at < cmd_at, "image precedes the command: {argv:?}");
         // Exactly the two mounts, so nothing else of the host is exposed.
         assert_eq!(argv.iter().filter(|a| *a == "-v").count(), 2);
+    }
+
+    #[test]
+    fn build_argv_points_at_the_manifest_context() {
+        let argv = build_argv(Path::new("/src/c0mpute"), "img:tag");
+        // The Dockerfile lives under runner/, but the context must be the
+        // plugin directory so module.toml is in the image.
+        assert!(argv.contains(&"/src/c0mpute/plugins/video/runner/Dockerfile".to_string()));
+        assert!(argv.contains(&"/src/c0mpute/plugins/video".to_string()));
+        assert!(argv.contains(&"img:tag".to_string()));
+        // Context last: docker reads the final positional as the context.
+        assert_eq!(argv.last().unwrap(), "/src/c0mpute/plugins/video");
+        let dash_f = argv.iter().position(|a| a == "-f").unwrap();
+        assert_eq!(argv[dash_f + 1], "/src/c0mpute/plugins/video/runner/Dockerfile");
     }
 
     #[test]

@@ -5,6 +5,10 @@
 # published as the image below; the node's video runner invokes it per job and
 # reads files, never stdout. See that directory's README for the job contract.
 #
+# The image below is a convenience: `c0mpute video setup` falls back to
+# building it from this public repo when the registry will not serve it, so a
+# node with a GPU never needs a registry account.
+#
 #   Backend: Diffusers, not ComfyUI. ComfyUI would mean shipping hand-authored
 #   API graph JSON per model, which cannot be checked by reading it; the
 #   diffusers pipelines take the Wan repos directly, so the model set below is
