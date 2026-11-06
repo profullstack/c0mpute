@@ -8,23 +8,35 @@
  */
 
 import { NextResponse } from "next/server";
-import { loadAllPlugins, tagline, installCommand } from "@/lib/plugins";
+import {
+  loadAllPlugins,
+  tagline,
+  installCommand,
+  modelOptions,
+} from "@/lib/plugins";
 
 export function GET() {
-  const plugins = loadAllPlugins().map((p) => ({
-    id: p.id,
-    name: p.name,
-    version: p.version,
-    kind: p.kind,
-    tagline: tagline(p),
-    description: p.description,
-    keywords: p.keywords ?? [],
-    homepage: p.homepage,
-    source: p.source,
-    install_command: installCommand(p),
-    install_url: `https://c0mpute.com/plugins/${p.id}/install.sh`,
-    web: `https://c0mpute.com/plugins/${p.id}`,
-  }));
+  const plugins = loadAllPlugins().map((p) => {
+    // Omitted rather than sent as [] for the plugins that have no model to
+    // choose, which is most of them.
+    const models = modelOptions(p).map(({ id, model }) => ({ id, ...model }));
+
+    return {
+      id: p.id,
+      name: p.name,
+      version: p.version,
+      kind: p.kind,
+      tagline: tagline(p),
+      description: p.description,
+      keywords: p.keywords ?? [],
+      homepage: p.homepage,
+      source: p.source,
+      install_command: installCommand(p),
+      install_url: `https://c0mpute.com/plugins/${p.id}/install.sh`,
+      web: `https://c0mpute.com/plugins/${p.id}`,
+      models: models.length > 0 ? models : undefined,
+    };
+  });
 
   return NextResponse.json(
     { count: plugins.length, plugins },
