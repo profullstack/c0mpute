@@ -535,6 +535,10 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::WorkflowStep) {
         types.push(crate::workflow::WORKLOAD.to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::Video) {
+        types.push(crate::video::WORKLOAD_TXT2VID.to_string());
+        types.push(crate::video::WORKLOAD_IMG2VID.to_string());
+    }
     types
 }
 

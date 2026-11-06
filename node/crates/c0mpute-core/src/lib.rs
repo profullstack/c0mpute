@@ -25,6 +25,7 @@ pub mod status_aggregator;
 pub mod supervisor;
 pub mod temporal;
 pub mod text;
+pub mod video;
 pub mod webhook;
 pub mod workflow;
 

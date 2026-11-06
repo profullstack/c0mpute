@@ -89,6 +89,14 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::Gateway => tags.push("c0mpute:role:gateway".to_string()),
             Role::Verifier => tags.push("c0mpute:role:verifier".to_string()),
             Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
+            Role::Video => {
+                // Same rule as TTS: advertise only what this box can do now.
+                // A node without the GPU, the runtime or the image would win
+                // auctions and fail them.
+                if crate::video::readiness_cached(crate::video::RUNNER_IMAGE).is_none() {
+                    tags.push(crate::video::ROLE_TAG.to_string());
+                }
+            }
         }
     }
     tags

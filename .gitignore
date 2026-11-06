@@ -22,3 +22,7 @@ subscribers.txt
 pnpm-lock.yaml
 blog.db
 .claude/
+
+# Python bytecode (the video runner and scripts/)
+__pycache__/
+*.pyc

@@ -98,7 +98,7 @@ impl WorkerLoad {
 
 /// Remove a job's scratch directory once its result is stored (or the job
 /// failed). The stored result lives in the chunk store, not here.
-async fn cleanup_job_dir(cache_root: &std::path::Path, job_id: &str) {
+pub(crate) async fn cleanup_job_dir(cache_root: &std::path::Path, job_id: &str) {
     if let Ok(dir) = safe_job_dir(cache_root, job_id) {
         if let Err(e) = fs::remove_dir_all(&dir).await {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -326,7 +326,7 @@ async fn run_stt_job(
     Ok(hash.to_hex())
 }
 
-fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
+pub(crate) fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
     let uuid = uuid::Uuid::parse_str(job_id).context("job id must be a UUID")?;
     Ok(cache_root.join("jobs").join(uuid.to_string()))
 }

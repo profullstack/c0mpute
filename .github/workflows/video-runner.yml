@@ -1,0 +1,105 @@
+# Build and publish the video-generation runner image.
+#
+# The runner's own contract tests are baked into the Dockerfile, so a bad
+# dependency pin or a broken job contract fails the BUILD and never reaches
+# ghcr. They also run here on their own for pull requests, because a full
+# torch image is several GB and not worth building to learn that a validation
+# rule changed.
+#
+# The image the node pulls is the tag in plugins/video/module.toml under
+# [module.dispatch]; keep the two in step.
+name: video runner
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "plugins/video/**"
+      - ".github/workflows/video-runner.yml"
+  pull_request:
+    paths:
+      - "plugins/video/**"
+      - ".github/workflows/video-runner.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra tag to publish, e.g. v0.2.61"
+        required: false
+
+env:
+  IMAGE: ghcr.io/profullstack/c0mpute-video-runner
+
+jobs:
+  # Fast gate: the job contract, without building the image.
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install what the selftest needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python3 -m pip install --quiet pillow
+      - name: Runner contract tests
+        working-directory: plugins/video/runner
+        run: python3 test_runner.py
+
+  publish:
+    # Only from master or a manual run: the image is several GB.
+    if: github.event_name != 'pull_request'
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Reclaim runner disk
+        # A torch image does not fit beside the hosted runner's preinstalled
+        # toolchains, and the failure is an opaque "no space left on device".
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: tags
+        env:
+          EXTRA: ${{ inputs.tag }}
+        run: |
+          set -eu
+          tags="${IMAGE}:candidate,${IMAGE}:${GITHUB_SHA}"
+          if [ -n "${EXTRA:-}" ]; then
+            tags="${tags},${IMAGE}:${EXTRA}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # The context is plugins/video so module.toml — the runner's model
+          # registry — is part of the image.
+          context: plugins/video
+          file: plugins/video/runner/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Selftest the published image
+        # Proves the thing we just pushed can parse the manifest, encode and
+        # probe. Needs no GPU, so a hosted runner can do it.
+        run: docker run --rm "${IMAGE}:${GITHUB_SHA}" selftest

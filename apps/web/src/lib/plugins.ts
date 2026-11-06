@@ -58,6 +58,8 @@ export const CATEGORY_BLURBS: Record<Category, string> = {
  */
 export interface ModelOption {
   repo?: string;
+  /** Diffusers-format repo the runner loads; `repo` stays the canonical id. */
+  diffusers_repo?: string;
   default?: boolean;
   params?: string;
   precision?: string;

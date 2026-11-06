@@ -183,6 +183,10 @@ pub enum Role {
     /// calls for webhook workflows. Config/CLI spelling: `workflow-step`.
     #[serde(rename = "workflow-step", alias = "workflowstep")]
     WorkflowStep,
+    /// `video.txt2vid` / `video.img2vid`: Wan 2.2 generation in the runner
+    /// container. Never a default role — it needs an NVIDIA GPU, a container
+    /// runtime and a 20 GB image.
+    Video,
 }
 
 #[cfg(test)]

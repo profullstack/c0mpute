@@ -141,6 +141,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SttCmd,
     },
+    /// Video generation (Wan 2.2) in the runner container.
+    Video {
+        #[command(subcommand)]
+        cmd: VideoCmd,
+    },
     /// Run the authenticated HTTP buyer bridge for P2P speech inference.
     Speech {
         #[command(subcommand)]
@@ -385,6 +390,21 @@ enum TtsCmd {
 enum SttCmd {
     /// Install multilingual faster-whisper base and its CPU runtime.
     Setup,
+}
+
+#[derive(Subcommand, Debug)]
+enum VideoCmd {
+    /// Pull the runner image so this node can serve video jobs.
+    Setup,
+    /// Report whether this node can serve video, and why not if it cannot.
+    Check {
+        /// Also run the runner's own selftest inside the container. Needs the
+        /// image, but neither a GPU nor model weights.
+        #[arg(long)]
+        selftest: bool,
+    },
+    /// List the model options the runner image ships with.
+    Models,
 }
 
 #[derive(Subcommand, Debug)]
@@ -678,6 +698,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
         Cmd::Tts { cmd } => run_tts(cmd, &config_path).await,
         Cmd::Stt { cmd } => run_stt(cmd).await,
+        Cmd::Video { cmd } => run_video(cmd).await,
         Cmd::Speech { cmd } => {
             let cfg = Config::load_or_default(&config_path)?;
             start_auto_update_poller(cfg.update_auto);
@@ -1690,6 +1711,93 @@ async fn run_stt(cmd: SttCmd) -> Result<()> {
     }
 }
 
+/// `c0mpute video` — the surface `plugins/video/module.toml` declares.
+///
+/// Everything here talks to the runner image rather than to the network: a
+/// provider's first question is "can this box earn on video", and the answer
+/// is a GPU, a container runtime and a pulled image.
+async fn run_video(cmd: VideoCmd) -> Result<()> {
+    use c0mpute_core::video;
+
+    match cmd {
+        VideoCmd::Setup => {
+            println!("pulling {} (this is a large image)", video::RUNNER_IMAGE);
+            let status = tokio::process::Command::new("docker")
+                .args(["pull", video::RUNNER_IMAGE])
+                .status()
+                .await
+                .context("could not run docker; install a container runtime first")?;
+            if !status.success() {
+                anyhow::bail!("docker pull failed with {status}");
+            }
+            match video::readiness(video::RUNNER_IMAGE) {
+                None => {
+                    println!("this node can serve video jobs");
+                    println!(
+                        "start a worker with `c0mpute worker start --roles video` to advertise them"
+                    );
+                }
+                Some(not_ready) => {
+                    // The image is in place but something else is missing, so
+                    // say so now rather than at the first auction.
+                    println!("image pulled, but this node still cannot serve video:");
+                    println!("  {}", not_ready.reason());
+                }
+            }
+            Ok(())
+        }
+        VideoCmd::Check { selftest } => {
+            match video::readiness(video::RUNNER_IMAGE) {
+                None => println!("ready: GPU, container runtime and runner image are all present"),
+                Some(not_ready) => {
+                    println!("not ready: {}", not_ready.reason());
+                    return Ok(());
+                }
+            }
+            if selftest {
+                println!("running the runner selftest in the container");
+                let status = tokio::process::Command::new("docker")
+                    .args(["run", "--rm", video::RUNNER_IMAGE, "selftest"])
+                    .status()
+                    .await
+                    .context("could not run the runner image")?;
+                if !status.success() {
+                    anyhow::bail!("runner selftest failed with {status}");
+                }
+            }
+            Ok(())
+        }
+        VideoCmd::Models => {
+            // The image carries the manifest it was built from, so this is
+            // the model set that node would actually serve — not what this
+            // CLI happened to be compiled with.
+            let out = tokio::process::Command::new("docker")
+                .args([
+                    "run",
+                    "--rm",
+                    "--entrypoint",
+                    "python3",
+                    video::RUNNER_IMAGE,
+                    "-c",
+                    "import tomllib,sys;\
+m=tomllib.load(open('/opt/c0mpute-video/module.toml','rb'))['module']['models'];\
+[print(f\"{k:18} {v.get('params','?'):9} {v.get('vram_gib','?')} GiB  {v.get('repo','')}\") for k,v in m.items()]",
+                ])
+                .output()
+                .await
+                .context("could not run the runner image; `c0mpute video setup` first")?;
+            if !out.status.success() {
+                anyhow::bail!(
+                    "could not read the model table: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            Ok(())
+        }
+    }
+}
+
 async fn run_speech(cmd: SpeechCmd) -> Result<()> {
     match cmd {
         SpeechCmd::Serve {
@@ -2085,6 +2193,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "gateway" => Some(Role::Gateway),
         "verifier" => Some(Role::Verifier),
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
+        "video" => Some(Role::Video),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None
