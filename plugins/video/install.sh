@@ -12,6 +12,7 @@
 set -eu
 
 IMAGE="${C0MPUTE_VIDEO_IMAGE:-ghcr.io/profullstack/c0mpute-video-runner:candidate}"
+SOURCE_REPO="${C0MPUTE_VIDEO_SOURCE_REPO:-https://github.com/profullstack/c0mpute.git}"
 
 say()  { printf '\033[1;36m→\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
@@ -43,17 +44,39 @@ fi
 
 if [ "$missing" -eq 0 ]; then
   say "pulling $IMAGE (several GB, once)"
-  if docker pull "$IMAGE"; then
-    ok "runner image pulled"
-    say "selftesting the image (no GPU needed)"
-    if docker run --rm "$IMAGE" selftest; then
-      ok "runner works on this box"
+  if ! docker pull "$IMAGE"; then
+    # The registry is a convenience, not a dependency: private, rate-limited
+    # or offline is no reason a box with a card cannot serve video. This repo
+    # is public, so build the same image from source.
+    warn "could not pull $IMAGE (private, rate-limited or offline)"
+    if command -v git >/dev/null 2>&1; then
+      say "building it from source instead (several minutes)"
+      src=$(mktemp -d)
+      # shellcheck disable=SC2064
+      trap "rm -rf '$src'" EXIT INT TERM
+      if git clone --depth 1 "$SOURCE_REPO" "$src" \
+         && docker build -t "$IMAGE" -f "$src/plugins/video/runner/Dockerfile" \
+              "$src/plugins/video"; then
+        ok "runner image built from source"
+      else
+        warn "could not build the runner image"
+        missing=1
+      fi
     else
-      warn "the runner image failed its own selftest; do not enable the role yet"
+      warn "install git to build the runner from source, then re-run this script"
       missing=1
     fi
   else
-    warn "could not pull $IMAGE"
+    ok "runner image pulled"
+  fi
+fi
+
+if [ "$missing" -eq 0 ]; then
+  say "selftesting the image (no GPU needed)"
+  if docker run --rm "$IMAGE" selftest; then
+    ok "runner works on this box"
+  else
+    warn "the runner image failed its own selftest; do not enable the role yet"
     missing=1
   fi
 fi
