@@ -13,8 +13,8 @@
 #
 #   Weights: pulled from Hugging Face into the runner's /weights cache on
 #   first use. Moving that to the c0mpute storage plugin (DIP-0012) is the
-#   next step and matters more than it sounds — a cold pull is tens of GB and
-#   a rented card bills for every minute of it.
+#   next step and matters more than it sounds — the default model's cold pull
+#   is a measured 32 GB, and a rented card bills for every minute of it.
 #
 #   Validation: schema + ffprobe (codec, dimensions, frame count, duration) —
 #   a generated clip is not reproducible across workers, so no cross-worker

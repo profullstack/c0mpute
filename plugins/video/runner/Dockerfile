@@ -26,15 +26,23 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# No .pyc litter from the build-time test run, and none at run time in a
+# read-only directory.
+ENV PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /opt/c0mpute-video
 
-COPY runner/requirements.txt ./
+# --chmod, not inherited modes: COPY preserves the build context's
+# permissions, so a checkout without "other" read bits (umask, ACLs)
+# builds an image whose own non-root USER cannot read its runner. CI
+# checks out 644 and would never show it.
+COPY --chmod=0644 runner/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # The manifest is the model registry the runner reads at run time, so it
 # ships in the image rather than being duplicated in Python.
-COPY module.toml ./
-COPY runner/runner.py runner/test_runner.py ./
+COPY --chmod=0644 module.toml ./
+COPY --chmod=0755 runner/runner.py runner/test_runner.py ./
 
 # Fail the BUILD if this combination of pins cannot even import, or if the
 # runner's own contract tests do not pass. A published image that cannot
@@ -46,12 +54,23 @@ print('torch', torch.__version__, '| diffusers', diffusers.__version__)" \
     && C0MPUTE_VIDEO_MODULE_TOML=/opt/c0mpute-video/module.toml \
        python3 /opt/c0mpute-video/test_runner.py
 
-# Weights cache. Mount a named volume here: a cold Hugging Face pull is tens
-# of GB, and on a rented card that pull is billed like inference.
+# Weights cache. Mount a named volume or a host directory here: a cold
+# Hugging Face pull is tens of GB, and on a rented card that pull is billed
+# like inference.
 ENV HF_HOME=/weights/hf \
     HF_HUB_DISABLE_TELEMETRY=1 \
     PYTHONUNBUFFERED=1
 VOLUME ["/weights"]
+
+# Never root. The node passes `--user <its own uid>:<gid>` so the clip it
+# reads back is owned by the node rather than by root — without that it
+# cannot clean up its own job directory. This USER is for every other way
+# the image gets run (by hand, or the CI selftest), where there is no
+# --user to override it. Numeric so it resolves with no passwd lookup.
+RUN useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin runner \
+    && mkdir -p /job /weights \
+    && chown 10001:10001 /job /weights
+USER 10001:10001
 
 # The job directory the node bind-mounts. Commands: txt2vid | img2vid | selftest.
 WORKDIR /job

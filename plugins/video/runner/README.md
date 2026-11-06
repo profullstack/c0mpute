@@ -83,9 +83,10 @@ provider mid-auction.
 
 ## Weights, and why the cache matters
 
-First use of a model pulls tens of GB from Hugging Face into
-`/weights/hf`. On a rented card that pull bills at the same rate as
-inference, so warm the cache before advertising the role. Moving weights to
+First use of a model pulls from Hugging Face into `/weights/hf`. Measured
+for the default `wan2.2-ti2v-5b`: **32 GB** over 242 shards. On a rented card
+that pull bills at the same rate as inference, so warm the cache before
+advertising the role. Moving weights to
 the c0mpute storage plugin (DIP-0012) is the next step and would also let the
 container run with `--network none`.
 
@@ -96,7 +97,12 @@ PNG→MP4 encode, ffprobe validation, the sidecar, and that this pin set
 imports.
 
 **Not yet verified: a real clip.** That needs a 24 GiB NVIDIA card, which no
-node in the fleet currently has. The generation path (`generate_frames`) is
-written against the diffusers 0.42 `WanPipeline` / `WanImageToVideoPipeline`
-signatures but has never produced a frame. Treat the first real job as the
+node in the fleet currently has.
+
+How far the generation path has actually been taken, on a box with no GPU:
+`txt2vid` resolved the diffusers repo, pulled the weights and loaded 62% of
+the model's 242 shards before the kernel killed it for memory. So the repo
+id, the pipeline class and `from_pretrained` are real; everything from
+`pipe.to("cuda")` onward — the sampling call, its kwargs, and the PIL frames
+`write_frames` expects — has never executed. Treat the first real job as the
 test it is.
