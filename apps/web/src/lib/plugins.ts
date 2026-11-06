@@ -49,6 +49,24 @@ export const CATEGORY_BLURBS: Record<Category, string> = {
   other: "no category declared in module.toml",
 };
 
+/**
+ * One entry of a manifest's `[module.models]` table: a model a plugin can
+ * be asked to run. `vramGib` is the floor a provider has to beat at the
+ * stated precision, which is what the marketplace card shows — a reader
+ * deciding whether their card can earn on this plugin needs that number,
+ * not a benchmark.
+ */
+export interface ModelOption {
+  repo?: string;
+  default?: boolean;
+  params?: string;
+  precision?: string;
+  vram_gib?: number;
+  resolution?: string;
+  workloads?: string[];
+  license?: string;
+}
+
 export interface PluginManifest {
   id: string;
   name: string;
@@ -68,6 +86,7 @@ export interface PluginManifest {
     capabilities?: string[];
   };
   workloads?: Record<string, { command?: string; validation?: string }>;
+  models?: Record<string, ModelOption>;
   dispatch?: {
     mode: "in-process" | "subprocess" | "container";
     binary?: string;
@@ -120,6 +139,7 @@ function loadOne(id: string): PluginManifest | null {
     keywords: Array.isArray(m.keywords) ? (m.keywords as string[]) : undefined,
     requirements: m.requirements as PluginManifest["requirements"],
     workloads: m.workloads as PluginManifest["workloads"],
+    models: m.models as PluginManifest["models"],
     dispatch: m.dispatch as PluginManifest["dispatch"],
     install: m.install as PluginManifest["install"],
     surfaces: m.surfaces as PluginManifest["surfaces"],
@@ -164,4 +184,21 @@ export function tagline(p: PluginManifest): string {
  */
 export function installCommand(p: PluginManifest): string {
   return `c0mpute plugin install ${p.id}`;
+}
+
+/**
+ * Model options for a card, default first then alphabetical. A plugin with
+ * no `[module.models]` table returns an empty list and renders nothing —
+ * most plugins have no model to choose.
+ */
+export function modelOptions(
+  p: PluginManifest,
+): { id: string; model: ModelOption }[] {
+  return Object.entries(p.models ?? {})
+    .map(([id, model]) => ({ id, model }))
+    .sort(
+      (a, b) =>
+        Number(b.model.default ?? false) - Number(a.model.default ?? false) ||
+        a.id.localeCompare(b.id),
+    );
 }

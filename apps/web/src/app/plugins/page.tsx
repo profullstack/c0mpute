@@ -6,15 +6,17 @@ import {
   byCategory,
   tagline,
   installCommand,
+  modelOptions,
   CATEGORY_LABELS,
   CATEGORY_BLURBS,
   type PluginManifest,
+  type ModelOption,
 } from "@/lib/plugins";
 
 export const metadata = {
   title: "plugins — c0mpute",
   description:
-    "c0mpute workload plugins, network services and applications: AI inference, embeddings, diffusion, speech and OCR; transcoding, rendering and streaming; crawling, storage and hosting. MIT-licensed, manifest-driven.",
+    "c0mpute workload plugins, network services and applications: AI inference, embeddings, image and video generation, speech and OCR; transcoding, rendering and streaming; crawling, storage and hosting. MIT-licensed, manifest-driven.",
   alternates: { canonical: "https://c0mpute.com/plugins" },
 };
 
@@ -157,6 +159,8 @@ function PluginCard({ p }: { p: PluginManifest }) {
         </p>
       )}
 
+      <ModelList p={p} />
+
       {p.dispatch?.mode === "in-process" ? (
         <p className="text-xs accent">ships with c0mpute · installed by default</p>
       ) : (
@@ -183,4 +187,50 @@ function PluginCard({ p }: { p: PluginManifest }) {
       </footer>
     </article>
   );
+}
+
+/**
+ * Model options declared by the manifest. Rendered as a plain list rather
+ * than a table: the point a reader is after is "which of these can my card
+ * run", so the VRAM floor sits next to each name.
+ */
+function ModelList({ p }: { p: PluginManifest }) {
+  const models = modelOptions(p);
+  if (models.length === 0) return null;
+
+  return (
+    <div className="space-y-1">
+      <p className="text-xs accent">models</p>
+      <ul className="space-y-1 text-xs text-[var(--color-dim)]">
+        {models.map(({ id, model }) => (
+          <li key={id}>
+            <code className="text-[var(--color-fg)]">{id}</code>
+            {model.default && <span className="accent"> · default</span>}
+            {modelSpec(model).length > 0 && <> · {modelSpec(model).join(" · ")}</>}
+            {model.repo && (
+              <>
+                {" · "}
+                <a
+                  href={`https://huggingface.co/${model.repo}`}
+                  className="!border-0 hover:text-[var(--color-accent)]"
+                >
+                  {model.repo} ↗
+                </a>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** The specs worth showing inline, skipping whatever the manifest omitted. */
+function modelSpec(model: ModelOption): string[] {
+  return [
+    model.params,
+    model.precision,
+    model.vram_gib ? `${model.vram_gib} GiB VRAM` : undefined,
+    model.resolution,
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
 }
