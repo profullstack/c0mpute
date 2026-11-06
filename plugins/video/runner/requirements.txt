@@ -1,0 +1,21 @@
+# Pinned: a provider's node and CI must get the same stack, and an
+# unpinned torch silently changes the CUDA it expects from the host driver.
+#
+# torch comes from PyPI rather than a cu* index and the base image is plain
+# python:3.12-slim, because the PyPI wheels carry their own CUDA runtime as
+# nvidia-* packages. Only the driver comes from the host, through the NVIDIA
+# container runtime. That keeps us off the base-image-CUDA/wheel-CUDA
+# mismatch, which fails at first inference rather than at build.
+torch==2.15.0
+diffusers==0.42.1
+transformers==5.22.2
+accelerate==1.15.0
+safetensors==0.8.0
+pillow==13.0.0
+
+# Wan's text encoder is UMT5. The repos ship a fast tokenizer so these are
+# usually unused, but a repo without tokenizer.json falls back to the
+# sentencepiece path and the failure is an unhelpful conversion error.
+sentencepiece==0.2.3
+protobuf==7.36.2
+ftfy==6.3.1

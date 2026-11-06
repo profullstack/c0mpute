@@ -194,6 +194,29 @@ impl Supervisor {
                     self.store.clone(),
                     load.clone(),
                 )),
+                crate::video::WORKLOAD_TXT2VID | crate::video::WORKLOAD_IMG2VID => {
+                    // The only container workload, so unlike the in-process
+                    // runners it can be unservable on a box that configured
+                    // the role: no GPU, no docker, or the image never pulled.
+                    // Skip the subscription entirely in that case rather than
+                    // bidding and failing.
+                    if let Some(not_ready) = crate::video::readiness(crate::video::RUNNER_IMAGE) {
+                        info!(
+                            %workload_type,
+                            reason = not_ready.reason(),
+                            "not subscribing: this node cannot serve video"
+                        );
+                        continue;
+                    }
+                    Some(crate::video::spawn_video_runner(
+                        net.clone(),
+                        self.store.clone(),
+                        cache_root.clone(),
+                        workload_type.clone(),
+                        crate::video::RUNNER_IMAGE.to_string(),
+                        load.clone(),
+                    ))
+                }
                 _ => None,
             };
             dispatch::run_worker_subscriber_with_load(

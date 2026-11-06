@@ -1,23 +1,30 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Containerized video-generation workload: text-to-video and
-#   image-to-video. Suggested upstreams: ComfyUI (the Wan 2.2 reference
-#   graphs ship with it) or Diffusers. Container pins the model set in
-#   [module.models]; jobs name a model id and the runner pulls weights
-#   from the c0mpute storage plugin (DIP-0012) rather than Hugging Face
-#   at job time. Output is one MP4 (H.264 or AV1) plus a metadata
-#   sidecar; hand the clip to the transcode plugin for other renditions.
-#   Validation: schema + ffprobe (duration, fps, dimensions) — a
-#   generated clip is not reproducible across workers, so no
-#   cross-worker hash check and no perceptual spot-check. Pay on a
-#   receipt from a single worker, as with render.
+# Containerized video-generation workload: text-to-video and image-to-video.
+# The runner lives at plugins/video/runner (Dockerfile + runner.py) and is
+# published as the image below; the node's video runner invokes it per job and
+# reads files, never stdout. See that directory's README for the job contract.
 #
-#   Model choice: Wan 2.2 (Apache-2.0, so commercial use is clean) is
-#   the default family. HunyuanVideo was the other candidate — quality
-#   is comparable, but it is markedly slower per clip, which is the
-#   wrong trade on a network billing by the second.
+#   Backend: Diffusers, not ComfyUI. ComfyUI would mean shipping hand-authored
+#   API graph JSON per model, which cannot be checked by reading it; the
+#   diffusers pipelines take the Wan repos directly, so the model set below is
+#   the whole configuration. Each model therefore carries `diffusers_repo`
+#   alongside the canonical `repo`.
+#
+#   Weights: pulled from Hugging Face into the runner's /weights cache on
+#   first use. Moving that to the c0mpute storage plugin (DIP-0012) is the
+#   next step and matters more than it sounds — a cold pull is tens of GB and
+#   a rented card bills for every minute of it.
+#
+#   Validation: schema + ffprobe (codec, dimensions, frame count, duration) —
+#   a generated clip is not reproducible across workers, so no cross-worker
+#   hash check and no perceptual spot-check. Pay on a receipt from a single
+#   worker, as with render.
+#
+#   Model choice: Wan 2.2 (Apache-2.0, so commercial use is clean) is the
+#   default family. HunyuanVideo was the other candidate — quality is
+#   comparable, but it is markedly slower per clip, which is the wrong trade
+#   on a network billing by the second.
 
 [module]
 id          = "video"
@@ -45,13 +52,13 @@ capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
 # benchmark. Weights are Apache-2.0 for every variant here; the plugin
 # itself is MIT.
 [module.models]
-"wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", default = true, params = "5B", precision = "fp16", vram_gib = 24, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
-"wan2.2-t2v-a14b" = { repo = "Wan-AI/Wan2.2-T2V-A14B", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.txt2vid"], license = "apache-2.0" }
-"wan2.2-i2v-a14b" = { repo = "Wan-AI/Wan2.2-I2V-A14B", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.img2vid"], license = "apache-2.0" }
+"wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", diffusers_repo = "Wan-AI/Wan2.2-TI2V-5B-Diffusers", default = true, params = "5B", precision = "fp16", vram_gib = 24, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
+"wan2.2-t2v-a14b" = { repo = "Wan-AI/Wan2.2-T2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-T2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.txt2vid"], license = "apache-2.0" }
+"wan2.2-i2v-a14b" = { repo = "Wan-AI/Wan2.2-I2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.img2vid"], license = "apache-2.0" }
 
 [module.dispatch]
 mode  = "container"
-image = "ghcr.io/c0mpute/video-runner:candidate"
+image = "ghcr.io/profullstack/c0mpute-video-runner:candidate"
 
 [module.surfaces]
 cli = "c0mpute video"
