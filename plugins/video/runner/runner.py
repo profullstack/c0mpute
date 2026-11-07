@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """c0mpute video-generation runner.
 
-One job per process: read a job JSON, generate a clip with Wan 2.2, encode an
-MP4, write a metadata sidecar, and exit non-zero on any failure. The node's
+One job per process: read a job JSON, generate a clip (Wan 2.2, or LTX-2.3
+with a synchronized soundtrack), encode an MP4, write a metadata sidecar, and
+exit non-zero on any failure. The node's
 `video` runner invokes this inside the container and never parses stdout, so
 the contract is entirely files on disk:
 
@@ -49,7 +50,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-RUNNER_VERSION = "1"
+RUNNER_VERSION = "2"
 
 # Where the image puts the manifest it was built from. Overridable so the
 # selftest can run against a checkout.
@@ -64,6 +65,14 @@ MAX_PIXELS = 1280 * 720
 MAX_PROMPT_CHARS = 2000
 MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 
+# Pipeline families. A manifest row without `backend` is Wan, which is what
+# every row meant before LTX-2 arrived.
+BACKENDS = ("wan", "ltx2")
+
+# The distilled LTX-2 checkpoints only work on their fixed sigma schedule;
+# `steps` from the job is ignored for them and this is what ran.
+LTX2_DISTILLED_STEPS = 8
+
 
 class JobError(Exception):
     """A problem with the job itself — refuse it, do not retry."""
@@ -77,6 +86,9 @@ class Model:
     workloads: tuple[str, ...]
     precision: str
     vram_gib: int
+    backend: str = "wan"
+    audio: bool = False
+    distilled: bool = False
 
 
 def load_models(path: Path) -> dict[str, Model]:
@@ -107,7 +119,14 @@ def load_models(path: Path) -> dict[str, Model]:
             workloads=tuple(row.get("workloads", ())),
             precision=row.get("precision", "bf16"),
             vram_gib=int(row.get("vram_gib", 0)),
+            backend=row.get("backend", "wan"),
+            audio=bool(row.get("audio", False)),
+            distilled=bool(row.get("distilled", False)),
         )
+        if models[mid].backend not in BACKENDS:
+            # Fail loudly: a typo here would otherwise advertise a model the
+            # runner then serves with the wrong pipeline.
+            raise JobError(f"model {mid} has unknown backend {models[mid].backend!r}")
     return models
 
 
@@ -147,6 +166,17 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
         raise JobError("width and height must be multiples of 16")
     if width * height > MAX_PIXELS:
         raise JobError(f"width*height must not exceed {MAX_PIXELS}")
+    if model.backend == "ltx2":
+        # The pipeline raises on sizes not divisible by 32, and silently
+        # rounds a frame count that is not 8k+1 (its VAE compresses time by
+        # 8), which would then fail the exact frame-count validation after
+        # the worker had already paid for the generation.
+        if width % 32 or height % 32:
+            raise JobError(f"{model.id}: width and height must be multiples of 32")
+        if frames % 8 != 1:
+            raise JobError(f"{model.id}: frames must be 8k+1 (e.g. 81, 121, 161)")
+        if model.distilled:
+            steps = LTX2_DISTILLED_STEPS
 
     image = None
     if workload == "video.img2vid":
@@ -178,8 +208,98 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
         "width": width,
         "height": height,
         "seed": seed,
-        "guidance_scale": float(raw.get("guidance_scale", 5.0)),
+        # Distilled checkpoints are trained for CFG off; 5.0 on them burns
+        # two forward passes per step for a worse clip.
+        "guidance_scale": float(
+            raw["guidance_scale"]
+            if raw.get("guidance_scale") is not None
+            else (1.0 if model.distilled else 5.0)
+        ),
     }
+
+
+def generate(job: dict, frame_dir: Path, audio_path: Path) -> bool:
+    """Run the model's pipeline. Writes frames as PNGs, and the soundtrack as
+    a WAV when the model makes one. Returns whether audio was written."""
+    if job["model"].backend == "ltx2":
+        return generate_ltx2(job, frame_dir, audio_path)
+    generate_frames(job, frame_dir)
+    return False
+
+
+def generate_ltx2(job: dict, frame_dir: Path, audio_path: Path) -> bool:
+    """LTX-2.x: video and a synchronized soundtrack from one pipeline call.
+
+    diffusers' own `encode_video` muxes the audio but needs PyAV; we already
+    ship ffmpeg for the encode and ffprobe for validation, so the waveform is
+    written as a WAV and muxed by `encode` instead of adding a dependency.
+    """
+    import torch
+    from diffusers import LTX2ImageToVideoPipeline, LTX2Pipeline
+    from diffusers.pipelines.ltx2.utils import DEFAULT_NEGATIVE_PROMPT, DISTILLED_SIGMA_VALUES
+
+    model: Model = job["model"]
+    pipe_cls = LTX2Pipeline if job["workload"] == "video.txt2vid" else LTX2ImageToVideoPipeline
+    pipe = pipe_cls.from_pretrained(model.diffusers_repo, torch_dtype=torch.bfloat16)
+    # Model offload, not .to("cuda"): the 22B transformer alone is most of a
+    # 48 GiB card, and the Gemma text encoder does not need to sit beside it.
+    pipe.enable_model_cpu_offload()
+    pipe.vae.enable_tiling()
+
+    kwargs = dict(
+        prompt=job["prompt"],
+        negative_prompt=job["negative_prompt"] or DEFAULT_NEGATIVE_PROMPT,
+        height=job["height"],
+        width=job["width"],
+        num_frames=job["frames"],
+        frame_rate=float(job["fps"]),
+        num_inference_steps=job["steps"],
+        guidance_scale=job["guidance_scale"],
+        generator=torch.Generator(device="cpu").manual_seed(job["seed"]),
+        output_type="pil",
+        return_dict=False,
+    )
+    if model.distilled:
+        kwargs["sigmas"] = DISTILLED_SIGMA_VALUES
+    if job["image"] is not None:
+        from diffusers.utils import load_image
+
+        kwargs["image"] = load_image(str(job["image"]))
+
+    video, audio = pipe(**kwargs)
+    write_frames(video[0], frame_dir)
+    rate = int(pipe.vocoder.config.output_sampling_rate)
+    write_wav(audio[0].float().cpu().numpy(), rate, audio_path)
+    return True
+
+
+def write_wav(samples, rate: int, path: Path) -> None:
+    """Float waveform shaped [channels, samples] (or [samples]) in -1..1 ->
+    16-bit PCM WAV. Pure stdlib so the selftest covers it without numpy."""
+    import array
+    import wave
+
+    rows = samples.tolist() if hasattr(samples, "tolist") else samples
+    if rows and not isinstance(rows[0], (list, tuple)):
+        rows = [rows]
+    channels = len(rows)
+    if channels == 0 or channels > 8 or not rows[0]:
+        raise JobError("the model produced no audio")
+    length = len(rows[0])
+    if any(len(r) != length for r in rows):
+        raise JobError("audio channels differ in length")
+    pcm = array.array("h", bytes(2 * channels * length))
+    for c, row in enumerate(rows):
+        for i, v in enumerate(row):
+            v = -1.0 if v < -1.0 else 1.0 if v > 1.0 else v
+            pcm[i * channels + c] = int(round(v * 32767))
+    if sys.byteorder == "big":
+        pcm.byteswap()
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
 
 
 def generate_frames(job: dict, frame_dir: Path) -> None:
@@ -236,12 +356,19 @@ def write_frames(frames, frame_dir: Path) -> int:
     return count
 
 
-def encode(frame_dir: Path, out_path: Path, fps: int) -> None:
-    """PNG sequence -> H.264 MP4.
+def encode(frame_dir: Path, out_path: Path, fps: int, audio_path: Path | None = None) -> None:
+    """PNG sequence (+ optional WAV) -> H.264/AAC MP4.
 
     yuv420p and faststart because the buyer's browser is the common consumer
     and neither is the default for a PNG source.
     """
+    audio_in: list[str] = []
+    audio_out: list[str] = []
+    if audio_path is not None:
+        # No -shortest: it can drop the last video frame and fail the exact
+        # frame-count check. The model sizes its audio to the clip.
+        audio_in = ["-i", str(audio_path)]
+        audio_out = ["-c:a", "aac", "-b:a", "192k"]
     cmd = [
         ffmpeg_bin(),
         "-y",
@@ -252,6 +379,7 @@ def encode(frame_dir: Path, out_path: Path, fps: int) -> None:
         str(fps),
         "-i",
         str(frame_dir / "frame_%05d.png"),
+        *audio_in,
         "-c:v",
         "libx264",
         "-preset",
@@ -262,6 +390,7 @@ def encode(frame_dir: Path, out_path: Path, fps: int) -> None:
         "yuv420p",
         "-movflags",
         "+faststart",
+        *audio_out,
         str(out_path),
     ]
     run(cmd, "ffmpeg encode")
@@ -292,7 +421,33 @@ def probe(out_path: Path) -> dict:
         raise JobError("output has no video stream")
     stream = streams[0]
     fmt = data.get("format") or {}
+    audio = json.loads(
+        run(
+            [
+                ffprobe_bin(),
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name,sample_rate,channels",
+                "-of",
+                "json",
+                str(out_path),
+            ],
+            "ffprobe audio",
+        )
+    ).get("streams") or []
     return {
+        "audio": (
+            {
+                "codec": audio[0].get("codec_name"),
+                "sample_rate": int(audio[0].get("sample_rate", 0) or 0),
+                "channels": int(audio[0].get("channels", 0) or 0),
+            }
+            if audio
+            else None
+        ),
         "codec": stream.get("codec_name"),
         "width": int(stream.get("width", 0)),
         "height": int(stream.get("height", 0)),
@@ -315,6 +470,9 @@ def validate(probed: dict, job: dict) -> None:
         raise JobError("output has no duration")
     if probed["size_bytes"] > MAX_OUTPUT_BYTES:
         raise JobError(f"output exceeds the {MAX_OUTPUT_BYTES} byte result limit")
+    if job["model"].audio and not probed.get("audio"):
+        # A model sold as "video + audio" must not hand back a silent clip.
+        raise JobError(f"{job['model'].id} must produce a soundtrack; output has none")
 
 
 def run(cmd: list[str], what: str) -> str:
@@ -339,14 +497,16 @@ def run_job(job_path: Path) -> int:
 
     frame_dir = job_dir / "frames"
     out_path = job_dir / "out.mp4"
-    generate_frames(job, frame_dir)
-    encode(frame_dir, out_path, job["fps"])
+    audio_path = job_dir / "audio.wav"
+    has_audio = generate(job, frame_dir, audio_path)
+    encode(frame_dir, out_path, job["fps"], audio_path if has_audio else None)
     probed = probe(out_path)
     validate(probed, job)
     write_sidecar(job_dir, job, probed)
     # The frames are many times the size of the clip and the node only ships
     # out.mp4, so they are dropped before the job dir is handed back.
     shutil.rmtree(frame_dir, ignore_errors=True)
+    audio_path.unlink(missing_ok=True)
     print(f"ok {out_path} {probed['frames']}f {probed['duration_s']:.2f}s")
     return 0
 
@@ -361,6 +521,7 @@ def write_sidecar(job_dir: Path, job: dict, probed: dict) -> None:
         "repo": model.repo,
         "diffusers_repo": model.diffusers_repo,
         "precision": model.precision,
+        "backend": model.backend,
         "prompt": job["prompt"],
         "negative_prompt": job["negative_prompt"],
         "seed": job["seed"],
@@ -444,11 +605,46 @@ def selftest(job_dir: Path) -> int:
     probed = probe(out_path)
     validate(probed, job)
     write_sidecar(job_dir, job, probed)
-    shutil.rmtree(frame_dir, ignore_errors=True)
     print(
         f"selftest ok: {probed['codec']} {probed['width']}x{probed['height']} "
         f"{probed['frames']}f {probed['duration_s']:.2f}s {probed['size_bytes']}B"
     )
+
+    # The soundtrack path: WAV writer -> AAC mux -> ffprobe sees the audio
+    # stream -> an audio model's validation passes. Same frames, re-used.
+    audio_models = [m for m in models.values() if m.audio]
+    if audio_models:
+        import math
+
+        model = audio_models[0]
+        av_frames = 9  # 8k+1, as LTX-2 requires
+        if written < av_frames:
+            # Pad by repeating the last frame; the encode only needs files.
+            last = frame_dir / f"frame_{written - 1:05d}.png"
+            for i in range(written, av_frames):
+                shutil.copyfile(last, frame_dir / f"frame_{i:05d}.png")
+        av_job = parse_job(
+            {**json.loads(job_path.read_text()), "model": model.id, "frames": av_frames},
+            models,
+            job_dir,
+        )
+        rate = 48000
+        n = int(rate * av_frames / fps)
+        tone = [math.sin(2 * math.pi * 440 * i / rate) * 0.2 for i in range(n)]
+        audio_path = job_dir / "audio.wav"
+        write_wav([tone, tone], rate, audio_path)
+        encode(frame_dir, out_path, fps, audio_path)
+        av_probed = probe(out_path)
+        validate(av_probed, av_job)
+        write_sidecar(job_dir, av_job, av_probed)
+        audio_path.unlink(missing_ok=True)
+        a = av_probed["audio"]
+        print(
+            f"selftest audio ok ({model.id}): {a['codec']} {a['sample_rate']}Hz "
+            f"{a['channels']}ch, {av_probed['frames']}f"
+        )
+
+    shutil.rmtree(frame_dir, ignore_errors=True)
     print(f"models from manifest: {sorted(models)}")
     return 0
 

@@ -68,7 +68,7 @@ def main() -> int:
 
     print("manifest is the single source of models")
     models = runner.load_models(MANIFEST)
-    check("three models load", len(models) == 3, f"(got {sorted(models)})")
+    check("four models load", len(models) == 4, f"(got {sorted(models)})")
     check("default model present", "wan2.2-ti2v-5b" in models)
     for mid, model in models.items():
         check(f"{mid} has a diffusers repo", model.diffusers_repo.endswith("-Diffusers"))
@@ -125,6 +125,21 @@ def main() -> int:
     )
     check("img2vid accepts a present image", ok["image"] == tmp / "in.png")
 
+    print("LTX-2 (video + audio) has its own rules")
+    av = "ltx2.3-av-distilled"
+    check("audio model is ltx2", models[av].backend == "ltx2" and models[av].audio)
+    check("wan rows default to the wan backend", models["wan2.2-ti2v-5b"].backend == "wan")
+    ltx = runner.parse_job(base_job(model=av), models, tmp)
+    check("node defaults (81f, 1280x704) are accepted", ltx["frames"] == 81)
+    check("distilled runs its fixed 8 steps", ltx["steps"] == runner.LTX2_DISTILLED_STEPS)
+    check("distilled defaults CFG off", ltx["guidance_scale"] == 1.0)
+    check(
+        "explicit guidance is kept",
+        runner.parse_job(base_job(model=av, guidance_scale=2.0), models, tmp)["guidance_scale"] == 2.0,
+    )
+    refuses("ltx2 frames not 8k+1", base_job(model=av, frames=80), tmp, "8k+1")
+    refuses("ltx2 size not /32", base_job(model=av, width=1264), tmp, "multiples of 32")
+
     print("validate() rejects output that does not match the job")
     probed = {
         "codec": "h264",
@@ -152,14 +167,48 @@ def main() -> int:
         except runner.JobError:
             check(f"rejects {name}", True)
 
+    print("an audio model never returns a silent clip")
+    av_job = runner.parse_job(base_job(model=av), models, tmp)
+    try:
+        runner.validate({**probed, "audio": None}, av_job)
+        check("silent clip from audio model rejected", False, "(accepted)")
+    except runner.JobError as exc:
+        check("silent clip from audio model rejected", "soundtrack" in str(exc))
+    try:
+        runner.validate(
+            {**probed, "audio": {"codec": "aac", "sample_rate": 48000, "channels": 2}}, av_job
+        )
+        check("clip with audio passes", True)
+    except runner.JobError as exc:
+        check("clip with audio passes", False, f"(got {exc!r})")
+
+    print("write_wav makes a valid 16-bit WAV")
+    import wave
+
+    wav = tmp / "t.wav"
+    runner.write_wav([[0.0, 0.5, -0.5, 2.0], [0.0, -1.0, 1.0, -2.0]], 48000, wav)
+    with wave.open(str(wav)) as w:
+        check("wav header", (w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()) == (2, 2, 48000, 4))
+    runner.write_wav([0.1, 0.2], 24000, wav)
+    with wave.open(str(wav)) as w:
+        check("mono 1-D input", w.getnchannels() == 1 and w.getnframes() == 2)
+    for name, bad in [("empty", []), ("ragged", [[0.1, 0.2], [0.1]])]:
+        try:
+            runner.write_wav(bad, 48000, wav)
+            check(f"wav refuses {name}", False, "(accepted)")
+        except runner.JobError:
+            check(f"wav refuses {name}", True)
+
     print("the selftest runs end to end")
     sel = tmp / "selftest"
     rc = runner.selftest(sel)
     check("selftest returns 0", rc == 0)
     check("selftest wrote a clip", (sel / "out.mp4").stat().st_size > 0)
     sidecar = json.loads((sel / "out.json").read_text())
-    check("sidecar names the model", sidecar["model"] == "wan2.2-ti2v-5b")
+    # The last leg of the selftest is the audio one, so its sidecar wins.
+    check("sidecar names the audio model", sidecar["model"] == av)
     check("sidecar records what was produced", sidecar["produced"]["codec"] == "h264")
+    check("selftest clip carries aac audio", (sidecar["produced"]["audio"] or {}).get("codec") == "aac")
     check("frames are cleaned up", not (sel / "frames").exists())
 
     print()

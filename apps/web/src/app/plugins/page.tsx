@@ -232,5 +232,6 @@ function modelSpec(model: ModelOption): string[] {
     model.precision,
     model.vram_gib ? `${model.vram_gib} GiB VRAM` : undefined,
     model.resolution,
+    model.audio ? "video + audio" : undefined,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
 }
