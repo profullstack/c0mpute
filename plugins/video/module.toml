@@ -29,17 +29,28 @@
 #   default family. HunyuanVideo was the other candidate — quality is
 #   comparable, but it is markedly slower per clip, which is the wrong trade
 #   on a network billing by the second.
+#
+#   Video WITH sound: LTX-2.3 (Lightricks) generates the clip and a
+#   synchronized 48 kHz stereo soundtrack in one pass. We take the distilled
+#   diffusers repo: ungated (no per-node Hugging Face token), 8 steps, no CFG.
+#   Its weights are NOT Apache: the LTX-2 Community License is worldwide and
+#   royalty-free for entities under $10M annual revenue, allows hosting as a
+#   service (s.3), and requires its Attachment A use restrictions to be in our
+#   terms and outputs to be disclosed as machine generated. A node operator
+#   at $10M+ revenue needs their own commercial license from Lightricks.
+#   Rejected: HyperFlow H3 / MiniMax H3 (license excludes the US, EU, UK and
+#   Korea), Ovi and Kandinsky 6 (both load MMAudio weights, CC-BY-NC).
 
 [module]
 id          = "video"
-name        = "Video — generation (Wan 2.2)"
+name        = "Video — generation (Wan 2.2, LTX-2.3 with audio)"
 version     = "0.2.60"
 kind        = "workload"
 category    = "ai"
-description = "Decentralized video generation (Wan 2.2 text-to-video and image-to-video) on consumer/prosumer GPUs."
+description = "Decentralized video generation on consumer/prosumer GPUs: Wan 2.2 text/image-to-video, and LTX-2.3 video with a synchronized soundtrack."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["video", "wan", "wan2.2", "txt2vid", "img2vid", "generation", "diffusion"]
+keywords    = ["video", "wan", "wan2.2", "ltx-2", "ltx-2.3", "audio", "txt2vid", "img2vid", "generation", "diffusion"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"
@@ -53,12 +64,17 @@ capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
 
 # Model options. `vram_gib` is the floor for the stated precision — the
 # number a provider's advert has to beat to be matched to a job, not a
-# benchmark. Weights are Apache-2.0 for every variant here; the plugin
-# itself is MIT.
+# benchmark. The Wan weights are Apache-2.0; LTX-2.3 is under the LTX-2
+# Community License (see the header). The plugin itself is MIT.
+#
+# `backend` picks the diffusers pipeline family (default "wan"); `audio`
+# means the clip carries a soundtrack, and the runner refuses to return one
+# without it. LTX-2 needs frames = 8k+1 and width/height divisible by 32.
 [module.models]
 "wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", diffusers_repo = "Wan-AI/Wan2.2-TI2V-5B-Diffusers", default = true, params = "5B", precision = "fp16", vram_gib = 24, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
 "wan2.2-t2v-a14b" = { repo = "Wan-AI/Wan2.2-T2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-T2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.txt2vid"], license = "apache-2.0" }
 "wan2.2-i2v-a14b" = { repo = "Wan-AI/Wan2.2-I2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.img2vid"], license = "apache-2.0" }
+"ltx2.3-av-distilled" = { repo = "Lightricks/LTX-2.3", diffusers_repo = "diffusers/LTX-2.3-Distilled-Diffusers", backend = "ltx2", audio = true, distilled = true, params = "22B", precision = "bf16", vram_gib = 48, resolution = "768x512@24fps + 48kHz stereo", workloads = ["video.txt2vid", "video.img2vid"], license = "ltx-2-community" }
 
 [module.dispatch]
 mode  = "container"

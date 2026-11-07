@@ -1,4 +1,4 @@
-# video runner — Wan 2.2
+# video runner — Wan 2.2 and LTX-2.3 (video + audio)
 
 The container the `video` plugin dispatches to. One job per process: read
 `job.json`, generate a clip, encode an MP4, write a sidecar, exit non-zero on
@@ -23,7 +23,7 @@ files and the process exit code.
 | --- | --- | --- |
 | `/job/job.json` | in | the job |
 | `/job/<image>` | in | `img2vid` only: the conditioning frame, a bare filename |
-| `/job/out.mp4` | out | the clip, H.264 in MP4 |
+| `/job/out.mp4` | out | the clip, H.264 in MP4 (plus AAC audio for `audio = true` models) |
 | `/job/out.json` | out | sidecar: model, repo, seed, and what ffprobe saw |
 
 ```json
@@ -59,6 +59,33 @@ ComfyUI would mean shipping hand-authored API graph JSON per model, which
 cannot be checked by reading it and breaks silently when a node name changes
 upstream. The diffusers pipelines take the Wan repos directly, so the model
 table is the whole configuration.
+
+## Video with sound: LTX-2.3
+
+`ltx2.3-av-distilled` (`backend = "ltx2"`, `audio = true`) runs
+`diffusers/LTX-2.3-Distilled-Diffusers` through `LTX2Pipeline` /
+`LTX2ImageToVideoPipeline`. One call returns the frames and a 48 kHz stereo
+waveform; the runner writes the waveform as a WAV and ffmpeg muxes it as AAC.
+(diffusers' own `encode_video` would need PyAV; ffmpeg is already here.)
+
+- `frames` must be 8k+1 (81, 121, 161...) and width/height divisible by 32.
+  The node's defaults (81 frames, 1280x704) already are.
+- The distilled checkpoint runs its fixed 8-step sigma schedule whatever
+  `steps` says, with CFG off (`guidance_scale` 1.0) unless the job sets one.
+  The sidecar records the 8.
+- A clip from an audio model with no audio stream fails validation: a buyer
+  who paid for sound never gets a silent clip.
+- 22B parameters in bf16 with model CPU offload: the 48 GiB floor in the
+  manifest is the transformer plus headroom. A 24 GiB card would need
+  sequential offload and 64 GB+ of system RAM, which is too slow to win jobs.
+
+**License.** The weights are under the LTX-2 Community License, not Apache:
+free for entities under $10M annual revenue, hosting as a service is allowed
+(s.3), Attachment A's use restrictions must be in the buyer terms, outputs
+must be disclosed as machine generated, and watermark/provenance features
+must not be stripped. Its item 20 forbids use in a service that "directly
+competes" with Lightricks' commercial offerings without a separate license;
+we have asked Lightricks to confirm a compute marketplace is not that.
 
 ## Build and run
 
@@ -102,8 +129,11 @@ Verified in CI and locally: manifest parsing, job validation and refusals,
 PNG→MP4 encode, ffprobe validation, the sidecar, and that this pin set
 imports.
 
-**Not yet verified: a real clip.** That needs a 24 GiB NVIDIA card, which no
-node in the fleet currently has.
+**Not yet verified: a real clip.** That needs a 24 GiB NVIDIA card (48 GiB
+for LTX-2.3), which no node in the fleet currently has. The LTX-2 sampling
+call is written against the diffusers 0.42.1 source and the model card, and
+its audio mux is covered by the selftest with a synthetic tone, but the
+pipeline itself has never run here.
 
 How far the generation path has actually been taken, on a box with no GPU:
 `txt2vid` resolved the diffusers repo, pulled the weights and loaded 62% of

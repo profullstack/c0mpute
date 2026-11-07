@@ -67,6 +67,12 @@ export interface ModelOption {
   resolution?: string;
   workloads?: string[];
   license?: string;
+  /** Diffusers pipeline family the runner uses; omitted means "wan". */
+  backend?: string;
+  /** The clip carries a generated soundtrack, not just pictures. */
+  audio?: boolean;
+  /** Few-step distilled checkpoint (fixed schedule, no CFG). */
+  distilled?: boolean;
 }
 
 export interface PluginManifest {

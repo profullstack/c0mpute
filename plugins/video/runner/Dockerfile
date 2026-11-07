@@ -1,4 +1,4 @@
-# c0mpute video-generation runner — Wan 2.2 via diffusers.
+# c0mpute video-generation runner — Wan 2.2 and LTX-2.3 (video + audio) via diffusers.
 #
 # Published as ghcr.io/profullstack/c0mpute-video-runner (see
 # .github/workflows/video-runner.yml); the tag the node pulls is the one in
@@ -50,6 +50,8 @@ COPY --chmod=0755 runner/runner.py runner/test_runner.py ./
 RUN python3 -c "\
 import torch, diffusers;\
 from diffusers import AutoencoderKLWan, WanImageToVideoPipeline, WanPipeline;\
+from diffusers import LTX2Pipeline, LTX2ImageToVideoPipeline;\
+from diffusers.pipelines.ltx2.utils import DEFAULT_NEGATIVE_PROMPT, DISTILLED_SIGMA_VALUES;\
 print('torch', torch.__version__, '| diffusers', diffusers.__version__)" \
     && C0MPUTE_VIDEO_MODULE_TOML=/opt/c0mpute-video/module.toml \
        python3 /opt/c0mpute-video/test_runner.py
