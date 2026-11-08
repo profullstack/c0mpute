@@ -309,6 +309,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         spec_inline: Some(auction.spec_inline.clone()),
         published_at_ms: unix_ms(),
         external_ref: auction.external_ref.clone(),
+        buyer_addrs: crate::reachability::buyer_external_addrs(
+            std::env::var("C0MPUTE_P2P_EXTERNAL").ok().as_deref(),
+            &offer.buyer_peer_id,
+        ),
     };
     publish_json(&net, &topic, &accept).await?;
     if let Some(tx) = &auction.accept_notify {

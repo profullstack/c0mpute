@@ -593,6 +593,20 @@ pub(crate) async fn publish_receipt(
         signature: None,
         external_ref: accept.external_ref.clone(),
     };
+    // Reach back to the buyer first: it can fetch the result only over a
+    // connection, and it usually cannot dial our random, firewalled port.
+    if receipt.output_hash.is_some() {
+        let addrs =
+            crate::reachability::dialable_buyer_addrs(&accept.buyer_addrs, &accept.buyer_peer_id);
+        if !addrs.is_empty() {
+            for addr in addrs {
+                if let Err(e) = net.dial(addr).await {
+                    tracing::debug!(err = %e, "dial back to buyer failed");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+    }
     let topic = job_topic(&accept.workload_type);
     if let Ok(payload) = serde_json::to_vec(&receipt) {
         if let Err(e) = net.publish(&topic, payload).await {
