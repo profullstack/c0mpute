@@ -5,7 +5,7 @@ import { getNodesPayload, NODE_GOAL } from "@/lib/nodes";
 export const metadata = {
   title: "nodes — c0mpute",
   description:
-    "Every c0mpute node online right now, ranked by its c0mpute bench score, plus the people who invited them. The goal is 100,000 nodes.",
+    "Every c0mpute node online right now, ranked by its c0mpute bench score, with who runs each one and who invited them. How to name your node. The goal is 100,000 nodes.",
   alternates: { canonical: "https://c0mpute.com/nodes" },
 };
 
@@ -43,9 +43,9 @@ export default async function NodesPage() {
         <p className="text-xs text-[var(--color-dim)] leading-6">
           Read from the signed capability adverts each worker gossips every
           minute. A node drops off five minutes after its last advert. Each row
-          shows only what the advert already says in public: the end of the
-          peer id, a hardware class, cores, the bench score, the version and the
-          referral handle it was installed with.
+          shows only what the advert already says in public: the operator&apos;s
+          nickname, the end of the peer id, a hardware class, cores, the bench
+          score, the version and the referral handle it was installed with.
           {p.source === "unavailable" ? " The aggregator is not answering right now, so the board is empty." : ""}
         </p>
       </section>
@@ -77,7 +77,10 @@ export default async function NodesPage() {
                 {p.nodes.map((n, i) => (
                   <tr key={`${n.id}-${i}`}>
                     <td className="py-2 pr-3 text-[var(--color-dim)]">{i + 1}</td>
-                    <td className="py-2 pr-3 accent font-mono">{n.id}</td>
+                    <td className="py-2 pr-3">
+                      {n.name ? <span className="accent font-bold">{n.name}</span> : <span className="text-[var(--color-dim)]">unnamed</span>}
+                      <span className="block font-mono text-[var(--color-dim)]">{n.id}</span>
+                    </td>
                     <td className="py-2 pr-3">{n.class}</td>
                     <td className="py-2 pr-3">{n.cores ?? "-"}</td>
                     <td className="py-2 pr-3">{n.bench_score?.toLocaleString() ?? "-"}</td>
@@ -90,17 +93,66 @@ export default async function NodesPage() {
             </table>
           </div>
         )}
-        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
+        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --name <your-handle>
 $ c0mpute bench        # one full run puts a score next to your node`}</CodeBlock>
+      </section>
+
+      <section className="space-y-3" id="name">
+        <h2 className="text-sm font-semibold">[ name your node ]</h2>
+        <p className="text-sm leading-7">
+          Every row starts as <span className="text-[var(--color-dim)]">unnamed</span>{" "}
+          with only the last 8 characters of its peer id. Give it a nickname so
+          people can see who runs it. Use the same nickname on every machine
+          you run and they are counted together under{" "}
+          <a href="#operators">operators</a>.
+        </p>
+        <p className="text-sm leading-7">On a node that is already running:</p>
+        <CodeBlock>{`$ c0mpute name profullstack       # set it (use your own handle)
+$ c0mpute worker stop && c0mpute worker start -d   # restart to publish it
+$ c0mpute name                    # check what is set`}</CodeBlock>
+        <p className="text-sm leading-7">When installing a new one:</p>
+        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --name profullstack`}</CodeBlock>
+        <p className="text-xs text-[var(--color-dim)] leading-6">
+          Your row shows the new name within a minute of the restart, on the
+          worker&apos;s next advert. The nickname is stored in{" "}
+          <code>~/.c0mpute/name</code>; the <code>C0MPUTE_NAME</code> environment
+          variable overrides it (handy in Docker or systemd).{" "}
+          <code>c0mpute name --clear</code> removes it. Rules: lowercase letters,
+          digits, <code>-</code> and <code>_</code>, up to 32 characters.
+          Anything else is ignored and the row stays unnamed. Names are public
+          and nobody checks them, so they show who says they run a node, not
+          who gets paid: earnings go to the payout address set on the node
+          (<code>infernet payout set</code>), never to a name. Needs c0mpute 0.2.64 or newer (<code>c0mpute update</code>).
+        </p>
+        {p.operators.length > 0 && (
+          <table id="operators" className="w-full text-left border-collapse text-xs">
+            <thead className="text-[var(--color-dim)]">
+              <tr>
+                <th className="py-2 pr-3">operator</th>
+                <th className="py-2">nodes online</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-rule)]">
+              {p.operators.map((o) => (
+                <tr key={o.name}>
+                  <td className="py-2 pr-3 accent">{o.name}</td>
+                  <td className="py-2">{o.nodes}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="space-y-3" id="refer">
         <h2 className="text-sm font-semibold">[ invite people ]</h2>
         <p className="text-sm leading-7">
-          Pick a handle and share <code>https://c0mpute.com/r/&lt;handle&gt;</code>.
-          That page gives your visitors an install line with your handle in it,
-          and every node they start shows up here with your name next to it.
-          Handles are lowercase letters, digits, <code>-</code> and{" "}
+          This is separate from your node&apos;s name: a name says who runs a
+          node, a referral handle says who brought it in. Pick a handle and
+          share <code>https://c0mpute.com/r/&lt;handle&gt;</code>. That page
+          gives your visitors an install line with your handle in it, and every
+          node they start shows your handle in the <em>invited by</em> column.
+          Same rules as names: lowercase letters, digits, <code>-</code> and{" "}
           <code>_</code>, up to 32 characters.
         </p>
         <p className="text-xs text-[var(--color-dim)] leading-6">

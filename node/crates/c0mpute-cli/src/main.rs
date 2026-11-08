@@ -90,6 +90,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<PricingCmd>,
     },
+    /// Your node's nickname on c0mpute.com/nodes (who runs it).
+    ///
+    /// `c0mpute name` prints it, `c0mpute name <handle>` sets it, `c0mpute
+    /// name --clear` removes it. Use the same handle on every machine you run
+    /// and the board groups them under it. Lowercase a-z, 0-9, `-` and `_`, up
+    /// to 32 characters; public and unverified. Stored in `~/.c0mpute/name`
+    /// (`C0MPUTE_NAME` overrides it). A running worker picks a change up on
+    /// restart.
+    Name {
+        /// The nickname to set, e.g. `profullstack`.
+        handle: Option<String>,
+        /// Remove the nickname.
+        #[arg(long, conflicts_with = "handle")]
+        clear: bool,
+    },
     /// Private mode: serve only your own machines, stay off the public list.
     ///
     /// A private node only bids on jobs whose signed publisher is one of the
@@ -694,6 +709,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             c0mpute_core::status_aggregator::run(bind).await
         }
         Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
+        Cmd::Name { handle, clear } => run_name(handle, clear),
         Cmd::Private { cmd } => run_private(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
@@ -1124,6 +1140,38 @@ fn run_private(cmd: Option<PrivateCmd>, config_path: &std::path::Path) -> Result
     }
     if local.is_empty() && cfg.private.buyers.is_empty() {
         println!("  (none yet: run `c0mpute worker register` or allow a peer-id)");
+    }
+    Ok(())
+}
+
+fn run_name(handle: Option<String>, clear: bool) -> Result<()> {
+    use c0mpute_core::capabilities::{node_name, node_name_path, sanitize_ref};
+    let path = node_name_path().context("cannot find a home directory for ~/.c0mpute")?;
+    let apply = "(apply: c0mpute worker stop && c0mpute worker start -d)";
+    if clear {
+        match std::fs::remove_file(&path) {
+            Ok(()) => println!("removed {} {apply}", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no nickname was set"),
+            Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+        }
+    } else if let Some(raw) = handle {
+        let name = sanitize_ref(&raw).with_context(|| {
+            format!("{raw:?} is not a valid nickname: use a-z, 0-9, - or _, up to 32 characters")
+        })?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, format!("{name}\n"))
+            .with_context(|| format!("write {}", path.display()))?;
+        println!("saved to {} {apply}", path.display());
+    }
+    match node_name() {
+        Some(n) => {
+            let via = if std::env::var_os("C0MPUTE_NAME").is_some() { " (from C0MPUTE_NAME)" } else { "" };
+            println!("name     : {n}{via}");
+            println!("shown on : https://c0mpute.com/nodes");
+        }
+        None => println!("name     : (none; set one with `c0mpute name <handle>`)"),
     }
     Ok(())
 }

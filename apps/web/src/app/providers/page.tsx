@@ -22,8 +22,13 @@ export default function ProvidersPage() {
           overnight and a rack of A100s advertise capacity the same way, quote
           the same way, and get paid the same way. Nobody approves you.
         </p>
-        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh
+        <CodeBlock>{`$ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --name <your-handle>
 $ c0mpute worker status        # the installer already started it`}</CodeBlock>
+        <p className="text-xs text-[var(--color-dim)] leading-6">
+          <code>--name</code> is optional: it is the nickname your node shows on{" "}
+          <Link href="/nodes#name">the node board</Link>. Set or change it later
+          with <code>c0mpute name &lt;handle&gt;</code>.
+        </p>
       </section>
 
       <section className="space-y-3 text-sm leading-7">
