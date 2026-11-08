@@ -3,17 +3,21 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CodeBlock } from "@/components/CodeBlock";
 import { installLine, sanitizeRef } from "@/lib/nodes";
+import { pageOg } from "@/lib/og";
 
 type Props = { params: Promise<{ code: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const code = sanitizeRef((await params).code);
+  const title = code ? `${code} invited you to run a c0mpute node` : "Run a c0mpute node";
+  const description =
+    "Run a c0mpute node with one command. The open compute network is aiming for 100,000 nodes so it can train and serve open-weight models in the open.";
   return {
-    title: code ? `${code} invited you to run a c0mpute node` : "c0mpute",
-    description:
-      "Run a c0mpute node with one command. The open compute network is aiming for 100,000 nodes so it can train and serve open-weight models in the open.",
+    title,
+    description,
     robots: { index: false, follow: true },
     alternates: { canonical: "https://c0mpute.com/" },
+    ...pageOg(title, description, `/r/${code ?? ""}`),
   };
 }
 

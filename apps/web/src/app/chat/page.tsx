@@ -1,10 +1,14 @@
 import { ChatApp } from "./chat-app";
+import { pageOg } from "@/lib/og";
+
+const DESCRIPTION =
+  "Chat with open models running on the c0mpute network. Sign in with CoinPay (DID required). Same chat from the browser, the c0mpute CLI, an OpenAI-compatible API and MCP.";
 
 export const metadata = {
   title: "chat — c0mpute",
-  description:
-    "Chat with open models running on the c0mpute network. Sign in with CoinPay (DID required). Same chat from the browser, the c0mpute CLI, an OpenAI-compatible API and MCP.",
+  description: DESCRIPTION,
   alternates: { canonical: "https://c0mpute.com/chat" },
+  ...pageOg("Chat with open models on c0mpute", DESCRIPTION, "/chat"),
 };
 
 export const dynamic = "force-dynamic";
