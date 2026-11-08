@@ -13,7 +13,7 @@
 [module]
 id          = "train"
 name        = "Fine-tune — LoRA/QLoRA training"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "ai"
 status      = "coming-soon"

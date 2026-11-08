@@ -10,7 +10,7 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "ai"
 status      = "partial"
