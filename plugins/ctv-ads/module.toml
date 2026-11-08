@@ -20,7 +20,7 @@
 [module]
 id          = "ctv-ads"
 name        = "CTV Ads — Connected TV ad marketplace"
-version     = "0.2.69"
+version     = "0.2.70"
 kind        = "service"
 category    = "applications"
 status      = "coming-soon"
