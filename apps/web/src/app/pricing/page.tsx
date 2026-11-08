@@ -69,11 +69,11 @@ export default function PricingPage() {
             <tr>
               <td className="py-2 pr-6 align-top accent whitespace-nowrap">infernet</td>
               <td className="py-2 text-[var(--color-dim)] leading-6">
-                <strong className="text-[var(--color-fg)]">A separate product, 2% house fee.</strong>{" "}
+                <strong className="text-[var(--color-fg)]">The same 5% house fee.</strong>{" "}
                 Paid inference bought on{" "}
                 <a href="https://infernetprotocol.com" target="_blank" rel="noopener noreferrer">infernetprotocol.com</a>{" "}
                 runs on c0mpute nodes but is billed by Infernet: the operator
-                keeps 98%. The c0mpute market fee is never added on top.
+                keeps 95%. The c0mpute market fee is never added on top.
               </td>
             </tr>
             <tr>

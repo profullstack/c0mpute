@@ -68,9 +68,10 @@ export default async function MarketPage() {
         </table>
         <p className="text-xs text-[var(--color-dim)] leading-6">
           <a href="https://infernetprotocol.com" target="_blank" rel="noopener noreferrer">Infernet</a>{" "}
-          is a separate product with its own 2% house fee on paid inference
-          jobs, which also run on these nodes; the {MARKET_FEE_PCT}% market fee
-          never applies on top of an Infernet job. Two peers dealing directly
+          charges the same {MARKET_FEE_PCT}% house fee on paid inference jobs,
+          which also run on these nodes, so the operator keeps{" "}
+          {OPERATOR_SHARE_PCT}% either way; the market fee never applies on
+          top of an Infernet job. Two peers dealing directly
           over the open protocol, without the market, pay no protocol fee. →{" "}
           <Link href="/pricing">pricing</Link>
         </p>

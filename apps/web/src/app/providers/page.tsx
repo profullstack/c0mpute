@@ -165,8 +165,8 @@ $ c0mpute worker start --roles tts,stt`}</CodeBlock>
           bought through the <Link href="/market">market</Link> will pay you{" "}
           <strong className="text-[var(--color-fg)]">95%</strong> once market
           settlement launches (a 5% market fee); no fee is collected today.
-          Paid Infernet inference is a separate product with its own 2% house
-          fee, so it pays you 98%.
+          Paid Infernet inference charges the same 5% house fee, so it also
+          pays you 95%; the two fees never stack.
         </p>
         <p className="text-[var(--color-dim)]">
           Your record is portable. Reputation is derived from signed receipts
