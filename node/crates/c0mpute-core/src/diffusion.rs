@@ -156,6 +156,26 @@ pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
         && installed()
         && fast_enough(config)
         && has_headroom_with(config, memory())
+        && idle_enough_with(load_avg_1m(), logical_cpus())
+        && node_slot().available_permits() > 0
+}
+
+/// Busiest a box may be (1-minute load average per logical CPU) and still
+/// take a render. A render needs half the box for ~2 minutes; on a box
+/// already this busy it takes 10+ and the buyer is better told "no worker".
+pub const MAX_LOAD_PER_CPU: f64 = 0.75;
+
+/// Pure decision: is the box idle enough to start an image now?
+pub fn idle_enough_with(load_1m: f64, cpus: usize) -> bool {
+    cpus > 0 && load_1m.is_finite() && load_1m < cpus as f64 * MAX_LOAD_PER_CPU
+}
+
+fn load_avg_1m() -> f64 {
+    sysinfo::System::load_average().one
+}
+
+fn logical_cpus() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
 fn now_secs() -> u64 {
@@ -706,6 +726,15 @@ mod tests {
         assert_eq!(parse_stat("3655695 (sd-cli) R 4165541 3655695 0"), Some(('R', 4165541)));
         assert_eq!(parse_stat("12 (a b) c) Z 7 12 0"), Some(('Z', 7)));
         assert_eq!(parse_stat("garbage"), None);
+    }
+
+    #[test]
+    fn a_busy_box_does_not_take_images() {
+        assert!(idle_enough_with(4.0, 16));
+        assert!(!idle_enough_with(26.5, 16), "seed2 at load 26 on 16 vCPUs");
+        assert!(!idle_enough_with(12.0, 16), "75% is the line");
+        assert!(!idle_enough_with(f64::NAN, 16));
+        assert!(!idle_enough_with(0.0, 0));
     }
 
     #[test]
