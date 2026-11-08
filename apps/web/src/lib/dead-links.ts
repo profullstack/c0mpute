@@ -5,7 +5,7 @@
 // cleaned on read instead of being edited.
 
 const DEAD_IMAGE_HOSTS = ["ywcizjsgrcmhgyplldac.supabase.co"];
-const DEAD_LINK_PREFIXES = ["https://c0upons.com/blog/walgreens-coupon-code-workflow"];
+const DEAD_LINK_PREFIXES = ["https://c0upons.pwa.pit.world/blog/walgreens-coupon-code-workflow"];
 
 export function isDeadImageUrl(url: string | null | undefined): boolean {
   if (!url) return false;
