@@ -509,12 +509,69 @@ fn node_slot() -> Arc<Semaphore> {
     SLOT.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
 }
 
+/// `/proc/<pid>/stat` -> (state, parent pid). The command name is in
+/// parentheses and may contain spaces, so parse after the last `)`.
+fn parse_stat(stat: &str) -> Option<(char, u32)> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?.trim_start();
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    Some((state, ppid))
+}
+
+/// Kill renders left running by the binary this process replaced.
+///
+/// An auto-update re-executes the worker in place: same PID, so a running
+/// sd-cli stays our child but nothing will ever read its result, and it
+/// keeps ~6-9 GB and every core busy, so the node stops bidding (free-RAM
+/// gate) or runs the next image at half speed. Called once when the runner
+/// starts, before it takes any job, so every sd-cli child is such an orphan.
+pub fn kill_orphaned_renders() -> usize {
+    if !cfg!(target_os = "linux") {
+        return 0;
+    }
+    let me = std::process::id();
+    let ours = sd_cli();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut killed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((state, ppid)) = parse_stat(&stat) else {
+            continue;
+        };
+        if ppid != me || state == 'Z' {
+            continue;
+        }
+        if std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_deref() != Some(ours.as_path()) {
+            continue;
+        }
+        if std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            warn!(pid, "killed an sd-cli render orphaned by an in-place update");
+            killed += 1;
+        }
+    }
+    killed
+}
+
 pub fn spawn_diffusion_runner(
     net: Arc<Libp2pNetwork>,
     store: ChunkStore,
     cache_root: PathBuf,
     load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
+    kill_orphaned_renders();
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -642,6 +699,13 @@ mod tests {
             !fast_enough_with(&config, 3),
             "a 6-core box at the 50% share is too slow"
         );
+    }
+
+    #[test]
+    fn proc_stat_parses_state_and_parent_even_with_spaces_in_the_name() {
+        assert_eq!(parse_stat("3655695 (sd-cli) R 4165541 3655695 0"), Some(('R', 4165541)));
+        assert_eq!(parse_stat("12 (a b) c) Z 7 12 0"), Some(('Z', 7)));
+        assert_eq!(parse_stat("garbage"), None);
     }
 
     #[test]
