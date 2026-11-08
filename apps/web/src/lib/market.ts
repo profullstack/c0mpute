@@ -1,9 +1,10 @@
 /**
  * The c0mpute market fee: what c0mpute keeps from a job bought through the
  * c0mpute market (c0mpute.com/market). The node operator gets the rest.
- * Anthony set it on 2026-10-27. Infernet is a separate product with its own
- * 2% house fee on paid inference (decided 2026-11-02: two products, two fees);
- * the market fee never applies on top of an Infernet job.
+ * Anthony set it on 2026-10-27. Infernet charges the same 5% house fee on paid
+ * inference (2026-11-08: one 5% fee across c0mpute and Infernet, the operator
+ * keeps 95%). The two fees never stack: an Infernet job pays Infernet's 5%
+ * only, never the market fee on top.
  */
 export const MARKET_FEE_PCT = 5;
 export const OPERATOR_SHARE_PCT = 100 - MARKET_FEE_PCT;
