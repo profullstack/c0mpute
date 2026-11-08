@@ -10,7 +10,7 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.2.62"
+version     = "0.2.63"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo through stable-diffusion.cpp, provisioned by every node with the RAM for it."

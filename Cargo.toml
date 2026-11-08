@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.62"
+version = "0.2.63"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/profullstack/c0mpute"
@@ -53,7 +53,7 @@ async-trait = "0.1"
 url = "2"
 directories = "5"
 sysinfo = "0.32"
-zip = { version = "~9.1.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.4.2", default-features = false, features = ["deflate"] }
 reed-solomon-erasure = "6"
 libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "kad", "identify", "ping", "request-response", "macros", "tokio", "ed25519", "cbor", "gossipsub", "mdns"] }
 tempfile = "3"
