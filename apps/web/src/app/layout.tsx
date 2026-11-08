@@ -15,6 +15,7 @@ const DESCRIPTION =
 export const revalidate = 3600;
 
 export const metadata: Metadata = {
+  metadataBase: new URL(SITE),
   title: "c0mpute — the open compute network",
   description: DESCRIPTION,
   manifest: "/manifest.json",
@@ -25,13 +26,11 @@ export const metadata: Metadata = {
     title: "c0mpute — the open compute network",
     description: DESCRIPTION,
     url: SITE,
-    images: [{ url: `${SITE}/og-image.png`, width: 1200, height: 630, alt: "c0mpute" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "c0mpute — the open compute network",
     description: DESCRIPTION,
-    images: [`${SITE}/og-image.png`],
   },
   alternates: { canonical: SITE },
 };

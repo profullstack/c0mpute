@@ -1,12 +1,16 @@
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
 import { getNodesPayload, NODE_GOAL } from "@/lib/nodes";
+import { pageOg } from "@/lib/og";
+
+const DESCRIPTION =
+  "Every c0mpute node online right now, ranked by its c0mpute bench score, with who runs each one and who invited them. How to name your node. The goal is 100,000 nodes.";
 
 export const metadata = {
   title: "nodes — c0mpute",
-  description:
-    "Every c0mpute node online right now, ranked by its c0mpute bench score, with who runs each one and who invited them. How to name your node. The goal is 100,000 nodes.",
+  description: DESCRIPTION,
   alternates: { canonical: "https://c0mpute.com/nodes" },
+  ...pageOg("c0mpute nodes online", DESCRIPTION, "/nodes"),
 };
 
 // A live board must not be a build-time snapshot. The aggregator read is a
