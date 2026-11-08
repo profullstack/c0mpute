@@ -883,6 +883,7 @@ mod tests {
             spec_inline: None,
             published_at_ms: now - 5_000,
             external_ref: None,
+            buyer_addrs: Vec::new(),
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 1);
@@ -920,6 +921,7 @@ mod tests {
             spec_inline: None,
             published_at_ms: now,
             external_ref: None,
+            buyer_addrs: Vec::new(),
         })
         .await;
         jobs.on_receipt(JobReceipt {

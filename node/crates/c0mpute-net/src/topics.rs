@@ -194,6 +194,12 @@ pub struct JobAccept {
     /// [`JobOffer::external_ref`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// The buyer's publicly dialable multiaddrs (`.../p2p/<buyer_peer_id>`).
+    /// A winning worker behind NAT dials one of these before publishing its
+    /// receipt, so the buyer can fetch the result over that connection; the
+    /// buyer usually cannot dial a worker's random, firewalled port.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buyer_addrs: Vec<String>,
 }
 
 /// Worker's completion receipt. Includes the output hash so the buyer
@@ -239,7 +245,11 @@ mod tests {
         assert_eq!(offer.external_ref, None);
         // And a new offer omits the field entirely when unset, so the bytes
         // an old node sees are unchanged.
-        assert!(!serde_json::to_string(&offer).unwrap().contains("external_ref"));
+        assert!(
+            !serde_json::to_string(&offer)
+                .unwrap()
+                .contains("external_ref")
+        );
     }
 
     #[test]

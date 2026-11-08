@@ -13,6 +13,7 @@ pub(crate) mod gateway_util;
 pub mod jobs_gateway;
 pub mod net_guard;
 pub mod pricing;
+pub mod reachability;
 pub mod private;
 pub mod register;
 pub mod resources;

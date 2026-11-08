@@ -572,6 +572,7 @@ mod tests {
             spec_inline: Some(serde_json::json!({"input_url": "https://example.com/a.mp4"})),
             published_at_ms: 0,
             external_ref: Some("infernet:job_42".into()),
+            buyer_addrs: Vec::new(),
         }
     }
 

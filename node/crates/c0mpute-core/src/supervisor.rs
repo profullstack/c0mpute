@@ -48,9 +48,17 @@ impl Supervisor {
         .await;
         info!(count = bootstrap_addrs.len(), "bootstrap peers loaded");
 
-        let net_cfg = NetworkConfig::for_dir(identity_dir)
+        let mut net_cfg = NetworkConfig::for_dir(identity_dir)
             .with_local_source(local_source)
             .with_bootstrap(bootstrap_addrs);
+        // A fixed, firewall-opened port for nodes that must be dialable
+        // (buyer gateways): C0MPUTE_P2P_LISTEN=/ip4/0.0.0.0/tcp/46341
+        let listen =
+            crate::reachability::listen_addrs(std::env::var("C0MPUTE_P2P_LISTEN").ok().as_deref());
+        if !listen.is_empty() {
+            info!(?listen, "libp2p listening on configured addresses");
+            net_cfg = net_cfg.with_listen(listen);
+        }
 
         let libp2p_net: Arc<Libp2pNetwork> = Arc::new(Libp2pNetwork::spawn(net_cfg).await?);
         info!(
