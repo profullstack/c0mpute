@@ -170,6 +170,48 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Same shape for CPU diffusion: install in the background (6.7 GB,
+            // only on boxes with the RAM and disk), subscribe once it works.
+            // The role tag itself is gated per tick on free memory.
+            if workload_type == crate::diffusion::WORKLOAD_TXT2IMG {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::diffusion::ensure(&config.diffusion).await {
+                        info!(
+                            "diffusion not available on this node; not subscribing to diffusion.txt2img"
+                        );
+                        return;
+                    }
+                    let runner_tx = crate::diffusion::spawn_diffusion_runner(
+                        net.clone(),
+                        store,
+                        cache_root,
+                        load.clone(),
+                    );
+                    info!(
+                        workload_type = crate::diffusion::WORKLOAD_TXT2IMG,
+                        "subscribing to job topic"
+                    );
+                    // Re-check free memory on every offer: the tag set is
+                    // fixed at subscribe time, the box's load is not.
+                    let gate = config.diffusion.clone();
+                    let filter: dispatch::OfferFilter =
+                        std::sync::Arc::new(move |_offer| crate::diffusion::can_serve(&gate));
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::diffusion::WORKLOAD_TXT2IMG.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        Some(filter),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {

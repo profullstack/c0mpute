@@ -187,6 +187,10 @@ pub enum Role {
     /// container. Never a default role — it needs an NVIDIA GPU, a container
     /// runtime and a 20 GB image.
     Video,
+    /// `diffusion.txt2img`: CPU image generation (stable-diffusion.cpp +
+    /// Z-Image-Turbo). On by default; the node installs it only when it has
+    /// the RAM and disk, and bids only while it has free memory.
+    Diffusion,
 }
 
 #[cfg(test)]

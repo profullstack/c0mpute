@@ -14,7 +14,7 @@
 [module]
 id          = "workflow-step"
 name        = "Workflow step — webhook workflow steps (meshhook)"
-version     = "0.2.60"
+version     = "0.2.61"
 kind        = "workload"
 category    = "infrastructure"
 description = "Runs one step of a webhook workflow on a c0mpute worker: a JMESPath transform or a guarded HTTP call. Applications reach it through `c0mpute jobs serve`."

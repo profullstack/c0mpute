@@ -97,6 +97,14 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.push(crate::video::ROLE_TAG.to_string());
                 }
             }
+            Role::Diffusion => {
+                // Installed AND enough free memory right now: re-checked each
+                // tick, so a box that gets busy stops winning image jobs.
+                if crate::diffusion::can_serve(&config.diffusion) {
+                    tags.push(crate::diffusion::ROLE_TAG.to_string());
+                    tags.push(crate::diffusion::MODEL_TAG.to_string());
+                }
+            }
         }
     }
     tags
