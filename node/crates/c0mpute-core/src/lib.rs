@@ -7,11 +7,13 @@
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
+pub mod crawl;
 pub mod diffusion;
 pub mod dispatch;
 pub(crate) mod gateway_util;
 pub mod jobs_gateway;
 pub mod net_guard;
+pub mod opendisk;
 pub mod pricing;
 pub mod reachability;
 pub mod private;

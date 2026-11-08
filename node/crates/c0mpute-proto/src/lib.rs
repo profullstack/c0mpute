@@ -191,6 +191,9 @@ pub enum Role {
     /// Z-Image-Turbo). On by default; the node installs it only when it has
     /// the RAM and disk, and bids only while it has free memory.
     Diffusion,
+    /// `crawl.fetch`: fetch one public web page for a buyer (static, robots
+    /// aware, SSRF-guarded). On by default; it needs nothing but a network.
+    Crawl,
 }
 
 #[cfg(test)]

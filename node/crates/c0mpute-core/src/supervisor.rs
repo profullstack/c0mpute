@@ -25,15 +25,34 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Boot as this machine's worker: identity at `<config_dir>/identity.key`.
     pub async fn boot(config: Config) -> Result<Self> {
+        let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        Self::boot_with_identity(config, identity_dir).await
+    }
+
+    /// Boot as a buyer (the speech and jobs bridges, one-shot submits) with
+    /// its own identity at `<data_dir>/buyer/identity.key` (where private mode
+    /// already looks for this machine's buyer identities, so a private node
+    /// still trusts its own bridges).
+    ///
+    /// A buyer must not reuse the worker's key: two processes with one peer
+    /// id on the same box make remote peers keep only one connection, and
+    /// the buyer's auctions fail with `NoPeersSubscribedToTopic` while the
+    /// network has plenty of workers on the topic.
+    pub async fn boot_buyer(config: Config) -> Result<Self> {
+        let identity_dir = config::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("buyer");
+        std::fs::create_dir_all(&identity_dir)?;
+        Self::boot_with_identity(config, identity_dir).await
+    }
+
+    async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&config.storage.root)?;
         let store = ChunkStore::open(&config.storage.root).await?;
 
-        // Real libp2p network. Identity persists at
-        // <config_dir>/identity.key. Bootstrap list is empty for now —
-        // DIP-0010 wires up c0mpute.com/bootstrap.json once we run
-        // public seed nodes.
-        let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        // Real libp2p network. The identity persists in `identity_dir`.
 
         let local_source: Arc<dyn ChunkSource> = Arc::new(StoreSource(store.clone()));
 
@@ -144,6 +163,8 @@ impl Supervisor {
             // workflow.step draws on its own light-work slots instead.
             let load = if workload_type == crate::workflow::WORKLOAD {
                 crate::workflow::worker_load()
+            } else if workload_type == crate::crawl::WORKLOAD {
+                crate::crawl::worker_load()
             } else {
                 runner::WorkerLoad::new(compute_slots.clone(), total_slots)
             };
@@ -244,6 +265,11 @@ impl Supervisor {
                     self.store.clone(),
                     load.clone(),
                 )),
+                crate::crawl::WORKLOAD => Some(crate::crawl::spawn_crawl_runner(
+                    net.clone(),
+                    self.store.clone(),
+                    load.clone(),
+                )),
                 crate::video::WORKLOAD_TXT2VID | crate::video::WORKLOAD_IMG2VID => {
                     // The only container workload, so unlike the in-process
                     // runners it can be unservable on a box that configured
@@ -286,8 +312,12 @@ impl Supervisor {
                 store: self.store.clone(),
                 net: self.net.clone(),
             };
+            let mut app = c0mpute_gateway::router(state);
+            if self.config.roles.contains(&c0mpute_proto::Role::Storage) {
+                app = app.merge(self.storage_router());
+            }
             tokio::spawn(async move {
-                if let Err(e) = c0mpute_gateway::serve(state, bind).await {
+                if let Err(e) = c0mpute_gateway::serve_router(app, bind).await {
                     tracing::error!(err = %e, "gateway server exited");
                 }
             });
@@ -314,9 +344,84 @@ impl Supervisor {
         info!("ctrl-c received; shutting down");
         Ok(())
     }
+
+    /// The storage API (CIP-002) and this node's OpenDisk descriptor, served
+    /// by the gateway on every node with the `storage` role.
+    ///
+    /// Reads are open: a blake3 hash is the capability, and private-tier
+    /// objects are ciphertext. Writes must be signed by this node's own
+    /// identity or a key the operator listed in `storage.trusted_writers`,
+    /// so a stranger cannot fill the disk.
+    fn storage_router(&self) -> axum::Router {
+        use axum::routing::get;
+        use c0mpute_gateway::auth::SignedEnvelope;
+        use c0mpute_gateway::storage_api::{self, Limits, StorageApiState};
+
+        let peer = self.libp2p.peer_id();
+        let key_hex = c0mpute_net::identity::ed25519_public_hex(&peer);
+        let mut writers: Vec<&str> = self
+            .config
+            .storage
+            .trusted_writers
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if let Some(own) = key_hex.as_deref() {
+            writers.push(own);
+        }
+        let (auth, rejected) = SignedEnvelope::from_hex_keys(writers);
+        for bad in rejected {
+            tracing::warn!(key = %bad, "storage: ignoring trusted_writers entry that is not an ed25519 key");
+        }
+        let limits = Limits {
+            disk_budget_bytes: self.config.storage.cap_bytes,
+            ..Limits::default()
+        };
+        let state = StorageApiState::new(
+            c0mpute_store::Storage::new(self.store.clone()),
+            Arc::new(auth),
+            limits,
+        );
+        let budget = state.budget.clone();
+        let mut app = storage_api::router(state);
+        info!("storage API on the gateway: /storage/v1 (signed writes)");
+
+        if self.config.storage.opendisk {
+            let config = self.config.clone();
+            let peer_id = peer.to_string();
+            let origin = crate::opendisk::public_origin(&config);
+            app = app.route(
+                crate::opendisk::WELL_KNOWN_PATH,
+                get(move || {
+                    let config = config.clone();
+                    let peer_id = peer_id.clone();
+                    let key_hex = key_hex.clone();
+                    let origin = origin.clone();
+                    let budget = budget.clone();
+                    async move {
+                        let cap = crate::opendisk::capacity(&config.storage, budget.used());
+                        let doc = crate::opendisk::descriptor(
+                            &config,
+                            &peer_id,
+                            key_hex.as_deref(),
+                            origin.as_deref(),
+                            cap,
+                        );
+                        (
+                            [(axum::http::header::CACHE_CONTROL, "public, max-age=300")],
+                            axum::Json(doc),
+                        )
+                    }
+                }),
+            );
+            crate::opendisk::spawn_self_listing(&self.config);
+        }
+        app
+    }
 }
 
-fn which_ffmpeg() -> Option<std::path::PathBuf> {
+/// The ffmpeg on PATH, if any. A node with one serves transcodes by default.
+pub fn which_ffmpeg() -> Option<std::path::PathBuf> {
     use std::env;
     let path = env::var_os("PATH")?;
     for dir in env::split_paths(&path) {

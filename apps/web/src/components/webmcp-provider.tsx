@@ -95,15 +95,38 @@ const TOOLS: WebMcpToolDescriptor[] = [
       },
       additionalProperties: false,
     },
-    execute: (args) => {
+    execute: async (args) => {
       const plugin =
         typeof args.plugin === "string" ? args.plugin.trim() : "";
       if (plugin) {
-        return json({
-          plugin,
-          command: `c0mpute plugin install ${plugin}`,
-          install_url: `https://c0mpute.com/plugins/${plugin}/install.sh`,
-        });
+        // Answer from the live listing, so a plugin that is built in or not
+        // built yet never gets an install command that would 404.
+        try {
+          const list = (await fetchJson("/api/plugins")) as {
+            plugins?: Array<{
+              id: string;
+              status?: string;
+              builtin?: boolean;
+              install_command?: string | null;
+              install_url?: string | null;
+            }>;
+          };
+          const found = list.plugins?.find((p) => p.id === plugin);
+          if (!found) return errorResult(`No plugin named "${plugin}".`);
+          if (found.status === "coming-soon") {
+            return json({ plugin, status: "coming-soon", note: "Not implemented yet; nothing to install." });
+          }
+          if (found.builtin) {
+            return json({ plugin, builtin: true, note: "Ships inside the c0mpute binary; no install needed." });
+          }
+          return json({
+            plugin,
+            command: found.install_command ?? null,
+            install_url: found.install_url ?? null,
+          });
+        } catch (e) {
+          return errorResult(`Failed to look up plugin: ${(e as Error).message}`);
+        }
       }
       return json({
         command: "curl -fsSL https://c0mpute.com/install.sh | sh",

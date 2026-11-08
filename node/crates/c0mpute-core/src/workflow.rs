@@ -508,7 +508,7 @@ pub fn spec_ref(hash: &Hash, bytes: usize) -> Value {
 
 /// Resolve `spec_inline` to the real spec: itself, or the chunk its
 /// `spec_ref` names, fetched from the buyer and checked against the hash.
-async fn resolve_spec(net: &Libp2pNetwork, job: &AcceptedJob) -> Result<Value> {
+pub(crate) async fn resolve_spec(net: &Libp2pNetwork, job: &AcceptedJob) -> Result<Value> {
     let spec = job
         .accept
         .spec_inline

@@ -63,9 +63,40 @@ fn write_locked_down(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))
 }
 
+/// The raw ed25519 public key behind a peer id, as lowercase hex, when the
+/// peer id inlines one (every c0mpute identity does: ed25519 keys are small
+/// enough to sit in an identity multihash). This is the key an OpenDisk
+/// descriptor states as `ed25519:<hex>`.
+pub fn ed25519_public_hex(peer: &libp2p::PeerId) -> Option<String> {
+    let mh: &libp2p::multihash::Multihash<64> = peer.as_ref();
+    if mh.code() != 0x00 {
+        return None;
+    }
+    let public = libp2p::identity::PublicKey::try_decode_protobuf(mh.digest()).ok()?;
+    let ed = public.try_into_ed25519().ok()?;
+    Some(ed.to_bytes().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_id_yields_its_ed25519_key() {
+        let kp = Keypair::generate_ed25519();
+        let peer = kp.public().to_peer_id();
+        let got = ed25519_public_hex(&peer).expect("ed25519 peer id");
+        let want: String = kp
+            .public()
+            .try_into_ed25519()
+            .unwrap()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 64);
+    }
 
     #[test]
     fn generate_and_reload_yields_same_peer_id() {

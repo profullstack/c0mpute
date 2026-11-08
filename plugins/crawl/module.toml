@@ -25,7 +25,7 @@ arch         = ["x86_64", "aarch64"]
 capabilities = ["network:egress"]
 
 [module.workloads]
-"crawl.fetch" = { command = "fetch", validation = "status_and_content_hash_spotcheck" }
+"crawl.fetch" = { command = "fetch", validation = "result_schema" }
 
 [module.dispatch]
 mode = "in-process"

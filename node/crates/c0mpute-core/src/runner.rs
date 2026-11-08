@@ -573,6 +573,30 @@ pub(crate) fn is_public_ip(ip: std::net::IpAddr) -> bool {
     crate::net_guard::is_public_ip(ip)
 }
 
+/// Before telling a buyer its result is ready, open a connection to the
+/// buyer. A worker behind NAT cannot be dialed, but it can dial out; the
+/// buyer's fetch of the result then uses this connection instead of failing
+/// with "Failed to dial the requested peer". Best effort, bounded to 5 s.
+async fn reach_buyer(net: &Libp2pNetwork, buyer_peer_id: &str) {
+    let Ok(buyer) = buyer_peer_id.parse::<c0mpute_net::PeerId>() else {
+        return;
+    };
+    if net.is_connected(buyer).await {
+        return;
+    }
+    if let Err(e) = net.connect(buyer).await {
+        tracing::debug!(%buyer, err = %e, "could not dial buyer before receipt");
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if net.is_connected(buyer).await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub(crate) async fn publish_receipt(
     net: &Libp2pNetwork,
     accept: &JobAccept,
@@ -605,6 +629,10 @@ pub(crate) async fn publish_receipt(
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        } else {
+            // The buyer advertised no address: dial it by peer id, using
+            // whatever addresses Kad and identify have learned for it.
+            reach_buyer(net, &accept.buyer_peer_id).await;
         }
     }
     let topic = job_topic(&accept.workload_type);

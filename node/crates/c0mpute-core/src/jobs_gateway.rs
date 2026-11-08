@@ -48,10 +48,11 @@ const MAX_ALLOW_PEERS: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
     WorkflowStep,
+    CrawlFetch,
 }
 
 impl Workload {
-    const ALL: &'static [Workload] = &[Workload::WorkflowStep];
+    const ALL: &'static [Workload] = &[Workload::WorkflowStep, Workload::CrawlFetch];
 
     fn parse(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|w| w.name() == name)
@@ -59,21 +60,23 @@ impl Workload {
     fn name(self) -> &'static str {
         match self {
             Workload::WorkflowStep => workflow::WORKLOAD,
+            Workload::CrawlFetch => crate::crawl::WORKLOAD,
         }
     }
     fn required_capabilities(self) -> Vec<String> {
         match self {
             Workload::WorkflowStep => vec![workflow::ROLE_TAG.to_string()],
+            Workload::CrawlFetch => vec![crate::crawl::ROLE_TAG.to_string()],
         }
     }
     fn max_result_bytes(self) -> usize {
         match self {
-            Workload::WorkflowStep => workflow::MAX_RESULT_BYTES,
+            Workload::WorkflowStep | Workload::CrawlFetch => workflow::MAX_RESULT_BYTES,
         }
     }
     fn valid_result(self, value: &Value) -> bool {
         match self {
-            Workload::WorkflowStep => {
+            Workload::WorkflowStep | Workload::CrawlFetch => {
                 value.get("v").and_then(Value::as_u64) == Some(1)
                     && value.get("ok").is_some_and(Value::is_boolean)
             }
@@ -125,6 +128,36 @@ impl JobsBridge {
         self.bid_window = window;
         self
     }
+
+    /// Run one job without the HTTP layer (for one-shot CLI submits such as
+    /// `c0mpute crawl fetch`). Returns the same body `POST /v1/jobs` would.
+    pub async fn submit_once(&self, workload: &str, spec: Value, timeout: Duration) -> Result<Value> {
+        let w = Workload::parse(workload)
+            .with_context(|| format!("unsupported workload {workload:?}"))?;
+        let spec_bytes = serde_json::to_vec(&spec)?;
+        run_job(
+            self,
+            w,
+            spec,
+            spec_bytes,
+            self.max_price_usd,
+            (*self.allow_peers).clone(),
+            timeout,
+        )
+        .await
+        .map_err(|ApiError(status, body)| anyhow::anyhow!("{status}: {body}"))
+    }
+}
+
+/// Boot a buyer and run one job: what `c0mpute crawl fetch` uses.
+pub async fn submit_once(workload: &str, spec: Value, max_price_usd: f64, timeout: Duration) -> Result<Value> {
+    let supervisor = Supervisor::boot_buyer(Config::default()).await?;
+    // Any token: the HTTP layer is not mounted.
+    let token: String = std::iter::repeat_n('x', 32).collect();
+    let bridge = JobsBridge::new(supervisor.libp2p, supervisor.store, token, max_price_usd, Vec::new())?;
+    // Give the swarm a moment to reach peers before the auction.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    bridge.submit_once(workload, spec, timeout).await
 }
 
 /// Parse `C0MPUTE_JOBS_ALLOW_PEERS` (comma-separated peer ids).
@@ -157,7 +190,7 @@ pub async fn serve(
     if token.len() < 24 || token.len() > 256 {
         bail!("C0MPUTE_JOBS_TOKEN must be between 24 and 256 characters");
     }
-    let supervisor = Supervisor::boot(Config::default()).await?;
+    let supervisor = Supervisor::boot_buyer(Config::default()).await?;
     let state = JobsBridge::new(
         supervisor.libp2p,
         supervisor.store,

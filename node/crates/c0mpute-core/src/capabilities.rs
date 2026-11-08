@@ -89,6 +89,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::Gateway => tags.push("c0mpute:role:gateway".to_string()),
             Role::Verifier => tags.push("c0mpute:role:verifier".to_string()),
             Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
+            Role::Crawl => tags.push(crate::crawl::ROLE_TAG.to_string()),
             Role::Video => {
                 // Same rule as TTS: advertise only what this box can do now.
                 // A node without the GPU, the runtime or the image would win
@@ -191,6 +192,14 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
         blob["name"] = serde_json::Value::String(name);
     }
     blob["pricing"] = config.pricing.listing();
+    if config.roles.contains(&c0mpute_proto::Role::Storage) {
+        let cap = crate::opendisk::capacity(&config.storage, 0);
+        blob["storage"] = serde_json::json!({
+            "free_bytes": cap.free_bytes,
+            "total_bytes": cap.total_bytes,
+            "per_gib_month": crate::opendisk::price(&config.storage),
+        });
+    }
     blob
 }
 

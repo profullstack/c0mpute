@@ -388,6 +388,9 @@ struct NodeRow {
     /// The operator's listing (`mode`, `min_usd`, `fixed_usd`), if the node
     /// advertises one. Re-validated here: only known fields, sane numbers.
     pricing: Option<serde_json::Value>,
+    /// What the node offers as storage (`free_bytes`, `total_bytes`,
+    /// `per_gib_month`), when it runs the storage role. Numbers only.
+    storage: Option<serde_json::Value>,
     last_seen_s: u64,
 }
 
@@ -494,6 +497,23 @@ fn short_id(peer_id: &str) -> String {
     peer_id[n.saturating_sub(8)..].to_string()
 }
 
+/// The storage offer a node advertises, re-validated: only the three known
+/// fields, finite and non-negative, so a node cannot inject anything else.
+fn storage_offer(hardware: &serde_json::Value) -> Option<serde_json::Value> {
+    let s = hardware.get("storage")?;
+    let free = s.get("free_bytes")?.as_u64()?;
+    let total = s.get("total_bytes")?.as_u64()?;
+    let price = s.get("per_gib_month")?.as_f64()?;
+    if !price.is_finite() || price < 0.0 || price > 1_000.0 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "free_bytes": free.min(total),
+        "total_bytes": total,
+        "per_gib_month": price,
+    }))
+}
+
 fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) -> NodesPayload {
     let mut nodes: Vec<NodeRow> = ads
         .iter()
@@ -525,6 +545,7 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::sanitize_ref),
             pricing: listing(&ad.hardware),
+            storage: storage_offer(&ad.hardware),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
         })
         .collect();
@@ -960,5 +981,25 @@ mod tests {
         jobs.evict(now).await;
         assert_eq!(jobs.in_flight.read().await.len(), 0);
         assert_eq!(jobs.completed.read().await.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod storage_offer_tests {
+    use super::storage_offer;
+    use serde_json::json;
+
+    #[test]
+    fn keeps_only_sane_numbers() {
+        let hw = json!({"storage": {"free_bytes": 900, "total_bytes": 1000, "per_gib_month": 0.004, "evil": "<script>"}});
+        assert_eq!(
+            storage_offer(&hw),
+            Some(json!({"free_bytes": 900, "total_bytes": 1000, "per_gib_month": 0.004}))
+        );
+        let negative = json!({"storage": {"free_bytes": 1, "total_bytes": 2, "per_gib_month": -1.0}});
+        assert_eq!(storage_offer(&negative), None);
+        assert_eq!(storage_offer(&json!({})), None);
+        let over = json!({"storage": {"free_bytes": 5000, "total_bytes": 1000, "per_gib_month": 0.0}});
+        assert_eq!(storage_offer(&over).unwrap()["free_bytes"], 1000);
     }
 }

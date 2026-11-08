@@ -17,7 +17,7 @@ import {
 export const metadata = {
   title: "plugins — c0mpute",
   description:
-    "c0mpute workload plugins, network services and applications: AI inference, embeddings, image and video generation, speech and OCR; transcoding, rendering and streaming; crawling, storage and hosting. MIT-licensed, manifest-driven.",
+    "c0mpute workload plugins, network services and applications: AI inference, image and video generation, speech, transcoding, web fetching, workflow steps, webhooks and OpenDisk storage, with more marked coming soon. MIT-licensed, manifest-driven.",
   alternates: { canonical: "https://c0mpute.com/plugins" },
 };
 

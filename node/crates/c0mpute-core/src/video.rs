@@ -494,7 +494,7 @@ async fn run_video_job(
 /// `ftyp` at offset 4 is the ISO-BMFF marker. The runner already ffprobed the
 /// file; this is the node refusing to store something that is not a clip at
 /// all, which is cheap and catches a broken image rather than a bad model.
-fn is_mp4(bytes: &[u8]) -> bool {
+pub(crate) fn is_mp4(bytes: &[u8]) -> bool {
     bytes.len() > 12 && &bytes[4..8] == b"ftyp"
 }
 
