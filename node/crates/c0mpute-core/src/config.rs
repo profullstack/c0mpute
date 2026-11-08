@@ -61,6 +61,11 @@ pub struct DiffusionConfig {
     pub min_free_ram_gb: u64,
     #[serde(default = "default_diffusion_min_free_disk_gb")]
     pub min_free_disk_gb: u64,
+    /// Smallest per-job CPU thread budget (`resources::cpu_threads_per_job`,
+    /// half the box by default) worth serving images with. At 8 threads a
+    /// 768x512 image takes ~2-4 min; at 3 it passes the 15-minute job limit.
+    #[serde(default = "default_diffusion_min_cpu_threads")]
+    pub min_cpu_threads: usize,
 }
 
 impl Default for DiffusionConfig {
@@ -70,6 +75,7 @@ impl Default for DiffusionConfig {
             min_ram_gb: default_diffusion_min_ram_gb(),
             min_free_ram_gb: default_diffusion_min_free_ram_gb(),
             min_free_disk_gb: default_diffusion_min_free_disk_gb(),
+            min_cpu_threads: default_diffusion_min_cpu_threads(),
         }
     }
 }
@@ -81,10 +87,14 @@ fn default_diffusion_min_ram_gb() -> u64 {
     16
 }
 fn default_diffusion_min_free_ram_gb() -> u64 {
-    10
+    // A job holds ~9 GB; keep ~3 GB for whatever else the box runs.
+    12
 }
 fn default_diffusion_min_free_disk_gb() -> u64 {
     25
+}
+fn default_diffusion_min_cpu_threads() -> usize {
+    8
 }
 
 impl DiffusionConfig {
