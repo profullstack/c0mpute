@@ -7,9 +7,11 @@
 [module]
 id          = "whisper"
 name        = "Whisper — speech-to-text"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "ai"
+status      = "available"
+builtin     = true
 description = "CPU speech-to-text inference over c0mpute using faster-whisper."
 author      = "Profullstack"
 license     = "MIT"

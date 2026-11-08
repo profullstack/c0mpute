@@ -12,9 +12,10 @@
 [module]
 id          = "hosting"
 name        = "Hosting — censorship-resistant static sites"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "data"
+status      = "coming-soon"
 description = "Static-site hosting with multi-replica placement, mutable naming, epoch settlement, and slashable proof-of-serve. See DIP-0015."
 author      = "Profullstack"
 license     = "MIT"

@@ -118,7 +118,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         bail!("maximum job price must be a non-negative number");
     }
 
-    let supervisor = Supervisor::boot(Config::default()).await?;
+    let supervisor = Supervisor::boot_buyer(Config::default()).await?;
     let state = GatewayState {
         net: supervisor.libp2p,
         store: supervisor.store,
@@ -137,6 +137,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
         .route("/v1/images", post(generate_image))
+        .route("/v1/videos", post(generate_video))
         // Warm, pinned sessions: open once per call, then say a sentence at a
         // time with no auction and no model reload in the way.
         .route("/v1/sessions", post(open_session).get(list_sessions))
@@ -445,8 +446,16 @@ async fn run_speech_auction(
         .with_excluded_bidders(excluded_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
         .with_bid_window(Duration::from_secs(4))
-        .with_deadline(Duration::from_secs(20 * 60))
-        .with_receipt_timeout(Duration::from_secs(15 * 60));
+        .with_deadline(if is_video(workload) {
+            crate::video::JOB_TIMEOUT + Duration::from_secs(5 * 60)
+        } else {
+            Duration::from_secs(20 * 60)
+        })
+        .with_receipt_timeout(if is_video(workload) {
+            crate::video::JOB_TIMEOUT
+        } else {
+            Duration::from_secs(15 * 60)
+        });
     run_auction(state.net.clone(), auction)
         .await
         .map_err(|error| {
@@ -531,8 +540,13 @@ async fn run_speech_job(
     }))
 }
 
+fn is_video(workload: &str) -> bool {
+    workload == crate::video::WORKLOAD_TXT2VID || workload == crate::video::WORKLOAD_IMG2VID
+}
+
 fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
     match workload {
+        w if is_video(w) => crate::video::is_mp4(bytes),
         "tts.synthesize" => bytes.len() >= 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
         crate::diffusion::WORKLOAD_TXT2IMG => crate::diffusion::is_png(bytes),
         "stt.transcribe" => {
@@ -554,7 +568,12 @@ async fn fetch_result(
         hash,
         provider_peer_id,
         max_bytes,
-        Duration::from_secs(20),
+        // A video result can be hundreds of MB; speech and images are small.
+        if max_bytes > MAX_AUDIO_BYTES {
+            Duration::from_secs(10 * 60)
+        } else {
+            Duration::from_secs(20)
+        },
     )
     .await
     {
@@ -754,6 +773,90 @@ fn audio_format(headers: &HeaderMap) -> ApiResult<&'static str> {
 /// `POST /v1/images`: CPU txt2img on a c0mpute worker (`diffusion.txt2img`).
 /// Body: `{prompt, width?, height?, steps?, seed?}` (see `diffusion::Txt2ImgSpec`).
 /// Returns `image/png`. Expect ~90-150 s.
+/// `POST /v1/videos`: a video job (Wan 2.2 / LTX-2.3) as a JSON body of
+/// [`crate::video::VideoJobInline`] fields. Send `image_base64` for
+/// image-to-video; this gateway stores and serves the image to the worker
+/// itself. Answers `video/mp4`.
+#[derive(Debug, Deserialize)]
+struct VideoRequest {
+    #[serde(flatten)]
+    job: crate::video::VideoJobInline,
+    #[serde(default)]
+    image_base64: Option<String>,
+}
+
+async fn generate_video(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<VideoRequest>,
+) -> ApiResult<Response> {
+    use base64::Engine;
+    authenticate(&state, &headers)?;
+    let mut job = input.job;
+    let workload = match input.image_base64.as_deref() {
+        Some(b64) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "image_base64 is not base64".into()))?;
+            if bytes.is_empty() || bytes.len() > crate::video::MAX_IMAGE_BYTES {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "image must be 1 byte to 32 MiB".into(),
+                ));
+            }
+            let hash = state
+                .store
+                .put(&bytes)
+                .await
+                .map_err(|error| gateway_failure(error.into()))?;
+            state
+                .net
+                .announce(&hash)
+                .await
+                .map_err(gateway_failure)?;
+            job.image_hash = Some(hash.to_hex());
+            job.image_provider_peer_id = Some(state.net.peer_id().to_base58());
+            crate::video::WORKLOAD_IMG2VID
+        }
+        None => crate::video::WORKLOAD_TXT2VID,
+    };
+    job.validate(workload)
+        .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
+    let _slot = state
+        .image_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "video queue is unavailable".into(),
+            )
+        })?;
+    let spec = serde_json::to_value(&job).map_err(|error| gateway_failure(error.into()))?;
+    let (outcome, bytes) = run_speech_job(
+        &state,
+        workload,
+        spec,
+        vec![crate::video::ROLE_TAG.to_string()],
+        crate::video::MAX_RESULT_BYTES,
+    )
+    .await?;
+    let mut response = (StatusCode::OK, bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    set_job_headers(
+        response.headers_mut(),
+        &outcome.job_id,
+        &outcome.accepted_bid.bidder_peer_id,
+    );
+    Ok(response)
+}
+
 async fn generate_image(
     State(state): State<GatewayState>,
     headers: HeaderMap,

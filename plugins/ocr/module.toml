@@ -12,9 +12,10 @@
 [module]
 id          = "ocr"
 name        = "OCR — document text extraction"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "ai"
+status      = "coming-soon"
 description = "Decentralized OCR for PDFs and scanned documents (Tesseract, PaddleOCR, docTR) with CPU or GPU runners."
 author      = "Profullstack"
 license     = "MIT"

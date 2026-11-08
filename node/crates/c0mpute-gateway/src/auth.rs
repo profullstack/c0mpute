@@ -120,6 +120,31 @@ impl SignedEnvelope {
         self
     }
 
+    /// Trust each ed25519 public key given as 64 hex characters, under the
+    /// DID `ed25519:<hex>`. Entries that are not valid keys are skipped and
+    /// handed back so the caller can warn about them.
+    pub fn from_hex_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> (Self, Vec<String>) {
+        let mut out = Self::new();
+        let mut rejected = Vec::new();
+        for raw in keys {
+            let hex = raw.trim().trim_start_matches("ed25519:").to_ascii_lowercase();
+            match decode_key(&hex) {
+                Some(key) => out = out.with_key(format!("ed25519:{hex}"), key),
+                None => rejected.push(raw.to_string()),
+            }
+        }
+        (out, rejected)
+    }
+
+    /// How many keys may write.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     #[cfg(test)]
     fn at_time(mut self, now: u64) -> Self {
         self.now_override = Some(now);
@@ -134,6 +159,17 @@ impl SignedEnvelope {
                 .unwrap_or(0)
         })
     }
+}
+
+fn decode_key(hex: &str) -> Option<VerifyingKey> {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        bytes[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    VerifyingKey::from_bytes(&bytes).ok()
 }
 
 impl Authorizer for SignedEnvelope {
@@ -199,6 +235,31 @@ mod tests {
 
     const DID: &str = "did:coinpay:test";
     const NOW: u64 = 1_756_512_000;
+
+    #[test]
+    fn hex_keys_authorize_under_their_ed25519_did() {
+        let sk = keypair();
+        let hex: String = sk
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (auth, rejected) =
+            SignedEnvelope::from_hex_keys([hex.as_str(), "not-a-key", "ed25519:zz"]);
+        assert_eq!(auth.len(), 1);
+        assert_eq!(rejected.len(), 2);
+        let auth = auth.at_time(NOW);
+        let did = format!("ed25519:{hex}");
+        let header = sign_envelope(&did, &sk, "PUT", "/storage/v1/objects/x", NOW, "00");
+        let req = AuthRequest {
+            method: "PUT",
+            path: "/storage/v1/objects/x",
+            body_hash_hex: "00",
+            header: Some(&header),
+        };
+        assert_eq!(auth.authorize(&req).unwrap().did, did);
+    }
 
     fn keypair() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])

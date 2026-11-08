@@ -11,9 +11,11 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "ai"
+status      = "available"
+builtin     = true
 description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo through stable-diffusion.cpp, provisioned by every node with the RAM for it."
 author      = "Profullstack"
 license     = "MIT"

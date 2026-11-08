@@ -175,6 +175,7 @@ impl Default for Config {
                 Role::Stt,
                 Role::WorkflowStep,
                 Role::Diffusion,
+                Role::Crawl,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),
@@ -208,6 +209,30 @@ impl Default for ApiConfig {
 pub struct StorageConfig {
     pub root: PathBuf,
     pub cap_bytes: Option<u64>,
+    /// The price this node asks to hold data, per GiB-month in USD. Published
+    /// in its OpenDisk descriptor (`/.well-known/opendisk.json`).
+    #[serde(default = "default_storage_price")]
+    pub price_usd_per_gib_month: f64,
+    /// Hex ed25519 public keys allowed to write to this node's storage API,
+    /// besides the node's own identity. Reads are open (a blake3 hash is the
+    /// capability); writes are signed so a stranger cannot fill the disk.
+    #[serde(default)]
+    pub trusted_writers: Vec<String>,
+    /// Serve `/.well-known/opendisk.json` and list this disk on d1sks when
+    /// the gateway announces a public https origin. On by default.
+    #[serde(default = "default_true")]
+    pub opendisk: bool,
+    /// The OpenDisk marketplace this node registers with.
+    #[serde(default = "default_d1sks_url")]
+    pub d1sks_url: String,
+}
+
+fn default_storage_price() -> f64 {
+    crate::opendisk::DEFAULT_PRICE_USD_PER_GIB_MONTH
+}
+
+fn default_d1sks_url() -> String {
+    crate::opendisk::DEFAULT_D1SKS_URL.to_string()
 }
 
 impl Default for StorageConfig {
@@ -215,6 +240,10 @@ impl Default for StorageConfig {
         Self {
             root: data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")),
             cap_bytes: None,
+            price_usd_per_gib_month: default_storage_price(),
+            trusted_writers: Vec::new(),
+            opendisk: true,
+            d1sks_url: default_d1sks_url(),
         }
     }
 }

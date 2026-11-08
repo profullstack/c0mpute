@@ -172,6 +172,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: JobsCmd,
     },
+    /// Crawl plugin: fetch a public web page through a c0mpute worker
+    /// (`crawl.fetch`: static, robots.txt-aware, private addresses refused).
+    Crawl {
+        #[command(subcommand)]
+        cmd: CrawlCmd,
+    },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
         /// Arguments forwarded to `coinpay`.
@@ -448,6 +454,24 @@ const SECURE_CHAT_CMDS: &[&str] = &[
 struct DmCli {
     #[command(subcommand)]
     cmd: ChatCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum CrawlCmd {
+    /// Fetch one URL from a worker and print the result JSON
+    /// (`{v, ok, output: {url, status, headers, body}}`).
+    Fetch {
+        url: String,
+        /// Highest price in USD you will pay for the fetch.
+        #[arg(long, default_value_t = 0.01)]
+        max_price: f64,
+        /// Skip the robots.txt check (only for a site you own).
+        #[arg(long)]
+        ignore_robots: bool,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 60)]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -730,6 +754,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             start_auto_update_poller(cfg.update_auto);
             run_jobs(cmd).await
         }
+        Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
@@ -979,10 +1004,24 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if let Some(rs) = roles {
                 cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
             } else {
-                for role in [Role::Tts, Role::Stt, Role::WorkflowStep, Role::Diffusion] {
+                for role in [
+                    Role::Storage,
+                    Role::Tts,
+                    Role::Stt,
+                    Role::WorkflowStep,
+                    Role::Diffusion,
+                    Role::Crawl,
+                ] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
                     }
+                }
+                // Transcoding needs nothing but ffmpeg: a node that has it
+                // serves it, CPU encoders included, without `--gpu`.
+                if c0mpute_core::supervisor::which_ffmpeg().is_some()
+                    && !cfg.roles.contains(&Role::Transcode)
+                {
+                    cfg.roles.push(Role::Transcode);
                 }
             }
             if gpu && !cfg.roles.contains(&Role::Transcode) {
@@ -1654,7 +1693,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             // Boot a buyer-mode libp2p node — this CLI invocation is
             // ephemeral, no roles, no advertise.
             let cfg = Config::default();
-            let sup = Supervisor::boot(cfg).await?;
+            let sup = Supervisor::boot_buyer(cfg).await?;
             let net = sup.libp2p.clone();
             // Tiny grace period so peer discovery (mDNS) sees us.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1930,6 +1969,29 @@ async fn run_speech(cmd: SpeechCmd) -> Result<()> {
             let token = std::env::var("C0MPUTE_SPEECH_TOKEN")
                 .context("set C0MPUTE_SPEECH_TOKEN to a random secret (at least 24 characters)")?;
             c0mpute_core::speech_gateway::serve(bind, token, max_price_usd).await
+        }
+    }
+}
+
+async fn run_crawl(cmd: CrawlCmd) -> Result<()> {
+    match cmd {
+        CrawlCmd::Fetch {
+            url,
+            max_price,
+            ignore_robots,
+            timeout_secs,
+        } => {
+            let spec = serde_json::json!({ "v": 1, "url": url, "ignore_robots": ignore_robots });
+            c0mpute_core::crawl::parse_spec(&spec).map_err(|e| anyhow::anyhow!(e))?;
+            let result = c0mpute_core::jobs_gateway::submit_once(
+                c0mpute_core::crawl::WORKLOAD,
+                spec,
+                max_price,
+                std::time::Duration::from_secs(timeout_secs.clamp(5, 300)),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
         }
     }
 }
@@ -2318,6 +2380,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         "video" => Some(Role::Video),
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
+        "crawl" | "fetch" => Some(Role::Crawl),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

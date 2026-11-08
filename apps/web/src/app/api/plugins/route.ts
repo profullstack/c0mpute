@@ -12,6 +12,7 @@ import {
   loadAllPlugins,
   tagline,
   installCommand,
+  installedByDefault,
   modelOptions,
 } from "@/lib/plugins";
 
@@ -20,19 +21,30 @@ export function GET() {
     // Omitted rather than sent as [] for the plugins that have no model to
     // choose, which is most of them.
     const models = modelOptions(p).map(({ id, model }) => ({ id, ...model }));
+    const install = installCommand(p);
 
     return {
       id: p.id,
       name: p.name,
       version: p.version,
       kind: p.kind,
+      // available | partial | coming-soon. A coming-soon plugin is a spec
+      // with no implementation behind it yet.
+      status: p.status,
+      status_note: p.statusNote,
+      builtin: p.builtin,
+      installed_by_default: installedByDefault(p),
       tagline: tagline(p),
       description: p.description,
       keywords: p.keywords ?? [],
       homepage: p.homepage,
       source: p.source,
-      install_command: installCommand(p),
-      install_url: `https://c0mpute.com/plugins/${p.id}/install.sh`,
+      // null when there is nothing to install: built in, coming soon, or no
+      // install.sh in the repo.
+      install_command: install,
+      install_url: install
+        ? `https://c0mpute.com/plugins/${p.id}/install.sh`
+        : null,
       web: `https://c0mpute.com/plugins/${p.id}`,
       models: models.length > 0 ? models : undefined,
     };

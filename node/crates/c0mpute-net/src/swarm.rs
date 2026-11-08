@@ -42,6 +42,16 @@ enum Cmd {
         addr: Multiaddr,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Make sure there is a connection to `peer`, dialing it by id (Kad and
+    /// identify supply its addresses).
+    Connect {
+        peer: PeerId,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    IsConnected {
+        peer: PeerId,
+        reply: oneshot::Sender<bool>,
+    },
     Announce {
         hash: Hash,
         reply: oneshot::Sender<Result<()>>,
@@ -256,6 +266,33 @@ impl Libp2pNetwork {
         rx.await.map_err(|_| anyhow!("swarm task closed"))?
     }
 
+    /// Open (or reuse) a connection to `peer` by id. A worker uses this to
+    /// reach its buyer before publishing a result: a worker behind NAT can
+    /// dial out, and the buyer's result fetch then rides that connection.
+    /// Returns once the dial is issued.
+    pub async fn connect(&self, peer: PeerId) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Connect { peer, reply: tx })
+            .await
+            .map_err(|_| anyhow!("swarm task closed"))?;
+        rx.await.map_err(|_| anyhow!("swarm task closed"))?
+    }
+
+    /// Whether a connection to `peer` is open now.
+    pub async fn is_connected(&self, peer: PeerId) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(Cmd::IsConnected { peer, reply: tx })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     pub async fn dial(&self, addr: Multiaddr) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -446,6 +483,18 @@ impl SwarmTask {
             }
             Cmd::Dial { addr, reply } => {
                 let r = self.swarm.lock().await.dial(addr).map_err(Into::into);
+                let _ = reply.send(r);
+            }
+            Cmd::IsConnected { peer, reply } => {
+                let _ = reply.send(self.swarm.lock().await.is_connected(&peer));
+            }
+            Cmd::Connect { peer, reply } => {
+                let mut swarm = self.swarm.lock().await;
+                let r = if swarm.is_connected(&peer) {
+                    Ok(())
+                } else {
+                    swarm.dial(peer).map_err(Into::into)
+                };
                 let _ = reply.send(r);
             }
             Cmd::Addrs { reply } => {

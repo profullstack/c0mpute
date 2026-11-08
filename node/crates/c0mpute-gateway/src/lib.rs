@@ -53,6 +53,15 @@ pub async fn serve_with_storage(
     Ok(())
 }
 
+/// Serve an already-assembled gateway router (the worker merges in storage
+/// and its OpenDisk descriptor before calling this).
+pub async fn serve_router(app: Router, addr: SocketAddr) -> Result<()> {
+    info!(%addr, "gateway listening");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 pub async fn serve(state: GatewayState, addr: SocketAddr) -> Result<()> {
     let app = router(state);
     info!(%addr, "gateway listening");

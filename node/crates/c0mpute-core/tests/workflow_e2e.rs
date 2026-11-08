@@ -106,7 +106,7 @@ async fn transform_step_round_trips_through_the_bridge() {
         .unwrap();
     assert_eq!(health["ok"], true);
     assert_eq!(health["peer_id"], buyer.peer_id().to_base58());
-    assert_eq!(health["workloads"], json!(["workflow.step"]));
+    assert_eq!(health["workloads"], json!(["workflow.step", "crawl.fetch"]));
 
     let post = |body: Value, token: &'static str| {
         let http = http.clone();

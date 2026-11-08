@@ -1,40 +1,34 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Distributed web fetching. Suggested upstreams: a Rust HTTP fetcher
-#   (reqwest + scraper) for static pages, plus Playwright/Chromium
-#   sidecar for JS-rendered pages. Jobs declare URL set + render mode +
-#   robots.txt policy. Outputs: WARC or per-URL {status, headers, body,
-#   final_url, fetched_at} JSON. This is also the canonical worker
-#   pool for the CrawlProof demand generator.
-#   Validation: status-code + content-hash agreement across two workers
-#   for a sample of the URL set (re-fetched independently).
+# Built into the c0mpute binary as the in-process `crawl.fetch` workload
+# (static HTTP fetch, robots-aware). CLI: `c0mpute crawl fetch <url>`.
+# JS-rendered pages (a Playwright/Chromium `crawl.render` workload) are not
+# implemented yet and are deliberately not declared here.
 
 [module]
 id          = "crawl"
 name        = "Crawl — distributed web fetching"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "data"
-description = "Decentralized web crawling and page-rendering pool. Static fetches and JS-rendered pages, robots-aware, WARC-capable."
+status      = "available"
+builtin     = true
+description = "Decentralized web fetching pool. Static page fetches, robots-aware."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["crawl", "scrape", "fetch", "warc", "playwright", "crawlproof"]
+keywords    = ["crawl", "scrape", "fetch", "crawlproof"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["network:egress", "browser:chromium?"]
+capabilities = ["network:egress"]
 
 [module.workloads]
-"crawl.fetch"  = { command = "fetch",  validation = "status_and_content_hash_spotcheck" }
-"crawl.render" = { command = "render", validation = "status_and_dom_hash_spotcheck" }
+"crawl.fetch" = { command = "fetch", validation = "result_schema" }
 
 [module.dispatch]
-mode   = "subprocess"
-binary = "c0mpute-crawl"
+mode = "in-process"
 
 [module.surfaces]
 cli = "c0mpute crawl"

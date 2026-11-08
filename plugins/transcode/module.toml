@@ -7,9 +7,11 @@
 [module]
 id          = "transcode"
 name        = "FFmpeg Transcoding"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "workload"
 category    = "media"
+status      = "available"
+builtin     = true
 description = "Decentralized audio/video transcoding via FFmpeg with hardware acceleration (NVENC, QSV, AMF, VideoToolbox, AV1)."
 author      = "Profullstack"
 license     = "MIT"

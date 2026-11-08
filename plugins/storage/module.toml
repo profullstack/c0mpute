@@ -1,25 +1,35 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — manifest stub for the DIP-0012 storage role.
-# Brief for the implementer:
-#   Reed-Solomon (k=10, n=14) shard storage and HTTP shard endpoints.
-#   Auto-repair re-shards on node failure. Compute-locality is the
-#   value prop — reads from c0mpute storage into a c0mpute worker
-#   are internal-egress-free. First-party in-tree: erasure coding
-#   already lives in c0mpute-store; this stub wires the marketplace
-#   surface (manifest + dashboard listing + capability tag).
+# First-party, compiled into the c0mpute binary and ON BY DEFAULT.
+#
+# Every node with the storage role (a default role) serves, on its gateway
+# (0.0.0.0:7777):
+#   /storage/v1/...                 the CIP-002 storage API: reads open (a
+#                                   blake3 hash is the capability), writes
+#                                   ed25519-signed by the node's own key or a
+#                                   key in storage.trusted_writers
+#   /.well-known/opendisk.json      its OpenDisk 0.1 descriptor: identity key,
+#                                   live free/total space, price per GiB-month
+# A node whose gateway.announce is a public https origin lists itself on the
+# OpenDisk marketplace (d1sks) on start and once a day. Peer to peer: no
+# central registry; storage.opendisk = false opts out.
+#
+# Reed-Solomon 10/14 sharding and placement live in c0mpute-store and
+# c0mpute-placement (`c0mpute storage put|get`).
 
 [module]
 id          = "storage"
 name        = "Storage — Reed-Solomon shard service"
-version     = "0.2.66"
+version     = "0.2.67"
 kind        = "service"
 category    = "data"
-description = "Reed-Solomon 10/14 shard storage with auto-repair. Compute-locality, E2E encryption, content-addressed, pay-as-you-go. See DIP-0012."
+status      = "available"
+builtin     = true
+description = "Reed-Solomon 10/14 shard storage on every node by default, with signed writes and an OpenDisk descriptor so each node lists itself on d1sks. Content-addressed, pay per GiB-month. See DIP-0012."
 author      = "Profullstack"
 license     = "MIT"
 source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/storage"
-keywords    = ["storage", "erasure-coding", "reed-solomon", "shards", "content-addressed"]
+keywords    = ["storage", "erasure-coding", "reed-solomon", "shards", "content-addressed", "opendisk", "d1sks"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"
