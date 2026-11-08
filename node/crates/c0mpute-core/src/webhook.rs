@@ -153,9 +153,7 @@ impl WebhookSpec {
     /// Worst-case seconds the worker spends on this delivery.
     pub fn budget_secs(&self) -> u64 {
         let tries = u64::from(self.max_attempts);
-        let waits: u64 = (1..tries)
-            .map(|n| backoff(self.backoff_ms, n as u32).as_millis() as u64)
-            .sum();
+        let waits: u64 = (1..tries).map(|n| backoff(self.backoff_ms, n as u32).as_millis() as u64).sum();
         (tries * u64::from(self.timeout_ms) + waits).div_ceil(1000)
     }
 }
@@ -217,10 +215,8 @@ impl WebhookCall {
         let mut bytes = 0;
         for (k, v) in &self.headers {
             bytes += k.len() + v.len();
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .with_context(|| format!("bad header name {k:?}"))?;
-            reqwest::header::HeaderValue::from_str(v)
-                .with_context(|| format!("bad value for header {k}"))?;
+            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes()).with_context(|| format!("bad header name {k:?}"))?;
+            reqwest::header::HeaderValue::from_str(v).with_context(|| format!("bad value for header {k}"))?;
             if RESERVED_HEADERS.contains(&name.as_str()) {
                 bail!("header {k} is set by the worker");
             }
@@ -228,11 +224,7 @@ impl WebhookCall {
         if bytes > MAX_HEADER_BYTES {
             bail!("headers larger than {MAX_HEADER_BYTES} bytes");
         }
-        if self
-            .secret
-            .as_deref()
-            .is_some_and(|s| s.is_empty() || s.len() > MAX_SECRET)
-        {
+        if self.secret.as_deref().is_some_and(|s| s.is_empty() || s.len() > MAX_SECRET) {
             bail!("secret must be 1..={MAX_SECRET} bytes");
         }
         if let Some(id) = &self.id {
@@ -289,10 +281,7 @@ impl DeliveryResult {
     }
 
     fn refused(e: impl std::fmt::Display) -> Self {
-        Self {
-            error: Some(format!("refused: {e}")),
-            ..Default::default()
-        }
+        Self { error: Some(format!("refused: {e}")), ..Default::default() }
     }
 }
 
@@ -330,28 +319,17 @@ pub struct WebhookSealedResult {
 /// One key per direction, bound to the job: a sealed result can never be
 /// replayed as a request, nor a message moved to another job.
 pub fn request_key(secret: &StaticSecret, peer_pub_hex: &str, job_id: &str) -> Result<[u8; 32]> {
-    crypto::session_key(
-        secret,
-        peer_pub_hex,
-        &format!("c0mpute.webhook/v1/{job_id}/request"),
-    )
+    crypto::session_key(secret, peer_pub_hex, &format!("c0mpute.webhook/v1/{job_id}/request"))
 }
 
 pub fn result_key(secret: &StaticSecret, peer_pub_hex: &str, job_id: &str) -> Result<[u8; 32]> {
-    crypto::session_key(
-        secret,
-        peer_pub_hex,
-        &format!("c0mpute.webhook/v1/{job_id}/result"),
-    )
+    crypto::session_key(secret, peer_pub_hex, &format!("c0mpute.webhook/v1/{job_id}/result"))
 }
 
 pub fn seal_call(key: &[u8; 32], call: &WebhookCall) -> Result<String> {
     let sealed = crypto::seal(key, &serde_json::to_vec(call)?)?;
     if sealed.len() > MAX_SEALED {
-        bail!(
-            "sealed request is {} bytes; one delivery carries at most {MAX_SEALED} (shrink the body or headers)",
-            sealed.len()
-        );
+        bail!("sealed request is {} bytes; one delivery carries at most {MAX_SEALED} (shrink the body or headers)", sealed.len());
     }
     Ok(sealed)
 }
@@ -404,10 +382,7 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 }
 
 fn unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 // ── Standard Webhooks signature ─────────────────────────────────────────
@@ -415,16 +390,12 @@ fn unix_secs() -> u64 {
 /// The signing key: `whsec_<base64>` decodes to bytes (Standard Webhooks);
 /// anything else is used as raw bytes.
 fn signing_key(secret: &str) -> Vec<u8> {
-    secret
-        .strip_prefix("whsec_")
-        .and_then(|b| B64.decode(b).ok())
-        .unwrap_or_else(|| secret.as_bytes().to_vec())
+    secret.strip_prefix("whsec_").and_then(|b| B64.decode(b).ok()).unwrap_or_else(|| secret.as_bytes().to_vec())
 }
 
 /// `webhook-signature` value: `v1,<base64 HMAC-SHA256(id.timestamp.body)>`.
 pub fn sign(secret: &str, id: &str, timestamp: u64, body: &[u8]) -> String {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&signing_key(secret))
-        .expect("hmac accepts any key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&signing_key(secret)).expect("hmac accepts any key length");
     mac.update(id.as_bytes());
     mac.update(b".");
     mac.update(timestamp.to_string().as_bytes());
@@ -449,18 +420,12 @@ async fn resolve_public(u: &url::Url, guard: Guard) -> Result<(String, Vec<std::
     }
     let host = u.host_str().context("url has no host")?.to_string();
     let port = u.port_or_known_default().context("url has no port")?;
-    let lookup = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
-    let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::net::lookup_host((lookup.as_str(), port)),
-    )
-    .await
-    .map_err(|_| anyhow!("resolving {host} timed out"))?
-    .with_context(|| format!("resolve {host}"))?
-    .collect();
+    let lookup = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((lookup.as_str(), port)))
+        .await
+        .map_err(|_| anyhow!("resolving {host} timed out"))?
+        .with_context(|| format!("resolve {host}"))?
+        .collect();
     if addrs.is_empty() {
         bail!("{host} did not resolve");
     }
@@ -482,12 +447,7 @@ fn retryable(status: Option<u16>) -> bool {
 
 /// Send `call` with up to `spec.max_attempts` tries. Never fails: a refused
 /// or unreachable target is reported in the result.
-pub async fn deliver(
-    call: &WebhookCall,
-    spec: &WebhookSpec,
-    default_id: &str,
-    guard: Guard,
-) -> DeliveryResult {
+pub async fn deliver(call: &WebhookCall, spec: &WebhookSpec, default_id: &str, guard: Guard) -> DeliveryResult {
     if let Err(e) = call.validate().and_then(|_| spec.validate()) {
         return DeliveryResult::refused(e);
     }
@@ -495,15 +455,9 @@ pub async fn deliver(
         Ok(u) => u,
         Err(e) => return DeliveryResult::refused(e),
     };
-    let id = call
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("msg_{default_id}"));
+    let id = call.id.clone().unwrap_or_else(|| format!("msg_{default_id}"));
     let started = Instant::now();
-    let mut out = DeliveryResult {
-        webhook_id: call.secret.as_ref().map(|_| id.clone()),
-        ..Default::default()
-    };
+    let mut out = DeliveryResult { webhook_id: call.secret.as_ref().map(|_| id.clone()), ..Default::default() };
     for n in 1..=spec.max_attempts {
         if n > 1 {
             tokio::time::sleep(backoff(spec.backoff_ms, n - 1)).await;
@@ -516,11 +470,7 @@ pub async fn deliver(
                 // A refusal is final; retrying cannot make the address public.
                 out.attempts = n;
                 out.error = Some(format!("refused: {e:#}"));
-                out.log.push(Attempt {
-                    status: None,
-                    error: out.error.clone(),
-                    latency_ms: 0,
-                });
+                out.log.push(Attempt { status: None, error: out.error.clone(), latency_ms: 0 });
                 break;
             }
             Ok((host, addrs)) => send_once(call, spec, &u, &host, &addrs, &id).await,
@@ -536,20 +486,12 @@ pub async fn deliver(
                 out.response_body = r.body;
                 out.truncated = r.truncated;
                 out.error = None;
-                out.log.push(Attempt {
-                    status: Some(r.status),
-                    error: None,
-                    latency_ms,
-                });
+                out.log.push(Attempt { status: Some(r.status), error: None, latency_ms });
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 out.error = Some(msg.clone());
-                out.log.push(Attempt {
-                    status: None,
-                    error: Some(msg),
-                    latency_ms,
-                });
+                out.log.push(Attempt { status: None, error: Some(msg), latency_ms });
             }
         }
         if !retryable(out.log.last().and_then(|a| a.status)) {
@@ -567,14 +509,7 @@ struct Answer {
     truncated: bool,
 }
 
-async fn send_once(
-    call: &WebhookCall,
-    spec: &WebhookSpec,
-    u: &url::Url,
-    host: &str,
-    addrs: &[std::net::SocketAddr],
-    id: &str,
-) -> Result<Answer> {
+async fn send_once(call: &WebhookCall, spec: &WebhookSpec, u: &url::Url, host: &str, addrs: &[std::net::SocketAddr], id: &str) -> Result<Answer> {
     let timeout = Duration::from_millis(u64::from(spec.timeout_ms));
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -599,17 +534,12 @@ async fn send_once(
         req = req
             .header("webhook-id", id)
             .header("webhook-timestamp", ts.to_string())
-            .header(
-                "webhook-signature",
-                sign(secret, id, ts, call.body.as_bytes()),
-            );
+            .header("webhook-signature", sign(secret, id, ts, call.body.as_bytes()));
     }
     if !call.body.is_empty() {
         req = req.body(call.body.clone());
     }
-    let mut resp = tokio::time::timeout(timeout, req.send())
-        .await
-        .map_err(|_| anyhow!("timed out after {}ms", spec.timeout_ms))??;
+    let mut resp = tokio::time::timeout(timeout, req.send()).await.map_err(|_| anyhow!("timed out after {}ms", spec.timeout_ms))??;
     let status = resp.status().as_u16();
     let headers = resp
         .headers()
@@ -640,12 +570,7 @@ async fn send_once(
     if tokio::time::timeout(timeout, read).await.is_err() {
         truncated = true;
     }
-    Ok(Answer {
-        status,
-        headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
-        truncated,
-    })
+    Ok(Answer { status, headers, body: String::from_utf8_lossy(&body).into_owned(), truncated })
 }
 
 // ── worker ──────────────────────────────────────────────────────────────
@@ -660,11 +585,7 @@ pub fn validate_price(price_usd: f64) -> Result<()> {
 
 /// The listing every webhook bid is priced with: a fixed price per delivery.
 pub fn pricing(price_usd: f64) -> PricingConfig {
-    PricingConfig {
-        mode: PricingMode::Fixed,
-        min_usd: price_usd,
-        fixed_usd: Some(price_usd),
-    }
+    PricingConfig { mode: PricingMode::Fixed, min_usd: price_usd, fixed_usd: Some(price_usd) }
 }
 
 /// Bid only on valid webhook offers whose cap covers our price.
@@ -677,9 +598,7 @@ pub fn offer_filter(price_usd: f64) -> OfferFilter {
                 .as_ref()
                 .and_then(|v| serde_json::from_value::<WebhookSpec>(v.clone()).ok())
                 .is_some_and(|s| {
-                    let deadline_ok = offer.deadline_unix_ms.saturating_sub(offer.published_at_ms)
-                        / 1000
-                        >= s.budget_secs();
+                    let deadline_ok = offer.deadline_unix_ms.saturating_sub(offer.published_at_ms) / 1000 >= s.budget_secs();
                     s.validate().is_ok() && deadline_ok
                 })
     })
@@ -694,12 +613,7 @@ async fn run_job(net: Arc<Libp2pNetwork>, accept: JobAccept, guard: Guard) -> Re
     let topic = job_topic(WORKLOAD);
     let me = net.peer_id().to_base58();
     let mut rx = net.messages();
-    let spec: WebhookSpec = serde_json::from_value(
-        accept
-            .spec_inline
-            .clone()
-            .context("accept lacks spec_inline")?,
-    )?;
+    let spec: WebhookSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
     spec.validate()?;
     let kp = crypto::keypair();
     let req_key = request_key(&kp.secret, &spec.client_pubkey, &accept.job_id)?;
@@ -732,22 +646,14 @@ async fn run_job(net: Arc<Libp2pNetwork>, accept: JobAccept, guard: Guard) -> Re
         if msg.topic != topic {
             continue;
         }
-        let Ok(r) = serde_json::from_slice::<WebhookSealed>(&msg.data) else {
-            continue;
-        };
+        let Ok(r) = serde_json::from_slice::<WebhookSealed>(&msg.data) else { continue };
         // Only the buyer that won us may hand us the request.
-        if r.t != "webhook_request"
-            || r.job_id != accept.job_id
-            || r.worker_peer_id != me
-            || !from(&msg, &accept.buyer_peer_id)
-        {
+        if r.t != "webhook_request" || r.job_id != accept.job_id || r.worker_peer_id != me || !from(&msg, &accept.buyer_peer_id) {
             continue;
         }
         match open_call(&req_key, &r.sealed) {
             Ok(c) => break c,
-            Err(e) => {
-                debug!(job_id = %accept.job_id, err = %e, "webhook: unreadable request ignored")
-            }
+            Err(e) => debug!(job_id = %accept.job_id, err = %e, "webhook: unreadable request ignored"),
         }
     };
 
@@ -755,19 +661,10 @@ async fn run_job(net: Arc<Libp2pNetwork>, accept: JobAccept, guard: Guard) -> Re
     drop(call);
     let sealed = seal_result(&res_key, &result)?;
     let hash = sha256_hex(sealed.as_bytes());
-    let msg = serde_json::to_vec(&WebhookSealedResult {
-        t: "webhook_result".into(),
-        job_id: accept.job_id.clone(),
-        worker_peer_id: me.clone(),
-        sealed,
-    })?;
+    let msg = serde_json::to_vec(&WebhookSealedResult { t: "webhook_result".into(), job_id: accept.job_id.clone(), worker_peer_id: me.clone(), sealed })?;
     let _ = net.publish(&topic, msg.clone()).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let status = if result.answered() {
-        JobStatus::Completed
-    } else {
-        JobStatus::Failed
-    };
+    let status = if result.answered() { JobStatus::Completed } else { JobStatus::Failed };
     info!(job_id = %accept.job_id, status = ?result.status, attempts = result.attempts, delivered = result.delivered, "webhook: delivery done");
     publish_receipt(&net, &accept, Some(hash), status).await;
 
@@ -777,12 +674,7 @@ async fn run_job(net: Arc<Libp2pNetwork>, accept: JobAccept, guard: Guard) -> Re
     tokio::spawn(async move {
         let linger = Instant::now() + RESULT_LINGER;
         loop {
-            let m = match tokio::time::timeout(
-                linger.saturating_duration_since(Instant::now()),
-                rx.recv(),
-            )
-            .await
-            {
+            let m = match tokio::time::timeout(linger.saturating_duration_since(Instant::now()), rx.recv()).await {
                 Ok(Ok(m)) => m,
                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
                 _ => return,
@@ -802,17 +694,11 @@ async fn run_job(net: Arc<Libp2pNetwork>, accept: JobAccept, guard: Guard) -> Re
 
 /// Runner for `webhook.deliver`: each accepted job runs in its own task on
 /// one of the node's delivery slots.
-pub fn spawn_runner(
-    net: Arc<Libp2pNetwork>,
-    load: WorkerLoad,
-    guard: Guard,
-) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_runner(net: Arc<Libp2pNetwork>, load: WorkerLoad, guard: Guard) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(64);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else {
-                return;
-            };
+            let Ok(slot) = load.compute_slots().acquire_owned().await else { return };
             let net = net.clone();
             let load = load.clone();
             tokio::spawn(async move {
@@ -838,42 +724,20 @@ pub struct Serving {
 
 /// `c0mpute webhook serve`: advertise `webhook:deliver` and deliver paid,
 /// sealed webhooks, `concurrency` at a time.
-pub async fn serve(
-    net_opts: &crate::temporal::node::NetOptions,
-    price_usd: f64,
-    concurrency: usize,
-) -> Result<Serving> {
+pub async fn serve(net_opts: &crate::temporal::node::NetOptions, price_usd: f64, concurrency: usize) -> Result<Serving> {
     validate_price(price_usd)?;
     let concurrency = concurrency.clamp(1, 256);
     let net = crate::temporal::node::spawn_node(net_opts).await?;
     let tags = vec![TAG.to_string()];
     let listing = pricing(price_usd);
     let hardware = serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "webhook": {"concurrency": concurrency}, "pricing": listing.listing()});
-    tokio::spawn(crate::capabilities::advertise_loop(
-        net.clone(),
-        tags.clone(),
-        hardware,
-        crate::capabilities::local_bench_score(),
-        crate::capabilities::DEFAULT_ADVERTISE_INTERVAL,
-    ));
+    tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
     let load = WorkerLoad::new(Arc::new(Semaphore::new(concurrency)), concurrency);
     let tx = spawn_runner(net.clone(), load.clone(), Guard::default());
-    crate::dispatch::run_worker_subscriber_with_load(
-        net.clone(),
-        WORKLOAD.into(),
-        tags.clone(),
-        Some(tx),
-        Some(offer_filter(price_usd)),
-        Some(listing),
-        Some(load),
-    );
+    crate::dispatch::run_worker_subscriber_with_load(net.clone(), WORKLOAD.into(), tags.clone(), Some(tx), Some(offer_filter(price_usd)), Some(listing), Some(load));
     info!(peer = %net.peer_id().to_base58(), price_usd, concurrency, "webhook: serving");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Serving {
-        net,
-        tags,
-        price_usd,
-    })
+    Ok(Serving { net, tags, price_usd })
 }
 
 // ── buyer ───────────────────────────────────────────────────────────────
@@ -909,13 +773,7 @@ pub async fn send(net: Arc<Libp2pNetwork>, req: &SendRequest) -> Result<SendOutc
         bail!("--max-price must be at least ${MIN_PRICE_USD}: webhook delivery is paid");
     }
     let kp = crypto::keypair();
-    let spec = WebhookSpec {
-        v: 1,
-        client_pubkey: kp.public_hex.clone(),
-        max_attempts: req.max_attempts,
-        timeout_ms: req.timeout_ms,
-        backoff_ms: req.backoff_ms,
-    };
+    let spec = WebhookSpec { v: 1, client_pubkey: kp.public_hex.clone(), max_attempts: req.max_attempts, timeout_ms: req.timeout_ms, backoff_ms: req.backoff_ms };
     spec.validate()?;
     // Fail before the auction if the request cannot fit one message.
     seal_call(&[0u8; 32], &req.call)?;
@@ -1008,32 +866,15 @@ pub async fn send(net: Arc<Libp2pNetwork>, req: &SendRequest) -> Result<SendOutc
 
     let o = outcome.expect("loop exits with an outcome");
     let worker = o.accepted_bid.bidder_peer_id.clone();
-    let sealed = results.remove(&o.job_id).with_context(|| {
-        format!(
-            "worker {worker} sent a receipt ({:?}) but no result",
-            o.receipt.status
-        )
-    })?;
+    let sealed = results.remove(&o.job_id).with_context(|| format!("worker {worker} sent a receipt ({:?}) but no result", o.receipt.status))?;
     let got = sha256_hex(sealed.as_bytes());
     let claimed = o.receipt.output_hash.clone().unwrap_or_default();
     if got != claimed {
         bail!("result {got} does not match the receipt's {claimed}");
     }
-    let x = keys
-        .get(&o.job_id)
-        .context("no key exchange for the accepted job")?;
-    let result = open_result(
-        &result_key(&kp.secret, &x.worker_pubkey, &o.job_id)?,
-        &sealed,
-    )?;
-    Ok(SendOutcome {
-        result,
-        job_id: o.job_id,
-        worker_peer_id: worker,
-        price_usd: o.accepted_bid.price_usd,
-        output_hash: got,
-        receipt_status: o.receipt.status,
-    })
+    let x = keys.get(&o.job_id).context("no key exchange for the accepted job")?;
+    let result = open_result(&result_key(&kp.secret, &x.worker_pubkey, &o.job_id)?, &sealed)?;
+    Ok(SendOutcome { result, job_id: o.job_id, worker_peer_id: worker, price_usd: o.accepted_bid.price_usd, output_hash: got, receipt_status: o.receipt.status })
 }
 
 /// The key exchange with an accepted worker: its key, and our sealed request
@@ -1044,31 +885,13 @@ struct Exchange {
 }
 
 /// Seal the call to an accepted worker's key, publish it, and remember it.
-async fn key_up(
-    net: &Libp2pNetwork,
-    topic: &str,
-    secret: &StaticSecret,
-    call: &WebhookCall,
-    ready: WebhookReady,
-    keys: &mut HashMap<String, Exchange>,
-) -> Result<()> {
+async fn key_up(net: &Libp2pNetwork, topic: &str, secret: &StaticSecret, call: &WebhookCall, ready: WebhookReady, keys: &mut HashMap<String, Exchange>) -> Result<()> {
     let key = request_key(secret, &ready.worker_pubkey, &ready.job_id)?;
     let sealed = seal_call(&key, call)?;
-    let payload = serde_json::to_vec(&WebhookSealed {
-        t: "webhook_request".into(),
-        job_id: ready.job_id.clone(),
-        worker_peer_id: ready.worker_peer_id.clone(),
-        sealed,
-    })?;
+    let payload = serde_json::to_vec(&WebhookSealed { t: "webhook_request".into(), job_id: ready.job_id.clone(), worker_peer_id: ready.worker_peer_id.clone(), sealed })?;
     let _ = net.publish(topic, payload.clone()).await;
     debug!(job_id = %ready.job_id, worker = %ready.worker_peer_id, "webhook: sealed request sent");
-    keys.insert(
-        ready.job_id,
-        Exchange {
-            worker_pubkey: ready.worker_pubkey,
-            payload,
-        },
-    );
+    keys.insert(ready.job_id, Exchange { worker_pubkey: ready.worker_pubkey, payload });
     Ok(())
 }
 
@@ -1082,29 +905,14 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::any;
 
-    const LOCAL: Guard = Guard {
-        allow_private: true,
-    };
+    const LOCAL: Guard = Guard { allow_private: true };
 
     fn spec(attempts: u32) -> WebhookSpec {
-        WebhookSpec {
-            v: 1,
-            client_pubkey: "11".repeat(32),
-            max_attempts: attempts,
-            timeout_ms: 5_000,
-            backoff_ms: 100,
-        }
+        WebhookSpec { v: 1, client_pubkey: "11".repeat(32), max_attempts: attempts, timeout_ms: 5_000, backoff_ms: 100 }
     }
 
     fn call(url: &str) -> WebhookCall {
-        WebhookCall {
-            url: url.into(),
-            method: "POST".into(),
-            headers: vec![("x-tenant".into(), "acme".into())],
-            body: r#"{"event":"paid"}"#.into(),
-            secret: None,
-            id: None,
-        }
+        WebhookCall { url: url.into(), method: "POST".into(), headers: vec![("x-tenant".into(), "acme".into())], body: r#"{"event":"paid"}"#.into(), secret: None, id: None }
     }
 
     #[derive(Clone, Default)]
@@ -1118,12 +926,7 @@ mod tests {
     /// to `/other`, `/big` 100 KiB.
     async fn target() -> (String, Seen) {
         let seen = Seen::default();
-        async fn handle(
-            State(s): State<Seen>,
-            uri: axum::http::Uri,
-            headers: HeaderMap,
-            body: axum::body::Bytes,
-        ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        async fn handle(State(s): State<Seen>, uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes) -> (StatusCode, HeaderMap, Vec<u8>) {
             let mut h = HeaderMap::new();
             match uri.path() {
                 "/other" => {
@@ -1163,59 +966,18 @@ mod tests {
         let bk = request_key(&buyer.secret, &worker.public_hex, "job-1").unwrap();
         let wk = request_key(&worker.secret, &buyer.public_hex, "job-1").unwrap();
         let sealed = seal_call(&bk, &c).unwrap();
-        assert!(
-            !sealed.contains("example.com") && !sealed.contains("whsec_"),
-            "ciphertext must not leak the call"
-        );
+        assert!(!sealed.contains("example.com") && !sealed.contains("whsec_"), "ciphertext must not leak the call");
         assert_eq!(open_call(&wk, &sealed).unwrap(), c);
         // Another job, another direction, another worker: none can open it.
-        assert!(
-            open_call(
-                &request_key(&worker.secret, &buyer.public_hex, "job-2").unwrap(),
-                &sealed
-            )
-            .is_err()
-        );
-        assert!(
-            open_call(
-                &result_key(&worker.secret, &buyer.public_hex, "job-1").unwrap(),
-                &sealed
-            )
-            .is_err()
-        );
+        assert!(open_call(&request_key(&worker.secret, &buyer.public_hex, "job-2").unwrap(), &sealed).is_err());
+        assert!(open_call(&result_key(&worker.secret, &buyer.public_hex, "job-1").unwrap(), &sealed).is_err());
         let eve = crypto::keypair();
-        assert!(
-            open_call(
-                &request_key(&eve.secret, &buyer.public_hex, "job-1").unwrap(),
-                &sealed
-            )
-            .is_err()
-        );
+        assert!(open_call(&request_key(&eve.secret, &buyer.public_hex, "job-1").unwrap(), &sealed).is_err());
 
-        let r = DeliveryResult {
-            delivered: true,
-            status: Some(200),
-            attempts: 1,
-            response_body: "ok".into(),
-            ..Default::default()
-        };
-        let rs = seal_result(
-            &result_key(&worker.secret, &buyer.public_hex, "job-1").unwrap(),
-            &r,
-        )
-        .unwrap();
-        assert_eq!(
-            open_result(
-                &result_key(&buyer.secret, &worker.public_hex, "job-1").unwrap(),
-                &rs
-            )
-            .unwrap(),
-            r
-        );
-        assert!(
-            open_result(&bk, &rs).is_err(),
-            "a result cannot be opened as a request"
-        );
+        let r = DeliveryResult { delivered: true, status: Some(200), attempts: 1, response_body: "ok".into(), ..Default::default() };
+        let rs = seal_result(&result_key(&worker.secret, &buyer.public_hex, "job-1").unwrap(), &r).unwrap();
+        assert_eq!(open_result(&result_key(&buyer.secret, &worker.public_hex, "job-1").unwrap(), &rs).unwrap(), r);
+        assert!(open_result(&bk, &rs).is_err(), "a result cannot be opened as a request");
     }
 
     #[test]
@@ -1227,11 +989,7 @@ mod tests {
         // JSON escaping can blow a body under the cap past one message.
         c.body = "\u{1}".repeat(MAX_BODY / 2);
         assert!(seal_call(&key, &c).is_err());
-        let r = DeliveryResult {
-            status: Some(200),
-            response_body: "\u{1}".repeat(MAX_RESPONSE_BODY),
-            ..Default::default()
-        };
+        let r = DeliveryResult { status: Some(200), response_body: "\u{1}".repeat(MAX_RESPONSE_BODY), ..Default::default() };
         let s = seal_result(&key, &r).unwrap();
         assert!(s.len() <= MAX_SEALED);
         assert!(open_result(&key, &s).unwrap().truncated);
@@ -1240,23 +998,13 @@ mod tests {
     #[test]
     fn call_validation() {
         assert!(call("https://example.com/h").validate().is_ok());
-        for bad in [
-            "ftp://example.com/",
-            "file:///etc/passwd",
-            "https://user:pw@example.com/",
-            "not a url",
-        ] {
+        for bad in ["ftp://example.com/", "file:///etc/passwd", "https://user:pw@example.com/", "not a url"] {
             assert!(call(bad).validate().is_err(), "{bad}");
         }
         let mut c = call("https://example.com/h");
         c.method = "CONNECT".into();
         assert!(c.validate().is_err());
-        for h in [
-            "Host",
-            "content-length",
-            "webhook-signature",
-            "Transfer-Encoding",
-        ] {
+        for h in ["Host", "content-length", "webhook-signature", "Transfer-Encoding"] {
             let mut c = call("https://example.com/h");
             c.headers = vec![(h.into(), "x".into())];
             assert!(c.validate().is_err(), "{h}");
@@ -1283,18 +1031,10 @@ mod tests {
         ] {
             let r = deliver(&call(&url), &spec(3), "j", Guard::default()).await;
             assert!(!r.answered(), "{url} must not be reached");
-            assert!(
-                r.error.as_deref().unwrap_or("").starts_with("refused"),
-                "{url}: {:?}",
-                r.error
-            );
+            assert!(r.error.as_deref().unwrap_or("").starts_with("refused"), "{url}: {:?}", r.error);
             assert_eq!(r.attempts, 1, "{url}: a refusal is not retried");
         }
-        assert_eq!(
-            seen.hits.load(Ordering::SeqCst),
-            0,
-            "nothing reached the local target"
-        );
+        assert_eq!(seen.hits.load(Ordering::SeqCst), 0, "nothing reached the local target");
     }
 
     #[tokio::test]
@@ -1304,16 +1044,8 @@ mod tests {
         assert_eq!(r.status, Some(302));
         assert!(!r.delivered);
         assert_eq!(r.attempts, 1, "a 3xx is final");
-        assert_eq!(
-            seen.other_hits.load(Ordering::SeqCst),
-            0,
-            "the redirect target was never fetched"
-        );
-        assert!(
-            r.response_headers
-                .iter()
-                .any(|(k, v)| k == "location" && v == "/other")
-        );
+        assert_eq!(seen.other_hits.load(Ordering::SeqCst), 0, "the redirect target was never fetched");
+        assert!(r.response_headers.iter().any(|(k, v)| k == "location" && v == "/other"));
     }
 
     #[tokio::test]
@@ -1323,10 +1055,7 @@ mod tests {
         c.secret = Some("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw".into());
         c.id = Some("msg_1".into());
         let r = deliver(&c, &spec(3), "j", LOCAL).await;
-        assert!(
-            r.delivered && r.status == Some(200) && r.attempts == 1,
-            "{r:?}"
-        );
+        assert!(r.delivered && r.status == Some(200) && r.attempts == 1, "{r:?}");
         assert_eq!(r.response_body, "thanks");
         assert_eq!(r.webhook_id.as_deref(), Some("msg_1"));
         let (h, body) = seen.last.lock().unwrap().clone().unwrap();
@@ -1336,26 +1065,15 @@ mod tests {
         assert_eq!(h["webhook-id"], "msg_1");
         let ts: u64 = h["webhook-timestamp"].to_str().unwrap().parse().unwrap();
         // Verify the way a receiver does, with an independent HMAC.
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(
-            &B64.decode("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap(),
-        )
-        .unwrap();
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&B64.decode("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap()).unwrap();
         mac.update(format!("msg_1.{ts}.{}", c.body).as_bytes());
-        assert_eq!(
-            h["webhook-signature"].to_str().unwrap(),
-            format!("v1,{}", B64.encode(mac.finalize().into_bytes()))
-        );
+        assert_eq!(h["webhook-signature"].to_str().unwrap(), format!("v1,{}", B64.encode(mac.finalize().into_bytes())));
     }
 
     #[test]
     fn signature_matches_the_standard_webhooks_reference_vector() {
         // From the Standard Webhooks spec / svix reference libraries.
-        let sig = sign(
-            "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
-            "msg_p5jXN8AQM9LWM0D4loKWxJek",
-            1614265330,
-            br#"{"test": 2432232314}"#,
-        );
+        let sig = sign("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "msg_p5jXN8AQM9LWM0D4loKWxJek", 1614265330, br#"{"test": 2432232314}"#);
         assert_eq!(sig, "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
     }
 
@@ -1368,24 +1086,11 @@ mod tests {
         assert_eq!(seen.hits.load(Ordering::SeqCst), 3);
 
         let r = deliver(&call(&format!("{base}/bad")), &spec(3), "j", LOCAL).await;
-        assert_eq!(
-            (r.attempts, r.status),
-            (1, Some(400)),
-            "a 4xx is not retried"
-        );
+        assert_eq!((r.attempts, r.status), (1, Some(400)), "a 4xx is not retried");
         assert_eq!(seen.hits.load(Ordering::SeqCst), 4);
 
-        let r = deliver(
-            &call(&format!("{base}/fail")),
-            &spec(MAX_ATTEMPTS + 1),
-            "j",
-            LOCAL,
-        )
-        .await;
-        assert!(
-            r.error.unwrap().contains("max_attempts"),
-            "over the cap is refused outright"
-        );
+        let r = deliver(&call(&format!("{base}/fail")), &spec(MAX_ATTEMPTS + 1), "j", LOCAL).await;
+        assert!(r.error.unwrap().contains("max_attempts"), "over the cap is refused outright");
         assert_eq!(seen.hits.load(Ordering::SeqCst), 4);
     }
 
@@ -1409,32 +1114,19 @@ mod tests {
         let mut s = spec(1);
         s.client_pubkey = "zz".into();
         assert!(s.validate().is_err());
-        let s = WebhookSpec {
-            v: 1,
-            client_pubkey: "11".repeat(32),
-            max_attempts: 3,
-            timeout_ms: 10_000,
-            backoff_ms: 1_000,
-        };
+        let s = WebhookSpec { v: 1, client_pubkey: "11".repeat(32), max_attempts: 3, timeout_ms: 10_000, backoff_ms: 1_000 };
         assert_eq!(s.budget_secs(), 30 + 1 + 2);
         assert_eq!(backoff(10_000, 5), Duration::from_millis(BACKOFF_CEIL_MS));
     }
 
     async fn node(dir: &std::path::Path, boot: Vec<libp2p::Multiaddr>) -> Arc<Libp2pNetwork> {
-        let cfg = c0mpute_net::NetworkConfig::for_dir(dir.to_path_buf())
-            .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
-            .with_bootstrap(boot);
+        let cfg = c0mpute_net::NetworkConfig::for_dir(dir.to_path_buf()).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]).with_bootstrap(boot);
         Arc::new(Libp2pNetwork::spawn(cfg).await.unwrap())
     }
 
     async fn dial_addr(net: &Libp2pNetwork) -> libp2p::Multiaddr {
         for _ in 0..50 {
-            if let Some(a) = net
-                .listen_addrs()
-                .await
-                .ok()
-                .and_then(|v| v.into_iter().next())
-            {
+            if let Some(a) = net.listen_addrs().await.ok().and_then(|v| v.into_iter().next()) {
                 return a.with(libp2p::multiaddr::Protocol::P2p(net.peer_id()));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1457,15 +1149,7 @@ mod tests {
 
         let load = WorkerLoad::new(Arc::new(Semaphore::new(4)), 4);
         let tx = spawn_runner(worker.clone(), load.clone(), LOCAL);
-        crate::dispatch::run_worker_subscriber_with_load(
-            worker.clone(),
-            WORKLOAD.into(),
-            vec![TAG.into()],
-            Some(tx),
-            Some(offer_filter(DEFAULT_PRICE_USD)),
-            Some(pricing(DEFAULT_PRICE_USD)),
-            Some(load),
-        );
+        crate::dispatch::run_worker_subscriber_with_load(worker.clone(), WORKLOAD.into(), vec![TAG.into()], Some(tx), Some(offer_filter(DEFAULT_PRICE_USD)), Some(pricing(DEFAULT_PRICE_USD)), Some(load));
         let topic = job_topic(WORKLOAD);
         bystander.subscribe(&topic).await.unwrap();
         let mut spy = bystander.messages();
@@ -1481,34 +1165,14 @@ mod tests {
         let secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"; // gitleaks:allow (public Standard Webhooks spec test key)
         let mut c = call(&format!("{base}/ok"));
         c.secret = Some(secret.into());
-        c.headers
-            .push(("authorization".into(), "Bearer sk_live_topsecret".into()));
-        let req = SendRequest {
-            call: c.clone(),
-            max_attempts: 2,
-            timeout_ms: 5_000,
-            backoff_ms: 100,
-            workers: vec![],
-            max_price_usd: DEFAULT_MAX_PRICE_USD,
-            bid_window: Duration::from_secs(3),
-            external_ref: Some("coinpay:inv_e2e".into()),
-        };
-        let out = tokio::time::timeout(Duration::from_secs(90), send(buyer.clone(), &req))
-            .await
-            .expect("send finishes")
-            .expect("send succeeds");
+        c.headers.push(("authorization".into(), "Bearer sk_live_topsecret".into()));
+        let req = SendRequest { call: c.clone(), max_attempts: 2, timeout_ms: 5_000, backoff_ms: 100, workers: vec![], max_price_usd: DEFAULT_MAX_PRICE_USD, bid_window: Duration::from_secs(3), external_ref: Some("coinpay:inv_e2e".into()) };
+        let out = tokio::time::timeout(Duration::from_secs(90), send(buyer.clone(), &req)).await.expect("send finishes").expect("send succeeds");
         assert_eq!(out.worker_peer_id, worker.peer_id().to_base58());
         assert_eq!(out.receipt_status, JobStatus::Completed);
-        assert!(
-            out.result.delivered && out.result.status == Some(200),
-            "{:?}",
-            out.result
-        );
+        assert!(out.result.delivered && out.result.status == Some(200), "{:?}", out.result);
         assert_eq!(out.result.response_body, "thanks");
-        assert_eq!(
-            out.price_usd, DEFAULT_PRICE_USD,
-            "paid the worker's price, not zero and not the cap"
-        );
+        assert_eq!(out.price_usd, DEFAULT_PRICE_USD, "paid the worker's price, not zero and not the cap");
         assert_eq!(seen.hits.load(Ordering::SeqCst), 1);
         let (h, _) = seen.last.lock().unwrap().clone().unwrap();
         assert_eq!(h["authorization"], "Bearer sk_live_topsecret");
@@ -1516,22 +1180,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
         let wire = String::from_utf8_lossy(&sniffed.lock().unwrap()).into_owned();
-        assert!(
-            wire.contains("webhook_request") && wire.contains("webhook_result"),
-            "the bystander saw the sealed exchange"
-        );
-        for leak in [
-            base.as_str(),
-            "sk_live_topsecret",
-            secret,
-            "x-tenant",
-            "\"event\"",
-            "thanks",
-        ] {
-            assert!(
-                !wire.contains(leak),
-                "plaintext {leak:?} leaked onto gossip"
-            );
+        assert!(wire.contains("webhook_request") && wire.contains("webhook_result"), "the bystander saw the sealed exchange");
+        for leak in [base.as_str(), "sk_live_topsecret", secret, "x-tenant", "\"event\"", "thanks"] {
+            assert!(!wire.contains(leak), "plaintext {leak:?} leaked onto gossip");
         }
     }
 
@@ -1560,57 +1211,24 @@ mod tests {
         // Our bid is always our price, never the buyer's cap, never zero.
         let p = pricing(DEFAULT_PRICE_USD);
         assert_eq!(p.quote(0.01, 0.0), Some(DEFAULT_PRICE_USD));
-        assert_eq!(
-            p.quote(DEFAULT_PRICE_USD / 2.0, 0.0),
-            None,
-            "a cap under our price gets no bid"
-        );
+        assert_eq!(p.quote(DEFAULT_PRICE_USD / 2.0, 0.0), None, "a cap under our price gets no bid");
         let f = offer_filter(DEFAULT_PRICE_USD);
         let good = serde_json::to_value(spec(3)).unwrap();
         assert!(f(&offer(DEFAULT_MAX_PRICE_USD, good.clone())));
         assert!(!f(&offer(0.0, good.clone())), "a free offer gets no bid");
         assert!(!f(&offer(f64::NAN, good.clone())));
-        assert!(
-            !f(&offer(1.0, serde_json::to_value(spec(9)).unwrap())),
-            "an invalid spec gets no bid"
-        );
-        assert!(
-            !f(&offer(
-                1.0,
-                serde_json::json!({"url": "http://169.254.169.254/"})
-            )),
-            "plaintext calls are not a webhook spec"
-        );
+        assert!(!f(&offer(1.0, serde_json::to_value(spec(9)).unwrap())), "an invalid spec gets no bid");
+        assert!(!f(&offer(1.0, serde_json::json!({"url": "http://169.254.169.254/"}))), "plaintext calls are not a webhook spec");
         let mut short = offer(1.0, good);
         short.deadline_unix_ms = short.published_at_ms + 1_000;
-        assert!(
-            !f(&short),
-            "a deadline shorter than the retry budget gets no bid"
-        );
+        assert!(!f(&short), "a deadline shorter than the retry budget gets no bid");
     }
 
     #[test]
     fn accepts_must_match_the_webhook_offer_we_bid_on() {
         let s = serde_json::to_value(spec(3)).unwrap();
-        let bid = crate::dispatch::OpenBid {
-            cap: 0.002,
-            price: 0.001,
-            buyer_peer_id: "buyer".into(),
-            spec_inline: Some(s.clone()),
-            external_ref: Some("coinpay:inv_1".into()),
-            expires_at_ms: u64::MAX / 2,
-        };
-        let accept = JobAccept {
-            job_id: "j".into(),
-            buyer_peer_id: "buyer".into(),
-            winning_bidder_peer_id: "us".into(),
-            agreed_price_usd: 0.001,
-            workload_type: WORKLOAD.into(),
-            spec_inline: Some(s),
-            published_at_ms: 0,
-            external_ref: Some("coinpay:inv_1".into()),
-            buyer_addrs: Vec::new(),
-        };
+        let bid = crate::dispatch::OpenBid { cap: 0.002, price: 0.001, buyer_peer_id: "buyer".into(), spec_inline: Some(s.clone()), external_ref: Some("coinpay:inv_1".into()), expires_at_ms: u64::MAX / 2 };
+        let accept = JobAccept { job_id: "j".into(), buyer_peer_id: "buyer".into(), winning_bidder_peer_id: "us".into(), agreed_price_usd: 0.001, workload_type: WORKLOAD.into(), spec_inline: Some(s), published_at_ms: 0, external_ref: Some("coinpay:inv_1".into()), buyer_addrs: Vec::new() };
         assert!(bid.matches(&accept, 0).is_ok());
         // A forged accept swapping in another buyer key (to read the call) is refused.
         let mut a = accept.clone();
@@ -1623,9 +1241,6 @@ mod tests {
         assert!(bid.matches(&a, 0).is_err(), "over the cap");
         let mut a = accept;
         a.buyer_peer_id = "mallory".into();
-        assert!(
-            bid.matches(&a, 0).is_err(),
-            "only the offer's buyer accepts"
-        );
+        assert!(bid.matches(&a, 0).is_err(), "only the offer's buyer accepts");
     }
 }
