@@ -18,6 +18,8 @@ export interface NodeRow {
   benchmarks: Record<string, WorkloadBenchmark> | null;
   version: string | null;
   ref: string | null;
+  /** The operator's nickname (`c0mpute name`); absent on nodes older than 0.2.64. */
+  name?: string | null;
   /** The operator's listing; absent on nodes older than 0.2.35. */
   pricing?: Pricing | null;
   last_seen_s: number;
@@ -56,6 +58,8 @@ export interface NodesPayload {
   generated_at: string;
   workers_online: number;
   nodes: NodeRow[];
+  /** Nodes online per nickname; absent from aggregators older than 0.2.64. */
+  operators: { name: string; nodes: number }[];
   referrers: { ref: string; nodes: number }[];
   source: "aggregator" | "unavailable";
 }
@@ -76,6 +80,8 @@ export async function getNodesPayload(): Promise<NodesPayload> {
     return {
       ...data,
       nodes: Array.isArray(data.nodes) ? data.nodes.map(publicRow) : [],
+      operators: Array.isArray(data.operators) ? data.operators : [],
+      referrers: Array.isArray(data.referrers) ? data.referrers : [],
       source: "aggregator",
     };
   }
@@ -83,6 +89,7 @@ export async function getNodesPayload(): Promise<NodesPayload> {
     generated_at: new Date().toISOString(),
     workers_online: 0,
     nodes: [],
+    operators: [],
     referrers: [],
     source: "unavailable",
   };

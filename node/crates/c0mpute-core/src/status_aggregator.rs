@@ -383,6 +383,8 @@ struct NodeRow {
     version: Option<String>,
     #[serde(rename = "ref")]
     referral: Option<String>,
+    /// The operator's nickname (`c0mpute name`), if the node sets one.
+    name: Option<String>,
     /// The operator's listing (`mode`, `min_usd`, `fixed_usd`), if the node
     /// advertises one. Re-validated here: only known fields, sane numbers.
     pricing: Option<serde_json::Value>,
@@ -461,11 +463,18 @@ struct ReferrerRow {
     nodes: u64,
 }
 
+#[derive(Serialize, Debug, PartialEq)]
+struct OperatorRow {
+    name: String,
+    nodes: u64,
+}
+
 #[derive(Serialize)]
 struct NodesPayload {
     generated_at: String,
     workers_online: u64,
     nodes: Vec<NodeRow>,
+    operators: Vec<OperatorRow>,
     referrers: Vec<ReferrerRow>,
 }
 
@@ -510,6 +519,11 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .get("ref")
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::sanitize_ref),
+            name: ad
+                .hardware
+                .get("name")
+                .and_then(|v| v.as_str())
+                .and_then(crate::capabilities::sanitize_ref),
             pricing: listing(&ad.hardware),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
         })
@@ -529,10 +543,23 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
         .collect();
     referrers.sort_by(|a, b| b.nodes.cmp(&a.nodes).then(a.referral.cmp(&b.referral)));
 
+    let mut by_name: BTreeMap<String, u64> = BTreeMap::new();
+    for n in &nodes {
+        if let Some(name) = &n.name {
+            *by_name.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut operators: Vec<OperatorRow> = by_name
+        .into_iter()
+        .map(|(name, nodes)| OperatorRow { name, nodes })
+        .collect();
+    operators.sort_by(|a, b| b.nodes.cmp(&a.nodes).then(a.name.cmp(&b.name)));
+
     NodesPayload {
         generated_at: iso8601_utc(now),
         workers_online: nodes.len() as u64,
         nodes,
+        operators,
         referrers,
     }
 }
@@ -733,7 +760,11 @@ mod tests {
         let ads = vec![
             (
                 "12D3KooWaaaaaaaaAAAAAAAA".to_string(),
-                mk(&["c0mpute:cpu"], None, serde_json::json!({"ref": "Chovy"})),
+                mk(
+                    &["c0mpute:cpu"],
+                    None,
+                    serde_json::json!({"ref": "Chovy", "name": "Profullstack"}),
+                ),
             ),
             (
                 "12D3KooWbbbbbbbbBBBBBBBB".to_string(),
@@ -745,6 +776,7 @@ mod tests {
                         "ram_bytes": 68_719_476_736u64,
                         "version": "0.2.32",
                         "ref": "chovy",
+                        "name": "profullstack",
                         "cpu": "Example CPU",
                         "bench_at": "2026-11-01T12:00:00Z",
                         "benchmark": {"workloads": {"fib": {
@@ -759,7 +791,7 @@ mod tests {
                 mk(
                     &["c0mpute:cpu"],
                     Some(100),
-                    serde_json::json!({"ref": "<bad>"}),
+                    serde_json::json!({"ref": "<bad>", "name": "has space"}),
                 ),
             ),
         ];
@@ -777,6 +809,15 @@ mod tests {
         assert_eq!(p.nodes[0].last_seen_s, 30);
         assert_eq!(p.nodes[2].bench_score, None);
         assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
+        assert_eq!(p.nodes[1].name, None, "invalid name dropped");
+        assert_eq!(p.nodes[0].name.as_deref(), Some("profullstack"));
+        assert_eq!(
+            p.operators,
+            vec![OperatorRow {
+                name: "profullstack".into(),
+                nodes: 2
+            }]
+        );
         assert_eq!(
             p.referrers,
             vec![ReferrerRow {

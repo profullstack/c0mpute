@@ -187,6 +187,9 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
     if let Some(code) = referral_code() {
         blob["ref"] = serde_json::Value::String(code);
     }
+    if let Some(name) = node_name() {
+        blob["name"] = serde_json::Value::String(name);
+    }
     blob["pricing"] = config.pricing.listing();
     blob
 }
@@ -239,14 +242,37 @@ fn benchmark_details(report: &c0mpute_bench::BenchReport) -> serde_json::Value {
 /// aggregator can credit the referrer on c0mpute.com/nodes. It carries no
 /// payout and proves nothing about identity.
 pub fn referral_code() -> Option<String> {
-    let raw = std::env::var("C0MPUTE_REF").ok().or_else(|| {
-        let home = std::env::var_os("C0MPUTE_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".c0mpute"))
-            })?;
-        std::fs::read_to_string(home.join("ref")).ok()
-    })?;
+    handle_setting("C0MPUTE_REF", "ref")
+}
+
+/// The operator nickname this node shows on c0mpute.com/nodes, if any.
+///
+/// `C0MPUTE_NAME` wins; otherwise `~/.c0mpute/name` (or `$C0MPUTE_HOME/name`),
+/// written by `c0mpute name <handle>` or `install.sh --name <handle>`. Give
+/// every machine you run the same name and the board groups them under it.
+/// Unlike `ref` (who invited you), this is who runs the node. Same rules as a
+/// referral handle: public, unverified, lowercase `[a-z0-9_-]`, up to 32.
+pub fn node_name() -> Option<String> {
+    handle_setting("C0MPUTE_NAME", "name")
+}
+
+/// Where `c0mpute name` stores the nickname: `$C0MPUTE_HOME/name`, else
+/// `~/.c0mpute/name`.
+pub fn node_name_path() -> Option<std::path::PathBuf> {
+    c0mpute_home().map(|h| h.join("name"))
+}
+
+fn c0mpute_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("C0MPUTE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".c0mpute")))
+}
+
+/// An env var, else a one-line file under the c0mpute home, sanitized.
+fn handle_setting(env: &str, file: &str) -> Option<String> {
+    let raw = std::env::var(env)
+        .ok()
+        .or_else(|| std::fs::read_to_string(c0mpute_home()?.join(file)).ok())?;
     sanitize_ref(&raw)
 }
 

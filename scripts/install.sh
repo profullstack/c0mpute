@@ -21,6 +21,7 @@
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
 #   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF)
+#   --name <handle> Your node's nickname on c0mpute.com/nodes (same as C0MPUTE_NAME)
 #   --no-house-models       Don't pull Infernet house models (same as
 #                           INFERNET_NO_HOUSE_MODELS=1). They are ON by default:
 #                           the node pulls and serves the models listed at
@@ -87,10 +88,12 @@ while [ $# -gt 0 ]; do
     --no-exec)      NO_EXEC=1 ;;
     --ref)          shift; C0MPUTE_REF="${1:-}" ;;
     --ref=*)        C0MPUTE_REF="${1#--ref=}" ;;
+    --name)         shift; C0MPUTE_NAME="${1:-}" ;;
+    --name=*)       C0MPUTE_NAME="${1#--name=}" ;;
     --no-house-models)      INFERNET_NO_HOUSE_MODELS=1 ;;
     --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
     --help|-h)
-      sed -n '2,32p' "$0"
+      sed -n '2,33p' "$0"
       exit 0
       ;;
     *)
@@ -751,23 +754,30 @@ UNIT
   fi
 }
 
-# Referral: `curl -fsSL https://c0mpute.com/install.sh | C0MPUTE_REF=<code> sh`
-# (links from c0mpute.com/r/<code>) stores the code in $C0MPUTE_HOME/ref. The
-# worker puts it in its public capability ad so c0mpute.com/nodes can credit
-# the referrer. It is a public handle, not a secret and not a payout. An
-# existing ref is kept unless a new one is passed.
-save_ref() {
-  code=$(printf '%s' "${C0MPUTE_REF:-}" | tr '[:upper:]' '[:lower:]')
+# Public handles the worker puts in its capability ad for c0mpute.com/nodes.
+# Neither is a secret, verified, or a payout; an existing value is kept unless
+# a new one is passed.
+#   ref : who invited you. `curl -fsSL https://c0mpute.com/install.sh |
+#         C0MPUTE_REF=<code> sh` (links from c0mpute.com/r/<code>) -> $C0MPUTE_HOME/ref
+#   name: who runs this node (your nickname). `... | sh -s -- --name <handle>`
+#         or C0MPUTE_NAME=<handle> -> $C0MPUTE_HOME/name; later `c0mpute name <handle>`.
+save_handle() { # <value> <file> <label>
+  code=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
   [ -n "$code" ] || return 0
   case "$code" in
-    *[!a-z0-9_-]*) warn "ignoring referral code '$code' (use a-z, 0-9, - or _)"; return 0 ;;
+    *[!a-z0-9_-]*) warn "ignoring $3 '$code' (use a-z, 0-9, - or _)"; return 0 ;;
   esac
   if [ "${#code}" -gt 32 ]; then
-    warn "ignoring referral code longer than 32 characters"
+    warn "ignoring $3 longer than 32 characters"
     return 0
   fi
-  mkdir -p "$C0MPUTE_HOME" && printf '%s\n' "$code" > "$C0MPUTE_HOME/ref" \
-    && ok "referral code '$code' saved (shown on https://c0mpute.com/nodes)"
+  mkdir -p "$C0MPUTE_HOME" && printf '%s\n' "$code" > "$C0MPUTE_HOME/$2" \
+    && ok "$3 '$code' saved (shown on https://c0mpute.com/nodes)"
+}
+
+save_ref() {
+  save_handle "${C0MPUTE_REF:-}" ref "referral code"
+  save_handle "${C0MPUTE_NAME:-}" name "node name"
 }
 
 # ────────────────────────────────────────────────────────────────────────
