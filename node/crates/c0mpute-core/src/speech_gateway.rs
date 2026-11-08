@@ -27,6 +27,9 @@ const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const MAX_WAV_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SPEECH_WORKER_ATTEMPTS: usize = 3;
 const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
+/// A healthy CPU worker draws an image in ~2 minutes. One that has not
+/// answered in 6 is benched and the job goes to the next worker.
+const IMAGE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 
 #[derive(Clone)]
 struct GatewayState {
@@ -40,6 +43,8 @@ struct GatewayState {
     image_slots: Arc<Semaphore>,
     /// Warm, pinned sessions this node is holding (see `speech_session`).
     sessions: crate::speech_session::SessionStore,
+    /// Workers that won and did not deliver, benched for a while.
+    penalties: crate::penalty_box::PenaltyBox,
 }
 
 #[derive(Debug)]
@@ -130,6 +135,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         stt_slots: Arc::new(Semaphore::new(2)),
         image_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
+        penalties: crate::penalty_box::PenaltyBox::new(),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -440,29 +446,41 @@ async fn run_speech_auction(
     spec: serde_json::Value,
     required: Vec<String>,
     excluded_bidders: &[String],
-) -> ApiResult<crate::AuctionOutcome> {
+) -> Result<crate::AuctionOutcome, (ApiError, Option<String>)> {
+    // Learn the winner as soon as it is chosen, so a winner that then goes
+    // silent can be benched and the job re-auctioned.
+    let (winner_tx, mut winner_rx) = tokio::sync::mpsc::unbounded_channel();
     let auction = JobAuction::new(workload, spec)
+        .with_accept_notify(winner_tx)
         .with_required_capabilities(required)
         .with_excluded_bidders(excluded_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
         .with_bid_window(Duration::from_secs(4))
         .with_deadline(if is_video(workload) {
             crate::video::JOB_TIMEOUT + Duration::from_secs(5 * 60)
+        } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
+            IMAGE_RECEIPT_TIMEOUT + Duration::from_secs(60)
         } else {
             Duration::from_secs(20 * 60)
         })
         .with_receipt_timeout(if is_video(workload) {
             crate::video::JOB_TIMEOUT
+        } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
+            IMAGE_RECEIPT_TIMEOUT
         } else {
             Duration::from_secs(15 * 60)
         });
     run_auction(state.net.clone(), auction)
         .await
         .map_err(|error| {
-            tracing::warn!(workload, err = %error, "speech auction failed");
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no c0mpute worker completed the speech job".into(),
+            let winner = winner_rx.try_recv().ok().map(|(_, bid)| bid.bidder_peer_id);
+            tracing::warn!(workload, err = %error, winner = ?winner, "speech auction failed");
+            (
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "no c0mpute worker completed the speech job".into(),
+                ),
+                winner,
             )
         })
 }
@@ -478,7 +496,8 @@ async fn run_speech_job(
     required: Vec<String>,
     max_bytes: usize,
 ) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
-    let mut excluded_bidders = Vec::new();
+    // Workers benched for not delivering earlier stay out of the auction.
+    let mut excluded_bidders = state.penalties.benched();
     let mut last_error = None;
 
     for attempt in 1..=MAX_SPEECH_WORKER_ATTEMPTS {
@@ -492,7 +511,17 @@ async fn run_speech_job(
         .await
         {
             Ok(outcome) => outcome,
-            Err(error) => return Err(last_error.unwrap_or(error)),
+            // A winner was chosen and then never answered: bench it and try
+            // the next worker instead of failing the caller.
+            Err((error, Some(winner))) => {
+                let bench = state.penalties.strike(&winner);
+                tracing::warn!(workload, attempt, worker = %winner, bench_secs = bench.as_secs(),
+                    "winner never delivered; benched, trying another worker");
+                excluded_bidders.push(winner);
+                last_error = Some(error);
+                continue;
+            }
+            Err((error, None)) => return Err(last_error.unwrap_or(error)),
         };
         let worker = outcome.accepted_bid.bidder_peer_id.clone();
         let result = if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
@@ -517,8 +546,12 @@ async fn run_speech_job(
         };
 
         match result {
-            Ok(bytes) => return Ok((outcome, bytes)),
+            Ok(bytes) => {
+                state.penalties.clear(&worker);
+                return Ok((outcome, bytes));
+            }
             Err(error) => {
+                state.penalties.strike(&worker);
                 tracing::warn!(
                     workload,
                     attempt,
