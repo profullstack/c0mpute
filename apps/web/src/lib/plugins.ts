@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import toml from "@iarna/toml";
 
@@ -75,12 +75,33 @@ export interface ModelOption {
   distilled?: boolean;
 }
 
+/**
+ * How much of a plugin actually ships. A manifest describes a contract; this
+ * says whether the code behind it exists. `available` runs today, `partial`
+ * runs with a caveat (see `statusNote`), `coming-soon` is a spec with no
+ * implementation yet. A manifest without `status` is treated as available.
+ */
+export const PLUGIN_STATUSES = ["available", "partial", "coming-soon"] as const;
+
+export type PluginStatus = (typeof PLUGIN_STATUSES)[number];
+
 export interface PluginManifest {
   id: string;
   name: string;
   version: string;
   kind: "workload" | "service" | "sdk";
   category: Category;
+  status: PluginStatus;
+  /** One sentence on what is missing; set for partial plugins. */
+  statusNote?: string;
+  /**
+   * Compiled into the c0mpute binary (`builtin = true` under [module]).
+   * Explicit rather than inferred from dispatch mode: an in-process manifest
+   * says how the code would run, not that the code exists.
+   */
+  builtin: boolean;
+  /** `plugins/<id>/install.sh` exists, so `c0mpute plugin install <id>` works. */
+  hasInstallScript: boolean;
   description: string;
   author?: string;
   license?: string;
@@ -139,6 +160,13 @@ function loadOne(id: string): PluginManifest | null {
     version: String(m.version ?? "0.0.0"),
     kind: (m.kind as PluginManifest["kind"]) ?? "workload",
     category: toCategory(m.category),
+    status: toStatus(m.status),
+    statusNote:
+      typeof m.status_note === "string" && m.status_note.length > 0
+        ? m.status_note
+        : undefined,
+    builtin: m.builtin === true,
+    hasInstallScript: existsSync(path.join(PLUGINS_DIR, id, "install.sh")),
     description: String(m.description ?? ""),
     author: typeof m.author === "string" ? m.author : undefined,
     license: typeof m.license === "string" ? m.license : undefined,
@@ -163,6 +191,12 @@ function toCategory(value: unknown): Category {
   return CATEGORIES.includes(value as Category) ? (value as Category) : "other";
 }
 
+function toStatus(value: unknown): PluginStatus {
+  return PLUGIN_STATUSES.includes(value as PluginStatus)
+    ? (value as PluginStatus)
+    : "available";
+}
+
 /**
  * Group plugins for display, preserving CATEGORIES order and dropping
  * groups that are empty.
@@ -172,7 +206,16 @@ export function byCategory(
 ): { category: Category; plugins: PluginManifest[] }[] {
   return CATEGORIES.map((category) => ({
     category,
-    plugins: plugins.filter((p) => p.category === category),
+    // Coming-soon cards sort after the ones that run today; each half keeps
+    // the incoming (id) order.
+    plugins: [
+      ...plugins.filter(
+        (p) => p.category === category && p.status !== "coming-soon",
+      ),
+      ...plugins.filter(
+        (p) => p.category === category && p.status === "coming-soon",
+      ),
+    ],
   })).filter((g) => g.plugins.length > 0);
 }
 
@@ -185,13 +228,22 @@ export function tagline(p: PluginManifest): string {
 }
 
 /**
- * Install command shown on each plugin card. Uniform across plugins:
- * `c0mpute plugin install <id>`. The CLI resolves the id to
- * `https://c0mpute.com/plugins/<id>/install.sh`. For in-process plugins
- * (transcode) the script informs the user it's built into c0mpute.
+ * Install command for a plugin, or null when there is nothing to install.
+ * `c0mpute plugin install <id>` resolves the id to
+ * `https://c0mpute.com/plugins/<id>/install.sh`, so the command is only
+ * offered when that script exists, the plugin is not already compiled into
+ * the binary, and it is not a coming-soon spec.
  */
-export function installCommand(p: PluginManifest): string {
+export function installCommand(p: PluginManifest): string | null {
+  if (p.status === "coming-soon" || p.builtin || !p.hasInstallScript) {
+    return null;
+  }
   return `c0mpute plugin install ${p.id}`;
+}
+
+/** Ships inside the c0mpute binary and works today. */
+export function installedByDefault(p: PluginManifest): boolean {
+  return p.builtin && p.status === "available";
 }
 
 /**

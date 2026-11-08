@@ -6,6 +6,7 @@ import {
   byCategory,
   tagline,
   installCommand,
+  installedByDefault,
   modelOptions,
   CATEGORY_LABELS,
   CATEGORY_BLURBS,
@@ -64,6 +65,12 @@ export default function PluginsPage() {
           <Badge label="application" /> is a product built <em>on</em>{" "}
           c0mpute — useful, and not something the protocol depends on.
         </p>
+        <p>
+          <Badge label="partial" /> runs today with a caveat noted on the
+          card.{" "}
+          <Badge label="coming soon" /> is a published spec with no
+          implementation yet — nothing to install or run.
+        </p>
       </section>
 
       {groups.map(({ category, plugins }) => (
@@ -74,6 +81,8 @@ export default function PluginsPage() {
               <span className="text-[var(--color-dim)] font-normal">
                 {" "}
                 · {plugins.length}
+                {comingSoonCount(plugins) > 0 &&
+                  ` (${comingSoonCount(plugins)} coming soon)`}
               </span>
             </h2>
             <p className="text-xs text-[var(--color-dim)]">
@@ -119,6 +128,10 @@ function kindLabel(p: PluginManifest): string {
   return p.category === "applications" ? "application" : "service";
 }
 
+function comingSoonCount(plugins: PluginManifest[]): number {
+  return plugins.filter((p) => p.status === "coming-soon").length;
+}
+
 function Badge({ label }: { label: string }) {
   return (
     <span className="border border-[var(--color-rule)] rounded px-1.5 py-0.5 accent whitespace-nowrap">
@@ -134,15 +147,27 @@ function PluginCard({ p }: { p: PluginManifest }) {
       : p.dispatch?.mode === "container"
         ? "container"
         : "subprocess";
+  const comingSoon = p.status === "coming-soon";
+  const install = installCommand(p);
 
   return (
-    <article className="border border-[var(--color-rule)] bg-[var(--color-card)] rounded p-5 space-y-3">
+    <article
+      className={`border border-[var(--color-rule)] bg-[var(--color-card)] rounded p-5 space-y-3${comingSoon ? " opacity-70" : ""}`}
+    >
       <header className="flex items-baseline justify-between gap-3">
         <h3 className="text-lg accent">
           <span className="text-[var(--color-dim)]">[</span>
           {p.id}
           <span className="text-[var(--color-dim)]">]</span>{" "}
           <span className="text-[var(--color-fg)]">{p.name}</span>
+          {p.status !== "available" && (
+            <>
+              {" "}
+              <span className="text-xs align-middle">
+                <Badge label={comingSoon ? "coming soon" : "partial"} />
+              </span>
+            </>
+          )}
         </h3>
         <span className="text-xs text-[var(--color-dim)] whitespace-nowrap">
           v{p.version} · {kindLabel(p)} · {dispatchLabel}
@@ -161,14 +186,24 @@ function PluginCard({ p }: { p: PluginManifest }) {
 
       <ModelList p={p} />
 
-      {p.dispatch?.mode === "in-process" ? (
-        <p className="text-xs accent">ships with c0mpute · installed by default</p>
-      ) : (
-        <CodeBlock>{`$ ${installCommand(p)}`}</CodeBlock>
+      {p.status === "partial" && p.statusNote && (
+        <p className="text-xs text-[var(--color-dim)]">
+          <span className="accent">partial:</span> {p.statusNote}
+        </p>
       )}
 
+      {comingSoon ? (
+        <p className="text-xs text-[var(--color-dim)]">
+          coming soon · spec only, not yet implemented
+        </p>
+      ) : installedByDefault(p) ? (
+        <p className="text-xs accent">ships with c0mpute · installed by default</p>
+      ) : install ? (
+        <CodeBlock>{`$ ${install}`}</CodeBlock>
+      ) : null}
+
       <footer className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-dim)]">
-        {p.surfaces?.cli && (
+        {p.surfaces?.cli && !comingSoon && (
           <span>
             cli: <code className="text-[var(--color-fg)]">{p.surfaces.cli}</code>
           </span>
