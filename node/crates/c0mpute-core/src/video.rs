@@ -502,10 +502,17 @@ pub fn weights_dir(cache_root: &Path) -> PathBuf {
     cache_root.join("video").join("weights")
 }
 
+#[cfg(unix)]
 async fn owner_of(path: &Path) -> Result<(u32, u32)> {
     use std::os::unix::fs::MetadataExt;
     let meta = fs::metadata(path).await?;
     Ok((meta.uid(), meta.gid()))
+}
+
+/// Video needs Linux + NVIDIA + docker; there is no owner to map elsewhere.
+#[cfg(not(unix))]
+async fn owner_of(_path: &Path) -> Result<(u32, u32)> {
+    anyhow::bail!("video containers run on Unix hosts only")
 }
 
 async fn run_container(run: &ContainerRun) -> Result<()> {
