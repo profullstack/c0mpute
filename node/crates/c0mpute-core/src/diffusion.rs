@@ -17,6 +17,7 @@
 //! - Linux x86_64 only (the only CPU build of the pinned release we run; it is
 //!   built on Ubuntu 26.04 and needs glibc 2.43, which the self-test checks);
 //! - at least `min_ram_gb` total RAM and `min_free_ram_gb` available right now;
+//! - a per-job CPU budget of at least `min_cpu_threads` (a 16-thread box);
 //! - at least `min_free_disk_gb` free before installing;
 //! - opt-out: `C0MPUTE_DIFFUSION_AUTO=0` or `[diffusion] auto_install = false`.
 
@@ -139,10 +140,22 @@ pub fn has_headroom_with(config: &crate::config::DiffusionConfig, mem: MemorySna
         && mem.available >= config.min_free_ram_gb.saturating_mul(GIB)
 }
 
+/// Pure decision: is this per-job thread budget fast enough to serve images?
+pub fn fast_enough_with(config: &crate::config::DiffusionConfig, job_threads: usize) -> bool {
+    job_threads >= config.min_cpu_threads
+}
+
+fn fast_enough(config: &crate::config::DiffusionConfig) -> bool {
+    fast_enough_with(config, crate::resources::cpu_threads_per_job())
+}
+
 /// Installed, enabled, and enough free memory to run a job without swapping.
 /// Called on every advertise tick, so a busy node stops bidding within a minute.
 pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
-    config.auto_install_enabled() && installed() && has_headroom_with(config, memory())
+    config.auto_install_enabled()
+        && installed()
+        && fast_enough(config)
+        && has_headroom_with(config, memory())
 }
 
 fn now_secs() -> u64 {
@@ -185,6 +198,14 @@ pub async fn ensure(config: &crate::config::DiffusionConfig) -> bool {
     }
     if !config.auto_install_enabled() {
         tracing::debug!("diffusion auto-provisioning is off; not installing");
+        return false;
+    }
+    if !fast_enough(config) {
+        info!(
+            job_threads = crate::resources::cpu_threads_per_job(),
+            required = config.min_cpu_threads,
+            "skipping diffusion: CPU budget too small for images in reasonable time"
+        );
         return false;
     }
     if installed() {
@@ -610,6 +631,17 @@ mod tests {
             "a busy box must not bid"
         );
         assert!(!has_headroom_with(&config, small));
+    }
+
+    #[test]
+    fn a_small_cpu_budget_does_not_serve_images() {
+        let config = DiffusionConfig::default();
+        assert!(fast_enough_with(&config, 8));
+        assert!(fast_enough_with(&config, 16));
+        assert!(
+            !fast_enough_with(&config, 3),
+            "a 6-core box at the 50% share is too slow"
+        );
     }
 
     #[test]

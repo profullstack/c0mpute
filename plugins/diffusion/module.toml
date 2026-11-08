@@ -3,14 +3,15 @@
 # CPU image generation. Every node with >=16 GiB RAM and >=25 GB free disk
 # provisions it itself (node/crates/c0mpute-core/src/diffusion.rs): a pinned
 # stable-diffusion.cpp release (MIT) plus Apache-2.0 weights from Hugging
-# Face, all SHA-256 checked. A node bids only while >=10 GiB RAM is free.
+# Face, all SHA-256 checked. Needs a per-job CPU budget of >=8 threads
+# (a 16-thread box); bids only while >=12 GiB RAM is free.
 # ~90-120 s per 768x512 image on a 16-core CPU. Buyers call the speech
 # gateway's POST /v1/images. Opt out: C0MPUTE_DIFFUSION_AUTO=0.
 
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.2.63"
+version     = "0.2.64"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo through stable-diffusion.cpp, provisioned by every node with the RAM for it."

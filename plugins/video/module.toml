@@ -44,7 +44,7 @@
 [module]
 id          = "video"
 name        = "Video — generation (Wan 2.2, LTX-2.3 with audio)"
-version     = "0.2.63"
+version     = "0.2.64"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized video generation on consumer/prosumer GPUs: Wan 2.2 text/image-to-video, and LTX-2.3 video with a synchronized soundtrack."
