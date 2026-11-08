@@ -17,17 +17,28 @@ use tokio::time::Instant;
 use super::caps::{Requirements, required_tags};
 use super::crypto;
 use super::http::TransferServer;
-use super::{INFER_WORKLOAD, SCHEMA_VERSION, SessionCall, SessionReady, SessionReply, SessionSpec, TRAIN_WORKLOAD, TrainSpec, select_family};
+use super::{
+    INFER_WORKLOAD, SCHEMA_VERSION, SessionCall, SessionReady, SessionReply, SessionSpec,
+    TRAIN_WORKLOAD, TrainSpec, select_family,
+};
 use crate::buyer::{JobAuction, run_auction};
 
 /// Run an auction, retrying while gossipsub has no subscriber for the topic
 /// yet (a worker that just joined, or a fresh buyer node): those errors mean
 /// "mesh still forming", not "no worker". Gives up after ~30 s.
-pub async fn auction_with_mesh_retry(net: Arc<Libp2pNetwork>, make: impl Fn() -> JobAuction) -> Result<crate::buyer::AuctionOutcome> {
+pub async fn auction_with_mesh_retry(
+    net: Arc<Libp2pNetwork>,
+    make: impl Fn() -> JobAuction,
+) -> Result<crate::buyer::AuctionOutcome> {
     let mut tries = 0;
     loop {
         match run_auction(net.clone(), make()).await {
-            Err(e) if tries < 30 && { let m = format!("{e:#}"); m.contains("NoPeersSubscribedToTopic") || m.contains("InsufficientPeers") } => {
+            Err(e)
+                if tries < 30 && {
+                    let m = format!("{e:#}");
+                    m.contains("NoPeersSubscribedToTopic") || m.contains("InsufficientPeers")
+                } =>
+            {
                 tries += 1;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -38,7 +49,10 @@ pub async fn auction_with_mesh_retry(net: Arc<Libp2pNetwork>, make: impl Fn() ->
 
 /// RFC 3339 UTC timestamp without pulling in a date crate.
 pub fn now_rfc3339() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil_from_days (Howard Hinnant)
     let z = days + 719_468;
@@ -50,7 +64,12 @@ pub fn now_rfc3339() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 fn sha256_bytes(b: &[u8]) -> String {
@@ -92,7 +111,10 @@ pub fn read_dataset(p: &Path) -> Result<(Vec<u8>, String, usize)> {
     if v["kind"] != "dataset_bundle" || v["schema_version"] != SCHEMA_VERSION {
         bail!("{} is not a liquid-agent/v1 dataset_bundle", p.display());
     }
-    let hash = v["manifest"]["dataset_hash"].as_str().context("manifest.dataset_hash missing")?.to_string();
+    let hash = v["manifest"]["dataset_hash"]
+        .as_str()
+        .context("manifest.dataset_hash missing")?
+        .to_string();
     let n = v["episodes"].as_array().map(|a| a.len()).unwrap_or(0);
     Ok((bytes, hash, n))
 }
@@ -117,7 +139,9 @@ pub fn train_job(family: &str, dataset_hash: &str, req: &TrainRequest) -> Value 
             h.insert(k.clone(), v.clone());
         }
     }
-    let idem = blake3::hash(format!("{dataset_hash}|{family}|{hp}").as_bytes()).to_hex().to_string();
+    let idem = blake3::hash(format!("{dataset_hash}|{family}|{hp}").as_bytes())
+        .to_hex()
+        .to_string();
     let mut resources = json!({"device": if req.requirements.gpu { "cuda" } else { "auto" }, "gpu_required": req.requirements.gpu});
     if let Some(gb) = req.requirements.min_ram_gb {
         resources["min_ram_mb"] = json!(gb * 1024);
@@ -175,7 +199,14 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest) -> Result<Value>
                     outcome = Some(o);
                     break;
                 }
-                Ok(o) => last_err = Some(anyhow::anyhow!("worker {} reported {:?} (attempt {})", o.accepted_bid.bidder_peer_id, o.receipt.status, attempt + 1)),
+                Ok(o) => {
+                    last_err = Some(anyhow::anyhow!(
+                        "worker {} reported {:?} (attempt {})",
+                        o.accepted_bid.bidder_peer_id,
+                        o.receipt.status,
+                        attempt + 1
+                    ))
+                }
                 Err(e) => last_err = Some(e.context(format!("attempt {}", attempt + 1))),
             }
         }
@@ -183,13 +214,19 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest) -> Result<Value>
             return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("training {family} failed")));
         };
         let files = server.take(family).await;
-        let weights = files.get("model.safetensors").context("worker did not upload model.safetensors")?;
-        let manifest_bytes = files.get("manifest.json").context("worker did not upload manifest.json")?;
+        let weights = files
+            .get("model.safetensors")
+            .context("worker did not upload model.safetensors")?;
+        let manifest_bytes = files
+            .get("manifest.json")
+            .context("worker did not upload manifest.json")?;
         let manifest: Value = serde_json::from_slice(manifest_bytes)?;
         let got = sha256_bytes(weights);
         let claimed = o.receipt.output_hash.clone().unwrap_or_default();
         if got != claimed || manifest["weights"]["weights_hash"].as_str() != Some(got.as_str()) {
-            bail!("artifact for {family} does not match the receipt: weights {got}, receipt {claimed}");
+            bail!(
+                "artifact for {family} does not match the receipt: weights {got}, receipt {claimed}"
+            );
         }
         if manifest["training"]["dataset_hash"].as_str() != Some(dataset_hash.as_str()) {
             bail!("model for {family} was trained on a different dataset");
@@ -199,7 +236,10 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest) -> Result<Value>
         for (name, data) in &files {
             std::fs::write(dir.join(name), data)?;
         }
-        let eval: Value = files.get("eval.json").and_then(|b| serde_json::from_slice(b).ok()).unwrap_or(json!({}));
+        let eval: Value = files
+            .get("eval.json")
+            .and_then(|b| serde_json::from_slice(b).ok())
+            .unwrap_or(json!({}));
         receipts.push(json!({
             "job_id": o.receipt.job_id, "worker_peer_id": o.receipt.worker_peer_id,
             "output_hash": o.receipt.output_hash, "status": "completed", "price_usd": o.accepted_bid.price_usd
@@ -208,9 +248,18 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest) -> Result<Value>
     }
     let scores: Vec<(String, f64)> = results
         .iter()
-        .map(|r| (r["family"].as_str().unwrap_or("").to_string(), r["eval"]["metrics"]["episode_success"].as_f64().unwrap_or(0.0)))
+        .map(|r| {
+            (
+                r["family"].as_str().unwrap_or("").to_string(),
+                r["eval"]["metrics"]["episode_success"]
+                    .as_f64()
+                    .unwrap_or(0.0),
+            )
+        })
         .collect();
-    Ok(json!({"dataset_hash": dataset_hash, "results": results, "selected": select_family(&scores), "receipts": receipts}))
+    Ok(
+        json!({"dataset_hash": dataset_hash, "results": results, "selected": select_family(&scores), "receipts": receipts}),
+    )
 }
 
 // ── sessions ────────────────────────────────────────────────────────────
@@ -254,7 +303,11 @@ impl SessionFile {
     }
 
     fn key(&self) -> Result<[u8; 32]> {
-        crypto::session_key(&crypto::secret_from_hex(&self.client_secret)?, &self.worker_pubkey, &self.session_id)
+        crypto::session_key(
+            &crypto::secret_from_hex(&self.client_secret)?,
+            &self.worker_pubkey,
+            &self.session_id,
+        )
     }
 }
 
@@ -280,7 +333,13 @@ pub async fn open_session(net: Arc<Libp2pNetwork>, req: &OpenRequest) -> Result<
     };
     spec.validate()?;
     let mut rx = net.messages();
-    let tags = required_tags(INFER_WORKLOAD, &Requirements { model_hash: Some(req.model_hash.clone()), ..Default::default() });
+    let tags = required_tags(
+        INFER_WORKLOAD,
+        &Requirements {
+            model_hash: Some(req.model_hash.clone()),
+            ..Default::default()
+        },
+    );
     let spec_v = serde_json::to_value(&spec)?;
     let make = || {
         JobAuction::new(INFER_WORKLOAD, spec_v.clone())
@@ -291,13 +350,24 @@ pub async fn open_session(net: Arc<Libp2pNetwork>, req: &OpenRequest) -> Result<
             .with_receipt_timeout(Duration::from_secs(60))
     };
     let o = auction_with_mesh_retry(net.clone(), make).await?;
-    if o.receipt.status != JobStatus::Completed || o.receipt.output_hash.as_deref() != Some(req.model_hash.as_str()) {
-        bail!("worker {} could not open the session ({:?})", o.accepted_bid.bidder_peer_id, o.receipt.status);
+    if o.receipt.status != JobStatus::Completed
+        || o.receipt.output_hash.as_deref() != Some(req.model_hash.as_str())
+    {
+        bail!(
+            "worker {} could not open the session ({:?})",
+            o.accepted_bid.bidder_peer_id,
+            o.receipt.status
+        );
     }
     let topic = job_topic(INFER_WORKLOAD);
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let msg = match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx.recv()).await {
+        let msg = match tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            rx.recv(),
+        )
+        .await
+        {
             Ok(Ok(m)) => m,
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
             _ => break,
@@ -306,7 +376,11 @@ pub async fn open_session(net: Arc<Libp2pNetwork>, req: &OpenRequest) -> Result<
             continue;
         }
         if let Ok(r) = serde_json::from_slice::<SessionReady>(&msg.data) {
-            if r.t == "temporal_ready" && r.job_id == o.job_id && r.worker_peer_id == o.accepted_bid.bidder_peer_id && from(&msg, &r.worker_peer_id) {
+            if r.t == "temporal_ready"
+                && r.job_id == o.job_id
+                && r.worker_peer_id == o.accepted_bid.bidder_peer_id
+                && from(&msg, &r.worker_peer_id)
+            {
                 return Ok(SessionFile {
                     session_id: req.session_id.clone(),
                     model_hash: req.model_hash.clone(),
@@ -329,7 +403,12 @@ fn from(msg: &GossipMessage, peer: &str) -> bool {
 
 /// One sealed call to the session's worker (republished until answered,
 /// since a fresh gossip mesh may drop the first copy).
-pub async fn call(net: Arc<Libp2pNetwork>, sf: &SessionFile, body: Value, timeout: Duration) -> Result<Value> {
+pub async fn call(
+    net: Arc<Libp2pNetwork>,
+    sf: &SessionFile,
+    body: Value,
+    timeout: Duration,
+) -> Result<Value> {
     let key = sf.key()?;
     let call_id = uuid::Uuid::new_v4().simple().to_string();
     let msg = SessionCall {
@@ -350,11 +429,16 @@ pub async fn call(net: Arc<Libp2pNetwork>, sf: &SessionFile, body: Value, timeou
             let _ = net.publish(&topic, payload.clone()).await;
             next_send = Instant::now() + Duration::from_secs(2);
         }
-        let wait = next_send.min(deadline).saturating_duration_since(Instant::now());
+        let wait = next_send
+            .min(deadline)
+            .saturating_duration_since(Instant::now());
         match tokio::time::timeout(wait, rx.recv()).await {
             Ok(Ok(m)) if m.topic == topic => {
                 if let Ok(r) = serde_json::from_slice::<SessionReply>(&m.data) {
-                    if r.t == "temporal_reply" && r.call_id == call_id && from(&m, &sf.worker_peer_id) {
+                    if r.t == "temporal_reply"
+                        && r.call_id == call_id
+                        && from(&m, &sf.worker_peer_id)
+                    {
                         let plain = crypto::open(&key, &r.sealed)?;
                         return Ok(serde_json::from_slice(&plain)?);
                     }
@@ -364,7 +448,10 @@ pub async fn call(net: Arc<Libp2pNetwork>, sf: &SessionFile, body: Value, timeou
             _ => {}
         }
     }
-    bail!("E_TIMEOUT: worker {} did not answer (session lost? reopen it)", sf.worker_peer_id)
+    bail!(
+        "E_TIMEOUT: worker {} did not answer (session lost? reopen it)",
+        sf.worker_peer_id
+    )
 }
 
 /// Build a `PredictRequestV1` from a step file: either a full request or
@@ -409,7 +496,10 @@ mod tests {
             families: vec!["cfc".into()],
             workers: vec!["peer1".into()],
             max_price_usd: 0.5,
-            requirements: Requirements { min_ram_gb: Some(8), ..Default::default() },
+            requirements: Requirements {
+                min_ram_gb: Some(8),
+                ..Default::default()
+            },
             public_url: None,
             bind: "127.0.0.1:0".parse().unwrap(),
             timeout_s: 600,
@@ -422,11 +512,19 @@ mod tests {
         let b = train_job("cfc", &h, &req);
         assert_eq!(a["idempotency_key"], b["idempotency_key"]);
         assert_ne!(a["job_id"], b["job_id"]);
-        assert_ne!(train_job("gru", &h, &req)["idempotency_key"], a["idempotency_key"]);
+        assert_ne!(
+            train_job("gru", &h, &req)["idempotency_key"],
+            a["idempotency_key"]
+        );
         assert_eq!(a["privacy"]["upload_approved"], true);
         assert_eq!(a["hyperparameters"]["epochs"], 3);
         assert_eq!(a["resources"]["min_ram_mb"], 8192);
-        let spec = TrainSpec { train_job: a, dataset_url: "http://h/d".into(), dataset_hash: h, artifact_upload_url: None };
+        let spec = TrainSpec {
+            train_job: a,
+            dataset_url: "http://h/d".into(),
+            dataset_hash: h,
+            artifact_upload_url: None,
+        };
         spec.validate().unwrap();
     }
 }

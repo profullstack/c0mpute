@@ -21,7 +21,10 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::prelude::*;
 use ed25519_dalek::{SigningKey as Ed25519SigningKey, VerifyingKey as Ed25519VerifyingKey};
 use hkdf::Hkdf;
-use ml_dsa::{KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa65, SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey};
+use ml_dsa::{
+    KeyExport as MlDsaKeyExport, Keypair as MlDsaKeypair, MlDsa65, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
+};
 use ml_kem::{DecapsulationKey as MlKemDk, MlKem768};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -85,25 +88,29 @@ impl ChatKey {
 
         // X25519 (classical ECDH)
         let mut x25519_bytes = Zeroizing::new([0u8; 32]);
-        hk.expand(b"secure-chat-x25519-v2", x25519_bytes.as_mut()).unwrap();
+        hk.expand(b"secure-chat-x25519-v2", x25519_bytes.as_mut())
+            .unwrap();
         let x25519_secret = X25519Secret::from(*x25519_bytes);
         let x25519_public = X25519Public::from(&x25519_secret);
 
         // Ed25519 (classical signing)
         let mut ed25519_bytes = Zeroizing::new([0u8; 32]);
-        hk.expand(b"secure-chat-ed25519-v2", ed25519_bytes.as_mut()).unwrap();
+        hk.expand(b"secure-chat-ed25519-v2", ed25519_bytes.as_mut())
+            .unwrap();
         let ed25519_key = Ed25519SigningKey::from_bytes(&*ed25519_bytes);
         let ed25519_public = ed25519_key.verifying_key();
 
         // ML-KEM-768 (PQ KEM, FIPS 203): 64-byte seed = d || z
         let mut ml_kem_seed_bytes = Zeroizing::new([0u8; 64]);
-        hk.expand(b"secure-chat-ml-kem-768-v2", ml_kem_seed_bytes.as_mut()).unwrap();
+        hk.expand(b"secure-chat-ml-kem-768-v2", ml_kem_seed_bytes.as_mut())
+            .unwrap();
         let ml_kem_seed: ml_kem::Seed = (*ml_kem_seed_bytes).into();
         let ml_kem_dk = MlKemDk::<MlKem768>::from_seed(ml_kem_seed);
 
         // ML-DSA-65 (PQ signing, FIPS 204): 32-byte seed
         let mut ml_dsa_seed_bytes = Zeroizing::new([0u8; 32]);
-        hk.expand(b"secure-chat-ml-dsa-65-v2", ml_dsa_seed_bytes.as_mut()).unwrap();
+        hk.expand(b"secure-chat-ml-dsa-65-v2", ml_dsa_seed_bytes.as_mut())
+            .unwrap();
         let ml_dsa_seed: ml_dsa::Seed = (*ml_dsa_seed_bytes).into();
         let ml_dsa_key = MlDsaSigningKey::<MlDsa65>::from_seed(&ml_dsa_seed);
         let ml_dsa_public = ml_dsa_key.verifying_key();
@@ -182,9 +189,13 @@ pub fn decrypt_keyfile(file: &KeyFile, password: &str) -> anyhow::Result<ChatKey
     let ciphertext = BASE64_URL_SAFE_NO_PAD.decode(&file.ciphertext)?;
 
     let mut kek = Zeroizing::new([0u8; 32]);
-    let params =
-        Params::new(file.argon2_mem_kib, file.argon2_iters, file.argon2_para, Some(32))
-            .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
+    let params = Params::new(
+        file.argon2_mem_kib,
+        file.argon2_iters,
+        file.argon2_para,
+        Some(32),
+    )
+    .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(password.as_bytes(), &salt, kek.as_mut())
         .map_err(|e| anyhow::anyhow!("argon2: {e}"))?;
@@ -211,8 +222,8 @@ pub fn key_file_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn load_keyfile(path: &Path) -> anyhow::Result<KeyFile> {
-    let raw = fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     Ok(serde_json::from_str(&raw)?)
 }
 

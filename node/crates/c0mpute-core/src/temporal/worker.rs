@@ -48,8 +48,13 @@ impl ModelStore {
     /// Copy a model directory in after checking its weights hash. Returns the hash.
     pub fn import(&self, src: &Path) -> Result<String> {
         let manifest: Value = serde_json::from_slice(&std::fs::read(src.join("manifest.json"))?)?;
-        let want = manifest["weights"]["weights_hash"].as_str().context("manifest lacks weights.weights_hash")?.to_string();
-        let file = manifest["weights"]["file"].as_str().unwrap_or("model.safetensors");
+        let want = manifest["weights"]["weights_hash"]
+            .as_str()
+            .context("manifest lacks weights.weights_hash")?
+            .to_string();
+        let file = manifest["weights"]["file"]
+            .as_str()
+            .unwrap_or("model.safetensors");
         let got = file_sha256(&src.join(file))?;
         if got != want {
             bail!("weights {got} do not match the manifest's {want}");
@@ -68,7 +73,11 @@ impl ModelStore {
 
     /// Resolve `sha256:<hex>` or a directory path to a verified model dir.
     pub fn resolve(&self, model: &str) -> Result<(PathBuf, String)> {
-        let dir = if model.starts_with("sha256:") { self.dir_for(model) } else { PathBuf::from(model) };
+        let dir = if model.starts_with("sha256:") {
+            self.dir_for(model)
+        } else {
+            PathBuf::from(model)
+        };
         let hash = self.import(&dir)?;
         if model.starts_with("sha256:") && hash != model {
             bail!("stored model {hash} is not {model}");
@@ -93,15 +102,24 @@ async fn download(url: &str, dst: &Path) -> Result<()> {
 }
 
 /// Run `infernet model train` for one accepted job; returns the model dir and hash.
-pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Result<(PathBuf, String)> {
+pub async fn run_train(
+    infernet: &Path,
+    job_dir: &Path,
+    spec: &TrainSpec,
+) -> Result<(PathBuf, String)> {
     spec.validate()?;
     tokio::fs::create_dir_all(job_dir).await?;
     let dataset = job_dir.join("dataset.json");
-    download(&spec.dataset_url, &dataset).await.context("fetch dataset")?;
+    download(&spec.dataset_url, &dataset)
+        .await
+        .context("fetch dataset")?;
     let job_path = job_dir.join("job.json");
     tokio::fs::write(&job_path, serde_json::to_vec_pretty(&spec.train_job)?).await?;
     let out_dir = job_dir.join("model");
-    let timeout_s = spec.train_job["limits"]["timeout_s"].as_u64().unwrap_or(3600).clamp(1, 7 * 86_400);
+    let timeout_s = spec.train_job["limits"]["timeout_s"]
+        .as_u64()
+        .unwrap_or(3600)
+        .clamp(1, 7 * 86_400);
     let mut command = tokio::process::Command::new(crate::live_bin(infernet));
     command
         .args(["model", "train", "--json", "--dataset"])
@@ -118,10 +136,20 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Res
         .await
         .map_err(|_| anyhow::anyhow!("E_TIMEOUT: training exceeded {timeout_s}s"))??;
     if !out.status.success() {
-        bail!("infernet model train failed: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("").trim());
+        bail!(
+            "infernet model train failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .trim()
+        );
     }
-    let res: Value = serde_json::from_slice(&out.stdout).context("parse infernet model train --json")?;
-    let r0 = res["results"].get(0).context("no results from infernet model train")?;
+    let res: Value =
+        serde_json::from_slice(&out.stdout).context("parse infernet model train --json")?;
+    let r0 = res["results"]
+        .get(0)
+        .context("no results from infernet model train")?;
     let model_dir = PathBuf::from(r0["model_dir"].as_str().context("result lacks model_dir")?);
     let claimed = r0["model_hash"].as_str().unwrap_or("").to_string();
     let actual = file_sha256(&model_dir.join("model.safetensors"))?;
@@ -138,7 +166,11 @@ async fn upload(base: &str, model_dir: &Path) -> Result<()> {
         if !p.exists() {
             continue;
         }
-        c.put(format!("{base}/{f}")).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
+        c.put(format!("{base}/{f}"))
+            .body(tokio::fs::read(&p).await?)
+            .send()
+            .await?
+            .error_for_status()?;
     }
     Ok(())
 }
@@ -164,13 +196,21 @@ pub fn spawn_train_runner(
             let accept = job.accept.clone();
             busy.store(true, std::sync::atomic::Ordering::Relaxed);
             let result: Result<String> = async {
-                let spec: TrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
+                let spec: TrainSpec = serde_json::from_value(
+                    accept
+                        .spec_inline
+                        .clone()
+                        .context("accept lacks spec_inline")?,
+                )?;
                 spec.validate()?;
                 let key = spec.idempotency_key().to_string();
                 let (dir, hash) = match done.get(&key) {
                     Some(hit) => hit.clone(),
                     None => {
-                        let job_dir = cache_root.join("temporal").join("jobs").join(&accept.job_id);
+                        let job_dir = cache_root
+                            .join("temporal")
+                            .join("jobs")
+                            .join(&accept.job_id);
                         let r = run_train(&infernet, &job_dir, &spec).await?;
                         done.insert(key, r.clone());
                         r
@@ -216,7 +256,10 @@ pub struct InferServer {
     sessions: Mutex<HashMap<String, Held>>,
     /// Replies by call id: a republished call gets the first answer back
     /// instead of running twice (exactly-once per call id).
-    replies: Mutex<(HashMap<String, Option<String>>, std::collections::VecDeque<String>)>,
+    replies: Mutex<(
+        HashMap<String, Option<String>>,
+        std::collections::VecDeque<String>,
+    )>,
 }
 
 const REPLY_CACHE: usize = 1024;
@@ -227,17 +270,40 @@ fn held_key(owner: &str, sid: &str) -> String {
 
 impl InferServer {
     /// Load every model (verifying its hash) into a fresh runtime.
-    pub async fn start(infernet: &Path, model_dirs: &[(PathBuf, String)], worker_id: &str, max_sessions: u32) -> Result<Arc<Self>> {
-        let rt = RuntimeProc::spawn(infernet, &["--worker".into(), worker_id.into(), "--max-sessions".into(), max_sessions.to_string()]).await?;
+    pub async fn start(
+        infernet: &Path,
+        model_dirs: &[(PathBuf, String)],
+        worker_id: &str,
+        max_sessions: u32,
+    ) -> Result<Arc<Self>> {
+        let rt = RuntimeProc::spawn(
+            infernet,
+            &[
+                "--worker".into(),
+                worker_id.into(),
+                "--max-sessions".into(),
+                max_sessions.to_string(),
+            ],
+        )
+        .await?;
         let mut models = Vec::new();
         for (dir, hash) in model_dirs {
             let r = rt
-                .request("load", json!({"model_dir": dir, "expected_hash": hash}), Duration::from_secs(300))
+                .request(
+                    "load",
+                    json!({"model_dir": dir, "expected_hash": hash}),
+                    Duration::from_secs(300),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("load {}: {e}", dir.display()))?;
             models.push(r["model_hash"].as_str().unwrap_or(hash).to_string());
         }
-        Ok(Arc::new(Self { runtime: rt, models, sessions: Mutex::new(HashMap::new()), replies: Mutex::new((HashMap::new(), Default::default())) }))
+        Ok(Arc::new(Self {
+            runtime: rt,
+            models,
+            sessions: Mutex::new(HashMap::new()),
+            replies: Mutex::new((HashMap::new(), Default::default())),
+        }))
     }
 
     /// Open a session for `owner` (the buyer's authenticated peer id).
@@ -247,7 +313,11 @@ impl InferServer {
         if !self.models.contains(&spec.model_hash) {
             bail!("E_NOT_LOADED: model {} is not served here", spec.model_hash);
         }
-        let runtime_sid = format!("{}.{}", &owner[owner.len().saturating_sub(16)..], spec.session_id);
+        let runtime_sid = format!(
+            "{}.{}",
+            &owner[owner.len().saturating_sub(16)..],
+            spec.session_id
+        );
         self.runtime
             .request(
                 "open_session",
@@ -258,7 +328,14 @@ impl InferServer {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let kp = crypto::keypair();
         let key = crypto::session_key(&kp.secret, &spec.client_pubkey, &spec.session_id)?;
-        self.sessions.lock().await.insert(held_key(owner, &spec.session_id), Held { owner: owner.into(), key, runtime_sid });
+        self.sessions.lock().await.insert(
+            held_key(owner, &spec.session_id),
+            Held {
+                owner: owner.into(),
+                key,
+                runtime_sid,
+            },
+        );
         Ok(kp.public_hex)
     }
 
@@ -292,8 +369,16 @@ impl InferServer {
             Ok(result) => json!({"ok": true, "result": result}),
             Err(e) => json!({"ok": false, "error": e}),
         };
-        if serde_json::from_slice::<Value>(&plain).ok().and_then(|v| v["op"].as_str().map(str::to_string)).as_deref() == Some("close_session") {
-            self.sessions.lock().await.remove(&held_key(owner, &call.session_id));
+        if serde_json::from_slice::<Value>(&plain)
+            .ok()
+            .and_then(|v| v["op"].as_str().map(str::to_string))
+            .as_deref()
+            == Some("close_session")
+        {
+            self.sessions
+                .lock()
+                .await
+                .remove(&held_key(owner, &call.session_id));
         }
         let sealed = crypto::seal(&key, reply.to_string().as_bytes()).ok()?;
         let mut c = self.replies.lock().await;
@@ -307,8 +392,14 @@ impl InferServer {
         Some(sealed)
     }
 
-    async fn dispatch(&self, runtime_sid: &str, client_sid: &str, plain: &[u8]) -> std::result::Result<Value, RuntimeError> {
-        let msg: Value = serde_json::from_slice(plain).map_err(|_| RuntimeError::new("E_BAD_REQUEST", "call is not JSON"))?;
+    async fn dispatch(
+        &self,
+        runtime_sid: &str,
+        client_sid: &str,
+        plain: &[u8],
+    ) -> std::result::Result<Value, RuntimeError> {
+        let msg: Value = serde_json::from_slice(plain)
+            .map_err(|_| RuntimeError::new("E_BAD_REQUEST", "call is not JSON"))?;
         let op = msg["op"].as_str().unwrap_or("");
         let t = Duration::from_secs(30);
         let swap = |mut v: Value| {
@@ -324,10 +415,20 @@ impl InferServer {
                     return Err(RuntimeError::new("E_BAD_REQUEST", "predict needs request"));
                 }
                 req["session_id"] = json!(runtime_sid);
-                self.runtime.request("predict", json!({"request": req}), t).await.map(swap)
+                self.runtime
+                    .request("predict", json!({"request": req}), t)
+                    .await
+                    .map(swap)
             }
-            "reset" | "close_session" => self.runtime.request(op, json!({"session_id": runtime_sid}), t).await.map(swap),
-            _ => Err(RuntimeError::new("E_BAD_REQUEST", format!("op {op} is not allowed over the network"))),
+            "reset" | "close_session" => self
+                .runtime
+                .request(op, json!({"session_id": runtime_sid}), t)
+                .await
+                .map(swap),
+            _ => Err(RuntimeError::new(
+                "E_BAD_REQUEST",
+                format!("op {op} is not allowed over the network"),
+            )),
         }
     }
 
@@ -338,13 +439,19 @@ impl InferServer {
 
 /// Runner for `infernet.temporal.infer`: an accepted job opens one session,
 /// publishes our key half, and receipts with the model hash.
-pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, server: Arc<InferServer>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_infer_runner(
+    net: Arc<Libp2pNetwork>,
+    server: Arc<InferServer>,
+) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(32);
     let topic = job_topic(INFER_WORKLOAD);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let accept: JobAccept = job.accept;
-            let spec: Option<SessionSpec> = accept.spec_inline.clone().and_then(|v| serde_json::from_value(v).ok());
+            let spec: Option<SessionSpec> = accept
+                .spec_inline
+                .clone()
+                .and_then(|v| serde_json::from_value(v).ok());
             let Some(spec) = spec else {
                 publish_receipt(&net, &accept, None, JobStatus::Failed).await;
                 continue;
@@ -363,7 +470,13 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, server: Arc<InferServer>) -> 
                         let _ = net.publish(&topic, b).await;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    publish_receipt(&net, &accept, Some(spec.model_hash.clone()), JobStatus::Completed).await;
+                    publish_receipt(
+                        &net,
+                        &accept,
+                        Some(spec.model_hash.clone()),
+                        JobStatus::Completed,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     warn!(job_id = %accept.job_id, err = %e, "temporal: session open failed");
@@ -395,11 +508,15 @@ pub fn spawn_call_listener(
             if msg.topic != topic {
                 continue;
             }
-            let Ok(call) = serde_json::from_slice::<SessionCall>(&msg.data) else { continue };
+            let Ok(call) = serde_json::from_slice::<SessionCall>(&msg.data) else {
+                continue;
+            };
             if call.t != "temporal_call" || call.worker_peer_id != me {
                 continue;
             }
-            let Some(src) = msg.source.map(|p| p.to_base58()) else { continue };
+            let Some(src) = msg.source.map(|p| p.to_base58()) else {
+                continue;
+            };
             if !source_matches_claim(&msg, &src) {
                 continue;
             }
@@ -414,7 +531,12 @@ pub fn spawn_call_listener(
                     return;
                 };
                 if let Some(sealed) = server.call(&src, &call).await {
-                    let reply = SessionReply { t: "temporal_reply".into(), session_id: call.session_id, call_id: call.call_id, sealed };
+                    let reply = SessionReply {
+                        t: "temporal_reply".into(),
+                        session_id: call.session_id,
+                        call_id: call.call_id,
+                        sealed,
+                    };
                     if let Ok(b) = serde_json::to_vec(&reply) {
                         let _ = net.publish(&topic, b).await;
                     }
@@ -426,7 +548,9 @@ pub fn spawn_call_listener(
 
 /// Bid only on train offers whose spec passes [`TrainSpec::validate`] and
 /// only while no training job is running here (one job per node).
-pub fn train_offer_filter(busy: Arc<std::sync::atomic::AtomicBool>) -> crate::dispatch::OfferFilter {
+pub fn train_offer_filter(
+    busy: Arc<std::sync::atomic::AtomicBool>,
+) -> crate::dispatch::OfferFilter {
     Arc::new(move |offer| {
         if busy.load(std::sync::atomic::Ordering::Relaxed) {
             return false;

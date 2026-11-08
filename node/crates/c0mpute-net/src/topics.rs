@@ -239,7 +239,11 @@ mod tests {
         assert_eq!(offer.external_ref, None);
         // And a new offer omits the field entirely when unset, so the bytes
         // an old node sees are unchanged.
-        assert!(!serde_json::to_string(&offer).unwrap().contains("external_ref"));
+        assert!(
+            !serde_json::to_string(&offer)
+                .unwrap()
+                .contains("external_ref")
+        );
     }
 
     #[test]

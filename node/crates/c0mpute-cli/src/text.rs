@@ -13,7 +13,10 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
-#[command(name = "c0mpute infernet text", about = "Fine-tune language models (LoRA) on c0mpute workers and chat with the result")]
+#[command(
+    name = "c0mpute infernet text",
+    about = "Fine-tune language models (LoRA) on c0mpute workers and chat with the result"
+)]
 struct TextCli {
     #[command(subcommand)]
     cmd: Sub,
@@ -114,28 +117,48 @@ enum Sub {
 }
 
 fn data_dir() -> PathBuf {
-    c0mpute_core::config::data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")).join("text")
+    c0mpute_core::config::data_dir()
+        .unwrap_or_else(|| PathBuf::from("./c0mpute-data"))
+        .join("text")
 }
 
 fn infernet_bin() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("C0MPUTE_INFERNET_BIN") {
         return Ok(PathBuf::from(p));
     }
-    crate::which_on_path("infernet").context("infernet is not on PATH (install it: c0mpute plugin install infernet)")
+    crate::which_on_path("infernet")
+        .context("infernet is not on PATH (install it: c0mpute plugin install infernet)")
 }
 
 fn net_opts(a: &NetArgs, identity: &str) -> NetOptions {
-    NetOptions { identity_dir: data_dir().join(identity), listen: a.listen.clone(), bootstrap: a.bootstrap.clone(), default_bootstrap: !a.no_default_bootstrap }
+    NetOptions {
+        identity_dir: data_dir().join(identity),
+        listen: a.listen.clone(),
+        bootstrap: a.bootstrap.clone(),
+        default_bootstrap: !a.no_default_bootstrap,
+    }
 }
 
 pub async fn run(args: &[String]) -> Result<()> {
-    let cli = TextCli::try_parse_from(std::iter::once("c0mpute infernet text".to_string()).chain(args.iter().cloned())).unwrap_or_else(|e| e.exit());
+    let cli = TextCli::try_parse_from(
+        std::iter::once("c0mpute infernet text".to_string()).chain(args.iter().cloned()),
+    )
+    .unwrap_or_else(|e| e.exit());
     match cli.cmd {
         Sub::Serve { net } => {
-            let s = text::serve(&net_opts(&net, "serve"), infernet_bin()?, data_dir().join("cache")).await?;
+            let s = text::serve(
+                &net_opts(&net, "serve"),
+                infernet_bin()?,
+                data_dir().join("cache"),
+            )
+            .await?;
             eprintln!(
                 "serving infernet.text.train{} as {}  (torch {}, peft {}, cuda {})",
-                if s.infer { " + infernet.text.infer" } else { " (chat needs Infernet >= 0.1.80)" },
+                if s.infer {
+                    " + infernet.text.infer"
+                } else {
+                    " (chat needs Infernet >= 0.1.80)"
+                },
                 s.net.peer_id().to_base58(),
                 s.runtime["torch"].as_str().unwrap_or("?"),
                 s.runtime["peft"].as_str().unwrap_or("?"),
@@ -148,9 +171,26 @@ pub async fn run(args: &[String]) -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {
+        Sub::Chat {
+            adapter,
+            question,
+            no_search,
+            search_url,
+            max_new_tokens,
+            worker,
+            max_price,
+            public_url,
+            bind,
+            timeout_s,
+            bid_window_s,
+            json: as_json,
+            net,
+        } => {
             let question = question.join(" ");
-            anyhow::ensure!(!question.trim().is_empty(), "ask a question: c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"");
+            anyhow::ensure!(
+                !question.trim().is_empty(),
+                "ask a question: c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\""
+            );
             let req = text::ChatRequest {
                 adapter_dir: adapter,
                 question,
@@ -174,12 +214,47 @@ pub async fn run(args: &[String]) -> Result<()> {
                 for (i, s) in out["sources"].as_array().into_iter().flatten().enumerate() {
                     println!("  [{}] {}", i + 1, s["url"].as_str().unwrap_or(""));
                 }
-                eprintln!("(worker {}, {} tokens in {}s, ${})", out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"), out["tokens"], out["seconds"], out["receipt"]["price_usd"]);
+                eprintln!(
+                    "(worker {}, {} tokens in {}s, ${})",
+                    out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"),
+                    out["tokens"],
+                    out["seconds"],
+                    out["receipt"]["price_usd"]
+                );
             }
             Ok(())
         }
-        Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, public_url, bind, timeout_s, retries, bid_window_s, yes, json: as_json, net } => {
-            let req = TrainRequest { job_path: job, dataset_path: dataset, output, workers: worker, max_price_usd: max_price, gpu, min_ram_gb, public_url, bind, timeout_s, retries, bid_window: Duration::from_secs(bid_window_s) };
+        Sub::Train {
+            job,
+            dataset,
+            output,
+            worker,
+            max_price,
+            gpu,
+            min_ram_gb,
+            public_url,
+            bind,
+            timeout_s,
+            retries,
+            bid_window_s,
+            yes,
+            json: as_json,
+            net,
+        } => {
+            let req = TrainRequest {
+                job_path: job,
+                dataset_path: dataset,
+                output,
+                workers: worker,
+                max_price_usd: max_price,
+                gpu,
+                min_ram_gb,
+                public_url,
+                bind,
+                timeout_s,
+                retries,
+                bid_window: Duration::from_secs(bid_window_s),
+            };
             let (_, _, p) = text::load(&req)?;
             if !yes {
                 eprintln!(
@@ -188,7 +263,11 @@ pub async fn run(args: &[String]) -> Result<()> {
                     p.documents,
                     p.bytes,
                     p.dataset_hash,
-                    if p.workers.is_empty() { "any eligible worker".to_string() } else { p.workers.join(",") },
+                    if p.workers.is_empty() {
+                        "any eligible worker".to_string()
+                    } else {
+                        p.workers.join(",")
+                    },
                     p.base_model,
                     p.name,
                     p.max_price_usd
@@ -208,7 +287,9 @@ pub async fn run(args: &[String]) -> Result<()> {
                     println!("{ev}");
                     return;
                 }
-                let Some(line) = text::render(ev, &mut total) else { return };
+                let Some(line) = text::render(ev, &mut total) else {
+                    return;
+                };
                 let mut err = std::io::stderr();
                 if ev["type"] == "step" {
                     let _ = write!(err, "\r\x1b[2K{line}");
@@ -229,7 +310,13 @@ pub async fn run(args: &[String]) -> Result<()> {
             if as_json {
                 println!("{}", serde_json::to_string(&out)?);
             } else {
-                println!("adapter {}  {}  (worker {}, ${})", out["adapter_hash"].as_str().unwrap_or("?"), out["adapter_dir"].as_str().unwrap_or("?"), out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"), out["receipt"]["price_usd"]);
+                println!(
+                    "adapter {}  {}  (worker {}, ${})",
+                    out["adapter_hash"].as_str().unwrap_or("?"),
+                    out["adapter_dir"].as_str().unwrap_or("?"),
+                    out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"),
+                    out["receipt"]["price_usd"]
+                );
             }
             Ok(())
         }

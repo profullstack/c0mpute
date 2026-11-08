@@ -26,6 +26,7 @@ const MAX_CONCURRENT_SPEECH_JOBS: usize = 6;
 const MAX_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 const MAX_WAV_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SPEECH_WORKER_ATTEMPTS: usize = 3;
+const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -35,6 +36,8 @@ struct GatewayState {
     max_price_usd: f64,
     tts_slots: Arc<Semaphore>,
     stt_slots: Arc<Semaphore>,
+    /// Image jobs in flight from this gateway (each holds a worker ~2 min).
+    image_slots: Arc<Semaphore>,
     /// Warm, pinned sessions this node is holding (see `speech_session`).
     sessions: crate::speech_session::SessionStore,
 }
@@ -125,6 +128,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         // workers instead of serializing most of its synthesis jobs here.
         tts_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SPEECH_JOBS)),
         stt_slots: Arc::new(Semaphore::new(2)),
+        image_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
     };
     let app = Router::new()
@@ -132,6 +136,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
+        .route("/v1/images", post(generate_image))
         // Warm, pinned sessions: open once per call, then say a sentence at a
         // time with no auction and no model reload in the way.
         .route("/v1/sessions", post(open_session).get(list_sessions))
@@ -529,6 +534,7 @@ async fn run_speech_job(
 fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
     match workload {
         "tts.synthesize" => bytes.len() >= 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+        crate::diffusion::WORKLOAD_TXT2IMG => crate::diffusion::is_png(bytes),
         "stt.transcribe" => {
             serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|value| value.is_object())
         }
@@ -743,6 +749,56 @@ fn audio_format(headers: &HeaderMap) -> ApiResult<&'static str> {
             "send WebM, WAV, Ogg, M4A, or MP3 audio".into(),
         )),
     }
+}
+
+/// `POST /v1/images`: CPU txt2img on a c0mpute worker (`diffusion.txt2img`).
+/// Body: `{prompt, width?, height?, steps?, seed?}` (see `diffusion::Txt2ImgSpec`).
+/// Returns `image/png`. Expect ~90-150 s.
+async fn generate_image(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::diffusion::Txt2ImgSpec>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    input
+        .validate()
+        .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
+    let _slot = state
+        .image_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "image queue is unavailable".into(),
+            )
+        })?;
+    let spec = serde_json::to_value(&input).map_err(|error| gateway_failure(error.into()))?;
+    let (outcome, bytes) = run_speech_job(
+        &state,
+        crate::diffusion::WORKLOAD_TXT2IMG,
+        spec,
+        vec![
+            crate::diffusion::ROLE_TAG.to_string(),
+            crate::diffusion::MODEL_TAG.to_string(),
+        ],
+        crate::diffusion::MAX_IMAGE_BYTES,
+    )
+    .await?;
+    let mut response = (StatusCode::OK, bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    set_job_headers(
+        response.headers_mut(),
+        &outcome.job_id,
+        &outcome.accepted_bid.bidder_peer_id,
+    );
+    Ok(response)
 }
 
 fn audio_response(bytes: Vec<u8>, job_id: &str, worker: &str) -> Response {

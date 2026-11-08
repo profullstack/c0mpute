@@ -32,8 +32,8 @@ pub enum Channel {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Artifact {
-    pub os: String,    // "linux" | "darwin" | "windows"
-    pub arch: String,  // "x86_64" | "aarch64"
+    pub os: String,   // "linux" | "darwin" | "windows"
+    pub arch: String, // "x86_64" | "aarch64"
     pub url: String,
     pub sha256_hex: String,
     pub minisig_url: String,
@@ -250,7 +250,9 @@ async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
         hex::encode(h.finalize())
     };
     if actual_sha != expected_sha {
-        anyhow::bail!("checksum mismatch for {artifact}: expected {expected_sha}, got {actual_sha}");
+        anyhow::bail!(
+            "checksum mismatch for {artifact}: expected {expected_sha}, got {actual_sha}"
+        );
     }
     info!("checksum verified; swapping binary");
 
@@ -341,7 +343,10 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
 
     // Small initial jitter (0–60s) so 1000 nodes don't all hit at once.
     let jitter = fastish_jitter_secs();
-    info!(secs = jitter, "auto-upgrade poll loop starting after jitter");
+    info!(
+        secs = jitter,
+        "auto-upgrade poll loop starting after jitter"
+    );
     tokio::time::sleep(Duration::from_secs(jitter)).await;
 
     let mut ticker = tokio::time::interval(interval);

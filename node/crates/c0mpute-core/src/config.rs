@@ -41,6 +41,59 @@ pub struct Config {
     /// default; this is where an operator turns that off.
     #[serde(default)]
     pub speech: SpeechConfig,
+    /// CPU image generation (`diffusion.txt2img`) provisioning and gates.
+    #[serde(default)]
+    pub diffusion: DiffusionConfig,
+}
+
+/// CPU image generation: stable-diffusion.cpp + Z-Image-Turbo, ~6.7 GB of
+/// weights and ~9 GB of RAM per job. On by default, but a node installs it only
+/// with `min_ram_gb` total RAM and `min_free_disk_gb` free disk, and bids only
+/// while `min_free_ram_gb` is available. Opt out with `C0MPUTE_DIFFUSION_AUTO=0`
+/// or `auto_install = false`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffusionConfig {
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+    #[serde(default = "default_diffusion_min_ram_gb")]
+    pub min_ram_gb: u64,
+    #[serde(default = "default_diffusion_min_free_ram_gb")]
+    pub min_free_ram_gb: u64,
+    #[serde(default = "default_diffusion_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+}
+
+impl Default for DiffusionConfig {
+    fn default() -> Self {
+        Self {
+            auto_install: true,
+            min_ram_gb: default_diffusion_min_ram_gb(),
+            min_free_ram_gb: default_diffusion_min_free_ram_gb(),
+            min_free_disk_gb: default_diffusion_min_free_disk_gb(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_diffusion_min_ram_gb() -> u64 {
+    16
+}
+fn default_diffusion_min_free_ram_gb() -> u64 {
+    10
+}
+fn default_diffusion_min_free_disk_gb() -> u64 {
+    25
+}
+
+impl DiffusionConfig {
+    pub fn auto_install_enabled(&self) -> bool {
+        auto_install_enabled_with(
+            self.auto_install,
+            std::env::var("C0MPUTE_DIFFUSION_AUTO").ok(),
+        )
+    }
 }
 
 /// CPU text-to-speech provisioning.
@@ -111,6 +164,7 @@ impl Default for Config {
                 Role::Tts,
                 Role::Stt,
                 Role::WorkflowStep,
+                Role::Diffusion,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),
@@ -119,6 +173,7 @@ impl Default for Config {
             pricing: Default::default(),
             private: Default::default(),
             speech: SpeechConfig::default(),
+            diffusion: DiffusionConfig::default(),
         }
     }
 }

@@ -186,7 +186,12 @@ impl VideoJobInline {
 
     /// The `job.json` the runner reads. `image` is a bare filename because
     /// the runner refuses anything with a path separator.
-    pub fn to_job_json(&self, job_id: &str, workload: &str, image: Option<&str>) -> serde_json::Value {
+    pub fn to_job_json(
+        &self,
+        job_id: &str,
+        workload: &str,
+        image: Option<&str>,
+    ) -> serde_json::Value {
         let mut job = serde_json::json!({
             "job_id": job_id,
             "workload": workload,
@@ -583,7 +588,10 @@ mod tests {
     #[test]
     fn unbounded_jobs_are_refused() {
         for (field, mutate) in [
-            ("frames", (|j: &mut VideoJobInline| j.frames = 5000) as fn(&mut VideoJobInline)),
+            (
+                "frames",
+                (|j: &mut VideoJobInline| j.frames = 5000) as fn(&mut VideoJobInline),
+            ),
             ("zero frames", |j| j.frames = 0),
             ("steps", |j| j.steps = 500),
             ("fps", |j| j.fps = 0),
@@ -656,7 +664,10 @@ mod tests {
         let window = argv.windows(2).any(|w| w[0] == "--gpus" && w[1] == "all");
         assert!(window, "must request the GPU: {argv:?}");
         assert!(argv.contains(&"--rm".to_string()));
-        assert!(argv.contains(&"1000:1000".to_string()), "runs as the node user");
+        assert!(
+            argv.contains(&"1000:1000".to_string()),
+            "runs as the node user"
+        );
         assert!(argv.contains(&"/var/c0mpute/jobs/abc:/job".to_string()));
         assert!(argv.contains(&"/var/c0mpute/video/weights:/weights".to_string()));
         assert!(argv.contains(&"c0mpute-video-abc".to_string()));
@@ -680,7 +691,10 @@ mod tests {
         // Context last: docker reads the final positional as the context.
         assert_eq!(argv.last().unwrap(), "/src/c0mpute/plugins/video");
         let dash_f = argv.iter().position(|a| a == "-f").unwrap();
-        assert_eq!(argv[dash_f + 1], "/src/c0mpute/plugins/video/runner/Dockerfile");
+        assert_eq!(
+            argv[dash_f + 1],
+            "/src/c0mpute/plugins/video/runner/Dockerfile"
+        );
     }
 
     #[test]

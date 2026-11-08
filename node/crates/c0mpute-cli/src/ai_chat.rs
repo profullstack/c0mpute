@@ -115,7 +115,8 @@ fn api_key() -> Option<String> {
 }
 
 fn require_key() -> Result<String> {
-    api_key().ok_or_else(|| anyhow!("not signed in: run `c0mpute chat login` (or set C0MPUTE_API_KEY)"))
+    api_key()
+        .ok_or_else(|| anyhow!("not signed in: run `c0mpute chat login` (or set C0MPUTE_API_KEY)"))
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -148,8 +149,10 @@ pub async fn run(args: &[String]) -> Result<()> {
         Some("mcp") => return mcp_stdio(&base_url(None)).await,
         _ => {}
     }
-    let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
-        .unwrap_or_else(|e| e.exit());
+    let a = Args::try_parse_from(
+        std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()),
+    )
+    .unwrap_or_else(|e| e.exit());
     let url = base_url(a.url.as_deref());
     let key = require_key()?;
 
@@ -159,7 +162,11 @@ pub async fn run(args: &[String]) -> Result<()> {
         let mut piped = String::new();
         stdin.lock().read_to_string(&mut piped)?;
         if !piped.trim().is_empty() {
-            prompt = if prompt.is_empty() { piped } else { format!("{prompt}\n\n{piped}") };
+            prompt = if prompt.is_empty() {
+                piped
+            } else {
+                format!("{prompt}\n\n{piped}")
+            };
         }
     }
 
@@ -182,7 +189,13 @@ pub async fn run(args: &[String]) -> Result<()> {
 }
 
 /// One completion. Streams text to stdout (returns it too), or returns raw JSON with `json`.
-async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool) -> Result<String> {
+async fn complete(
+    url: &str,
+    key: &str,
+    a: &Args,
+    messages: &[Value],
+    json_out: bool,
+) -> Result<String> {
     let mut body = json!({"messages": messages, "stream": !json_out});
     if let Some(m) = &a.model {
         body["model"] = json!(m);
@@ -215,25 +228,32 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
     let mut out = std::io::stdout();
     let mut answer = String::new();
     let mut buf = String::new();
-    'read: while let Some(chunk) = res
-        .chunk()
-        .await
-        .map_err(|_| anyhow!("the answer stream was cut off (the serving node or the network restarted); try again"))?
-    {
+    'read: while let Some(chunk) = res.chunk().await.map_err(|_| {
+        anyhow!(
+            "the answer stream was cut off (the serving node or the network restarted); try again"
+        )
+    })? {
         buf.push_str(&String::from_utf8_lossy(&chunk));
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim().to_string();
             buf.drain(..=nl);
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
             if data == "[DONE]" {
                 break 'read;
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
             if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
                 out.flush().ok();
                 bail!("{msg}");
             }
-            if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+            if let Some(t) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+            {
                 answer.push_str(t);
                 print!("{t}");
                 out.flush().ok();
@@ -282,7 +302,10 @@ async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Resul
             _ => {}
         }
         messages.push(json!({"role": "user", "content": line}));
-        let args = Args { model: model.clone(), ..clone_args(a) };
+        let args = Args {
+            model: model.clone(),
+            ..clone_args(a)
+        };
         match complete(url, key, &args, &messages, false).await {
             Ok(answer) => messages.push(json!({"role": "assistant", "content": answer})),
             Err(e) => {
@@ -312,7 +335,9 @@ async fn login(rest: &[String]) -> Result<()> {
         match arg.as_str() {
             "--url" => url_flag = it.next().cloned(),
             "-h" | "--help" => {
-                println!("c0mpute chat login [--url https://c0mpute.com]\n\nSigns this machine in: approve the code on c0mpute.com with CoinPay (a DID is required).");
+                println!(
+                    "c0mpute chat login [--url https://c0mpute.com]\n\nSigns this machine in: approve the code on c0mpute.com with CoinPay (a DID is required)."
+                );
                 return Ok(());
             }
             other => bail!("unknown argument: {other}"),
@@ -338,13 +363,18 @@ async fn login(rest: &[String]) -> Result<()> {
         return Err(api_error(status, &text));
     }
     let d: Value = serde_json::from_str(&text)?;
-    let device = d["device_code"].as_str().context("no device_code")?.to_string();
+    let device = d["device_code"]
+        .as_str()
+        .context("no device_code")?
+        .to_string();
     let code = d["user_code"].as_str().unwrap_or_default();
     let link = d["verification_uri_complete"].as_str().unwrap_or_default();
     let interval = d["interval"].as_u64().unwrap_or(3).max(1);
     let expires = d["expires_in"].as_u64().unwrap_or(600);
 
-    println!("Open this link and sign in with CoinPay (a DID is required):\n\n  {link}\n\nand check it shows the code  {code}\n");
+    println!(
+        "Open this link and sign in with CoinPay (a DID is required):\n\n  {link}\n\nand check it shows the code  {code}\n"
+    );
     open_browser(link);
     eprint!("waiting for approval");
     let deadline = std::time::Instant::now() + Duration::from_secs(expires);
@@ -364,7 +394,10 @@ async fn login(rest: &[String]) -> Result<()> {
             200 => {
                 let v: Value = res.json().await?;
                 let key = v["key"].as_str().context("no key in response")?.to_string();
-                let saved = Saved { url: (url != DEFAULT_URL).then(|| url.clone()), key: Some(key) };
+                let saved = Saved {
+                    url: (url != DEFAULT_URL).then(|| url.clone()),
+                    key: Some(key),
+                };
                 let path = store(&saved)?;
                 eprintln!();
                 println!("signed in; key saved to {}", path.display());
@@ -387,7 +420,11 @@ fn open_browser(link: &str) {
     if link.is_empty() || std::env::var_os("SSH_CONNECTION").is_some() {
         return;
     }
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let _ = std::process::Command::new(opener)
         .arg(link)
         .stdout(std::process::Stdio::null())
@@ -399,7 +436,10 @@ fn logout() -> Result<()> {
     let path = config_path()?;
     if path.exists() {
         std::fs::remove_file(&path)?;
-        println!("signed out (removed {}). Revoke the key itself at https://c0mpute.com/chat → CLI / API / MCP keys.", path.display());
+        println!(
+            "signed out (removed {}). Revoke the key itself at https://c0mpute.com/chat → CLI / API / MCP keys.",
+            path.display()
+        );
     } else {
         println!("not signed in");
     }
@@ -408,7 +448,11 @@ fn logout() -> Result<()> {
 
 async fn whoami(url: &str) -> Result<()> {
     let key = require_key()?;
-    let res = client()?.get(format!("{url}/api/v1/me")).bearer_auth(&key).send().await?;
+    let res = client()?
+        .get(format!("{url}/api/v1/me"))
+        .bearer_auth(&key)
+        .send()
+        .await?;
     let status = res.status();
     let text = res.text().await?;
     if !status.is_success() {
@@ -452,7 +496,9 @@ async fn mcp_stdio(url: &str) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let id = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("id").cloned());
+        let id = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|v| v.get("id").cloned());
         let id_present = id.is_some();
         let res = http
             .post(format!("{url}/api/mcp"))
@@ -469,7 +515,14 @@ async fn mcp_stdio(url: &str) -> Result<()> {
                 if serde_json::from_str::<Value>(&text).is_ok() {
                     Some(text)
                 } else {
-                    Some(rpc_error(id, &format!("HTTP {}: {}", status.as_u16(), text.chars().take(200).collect::<String>())))
+                    Some(rpc_error(
+                        id,
+                        &format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            text.chars().take(200).collect::<String>()
+                        ),
+                    ))
                 }
             }
             Err(e) => Some(rpc_error(id, &format!("could not reach {url}: {e}"))),
@@ -493,7 +546,17 @@ mod tests {
 
     #[test]
     fn parses_prompt_and_flags() {
-        let a = Args::try_parse_from(["c0mpute chat", "--model", "qwen2.5:7b", "-s", "terse", "what", "is", "2+2"]).unwrap();
+        let a = Args::try_parse_from([
+            "c0mpute chat",
+            "--model",
+            "qwen2.5:7b",
+            "-s",
+            "terse",
+            "what",
+            "is",
+            "2+2",
+        ])
+        .unwrap();
         assert_eq!(a.model.as_deref(), Some("qwen2.5:7b"));
         assert_eq!(a.system.as_deref(), Some("terse"));
         assert_eq!(a.prompt.join(" "), "what is 2+2");
@@ -501,7 +564,10 @@ mod tests {
 
     #[test]
     fn api_error_reads_openai_envelope() {
-        let e = api_error(reqwest::StatusCode::UNAUTHORIZED, r#"{"error":{"message":"nope"}}"#);
+        let e = api_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":{"message":"nope"}}"#,
+        );
         assert_eq!(e.to_string(), "HTTP 401: nope");
         let e = api_error(reqwest::StatusCode::GONE, r#"{"error":"expired_token"}"#);
         assert_eq!(e.to_string(), "HTTP 410: expired_token");

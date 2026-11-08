@@ -1,15 +1,11 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Containerized image-generation workload. Suggested upstreams:
-#   ComfyUI (graph-defined pipelines), stable-diffusion.cpp (lean
-#   inference), or Diffusers (HF reference). Container ships with a
-#   pinned model set; jobs may request additional model hashes which
-#   the runner pulls from the c0mpute storage plugin (DIP-0012). Output
-#   is one or more PNG/WebP files plus a metadata sidecar.
-#   Validation: schema + perceptual-hash spot-check against a small
-#   deterministic reference seed.
+# CPU image generation. Every node with >=16 GiB RAM and >=25 GB free disk
+# provisions it itself (node/crates/c0mpute-core/src/diffusion.rs): a pinned
+# stable-diffusion.cpp release (MIT) plus Apache-2.0 weights from Hugging
+# Face, all SHA-256 checked. A node bids only while >=10 GiB RAM is free.
+# ~90-120 s per 768x512 image on a 16-core CPU. Buyers call the speech
+# gateway's POST /v1/images. Opt out: C0MPUTE_DIFFUSION_AUTO=0.
 
 [module]
 id          = "diffusion"
@@ -17,28 +13,33 @@ name        = "Diffusion — image generation"
 version     = "0.2.60"
 kind        = "workload"
 category    = "ai"
-description = "Decentralized image generation (Stable Diffusion, SDXL, Flux) on consumer/prosumer GPUs."
+description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo through stable-diffusion.cpp, provisioned by every node with the RAM for it."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["diffusion", "stable-diffusion", "sdxl", "flux", "image", "txt2img", "img2img"]
+keywords    = ["diffusion", "z-image", "stable-diffusion.cpp", "image", "txt2img", "cpu"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.61"
 os           = ["linux"]
-arch         = ["x86_64", "aarch64"]
-capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
+arch         = ["x86_64"]
+capabilities = ["cpu"]
 
 [module.workloads]
-"diffusion.txt2img" = { command = "txt2img", validation = "schema_and_phash_spotcheck" }
-"diffusion.img2img" = { command = "img2img", validation = "schema_and_phash_spotcheck" }
+"diffusion.txt2img" = { command = "txt2img", validation = "png_magic" }
 
 [module.dispatch]
-mode  = "container"
-image = "ghcr.io/c0mpute/diffusion-runner:candidate"
+mode = "in-process"
 
 [module.surfaces]
-cli = "c0mpute diffusion"
+api = "POST /v1/images (c0mpute speech serve)"
 
-[module.config.defaults]
-sampler = "dpmpp_2m"
-steps   = 25
+[module.models."z-image-turbo"]
+repo       = "leejet/Z-Image-Turbo-GGUF"
+default    = true
+params     = "6B"
+precision  = "Q4_K"
+resolution = "256-1024 px, multiples of 64 (default 768x512)"
+workloads  = ["diffusion.txt2img"]
+license    = "Apache-2.0"
+backend    = "stable-diffusion.cpp"
+distilled  = true

@@ -267,8 +267,8 @@ enum WorkerCmd {
     /// Start the worker daemon and accept jobs.
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
-        /// verifier, workflow-step. Default: the config's roles plus tts,
-        /// stt and workflow-step.
+        /// verifier, workflow-step, video, diffusion. Default: the config's
+        /// roles plus tts, stt, workflow-step and diffusion.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -414,7 +414,7 @@ enum VideoCmd {
 
 #[derive(Subcommand, Debug)]
 enum SpeechCmd {
-    /// Serve /v1/tts and /v1/stt as a P2P buyer gateway.
+    /// Serve /v1/tts, /v1/stt and /v1/images as a P2P buyer gateway.
     Serve {
         #[arg(long, env = "C0MPUTE_SPEECH_BIND", default_value = "127.0.0.1:8787")]
         bind: std::net::SocketAddr,
@@ -716,7 +716,11 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
-        Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
+        Cmd::Chat { args }
+            if args
+                .first()
+                .is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) =>
+        {
             let dm = DmCli::try_parse_from(std::iter::once("c0mpute dm".to_string()).chain(args))
                 .unwrap_or_else(|e| e.exit());
             run_chat(dm.cmd)
@@ -955,7 +959,11 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 eprintln!(
                     "private mode: serving {} trusted buyer identit{} only; not advertised to the network",
                     policy.trusted.len(),
-                    if policy.trusted.len() == 1 { "y" } else { "ies" }
+                    if policy.trusted.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
                 );
             }
             ensure_current_version_benchmark();
@@ -963,7 +971,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if let Some(rs) = roles {
                 cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
             } else {
-                for role in [Role::Tts, Role::Stt, Role::WorkflowStep] {
+                for role in [Role::Tts, Role::Stt, Role::WorkflowStep, Role::Diffusion] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
                     }
@@ -989,7 +997,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if default_speech_roles {
                 eprintln!(
-                    "TTS, STT and workflow-step are enabled by default; pass --roles to choose a specific role set"
+                    "TTS, STT, workflow-step and diffusion (CPU images, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
                 );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
@@ -2269,6 +2277,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "verifier" => Some(Role::Verifier),
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         "video" => Some(Role::Video),
+        "diffusion" | "image" | "images" => Some(Role::Diffusion),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

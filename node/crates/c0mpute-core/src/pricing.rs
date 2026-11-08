@@ -194,7 +194,11 @@ mod tests {
         let mut m = MarketLearner::default();
         m.observe(1.0, 0.6, 0.4, false);
         assert_eq!(p.quote_in_market(1.0, 0.0, &m), Some(0.392));
-        assert_eq!(p.quote_in_market(2.0, 0.0, &m), Some(0.784), "learned as a share of the cap");
+        assert_eq!(
+            p.quote_in_market(2.0, 0.0, &m),
+            Some(0.784),
+            "learned as a share of the cap"
+        );
     }
 
     #[test]

@@ -41,7 +41,11 @@ use crate::temporal::node::{NetOptions, spawn_node};
 pub const TRAIN_WORKLOAD: &str = "infernet.text.train";
 pub const KINDS: [&str; 2] = ["lora", "peft"];
 /// What the worker uploads; the buyer accepts nothing else.
-pub const ARTIFACTS: [&str; 3] = ["adapter_model.safetensors", "adapter_config.json", "manifest.json"];
+pub const ARTIFACTS: [&str; 3] = [
+    "adapter_model.safetensors",
+    "adapter_config.json",
+    "manifest.json",
+];
 const MAX_DATASET: u64 = 512 << 20;
 const SLOT: &str = "adapter";
 
@@ -74,15 +78,27 @@ impl TextTrainSpec {
         if !KINDS.contains(&kind) {
             bail!("job.kind must be one of {KINDS:?}, got {kind:?}");
         }
-        let base = self.job.get("base_model").and_then(|v| v.as_str()).unwrap_or("");
+        let base = self
+            .job
+            .get("base_model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         // A Hugging Face repo id (org/name): never a path or a URL on the worker.
-        if base.is_empty() || base.len() > 200 || base.starts_with('/') || base.contains("..") || base.contains("://") {
+        if base.is_empty()
+            || base.len() > 200
+            || base.starts_with('/')
+            || base.contains("..")
+            || base.contains("://")
+        {
             bail!("job.base_model must be a model repo id like org/name");
         }
         if !crate::temporal::is_sha256_ref(&self.dataset_hash) {
             bail!("dataset_hash must be sha256:<64 lowercase hex>");
         }
-        if !is_http(&self.dataset_url) || !is_http(&self.artifact_upload_url) || self.events_url.as_deref().is_some_and(|u| !is_http(u)) {
+        if !is_http(&self.dataset_url)
+            || !is_http(&self.artifact_upload_url)
+            || self.events_url.as_deref().is_some_and(|u| !is_http(u))
+        {
             bail!("dataset, upload and events URLs must be http(s)");
         }
         Ok(())
@@ -99,14 +115,19 @@ pub fn sha256_hex(b: &[u8]) -> String {
 pub async fn probe(infernet: &Path) -> Result<Value> {
     let out = tokio::time::timeout(
         Duration::from_secs(120),
-        tokio::process::Command::new(crate::live_bin(infernet)).args(["model", "runtime", "status", "--peft", "--json"]).stdin(std::process::Stdio::null()).output(),
+        tokio::process::Command::new(crate::live_bin(infernet))
+            .args(["model", "runtime", "status", "--peft", "--json"])
+            .stdin(std::process::Stdio::null())
+            .output(),
     )
     .await
     .context("infernet model runtime status --peft timed out")?
     .with_context(|| format!("run {}", infernet.display()))?;
     let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(json!({"installed": false}));
     if v["installed"] != json!(true) {
-        bail!("the peft runtime is not installed: run `infernet model runtime setup --peft --yes` (needs Infernet >= 0.1.79)");
+        bail!(
+            "the peft runtime is not installed: run `infernet model runtime setup --peft --yes` (needs Infernet >= 0.1.79)"
+        );
     }
     Ok(v)
 }
@@ -115,14 +136,23 @@ pub async fn probe(infernet: &Path) -> Result<Value> {
 pub fn local_ram_mb() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
-        .and_then(|m| m.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|kb| kb.parse::<u64>().ok()))
+        .and_then(|m| {
+            m.lines()
+                .find(|l| l.starts_with("MemTotal:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|kb| kb.parse::<u64>().ok())
+        })
         .map(|kb| kb / 1024)
         .unwrap_or(0)
 }
 
 /// Tags a text-training worker advertises.
 pub fn worker_tags(runtime: &Value, ram_mb: u64) -> Vec<String> {
-    let mut t = vec![tag(TRAIN_WORKLOAD), "infernet:text:runtime:peft".into(), "infernet:text:device:cpu".into()];
+    let mut t = vec![
+        tag(TRAIN_WORKLOAD),
+        "infernet:text:runtime:peft".into(),
+        "infernet:text:device:cpu".into(),
+    ];
     if runtime["cuda"] == json!(true) {
         t.push("infernet:text:device:cuda".into());
     }
@@ -153,17 +183,27 @@ async fn download(url: &str, dst: &Path, want: &str) -> Result<()> {
 
 /// Run one accepted job: fetch the corpus, run `infernet model train --job
 /// --json`, relay every event, return the adapter dir and its weights hash.
-pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) -> Result<(PathBuf, String)> {
+pub async fn run_train(
+    infernet: &Path,
+    job_dir: &Path,
+    spec: &TextTrainSpec,
+) -> Result<(PathBuf, String)> {
     spec.validate()?;
     tokio::fs::create_dir_all(job_dir).await?;
     let dataset = job_dir.join("dataset.jsonl");
-    download(&spec.dataset_url, &dataset, &spec.dataset_hash).await.context("fetch dataset")?;
+    download(&spec.dataset_url, &dataset, &spec.dataset_hash)
+        .await
+        .context("fetch dataset")?;
     let mut job = spec.job.clone();
-    job["dataset"] = json!({"url": "dataset.jsonl", "sha256": spec.dataset_hash.trim_start_matches("sha256:")});
+    job["dataset"] =
+        json!({"url": "dataset.jsonl", "sha256": spec.dataset_hash.trim_start_matches("sha256:")});
     job["output"] = json!({"destination_url": "adapter"});
     let job_path = job_dir.join("job.json");
     tokio::fs::write(&job_path, serde_json::to_vec_pretty(&job)?).await?;
-    let timeout_s = job["limits"]["timeout_s"].as_u64().unwrap_or(4 * 3600).clamp(60, 7 * 86_400);
+    let timeout_s = job["limits"]["timeout_s"]
+        .as_u64()
+        .unwrap_or(4 * 3600)
+        .clamp(60, 7 * 86_400);
 
     let mut command = tokio::process::Command::new(crate::live_bin(infernet));
     command
@@ -192,7 +232,10 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Value>();
     let relay = spec.events_url.clone().map(|url| {
         tokio::spawn(async move {
-            let c = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+            let c = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
             while let Some(ev) = ev_rx.recv().await {
                 if let Err(e) = c.post(&url).json(&ev).send().await {
                     warn!(err = %e, "text: could not relay a training event");
@@ -206,7 +249,9 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
         let mut checkpoint: Option<Value> = None;
         let mut done: Option<Value> = None;
         while let Some(line) = lines.next_line().await? {
-            let Ok(ev) = serde_json::from_str::<Value>(line.trim()) else { continue };
+            let Ok(ev) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
             if ev["v"] != json!(1) {
                 continue;
             }
@@ -231,13 +276,20 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
     }
     let last_err = err_tail.await.unwrap_or_default();
     if done.as_ref().and_then(|d| d["reason"].as_str()) != Some("complete") || !status.success() {
-        bail!("infernet model train did not complete ({}): {last_err}", done.and_then(|d| d["reason"].as_str().map(String::from)).unwrap_or_else(|| format!("exit {status}")));
+        bail!(
+            "infernet model train did not complete ({}): {last_err}",
+            done.and_then(|d| d["reason"].as_str().map(String::from))
+                .unwrap_or_else(|| format!("exit {status}"))
+        );
     }
     let checkpoint = checkpoint.context("no checkpoint event")?;
     let dir = job_dir.join("adapter");
     let actual = crate::temporal::worker::file_sha256(&dir.join("adapter_model.safetensors"))?;
     if checkpoint["model"].as_str() != Some(actual.as_str()) {
-        bail!("adapter hash {actual} differs from the checkpoint's {}", checkpoint["model"]);
+        bail!(
+            "adapter hash {actual} differs from the checkpoint's {}",
+            checkpoint["model"]
+        );
     }
     Ok((dir, actual))
 }
@@ -247,24 +299,43 @@ async fn upload(base: &str, dir: &Path) -> Result<()> {
     for f in ARTIFACTS {
         let p = dir.join(f);
         if p.exists() {
-            c.put(format!("{base}/{f}")).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
+            c.put(format!("{base}/{f}"))
+                .body(tokio::fs::read(&p).await?)
+                .send()
+                .await?
+                .error_for_status()?;
         }
     }
     Ok(())
 }
 
-pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_train_runner(
+    net: Arc<Libp2pNetwork>,
+    cache_root: PathBuf,
+    infernet: PathBuf,
+    busy: Arc<AtomicBool>,
+    slots: Arc<Semaphore>,
+) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_slot) = slots.clone().acquire_owned().await else { return };
+            let Ok(_slot) = slots.clone().acquire_owned().await else {
+                return;
+            };
             let accept = job.accept.clone();
             busy.store(true, Ordering::Relaxed);
             let result: Result<String> = async {
-                let spec: TextTrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
+                let spec: TextTrainSpec = serde_json::from_value(
+                    accept
+                        .spec_inline
+                        .clone()
+                        .context("accept lacks spec_inline")?,
+                )?;
                 let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
                 let (dir, hash) = run_train(&infernet, &job_dir, &spec).await?;
-                upload(&spec.artifact_upload_url, &dir).await.context("upload adapter")?;
+                upload(&spec.artifact_upload_url, &dir)
+                    .await
+                    .context("upload adapter")?;
                 Ok(hash)
             }
             .await;
@@ -300,7 +371,11 @@ pub fn train_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter
 
 pub const INFER_WORKLOAD: &str = "infernet.text.infer";
 /// The adapter files a chat request carries (bundled, base64) and the worker caches.
-pub const ADAPTER_FILES: [&str; 3] = ["adapter_model.safetensors", "adapter_config.json", "manifest.json"];
+pub const ADAPTER_FILES: [&str; 3] = [
+    "adapter_model.safetensors",
+    "adapter_config.json",
+    "manifest.json",
+];
 /// What the worker uploads back.
 pub const ANSWER_ARTIFACTS: [&str; 1] = ["answer.json"];
 const MAX_BUNDLE: u64 = 128 << 20;
@@ -326,7 +401,11 @@ pub struct TextInferSpec {
 }
 
 fn valid_repo_id(base: &str) -> bool {
-    !(base.is_empty() || base.len() > 200 || base.starts_with('/') || base.contains("..") || base.contains("://"))
+    !(base.is_empty()
+        || base.len() > 200
+        || base.starts_with('/')
+        || base.contains("..")
+        || base.contains("://"))
 }
 
 impl TextInferSpec {
@@ -346,7 +425,10 @@ impl TextInferSpec {
             if !["system", "user", "assistant"].contains(&role) {
                 bail!("message role must be system, user or assistant");
             }
-            bytes += m["content"].as_str().context("message content must be a string")?.len();
+            bytes += m["content"]
+                .as_str()
+                .context("message content must be a string")?
+                .len();
         }
         if bytes > MAX_PROMPT_BYTES {
             bail!("messages exceed {MAX_PROMPT_BYTES} bytes");
@@ -368,12 +450,23 @@ pub fn adapter_bundle(dir: &Path) -> Result<(Vec<u8>, String, Value)> {
     for f in ADAPTER_FILES {
         let p = dir.join(f);
         if p.exists() {
-            files.insert(f.into(), json!(base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p)?)));
+            files.insert(
+                f.into(),
+                json!(base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p)?)),
+            );
         }
     }
-    let weights = std::fs::read(dir.join("adapter_model.safetensors")).with_context(|| format!("{} has no adapter_model.safetensors", dir.display()))?;
-    let manifest: Value = std::fs::read(dir.join("manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-    Ok((serde_json::to_vec(&json!({"files": files}))?, sha256_hex(&weights), manifest))
+    let weights = std::fs::read(dir.join("adapter_model.safetensors"))
+        .with_context(|| format!("{} has no adapter_model.safetensors", dir.display()))?;
+    let manifest: Value = std::fs::read(dir.join("manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(json!({}));
+    Ok((
+        serde_json::to_vec(&json!({"files": files}))?,
+        sha256_hex(&weights),
+        manifest,
+    ))
 }
 
 /// Fetch, verify and unpack an adapter bundle into `dir` (a cache entry).
@@ -393,10 +486,17 @@ async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(&tmp).await?;
     for f in ADAPTER_FILES {
         if let Some(b64) = v["files"][f].as_str() {
-            tokio::fs::write(tmp.join(f), base64::engine::general_purpose::STANDARD.decode(b64).context("bad base64 in adapter bundle")?).await?;
+            tokio::fs::write(
+                tmp.join(f),
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .context("bad base64 in adapter bundle")?,
+            )
+            .await?;
         }
     }
-    let got = crate::temporal::worker::file_sha256(&tmp.join("adapter_model.safetensors")).context("bundle lacks adapter_model.safetensors")?;
+    let got = crate::temporal::worker::file_sha256(&tmp.join("adapter_model.safetensors"))
+        .context("bundle lacks adapter_model.safetensors")?;
     if got != want {
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         bail!("adapter {got} differs from the offer's {want}");
@@ -407,43 +507,92 @@ async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
 }
 
 /// Answer one request: adapter from the cache (or fetched), then `infernet model generate`.
-pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec) -> Result<Vec<u8>> {
+pub async fn run_infer(
+    infernet: &Path,
+    cache_root: &Path,
+    job_id: &str,
+    spec: &TextInferSpec,
+) -> Result<Vec<u8>> {
     spec.validate()?;
-    let adapter = cache_root.join("text").join("adapters").join(spec.adapter_hash.trim_start_matches("sha256:"));
-    let cached = crate::temporal::worker::file_sha256(&adapter.join("adapter_model.safetensors")).ok();
+    let adapter = cache_root
+        .join("text")
+        .join("adapters")
+        .join(spec.adapter_hash.trim_start_matches("sha256:"));
+    let cached =
+        crate::temporal::worker::file_sha256(&adapter.join("adapter_model.safetensors")).ok();
     if cached.as_deref() != Some(spec.adapter_hash.as_str()) {
-        fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?;
+        fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter)
+            .await
+            .context("fetch adapter")?;
     }
     let dir = cache_root.join("text").join("infer").join(job_id);
     tokio::fs::create_dir_all(&dir).await?;
     let req = dir.join("request.json");
     tokio::fs::write(&req, serde_json::to_vec(&json!({"adapter_dir": adapter, "base_model": spec.base_model, "messages": spec.messages, "max_new_tokens": spec.max_new_tokens}))?).await?;
     let mut command = tokio::process::Command::new(crate::live_bin(infernet));
-    command.args(["model", "generate", "--json", "--input"]).arg(&req).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    command
+        .args(["model", "generate", "--json", "--input"])
+        .arg(&req)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     crate::resources::apply_job_limits(&mut command);
-    let out = tokio::time::timeout(Duration::from_secs(900), command.output()).await.map_err(|_| anyhow::anyhow!("E_TIMEOUT: generation exceeded 900s"))??;
+    let out = tokio::time::timeout(Duration::from_secs(900), command.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("E_TIMEOUT: generation exceeded 900s"))??;
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    let line = String::from_utf8_lossy(&out.stdout).lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("").to_string();
+    let line = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .unwrap_or("")
+        .to_string();
     let ans: Value = serde_json::from_str(&line).unwrap_or(json!({}));
     if !out.status.success() || ans["type"] != json!("answer") {
-        bail!("infernet model generate failed: {}", ans["message"].as_str().unwrap_or(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")));
+        bail!(
+            "infernet model generate failed: {}",
+            ans["message"].as_str().unwrap_or(
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            )
+        );
     }
     if ans["adapter"].as_str() != Some(spec.adapter_hash.as_str()) {
-        bail!("generate used adapter {} instead of {}", ans["adapter"], spec.adapter_hash);
+        bail!(
+            "generate used adapter {} instead of {}",
+            ans["adapter"],
+            spec.adapter_hash
+        );
     }
     Ok(serde_json::to_vec(&ans)?)
 }
 
-pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_infer_runner(
+    net: Arc<Libp2pNetwork>,
+    cache_root: PathBuf,
+    infernet: PathBuf,
+    busy: Arc<AtomicBool>,
+) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let accept = job.accept.clone();
             busy.store(true, Ordering::Relaxed);
             let result: Result<String> = async {
-                let spec: TextInferSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
+                let spec: TextInferSpec = serde_json::from_value(
+                    accept
+                        .spec_inline
+                        .clone()
+                        .context("accept lacks spec_inline")?,
+                )?;
                 let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec).await?;
-                reqwest::Client::new().put(format!("{}/answer.json", spec.answer_upload_url)).body(answer.clone()).send().await?.error_for_status()?;
+                reqwest::Client::new()
+                    .put(format!("{}/answer.json", spec.answer_upload_url))
+                    .body(answer.clone())
+                    .send()
+                    .await?
+                    .error_for_status()?;
                 Ok(sha256_hex(&answer))
             }
             .await;
@@ -477,7 +626,15 @@ pub fn infer_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter
 /// Does the local Infernet have `model generate` (>= 0.1.80)? It answers a
 /// bare call with a usage error naming `--adapter`; older ones do not know it.
 pub async fn supports_generate(infernet: &Path) -> bool {
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), tokio::process::Command::new(crate::live_bin(infernet)).args(["model", "generate"]).stdin(std::process::Stdio::null()).output()).await else {
+    let Ok(Ok(out)) = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(crate::live_bin(infernet))
+            .args(["model", "generate"])
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    else {
         return false;
     };
     String::from_utf8_lossy(&out.stderr).contains("--adapter")
@@ -492,7 +649,11 @@ pub struct Serving {
 
 /// `c0mpute infernet text serve`: advertise and take `infernet.text.train`
 /// jobs, and `infernet.text.infer` requests when the local Infernet can.
-pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf) -> Result<Serving> {
+pub async fn serve(
+    net_opts: &NetOptions,
+    infernet: PathBuf,
+    cache_root: PathBuf,
+) -> Result<Serving> {
     let runtime = probe(&infernet).await?;
     let infer = supports_generate(&infernet).await;
     let ram_mb = local_ram_mb();
@@ -502,19 +663,48 @@ pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf
     }
     let net = spawn_node(net_opts).await?;
     let hardware = json!({"version": env!("CARGO_PKG_VERSION"), "text_runtime": "peft", "ram_mb": ram_mb, "cuda": runtime["cuda"]});
-    tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
+    tokio::spawn(crate::capabilities::advertise_loop(
+        net.clone(),
+        tags.clone(),
+        hardware,
+        crate::capabilities::local_bench_score(),
+        crate::capabilities::DEFAULT_ADVERTISE_INTERVAL,
+    ));
     let busy = Arc::new(AtomicBool::new(false));
     let slots = Arc::new(Semaphore::new(1));
-    let tx = spawn_train_runner(net.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots);
-    crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy)));
+    let tx = spawn_train_runner(
+        net.clone(),
+        cache_root.clone(),
+        infernet.clone(),
+        busy.clone(),
+        slots,
+    );
+    crate::dispatch::run_worker_subscriber_filtered(
+        net.clone(),
+        TRAIN_WORKLOAD.into(),
+        tags.clone(),
+        Some(tx),
+        Some(train_offer_filter(busy)),
+    );
     if infer {
         let ibusy = Arc::new(AtomicBool::new(false));
         let itx = spawn_infer_runner(net.clone(), cache_root, infernet, ibusy.clone());
-        crate::dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(itx), Some(infer_offer_filter(ibusy)));
+        crate::dispatch::run_worker_subscriber_filtered(
+            net.clone(),
+            INFER_WORKLOAD.into(),
+            tags.clone(),
+            Some(itx),
+            Some(infer_offer_filter(ibusy)),
+        );
     }
     info!(peer = %net.peer_id().to_base58(), ?tags, "text: serving");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Serving { net, tags, runtime, infer })
+    Ok(Serving {
+        net,
+        tags,
+        runtime,
+        infer,
+    })
 }
 
 // ── buyer ───────────────────────────────────────────────────────────────
@@ -550,19 +740,30 @@ pub struct Preview {
 
 /// The job and corpus the buyer is about to send.
 pub fn load(req: &TrainRequest) -> Result<(Value, Vec<u8>, Preview)> {
-    let job: Value = serde_json::from_slice(&std::fs::read(&req.job_path).with_context(|| format!("read {}", req.job_path.display()))?)?;
+    let job: Value = serde_json::from_slice(
+        &std::fs::read(&req.job_path)
+            .with_context(|| format!("read {}", req.job_path.display()))?,
+    )?;
     let dataset = match &req.dataset_path {
         Some(p) => p.clone(),
         None => {
-            let u = job["dataset"]["url"].as_str().context("job.dataset.url is missing; pass --dataset")?;
+            let u = job["dataset"]["url"]
+                .as_str()
+                .context("job.dataset.url is missing; pass --dataset")?;
             if is_http(u) {
                 bail!("job.dataset.url is a URL; pass the local corpus with --dataset");
             }
-            req.job_path.parent().unwrap_or(Path::new(".")).join(u.trim_start_matches("file://"))
+            req.job_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(u.trim_start_matches("file://"))
         }
     };
     let bytes = std::fs::read(&dataset).with_context(|| format!("read {}", dataset.display()))?;
-    let documents = bytes.split(|b| *b == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)).count();
+    let documents = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.iter().all(u8::is_ascii_whitespace))
+        .count();
     let p = Preview {
         name: job["name"].as_str().unwrap_or("adapter").to_string(),
         base_model: job["base_model"].as_str().unwrap_or("").to_string(),
@@ -586,15 +787,30 @@ pub fn render(ev: &Value, total: &mut Option<u64>) -> Option<String> {
     match ev["type"].as_str()? {
         "meta" => {
             *total = ev["total_steps"].as_u64();
-            Some(format!("training {} on {} ({} docs, {} steps)", ev["base_model"].as_str().unwrap_or("?"), ev["device"].as_str().unwrap_or("cpu"), ev["documents"], total.map(|t| t.to_string()).unwrap_or("?".into())))
+            Some(format!(
+                "training {} on {} ({} docs, {} steps)",
+                ev["base_model"].as_str().unwrap_or("?"),
+                ev["device"].as_str().unwrap_or("cpu"),
+                ev["documents"],
+                total.map(|t| t.to_string()).unwrap_or("?".into())
+            ))
         }
         "step" => {
             let step = ev["step"].as_u64().unwrap_or(0);
             let t = ev["total_steps"].as_u64().or(*total).unwrap_or(step.max(1));
-            Some(format!("{} step {step}/{t}  loss {}  {} tok/s", bar(step, t), ev["loss"], ev["throughput"]))
+            Some(format!(
+                "{} step {step}/{t}  loss {}  {} tok/s",
+                bar(step, t),
+                ev["loss"],
+                ev["throughput"]
+            ))
         }
         "eval" => Some(format!("eval @{}: {}", ev["step"], ev["metrics"])),
-        "checkpoint" => Some(format!("adapter {} ({} bytes)", ev["model"].as_str().unwrap_or("?"), ev["size_bytes"])),
+        "checkpoint" => Some(format!(
+            "adapter {} ({} bytes)",
+            ev["model"].as_str().unwrap_or("?"),
+            ev["size_bytes"]
+        )),
         "error" => Some(format!("error: {}", ev["message"].as_str().unwrap_or("?"))),
         "done" => Some(format!("done: {}", ev["reason"].as_str().unwrap_or("?"))),
         _ => None,
@@ -602,10 +818,21 @@ pub fn render(ev: &Value, total: &mut Option<u64>) -> Option<String> {
 }
 
 /// Auction the job, stream its progress through `on_event`, verify and keep the adapter.
-pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: impl FnMut(&Value) + Send) -> Result<Value> {
+pub async fn train(
+    net: Arc<Libp2pNetwork>,
+    req: &TrainRequest,
+    mut on_event: impl FnMut(&Value) + Send,
+) -> Result<Value> {
     let (job, bytes, preview) = load(req)?;
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<SlotEvent>();
-    let server = TransferServer::start_with(req.bind, req.public_url.clone(), bytes, &ARTIFACTS, Some(ev_tx)).await?;
+    let server = TransferServer::start_with(
+        req.bind,
+        req.public_url.clone(),
+        bytes,
+        &ARTIFACTS,
+        Some(ev_tx),
+    )
+    .await?;
     let spec = TextTrainSpec {
         job,
         dataset_url: server.dataset_url(),
@@ -619,7 +846,11 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
         tags.push("infernet:text:device:cuda".into());
     }
     if let Some(min) = req.min_ram_gb {
-        let b = crate::temporal::caps::RAM_BUCKETS_GB.iter().copied().find(|b| *b >= min).unwrap_or(128);
+        let b = crate::temporal::caps::RAM_BUCKETS_GB
+            .iter()
+            .copied()
+            .find(|b| *b >= min)
+            .unwrap_or(128);
         tags.push(format!("c0mpute:ram:{b}gb+"));
     }
     let spec_v = serde_json::to_value(&spec)?;
@@ -652,13 +883,23 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
                 outcome = Some(o);
                 break;
             }
-            Ok(o) => last_err = Some(anyhow::anyhow!("worker {} reported {:?} (attempt {})", o.accepted_bid.bidder_peer_id, o.receipt.status, attempt + 1)),
+            Ok(o) => {
+                last_err = Some(anyhow::anyhow!(
+                    "worker {} reported {:?} (attempt {})",
+                    o.accepted_bid.bidder_peer_id,
+                    o.receipt.status,
+                    attempt + 1
+                ))
+            }
             Err(e) => last_err = Some(e.context(format!("attempt {}", attempt + 1))),
         }
     }
-    let o = outcome.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("training failed")))?;
+    let o =
+        outcome.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("training failed")))?;
     let files: HashMap<String, Vec<u8>> = server.take(SLOT).await;
-    let weights = files.get("adapter_model.safetensors").context("worker did not upload adapter_model.safetensors")?;
+    let weights = files
+        .get("adapter_model.safetensors")
+        .context("worker did not upload adapter_model.safetensors")?;
     let got = sha256_hex(weights);
     let claimed = o.receipt.output_hash.clone().unwrap_or_default();
     if got != claimed {
@@ -687,19 +928,33 @@ pub struct Source {
 
 /// Top web results for the question from pit.world search; empty when unreachable.
 pub async fn pit_search(base: &str, query: &str, k: usize) -> Vec<Source> {
-    let Ok(mut url) = url::Url::parse(base) else { return vec![] };
-    url.query_pairs_mut().append_pair("q", query);
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(20)).user_agent(concat!("c0mpute/", env!("CARGO_PKG_VERSION"))).build() else {
+    let Ok(mut url) = url::Url::parse(base) else {
         return vec![];
     };
-    let Ok(resp) = client.get(url).send().await else { return vec![] };
-    let Ok(body) = resp.json::<Value>().await else { return vec![] };
+    url.query_pairs_mut().append_pair("q", query);
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("c0mpute/", env!("CARGO_PKG_VERSION")))
+        .build()
+    else {
+        return vec![];
+    };
+    let Ok(resp) = client.get(url).send().await else {
+        return vec![];
+    };
+    let Ok(body) = resp.json::<Value>().await else {
+        return vec![];
+    };
     body["results"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|r| {
-            Some(Source { title: r["title"].as_str()?.to_string(), url: r["url"].as_str()?.to_string(), text: r["description"].as_str().unwrap_or("").to_string() })
+            Some(Source {
+                title: r["title"].as_str()?.to_string(),
+                url: r["url"].as_str()?.to_string(),
+                text: r["description"].as_str().unwrap_or("").to_string(),
+            })
         })
         .take(k)
         .collect()
@@ -710,8 +965,23 @@ pub fn chat_prompt(question: &str, sources: &[Source]) -> String {
     if sources.is_empty() {
         return question.to_string();
     }
-    let ctx: Vec<String> = sources.iter().enumerate().map(|(i, s)| format!("[{}] {} ({})\n{}", i + 1, s.title, s.url, s.text.chars().take(700).collect::<String>())).collect();
-    format!("Background from the web:\n{}\n\nUsing the background where it helps, answer: {question}", ctx.join("\n\n"))
+    let ctx: Vec<String> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!(
+                "[{}] {} ({})\n{}",
+                i + 1,
+                s.title,
+                s.url,
+                s.text.chars().take(700).collect::<String>()
+            )
+        })
+        .collect();
+    format!(
+        "Background from the web:\n{}\n\nUsing the background where it helps, answer: {question}",
+        ctx.join("\n\n")
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -732,7 +1002,10 @@ pub struct ChatRequest {
 /// Ask a worker; returns the answer, its sources and the receipt.
 pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
     let (bundle, adapter_hash, manifest) = adapter_bundle(&req.adapter_dir)?;
-    let base_model = manifest["base_model"].as_str().context("the adapter's manifest.json has no base_model")?.to_string();
+    let base_model = manifest["base_model"]
+        .as_str()
+        .context("the adapter's manifest.json has no base_model")?
+        .to_string();
     let sources = match &req.search {
         Some(base) => pit_search(base, &req.question, 3).await,
         None => vec![],
@@ -742,7 +1015,14 @@ pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
         messages.push(json!({"role": "system", "content": system}));
     }
     messages.push(json!({"role": "user", "content": chat_prompt(&req.question, &sources)}));
-    let server = TransferServer::start_with(req.bind, req.public_url.clone(), bundle, &ANSWER_ARTIFACTS, None).await?;
+    let server = TransferServer::start_with(
+        req.bind,
+        req.public_url.clone(),
+        bundle,
+        &ANSWER_ARTIFACTS,
+        None,
+    )
+    .await?;
     let spec = TextInferSpec {
         adapter_hash: adapter_hash.clone(),
         base_model: base_model.clone(),
@@ -764,13 +1044,22 @@ pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
     };
     let o = auction_with_mesh_retry(net, make).await?;
     if o.receipt.status != JobStatus::Completed {
-        bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
+        bail!(
+            "worker {} reported {:?}",
+            o.accepted_bid.bidder_peer_id,
+            o.receipt.status
+        );
     }
     let files = server.take(ANSWER_SLOT).await;
-    let answer = files.get("answer.json").context("worker did not upload answer.json")?;
+    let answer = files
+        .get("answer.json")
+        .context("worker did not upload answer.json")?;
     let got = sha256_hex(answer);
     if Some(got.as_str()) != o.receipt.output_hash.as_deref() {
-        bail!("answer {got} does not match the receipt's {:?}", o.receipt.output_hash);
+        bail!(
+            "answer {got} does not match the receipt's {:?}",
+            o.receipt.output_hash
+        );
     }
     let ans: Value = serde_json::from_slice(answer)?;
     Ok(json!({
@@ -817,23 +1106,42 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         std::fs::write(src.path().join("adapter_model.safetensors"), b"weights").unwrap();
         std::fs::write(src.path().join("adapter_config.json"), b"{}").unwrap();
-        std::fs::write(src.path().join("manifest.json"), br#"{"base_model":"org/m","system_prompt":"be brief"}"#).unwrap();
+        std::fs::write(
+            src.path().join("manifest.json"),
+            br#"{"base_model":"org/m","system_prompt":"be brief"}"#,
+        )
+        .unwrap();
         let (bundle, hash, manifest) = adapter_bundle(src.path()).unwrap();
         assert_eq!(hash, sha256_hex(b"weights"));
         assert_eq!(manifest["base_model"], "org/m");
-        let srv = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, bundle).await.unwrap();
+        let srv = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, bundle)
+            .await
+            .unwrap();
         let cache = tempfile::tempdir().unwrap();
         let dst = cache.path().join("a");
-        fetch_adapter(&srv.dataset_url(), &hash, &dst).await.unwrap();
-        assert_eq!(std::fs::read(dst.join("adapter_model.safetensors")).unwrap(), b"weights");
+        fetch_adapter(&srv.dataset_url(), &hash, &dst)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dst.join("adapter_model.safetensors")).unwrap(),
+            b"weights"
+        );
         let bad = format!("sha256:{}", "0".repeat(64));
-        assert!(fetch_adapter(&srv.dataset_url(), &bad, &cache.path().join("b")).await.is_err());
+        assert!(
+            fetch_adapter(&srv.dataset_url(), &bad, &cache.path().join("b"))
+                .await
+                .is_err()
+        );
         assert!(!cache.path().join("b").exists());
     }
 
     #[test]
     fn prompt_carries_numbered_sources() {
-        let s = vec![Source { title: "How to price".into(), url: "https://x/p".into(), text: "value".into() }];
+        let s = vec![Source {
+            title: "How to price".into(),
+            url: "https://x/p".into(),
+            text: "value".into(),
+        }];
         let p = chat_prompt("Pricing?", &s);
         assert!(p.starts_with("Background from the web:\n[1] How to price (https://x/p)"));
         assert!(p.ends_with("answer: Pricing?"));
@@ -876,19 +1184,43 @@ mod tests {
         assert!(t.contains(&"c0mpute:ram:16gb+".to_string()));
         assert!(!t.contains(&"infernet:text:device:cuda".to_string()));
         let mut total = None;
-        render(&json!({"type": "meta", "base_model": "m", "total_steps": 4, "documents": 9}), &mut total);
+        render(
+            &json!({"type": "meta", "base_model": "m", "total_steps": 4, "documents": 9}),
+            &mut total,
+        );
         assert_eq!(total, Some(4));
-        let line = render(&json!({"type": "step", "step": 2, "loss": 1.5, "throughput": 10}), &mut total).unwrap();
-        assert!(line.starts_with("[############------------] step 2/4"), "{line}");
+        let line = render(
+            &json!({"type": "step", "step": 2, "loss": 1.5, "throughput": 10}),
+            &mut total,
+        )
+        .unwrap();
+        assert!(
+            line.starts_with("[############------------] step 2/4"),
+            "{line}"
+        );
     }
 
     #[tokio::test]
     async fn worker_refuses_a_dataset_whose_hash_differs() {
-        let srv = TransferServer::start("127.0.0.1:0".parse().unwrap(), None, b"{\"text\":\"x\"}\n".to_vec()).await.unwrap();
+        let srv = TransferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            b"{\"text\":\"x\"}\n".to_vec(),
+        )
+        .await
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let err = download(&srv.dataset_url(), &dir.path().join("d.jsonl"), &format!("sha256:{}", "0".repeat(64))).await.unwrap_err();
+        let err = download(
+            &srv.dataset_url(),
+            &dir.path().join("d.jsonl"),
+            &format!("sha256:{}", "0".repeat(64)),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err}").contains("differs"));
         let ok = sha256_hex(b"{\"text\":\"x\"}\n");
-        download(&srv.dataset_url(), &dir.path().join("d.jsonl"), &ok).await.unwrap();
+        download(&srv.dataset_url(), &dir.path().join("d.jsonl"), &ok)
+            .await
+            .unwrap();
     }
 }

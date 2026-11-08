@@ -108,10 +108,16 @@ async fn auction_round_trip_publishes_receipt() {
         .await
         .expect("auction completes");
     assert_eq!(outcome.receipt.status, JobStatus::Completed);
-    assert_eq!(outcome.accepted_bid.bidder_peer_id, worker.peer_id().to_base58());
+    assert_eq!(
+        outcome.accepted_bid.bidder_peer_id,
+        worker.peer_id().to_base58()
+    );
     assert!(outcome.receipt.output_hash.is_some());
     // The billing id travels offer -> accept -> worker -> receipt.
-    assert_eq!(outcome.receipt.external_ref.as_deref(), Some("infernet:job_e2e"));
+    assert_eq!(
+        outcome.receipt.external_ref.as_deref(),
+        Some("infernet:job_e2e")
+    );
     assert_eq!(outcome.external_ref.as_deref(), Some("infernet:job_e2e"));
     // Bids now carry an expiry and an ETA (default before any job ran).
     assert!(outcome.accepted_bid.expires_at_ms.is_some());

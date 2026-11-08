@@ -26,7 +26,10 @@ pub const DEFAULT_SEEDS: &[&str] = &[
 
 /// [`DEFAULT_SEEDS`] as multiaddrs.
 pub fn default_seeds() -> Vec<Multiaddr> {
-    DEFAULT_SEEDS.iter().filter_map(|s| s.parse().ok()).collect()
+    DEFAULT_SEEDS
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]

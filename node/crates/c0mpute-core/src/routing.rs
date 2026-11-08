@@ -45,7 +45,9 @@ impl std::str::FromStr for SelectionPolicy {
         match s.trim().to_ascii_lowercase().as_str() {
             "smart" | "capable" | "best" => Ok(Self::Smart),
             "cheapest" | "price" | "lowest-price" => Ok(Self::Cheapest),
-            other => Err(format!("unknown selection policy `{other}` (smart|cheapest)")),
+            other => Err(format!(
+                "unknown selection policy `{other}` (smart|cheapest)"
+            )),
         }
     }
 }
@@ -80,19 +82,32 @@ pub fn best_bench(bids: &[JobBid]) -> u32 {
 }
 
 fn price_cmp(a: &JobBid, b: &JobBid) -> Ordering {
-    a.price_usd.partial_cmp(&b.price_usd).unwrap_or(Ordering::Equal)
+    a.price_usd
+        .partial_cmp(&b.price_usd)
+        .unwrap_or(Ordering::Equal)
 }
 
 /// Order two bids under `policy`, ignoring publish time (the tie-breaker).
-pub fn compare(a: &JobBid, b: &JobBid, policy: SelectionPolicy, deadline_secs: u64, best: u32) -> Ordering {
+pub fn compare(
+    a: &JobBid,
+    b: &JobBid,
+    policy: SelectionPolicy,
+    deadline_secs: u64,
+    best: u32,
+) -> Ordering {
     match policy {
         SelectionPolicy::Cheapest => price_cmp(a, b),
         SelectionPolicy::Smart => {
-            let (oa, ob) = (is_overloaded(a, deadline_secs), is_overloaded(b, deadline_secs));
+            let (oa, ob) = (
+                is_overloaded(a, deadline_secs),
+                is_overloaded(b, deadline_secs),
+            );
             oa.cmp(&ob)
                 .then_with(|| {
                     if oa && ob {
-                        load_of(a).partial_cmp(&load_of(b)).unwrap_or(Ordering::Equal)
+                        load_of(a)
+                            .partial_cmp(&load_of(b))
+                            .unwrap_or(Ordering::Equal)
                     } else {
                         Ordering::Equal
                     }
@@ -196,8 +211,17 @@ mod tests {
 
     #[test]
     fn old_workers_without_fields_still_win_alone_and_rank_below_benchmarked() {
-        assert_eq!(winner(vec![bid("old", 0.5, 60, None, None)], SelectionPolicy::Smart), "old");
-        let bids = vec![bid("old", 0.1, 60, None, None), bid("new", 0.5, 60, Some(3_000), Some(0.0))];
+        assert_eq!(
+            winner(
+                vec![bid("old", 0.5, 60, None, None)],
+                SelectionPolicy::Smart
+            ),
+            "old"
+        );
+        let bids = vec![
+            bid("old", 0.1, 60, None, None),
+            bid("new", 0.5, 60, Some(3_000), Some(0.0)),
+        ];
         assert_eq!(winner(bids, SelectionPolicy::Smart), "new");
     }
 
@@ -222,8 +246,14 @@ mod tests {
 
     #[test]
     fn policy_parses() {
-        assert_eq!("smart".parse::<SelectionPolicy>().unwrap(), SelectionPolicy::Smart);
-        assert_eq!("cheapest".parse::<SelectionPolicy>().unwrap(), SelectionPolicy::Cheapest);
+        assert_eq!(
+            "smart".parse::<SelectionPolicy>().unwrap(),
+            SelectionPolicy::Smart
+        );
+        assert_eq!(
+            "cheapest".parse::<SelectionPolicy>().unwrap(),
+            SelectionPolicy::Cheapest
+        );
         assert!("nope".parse::<SelectionPolicy>().is_err());
     }
 }

@@ -7,6 +7,7 @@
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
+pub mod diffusion;
 pub mod dispatch;
 pub(crate) mod gateway_util;
 pub mod jobs_gateway;

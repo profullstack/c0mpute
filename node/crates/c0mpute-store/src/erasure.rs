@@ -67,7 +67,10 @@ pub fn decode(
 ) -> Result<Vec<u8>> {
     let n = k + parity;
     if received.len() != n {
-        bail!("erasure decode: expected {n} positions, got {}", received.len());
+        bail!(
+            "erasure decode: expected {n} positions, got {}",
+            received.len()
+        );
     }
     let surviving = received.iter().filter(|s| s.is_some()).count();
     if surviving < k {

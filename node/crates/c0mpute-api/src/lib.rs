@@ -50,7 +50,9 @@ impl CoordinatorClient {
         let path = format!("providers/{}/heartbeat", provider_id);
         let resp = self
             .req(reqwest::Method::POST, &path)?
-            .json(&HeartbeatBody { capabilities: caps.clone() })
+            .json(&HeartbeatBody {
+                capabilities: caps.clone(),
+            })
             .send()
             .await?;
         resp.error_for_status()?;
@@ -85,7 +87,9 @@ impl CoordinatorClient {
         let path = format!("jobs/{}/fail", job_id);
         let resp = self
             .req(reqwest::Method::POST, &path)?
-            .json(&FailBody { error: error.into() })
+            .json(&FailBody {
+                error: error.into(),
+            })
             .send()
             .await?;
         resp.error_for_status()?;
