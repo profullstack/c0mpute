@@ -7,7 +7,7 @@
 [module]
 id          = "webhook"
 name        = "Webhooks — paid, end-to-end encrypted delivery"
-version     = "0.2.61"
+version     = "0.2.62"
 kind        = "workload"
 category    = "infrastructure"
 description = "Send webhooks from c0mpute workers, paid per delivery. The URL, headers, body and signing secret are sealed to the one worker that wins the job; relays and the market see only ciphertext. Standard Webhooks signatures, bounded retries with backoff, SSRF-guarded delivery (public addresses only, no redirects)."
