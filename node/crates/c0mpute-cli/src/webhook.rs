@@ -10,10 +10,7 @@ use c0mpute_core::webhook::{self, SendRequest, WebhookCall};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "c0mpute webhook",
-    about = "Send webhooks from c0mpute workers, end-to-end encrypted and paid per delivery"
-)]
+#[command(name = "c0mpute webhook", about = "Send webhooks from c0mpute workers, end-to-end encrypted and paid per delivery")]
 struct WebhookCli {
     #[command(subcommand)]
     cmd: Sub,
@@ -98,45 +95,24 @@ enum Sub {
 }
 
 fn data_dir() -> PathBuf {
-    c0mpute_core::config::data_dir()
-        .unwrap_or_else(|| PathBuf::from("./c0mpute-data"))
-        .join("webhook")
+    c0mpute_core::config::data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")).join("webhook")
 }
 
 fn net_opts(a: &NetArgs, identity: &str) -> NetOptions {
-    NetOptions {
-        identity_dir: data_dir().join(identity),
-        listen: a.listen.clone(),
-        bootstrap: a.bootstrap.clone(),
-        default_bootstrap: !a.no_default_bootstrap,
-    }
+    NetOptions { identity_dir: data_dir().join(identity), listen: a.listen.clone(), bootstrap: a.bootstrap.clone(), default_bootstrap: !a.no_default_bootstrap }
 }
 
 fn parse_header(h: &str) -> Result<(String, String)> {
-    let (k, v) = h
-        .split_once(':')
-        .with_context(|| format!("header {h:?} must look like \"Name: value\""))?;
+    let (k, v) = h.split_once(':').with_context(|| format!("header {h:?} must look like \"Name: value\""))?;
     Ok((k.trim().to_string(), v.trim().to_string()))
 }
 
 pub async fn run(args: &[String]) -> Result<()> {
-    let cli = WebhookCli::try_parse_from(
-        std::iter::once("c0mpute webhook".to_string()).chain(args.iter().cloned()),
-    )
-    .unwrap_or_else(|e| e.exit());
+    let cli = WebhookCli::try_parse_from(std::iter::once("c0mpute webhook".to_string()).chain(args.iter().cloned())).unwrap_or_else(|e| e.exit());
     match cli.cmd {
-        Sub::Serve {
-            price,
-            concurrency,
-            net,
-        } => {
+        Sub::Serve { price, concurrency, net } => {
             let s = webhook::serve(&net_opts(&net, "serve"), price, concurrency).await?;
-            eprintln!(
-                "delivering {} as {} at ${} per delivery",
-                webhook::WORKLOAD,
-                s.net.peer_id().to_base58(),
-                s.price_usd
-            );
+            eprintln!("delivering {} as {} at ${} per delivery", webhook::WORKLOAD, s.net.peer_id().to_base58(), s.price_usd);
             for a in s.net.listen_addrs().await.unwrap_or_default() {
                 eprintln!("  listening {a}/p2p/{}", s.net.peer_id().to_base58());
             }
@@ -144,55 +120,15 @@ pub async fn run(args: &[String]) -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Sub::Send {
-            url,
-            method,
-            headers,
-            data,
-            data_file,
-            secret,
-            id,
-            attempts,
-            timeout_ms,
-            backoff_ms,
-            worker,
-            max_price,
-            external_ref,
-            bid_window_s,
-            json: as_json,
-            net,
-        } => {
+        Sub::Send { url, method, headers, data, data_file, secret, id, attempts, timeout_ms, backoff_ms, worker, max_price, external_ref, bid_window_s, json: as_json, net } => {
             let body = match (data, data_file) {
                 (Some(d), _) => d,
-                (None, Some(p)) if p.as_os_str() == "-" => {
-                    std::io::read_to_string(std::io::stdin())?
-                }
-                (None, Some(p)) => {
-                    std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?
-                }
+                (None, Some(p)) if p.as_os_str() == "-" => std::io::read_to_string(std::io::stdin())?,
+                (None, Some(p)) => std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?,
                 (None, None) => String::new(),
             };
-            let call = WebhookCall {
-                url,
-                method: method.to_ascii_uppercase(),
-                headers: headers
-                    .iter()
-                    .map(|h| parse_header(h))
-                    .collect::<Result<_>>()?,
-                body,
-                secret,
-                id,
-            };
-            let req = SendRequest {
-                call,
-                max_attempts: attempts,
-                timeout_ms,
-                backoff_ms,
-                workers: worker,
-                max_price_usd: max_price,
-                bid_window: Duration::from_secs(bid_window_s),
-                external_ref,
-            };
+            let call = WebhookCall { url, method: method.to_ascii_uppercase(), headers: headers.iter().map(|h| parse_header(h)).collect::<Result<_>>()?, body, secret, id };
+            let req = SendRequest { call, max_attempts: attempts, timeout_ms, backoff_ms, workers: worker, max_price_usd: max_price, bid_window: Duration::from_secs(bid_window_s), external_ref };
             // Validate before joining the network.
             req.call.validate()?;
             let n = c0mpute_core::temporal::node::spawn_node(&net_opts(&net, "client")).await?;
@@ -204,29 +140,13 @@ pub async fn run(args: &[String]) -> Result<()> {
             } else {
                 let r = &out.result;
                 match r.status {
-                    Some(s) => println!(
-                        "{s} in {}ms after {} attempt(s){}",
-                        r.latency_ms,
-                        r.attempts,
-                        if r.delivered { "" } else { " (not delivered)" }
-                    ),
-                    None => println!(
-                        "not delivered after {} attempt(s): {}",
-                        r.attempts,
-                        r.error.as_deref().unwrap_or("no answer")
-                    ),
+                    Some(s) => println!("{s} in {}ms after {} attempt(s){}", r.latency_ms, r.attempts, if r.delivered { "" } else { " (not delivered)" }),
+                    None => println!("not delivered after {} attempt(s): {}", r.attempts, r.error.as_deref().unwrap_or("no answer")),
                 }
                 if !r.response_body.is_empty() {
-                    println!(
-                        "{}{}",
-                        r.response_body,
-                        if r.truncated { "\n[truncated]" } else { "" }
-                    );
+                    println!("{}{}", r.response_body, if r.truncated { "\n[truncated]" } else { "" });
                 }
-                eprintln!(
-                    "(worker {}, ${}, receipt {})",
-                    out.worker_peer_id, out.price_usd, out.output_hash
-                );
+                eprintln!("(worker {}, ${}, receipt {})", out.worker_peer_id, out.price_usd, out.output_hash);
             }
             if !out.result.delivered {
                 std::process::exit(1);

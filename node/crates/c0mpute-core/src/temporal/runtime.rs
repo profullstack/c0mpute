@@ -36,11 +36,7 @@ impl std::error::Error for RuntimeError {}
 impl RuntimeError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         let retriable = matches!(code, "E_CAPACITY" | "E_TIMEOUT" | "E_RUNTIME");
-        Self {
-            code: code.into(),
-            message: message.into(),
-            retriable,
-        }
+        Self { code: code.into(), message: message.into(), retriable }
     }
 }
 
@@ -57,7 +53,9 @@ impl RuntimeProc {
     /// Spawn `<infernet> model serve --stdio [extra]`.
     pub async fn spawn(infernet: &Path, extra: &[String]) -> Result<Arc<Self>> {
         let mut command = Command::new(crate::live_bin(infernet));
-        command.args(["model", "serve", "--stdio"]).args(extra);
+        command
+            .args(["model", "serve", "--stdio"])
+            .args(extra);
         crate::resources::apply_job_limits(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
@@ -73,15 +71,11 @@ impl RuntimeProc {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
+                let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
                 if msg.get("event").is_some() {
                     continue;
                 }
-                let Some(id) = msg.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
-                    continue;
-                };
+                let Some(id) = msg.get("id").and_then(|v| v.as_str()).map(str::to_string) else { continue };
                 if let Some(tx) = p2.lock().await.remove(&id) {
                     let _ = tx.send(msg);
                 }
@@ -91,20 +85,10 @@ impl RuntimeProc {
                 let _ = tx.send(json!({"ok": false, "error": {"code": "E_RUNTIME", "message": "infernet runtime exited", "retriable": true}}));
             }
         });
-        Ok(Arc::new(Self {
-            stdin: Mutex::new(stdin),
-            pending,
-            seq: AtomicU64::new(0),
-            child: Mutex::new(child),
-        }))
+        Ok(Arc::new(Self { stdin: Mutex::new(stdin), pending, seq: AtomicU64::new(0), child: Mutex::new(child) }))
     }
 
-    pub async fn request(
-        &self,
-        op: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> std::result::Result<Value, RuntimeError> {
+    pub async fn request(&self, op: &str, params: Value, timeout: Duration) -> std::result::Result<Value, RuntimeError> {
         let id = format!("c{}", self.seq.fetch_add(1, Ordering::Relaxed) + 1);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), tx);
@@ -119,20 +103,12 @@ impl RuntimeProc {
             let mut w = self.stdin.lock().await;
             if w.write_all(line.as_bytes()).await.is_err() || w.flush().await.is_err() {
                 self.pending.lock().await.remove(&id);
-                return Err(RuntimeError::new(
-                    "E_RUNTIME",
-                    "infernet runtime is not running",
-                ));
+                return Err(RuntimeError::new("E_RUNTIME", "infernet runtime is not running"));
             }
         }
         let reply = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(v)) => v,
-            Ok(Err(_)) => {
-                return Err(RuntimeError::new(
-                    "E_RUNTIME",
-                    "infernet runtime dropped the request",
-                ));
-            }
+            Ok(Err(_)) => return Err(RuntimeError::new("E_RUNTIME", "infernet runtime dropped the request")),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
                 return Err(RuntimeError::new("E_TIMEOUT", format!("{op} timed out")));
@@ -149,9 +125,7 @@ impl RuntimeProc {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self
-            .request("shutdown", json!({}), Duration::from_secs(5))
-            .await;
+        let _ = self.request("shutdown", json!({}), Duration::from_secs(5)).await;
         let _ = self.child.lock().await.kill().await;
     }
 }

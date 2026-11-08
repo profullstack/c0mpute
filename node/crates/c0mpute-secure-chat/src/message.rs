@@ -18,10 +18,10 @@ use ed25519_dalek::{
 };
 use hkdf::Hkdf;
 use ml_dsa::{
-    MlDsa65, Signature as MlDsaSig, Signer as MlDsaSigner, SigningKey as MlDsaSigningKey,
-    Verifier as MlDsaVerifier, VerifyingKey as MlDsaVerifyingKey,
+    MlDsa65, Signature as MlDsaSig, SigningKey as MlDsaSigningKey, Signer as MlDsaSigner,
+    VerifyingKey as MlDsaVerifyingKey, Verifier as MlDsaVerifier,
 };
-use ml_kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey, MlKem768};
+use ml_kem::{Decapsulate, Encapsulate, EncapsulationKey, DecapsulationKey, MlKem768};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -111,8 +111,9 @@ pub fn encrypt_dm(
     let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(ed_sig.to_bytes());
 
     // ML-DSA-65 signature (post-quantum, FIPS 204)
-    let ml_dsa_sig: MlDsaSig<MlDsa65> = MlDsaSigner::try_sign(sender_ml_dsa_key, id.as_bytes())
-        .map_err(|e| anyhow::anyhow!("ml-dsa sign: {e}"))?;
+    let ml_dsa_sig: MlDsaSig<MlDsa65> =
+        MlDsaSigner::try_sign(sender_ml_dsa_key, id.as_bytes())
+            .map_err(|e| anyhow::anyhow!("ml-dsa sign: {e}"))?;
     let ml_dsa_sig_encoded = ml_dsa_sig.encode();
     let ml_dsa_sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(&ml_dsa_sig_encoded[..]);
 
@@ -262,12 +263,7 @@ mod tests {
         .unwrap();
 
         // Eve uses wrong X25519 key — ECDH diverges, symmetric key differs.
-        let result = decrypt_dm(
-            &envelope,
-            &eve.x25519_secret,
-            &alice.x25519_public,
-            &bob.ml_kem_dk,
-        );
+        let result = decrypt_dm(&envelope, &eve.x25519_secret, &alice.x25519_public, &bob.ml_kem_dk);
         assert!(result.is_err());
     }
 
@@ -291,12 +287,7 @@ mod tests {
         .unwrap();
 
         // Eve uses wrong ML-KEM key — decapsulation gives wrong shared secret.
-        let result = decrypt_dm(
-            &envelope,
-            &bob.x25519_secret,
-            &alice.x25519_public,
-            &eve.ml_kem_dk,
-        );
+        let result = decrypt_dm(&envelope, &bob.x25519_secret, &alice.x25519_public, &eve.ml_kem_dk);
         assert!(result.is_err());
     }
 }

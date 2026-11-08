@@ -69,10 +69,7 @@ async fn check_ffmpeg() -> CheckResult {
         return CheckResult::fail(
             "ffmpeg",
             "ffmpeg not on PATH",
-            Some(
-                "install with: curl -fsSL https://c0mpute.com/plugins/transcode/install.sh | sh"
-                    .into(),
-            ),
+            Some("install with: curl -fsSL https://c0mpute.com/plugins/transcode/install.sh | sh".into()),
         );
     };
 

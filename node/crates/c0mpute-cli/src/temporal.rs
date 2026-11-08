@@ -15,10 +15,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "c0mpute infernet temporal",
-    about = "Temporal policies (CfC/LTC liquid networks, GRU baseline) on c0mpute workers"
-)]
+#[command(name = "c0mpute infernet temporal", about = "Temporal policies (CfC/LTC liquid networks, GRU baseline) on c0mpute workers")]
 struct TemporalCli {
     #[command(subcommand)]
     cmd: Sub,
@@ -134,33 +131,22 @@ enum Sub {
 }
 
 fn data_dir() -> PathBuf {
-    c0mpute_core::config::data_dir()
-        .unwrap_or_else(|| PathBuf::from("./c0mpute-data"))
-        .join("temporal")
+    c0mpute_core::config::data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")).join("temporal")
 }
 
 fn infernet_bin() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("C0MPUTE_INFERNET_BIN") {
         return Ok(PathBuf::from(p));
     }
-    crate::which_on_path("infernet")
-        .context("infernet is not on PATH (install it: c0mpute plugin install infernet)")
+    crate::which_on_path("infernet").context("infernet is not on PATH (install it: c0mpute plugin install infernet)")
 }
 
 fn net_opts(a: &NetArgs, identity: &str) -> NetOptions {
-    NetOptions {
-        identity_dir: data_dir().join(identity),
-        listen: a.listen.clone(),
-        bootstrap: a.bootstrap.clone(),
-        default_bootstrap: !a.no_default_bootstrap,
-    }
+    NetOptions { identity_dir: data_dir().join(identity), listen: a.listen.clone(), bootstrap: a.bootstrap.clone(), default_bootstrap: !a.no_default_bootstrap }
 }
 
 pub async fn run(args: &[String]) -> Result<()> {
-    let cli = TemporalCli::try_parse_from(
-        std::iter::once("c0mpute infernet temporal".to_string()).chain(args.iter().cloned()),
-    )
-    .unwrap_or_else(|e| e.exit());
+    let cli = TemporalCli::try_parse_from(std::iter::once("c0mpute infernet temporal".to_string()).chain(args.iter().cloned())).unwrap_or_else(|e| e.exit());
     let store = ModelStore::new(data_dir().join("models"));
     match cli.cmd {
         Sub::Models { import } => {
@@ -170,42 +156,16 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             if let Ok(rd) = std::fs::read_dir(&store.root) {
                 for e in rd.flatten() {
-                    let m: Value = std::fs::read(e.path().join("manifest.json"))
-                        .ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .unwrap_or(json!({}));
-                    println!(
-                        "sha256:{}  {}  {}",
-                        e.file_name().to_string_lossy(),
-                        m["architecture"]["family"].as_str().unwrap_or("?"),
-                        m["created_at"].as_str().unwrap_or("")
-                    );
+                    let m: Value = std::fs::read(e.path().join("manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+                    println!("sha256:{}  {}  {}", e.file_name().to_string_lossy(), m["architecture"]["family"].as_str().unwrap_or("?"), m["created_at"].as_str().unwrap_or(""));
                 }
             }
             Ok(())
         }
-        Sub::Serve {
-            model,
-            train,
-            max_sessions,
-            net,
-        } => {
-            let o = ServeOptions {
-                net: net_opts(&net, "serve"),
-                infernet: infernet_bin()?,
-                models: model,
-                train,
-                max_sessions,
-                store,
-                cache_root: data_dir().join("cache"),
-            };
+        Sub::Serve { model, train, max_sessions, net } => {
+            let o = ServeOptions { net: net_opts(&net, "serve"), infernet: infernet_bin()?, models: model, train, max_sessions, store, cache_root: data_dir().join("cache") };
             let s = node::serve(&o).await?;
-            eprintln!(
-                "serving as {}  (runtime {}, cuda {})",
-                s.net.peer_id().to_base58(),
-                s.caps.runtime.version,
-                s.caps.devices.cuda
-            );
+            eprintln!("serving as {}  (runtime {}, cuda {})", s.net.peer_id().to_base58(), s.caps.runtime.version, s.caps.devices.cuda);
             for a in s.net.listen_addrs().await.unwrap_or_default() {
                 eprintln!("  listening {a}/p2p/{}", s.net.peer_id().to_base58());
             }
@@ -216,28 +176,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        Sub::Train {
-            dataset,
-            output,
-            family,
-            baseline,
-            worker,
-            max_price,
-            gpu,
-            min_ram_gb,
-            runtime_version,
-            public_url,
-            bind,
-            timeout_s,
-            retries,
-            epochs,
-            seed,
-            hidden,
-            bid_window_s,
-            yes,
-            json: as_json,
-            net,
-        } => {
+        Sub::Train { dataset, output, family, baseline, worker, max_price, gpu, min_ram_gb, runtime_version, public_url, bind, timeout_s, retries, epochs, seed, hidden, bid_window_s, yes, json: as_json, net } => {
             let mut families = vec![family];
             families.extend(baseline.into_iter().filter(|b| !b.is_empty()));
             families.dedup();
@@ -257,12 +196,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                 families,
                 workers: worker,
                 max_price_usd: max_price,
-                requirements: Requirements {
-                    gpu,
-                    min_ram_gb,
-                    runtime_version,
-                    model_hash: None,
-                },
+                requirements: Requirements { gpu, min_ram_gb, runtime_version, model_hash: None },
                 public_url,
                 bind,
                 timeout_s,
@@ -272,20 +206,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             };
             let p = client::preview(&req)?;
             if !yes {
-                eprintln!(
-                    "About to send dataset {} ({} episodes, {} bytes) for training {} on {} (max ${} per job).\n{}\nRe-run with --yes to send it.",
-                    p.dataset_hash,
-                    p.episodes,
-                    p.bytes,
-                    p.families.join(","),
-                    if p.workers.is_empty() {
-                        "any eligible worker".to_string()
-                    } else {
-                        p.workers.join(",")
-                    },
-                    p.max_price_usd,
-                    p.note
-                );
+                eprintln!("About to send dataset {} ({} episodes, {} bytes) for training {} on {} (max ${} per job).\n{}\nRe-run with --yes to send it.", p.dataset_hash, p.episodes, p.bytes, p.families.join(","), if p.workers.is_empty() { "any eligible worker".to_string() } else { p.workers.join(",") }, p.max_price_usd, p.note);
                 if as_json {
                     println!("{}", json!({"preview": p}));
                 }
@@ -298,69 +219,28 @@ pub async fn run(args: &[String]) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 for r in out["results"].as_array().into_iter().flatten() {
-                    println!(
-                        "{} {}  episode_success {}  worker {}",
-                        r["family"].as_str().unwrap_or(""),
-                        r["model_hash"].as_str().unwrap_or(""),
-                        r["eval"]["metrics"]["episode_success"],
-                        r["worker_peer_id"].as_str().unwrap_or("")
-                    );
+                    println!("{} {}  episode_success {}  worker {}", r["family"].as_str().unwrap_or(""), r["model_hash"].as_str().unwrap_or(""), r["eval"]["metrics"]["episode_success"], r["worker_peer_id"].as_str().unwrap_or(""));
                 }
-                println!(
-                    "selected: {} (a liquid family wins only if it beats the GRU baseline)",
-                    out["selected"].as_str().unwrap_or("?")
-                );
+                println!("selected: {} (a liquid family wins only if it beats the GRU baseline)", out["selected"].as_str().unwrap_or("?"));
             }
             Ok(())
         }
-        Sub::Predict {
-            session,
-            input,
-            model,
-            worker,
-            ttl,
-            scope,
-            max_price,
-            reset,
-            close,
-            bid_window_s,
-            net,
-        } => {
+        Sub::Predict { session, input, model, worker, ttl, scope, max_price, reset, close, bid_window_s, net } => {
             let dir = data_dir().join("sessions");
             let n = node::spawn_node(&net_opts(&net, "client")).await?;
             settle(&n).await;
             let mut sf = match SessionFile::load(&dir, &session)? {
                 Some(sf) => {
                     if model.as_ref().is_some_and(|m| m != &sf.model_hash) {
-                        bail!(
-                            "session {session} serves {}, not {}",
-                            sf.model_hash,
-                            model.unwrap()
-                        );
+                        bail!("session {session} serves {}, not {}", sf.model_hash, model.unwrap());
                     }
                     sf
                 }
                 None => {
-                    let model =
-                        model.context("--model sha256:<hash> is needed to open a new session")?;
-                    let sf = client::open_session(
-                        n.clone(),
-                        &OpenRequest {
-                            model_hash: model,
-                            session_id: session.clone(),
-                            ttl_s: ttl,
-                            account_scope: scope,
-                            workers: worker,
-                            max_price_usd: max_price,
-                            bid_window: Duration::from_secs(bid_window_s),
-                        },
-                    )
-                    .await?;
+                    let model = model.context("--model sha256:<hash> is needed to open a new session")?;
+                    let sf = client::open_session(n.clone(), &OpenRequest { model_hash: model, session_id: session.clone(), ttl_s: ttl, account_scope: scope, workers: worker, max_price_usd: max_price, bid_window: Duration::from_secs(bid_window_s) }).await?;
                     sf.save(&dir)?;
-                    eprintln!(
-                        "session {} opened on worker {}",
-                        sf.session_id, sf.worker_peer_id
-                    );
+                    eprintln!("session {} opened on worker {}", sf.session_id, sf.worker_peer_id);
                     sf
                 }
             };
@@ -374,8 +254,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             if let Some(p) = input {
                 let step: Value = serde_json::from_slice(&std::fs::read(&p)?)?;
                 let req = client::predict_request(&step, &sf)?;
-                let r = client::call(n.clone(), &sf, json!({"op": "predict", "request": req}), t)
-                    .await?;
+                let r = client::call(n.clone(), &sf, json!({"op": "predict", "request": req}), t).await?;
                 if r["ok"] == json!(true) {
                     sf.next_seq = req["sequence_index"].as_i64().unwrap_or(sf.next_seq) + 1;
                     sf.save(&dir)?;

@@ -26,29 +26,20 @@ pub fn keypair() -> KeyPair {
 }
 
 pub fn secret_from_hex(h: &str) -> Result<StaticSecret> {
-    let b: [u8; 32] = hex::decode(h)?
-        .try_into()
-        .map_err(|_| anyhow!("secret must be 32 bytes"))?;
+    let b: [u8; 32] = hex::decode(h)?.try_into().map_err(|_| anyhow!("secret must be 32 bytes"))?;
     Ok(StaticSecret::from(b))
 }
 
 /// Shared session key; `session_id` binds it to one session.
-pub fn session_key(
-    secret: &StaticSecret,
-    peer_pub_hex: &str,
-    session_id: &str,
-) -> Result<[u8; 32]> {
-    let p: [u8; 32] = hex::decode(peer_pub_hex)?
-        .try_into()
-        .map_err(|_| anyhow!("public key must be 32 bytes"))?;
+pub fn session_key(secret: &StaticSecret, peer_pub_hex: &str, session_id: &str) -> Result<[u8; 32]> {
+    let p: [u8; 32] = hex::decode(peer_pub_hex)?.try_into().map_err(|_| anyhow!("public key must be 32 bytes"))?;
     let shared = secret.diffie_hellman(&PublicKey::from(p));
     if !shared.was_contributory() {
         bail!("weak peer public key");
     }
     let hk = Hkdf::<Sha256>::new(Some(b"c0mpute/infernet.temporal/v1"), shared.as_bytes());
     let mut key = [0u8; 32];
-    hk.expand(session_id.as_bytes(), &mut key)
-        .map_err(|_| anyhow!("hkdf expand"))?;
+    hk.expand(session_id.as_bytes(), &mut key).map_err(|_| anyhow!("hkdf expand"))?;
     Ok(key)
 }
 
@@ -56,9 +47,7 @@ pub fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<String> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("key"))?;
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .map_err(|_| anyhow!("encrypt"))?;
+    let ct = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).map_err(|_| anyhow!("encrypt"))?;
     let mut out = nonce.to_vec();
     out.extend(ct);
     Ok(B64.encode(out))
@@ -70,9 +59,7 @@ pub fn open(key: &[u8; 32], sealed: &str) -> Result<Vec<u8>> {
         bail!("sealed payload too short");
     }
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow!("key"))?;
-    cipher
-        .decrypt(Nonce::from_slice(&raw[..12]), &raw[12..])
-        .map_err(|_| anyhow!("decrypt failed (wrong key or tampered)"))
+    cipher.decrypt(Nonce::from_slice(&raw[..12]), &raw[12..]).map_err(|_| anyhow!("decrypt failed (wrong key or tampered)"))
 }
 
 #[cfg(test)]

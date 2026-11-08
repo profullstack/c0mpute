@@ -18,9 +18,10 @@ const KEY_FILE: &str = "identity.key";
 pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     let path = dir.join(KEY_FILE);
     if path.exists() {
-        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let kp =
-            Keypair::from_protobuf_encoding(&bytes).context("decode persisted libp2p identity")?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read {}", path.display()))?;
+        let kp = Keypair::from_protobuf_encoding(&bytes)
+            .context("decode persisted libp2p identity")?;
         info!(peer_id = %kp.public().to_peer_id(), file = %path.display(), "loaded identity");
         return Ok(kp);
     }
@@ -58,7 +59,8 @@ fn write_locked_down(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_locked_down(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+    std::fs::write(path, bytes)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 #[cfg(test)]

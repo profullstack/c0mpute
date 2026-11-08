@@ -54,8 +54,9 @@ pub fn run_register(config_path_override: Option<&Path>) -> Result<Registration>
             .with_context(|| format!("write {}", config_path.display()))?;
     }
 
-    std::fs::create_dir_all(&cfg.storage.root)
-        .with_context(|| format!("create storage root {}", cfg.storage.root.display()))?;
+    std::fs::create_dir_all(&cfg.storage.root).with_context(|| {
+        format!("create storage root {}", cfg.storage.root.display())
+    })?;
 
     Ok(Registration {
         peer_id,

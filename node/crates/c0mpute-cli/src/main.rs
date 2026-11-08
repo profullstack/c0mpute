@@ -716,11 +716,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
-        Cmd::Chat { args }
-            if args
-                .first()
-                .is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) =>
-        {
+        Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
             let dm = DmCli::try_parse_from(std::iter::once("c0mpute dm".to_string()).chain(args))
                 .unwrap_or_else(|e| e.exit());
             run_chat(dm.cmd)
@@ -959,11 +955,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 eprintln!(
                     "private mode: serving {} trusted buyer identit{} only; not advertised to the network",
                     policy.trusted.len(),
-                    if policy.trusted.len() == 1 {
-                        "y"
-                    } else {
-                        "ies"
-                    }
+                    if policy.trusted.len() == 1 { "y" } else { "ies" }
                 );
             }
             ensure_current_version_benchmark();
