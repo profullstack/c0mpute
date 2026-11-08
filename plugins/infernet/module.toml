@@ -10,7 +10,7 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.62"
+version     = "0.2.63"
 kind        = "workload"
 category    = "ai"
 description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) and fine-tunes language models (LoRA) with live progress, on CPU or GPU."

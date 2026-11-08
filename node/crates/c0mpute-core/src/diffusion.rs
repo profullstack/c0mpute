@@ -14,7 +14,8 @@
 //!
 //! Gates, all re-checked on every advertise tick so a busy box stops bidding
 //! instead of swapping:
-//! - Linux x86_64 only (the only CPU build of the pinned release we run);
+//! - Linux x86_64 only (the only CPU build of the pinned release we run; it is
+//!   built on Ubuntu 26.04 and needs glibc 2.43, which the self-test checks);
 //! - at least `min_ram_gb` total RAM and `min_free_ram_gb` available right now;
 //! - at least `min_free_disk_gb` free before installing;
 //! - opt-out: `C0MPUTE_DIFFUSION_AUTO=0` or `[diffusion] auto_install = false`.
@@ -48,9 +49,9 @@ pub const MAX_PROMPT_CHARS: usize = 2_000;
 const JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const INSTALL_RETRY_BACKOFF_SECS: u64 = 6 * 60 * 60;
 
-const SDCPP_RELEASE: &str = "master-1006-0886f11";
-const SDCPP_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1006-0886f11/sd-master-0886f11-bin-Linux-Ubuntu-24.04-x86_64.zip";
-const SDCPP_ZIP_SHA256: &str = "3d33be5e3e9b5244cf904c537b8dc51c9582920b11d16539c8b35c12ab0f20a8";
+const SDCPP_RELEASE: &str = "master-1060-0b3b98d";
+const SDCPP_ZIP_URL: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1060-0b3b98d/sd-master-0b3b98d-bin-Linux-Ubuntu-26.04-x86_64.zip";
+const SDCPP_ZIP_SHA256: &str = "eae29803481aba47442272e1dbbff00579c9c4de850433c2cd96cd0df55f3eee";
 
 struct WeightFile {
     name: &'static str,

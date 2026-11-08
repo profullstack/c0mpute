@@ -68,6 +68,14 @@ const KNOWN_WORKLOADS: &[&str] = &[
     "infernet.temporal.infer",
     // DIP 0030: webhook workflow steps (meshhook via `c0mpute jobs serve`).
     "workflow.step",
+    // CPU speech and images, plus GPU video. Seeds must be in these topics'
+    // meshes too: a buyer gateway that only knows the seeds otherwise gets
+    // NoPeersSubscribedToTopic and never reaches a remote worker.
+    "tts.synthesize",
+    "stt.transcribe",
+    "diffusion.txt2img",
+    "video.txt2vid",
+    "video.img2vid",
 ];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
