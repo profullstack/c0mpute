@@ -2,14 +2,22 @@
 
 import { useMemo, useState } from "react";
 import {
+  DEFAULT_GPU_MODEL,
+  GPU_GROUPS,
   GPU_RATE_CHECKED_AT,
   GPU_RATE_REFERENCES,
-  GPU_RATE_SOURCE,
+  GPU_RATE_SOURCES,
   UTILIZATION_SCENARIOS,
 } from "@/lib/gpu-estimates";
 import { MARKET_FEE_PCT, OPERATOR_SHARE_PCT } from "@/lib/market";
 
 const DAYS_PER_MONTH = 30;
+const OTHER_GPU = "__other__";
+
+function rateFor(model: string): string {
+  const match = GPU_RATE_REFERENCES.find((gpu) => gpu.model === model);
+  return match?.hourlyUsd != null ? String(match.hourlyUsd) : "";
+}
 
 function usd(value: number): string {
   return new Intl.NumberFormat("en-US", {
@@ -20,8 +28,9 @@ function usd(value: number): string {
 }
 
 export function EarningsEstimator({ jobsCompleted24h }: { jobsCompleted24h: number | null }) {
-  const [model, setModel] = useState(GPU_RATE_REFERENCES[1].model);
-  const [hourlyRate, setHourlyRate] = useState(String(GPU_RATE_REFERENCES[1].hourlyUsd));
+  const [model, setModel] = useState(DEFAULT_GPU_MODEL);
+  const [customModel, setCustomModel] = useState("");
+  const [hourlyRate, setHourlyRate] = useState(rateFor(DEFAULT_GPU_MODEL));
   const [hoursAvailable, setHoursAvailable] = useState("24");
 
   const selected = useMemo(
@@ -33,28 +42,48 @@ export function EarningsEstimator({ jobsCompleted24h }: { jobsCompleted24h: numb
 
   function updateModel(next: string) {
     setModel(next);
-    const match = GPU_RATE_REFERENCES.find((gpu) => gpu.model === next);
-    setHourlyRate(match ? String(match.hourlyUsd) : "");
+    setHourlyRate(rateFor(next));
   }
+
+  const selectedSource = selected?.source ? GPU_RATE_SOURCES[selected.source] : null;
+  const rateHint = !selected
+    ? "Custom model: enter a comparable rate."
+    : selectedSource
+      ? `${selected.vram} · rate from ${selectedSource.label}.`
+      : `${selected.vram} · no public hourly rental rate for this GPU, so enter your own.`;
 
   return (
     <section className="space-y-5 border border-[var(--color-rule)] bg-[var(--color-card)] rounded-md p-4 sm:p-6">
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block space-y-2 text-sm">
           <span className="text-[var(--color-fg)]">GPU model</span>
-          <input
+          {/* A <select>, not an <input list>: a datalist only offers options
+              matching the input's current text, so a prefilled model hid
+              every other GPU. */}
+          <select
             aria-label="GPU model"
-            list="gpu-rate-models"
             value={model}
             onChange={(event) => updateModel(event.target.value)}
-            placeholder="Type a model, e.g. RTX 4090"
             className="w-full rounded border border-[var(--color-rule)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
-          />
-          <datalist id="gpu-rate-models">
-            {GPU_RATE_REFERENCES.map((gpu) => (
-              <option key={gpu.model} value={gpu.model}>{`${gpu.model} · ${gpu.vram}`}</option>
+          >
+            {GPU_GROUPS.map((group) => (
+              <optgroup key={group} label={group}>
+                {GPU_RATE_REFERENCES.filter((gpu) => gpu.group === group).map((gpu) => (
+                  <option key={gpu.model} value={gpu.model}>{`${gpu.model} · ${gpu.vram}`}</option>
+                ))}
+              </optgroup>
             ))}
-          </datalist>
+            <option value={OTHER_GPU}>Other GPU (enter your own rate)</option>
+          </select>
+          {model === OTHER_GPU && (
+            <input
+              aria-label="Your GPU model"
+              value={customModel}
+              onChange={(event) => setCustomModel(event.target.value)}
+              placeholder="Your GPU, e.g. RTX 2080 Ti"
+              className="w-full rounded border border-[var(--color-rule)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+            />
+          )}
         </label>
 
         <label className="block space-y-2 text-sm">
@@ -71,7 +100,7 @@ export function EarningsEstimator({ jobsCompleted24h }: { jobsCompleted24h: numb
             className="w-full rounded border border-[var(--color-rule)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
           />
           <span className="block text-xs text-[var(--color-dim)]">
-            {selected ? `${selected.vram} reference rate.` : "Custom model: enter a comparable rate."} This is an external rental-price benchmark.
+            {rateHint} This is an external rental-price benchmark.
           </span>
         </label>
 
@@ -137,8 +166,10 @@ export function EarningsEstimator({ jobsCompleted24h }: { jobsCompleted24h: numb
             : `${jobsCompleted24h.toLocaleString()} completed jobs in the last 24 hours. Public payout totals by GPU are not available yet, so there is no actual average to show.`}
         </p>
         <p className="text-[var(--color-dim)]">
-          This is a comparison scenario, not a c0mpute payout forecast. c0mpute providers currently bid per job, so realized earnings depend on workload demand, your bids, and how often jobs choose your node. The reference rates are public RunPod GPU prices checked {GPU_RATE_CHECKED_AT}; prices change.
-          {" "}<a href={GPU_RATE_SOURCE} target="_blank" rel="noopener noreferrer">View current RunPod rates</a>.
+          This is a comparison scenario, not a c0mpute payout forecast. c0mpute providers currently bid per job, so realized earnings depend on workload demand, your bids, and how often jobs choose your node. The reference rates are public GPU rental prices checked {GPU_RATE_CHECKED_AT}; prices change. Current rates:
+          {" "}<a href={GPU_RATE_SOURCES["runpod-secure"].url} target="_blank" rel="noopener noreferrer">RunPod</a>,
+          {" "}<a href={GPU_RATE_SOURCES["vast-median"].url} target="_blank" rel="noopener noreferrer">Vast.ai</a>,
+          {" "}<a href={GPU_RATE_SOURCES.lambda.url} target="_blank" rel="noopener noreferrer">Lambda</a>.
         </p>
       </div>
     </section>
