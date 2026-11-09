@@ -657,6 +657,7 @@ mod tests {
             prev: prev.map(String::from),
             force,
             pushed_at: 0,
+            sealed: None,
         }
     }
 

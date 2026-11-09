@@ -747,12 +747,12 @@ fn diff_trees(
                         diff_trees(p, o, n, &format!("{path}/"), out);
                     }
                 }
-                let file = |e: Option<&TreeEntry>| e.filter(|e| !e.is_dir());
+                let file = |e: Option<&TreeEntry>| e.is_some_and(|e| !e.is_dir());
                 match (file(x), file(y)) {
-                    (Some(_), Some(_)) => out.push(('M', path)),
-                    (Some(_), None) => out.push(('D', path)),
-                    (None, Some(_)) => out.push(('A', path)),
-                    (None, None) => {}
+                    (true, true) => out.push(('M', path)),
+                    (true, false) => out.push(('D', path)),
+                    (false, true) => out.push(('A', path)),
+                    (false, false) => {}
                 }
             }
         }
