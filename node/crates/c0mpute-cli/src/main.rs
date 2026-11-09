@@ -2345,62 +2345,6 @@ async fn run_stt(cmd: SttCmd) -> Result<()> {
     }
 }
 
-/// Build the runner image from a shallow clone of the public repo.
-///
-/// The fallback for `c0mpute video setup` when the registry will not serve
-/// the image. Slower than a pull (it downloads the Python stack rather than
-/// finished layers) but it needs no registry account, which is the point.
-async fn build_video_runner() -> Result<()> {
-    use c0mpute_core::video;
-
-    for bin in ["docker", "git"] {
-        if tokio::process::Command::new(bin)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .is_err()
-        {
-            anyhow::bail!("building the runner needs both docker and git; {bin} is missing");
-        }
-    }
-
-    // A fresh directory per run: a half-finished clone from a previous
-    // attempt would make `git clone` fail rather than resume.
-    let checkout = std::env::temp_dir().join(format!("c0mpute-video-src-{}", std::process::id()));
-    let _ = tokio::fs::remove_dir_all(&checkout).await;
-
-    println!("cloning {} (shallow)", video::RUNNER_SOURCE_REPO);
-    let status = tokio::process::Command::new("git")
-        .args(["clone", "--depth", "1", video::RUNNER_SOURCE_REPO])
-        .arg(&checkout)
-        .status()
-        .await
-        .context("could not run git")?;
-    if !status.success() {
-        anyhow::bail!("git clone failed with {status}");
-    }
-
-    println!("building {} (several minutes)", video::RUNNER_IMAGE);
-    let args = video::build_argv(&checkout, video::RUNNER_IMAGE);
-    let status = tokio::process::Command::new("docker")
-        .args(&args)
-        .status()
-        .await
-        .context("could not run docker build")?;
-
-    // Clean up whether or not the build worked: the checkout is scratch and
-    // a stale one in /tmp is worse than no cache at all.
-    let _ = tokio::fs::remove_dir_all(&checkout).await;
-
-    if !status.success() {
-        anyhow::bail!("docker build failed with {status}");
-    }
-    println!("built {}", video::RUNNER_IMAGE);
-    Ok(())
-}
-
 /// `c0mpute video` — the surface `plugins/video/module.toml` declares.
 ///
 /// Everything here talks to the runner image rather than to the network: a
@@ -2411,29 +2355,8 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
 
     match cmd {
         VideoCmd::Setup { build } => {
-            let mut have_image = false;
-            if !build {
-                println!("pulling {} (this is a large image)", video::RUNNER_IMAGE);
-                let status = tokio::process::Command::new("docker")
-                    .args(["pull", video::RUNNER_IMAGE])
-                    .status()
-                    .await
-                    .context("could not run docker; install a container runtime first")?;
-                have_image = status.success();
-                if !have_image {
-                    // A registry is the kind of dependency that is private by
-                    // default, rate-limited or down, and none of those are a
-                    // reason a node with a card cannot serve video. The repo
-                    // is public, so build the same image from source.
-                    println!();
-                    println!("could not pull the runner image (private, rate-limited or offline).");
-                    println!("building it from source instead — same Dockerfile, same result.");
-                    println!();
-                }
-            }
-            if !have_image {
-                build_video_runner().await?;
-            }
+            let how = video::setup(build, &std::env::temp_dir(), &|line: &str| println!("{line}")).await?;
+            println!("runner image ready as {} ({how:?})", video::RUNNER_IMAGE);
             match video::readiness(video::RUNNER_IMAGE) {
                 None => {
                     println!("this node can serve video jobs");
@@ -2460,7 +2383,7 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
             }
             if selftest {
                 println!("running the runner selftest in the container");
-                let status = tokio::process::Command::new("docker")
+                let status = c0mpute_core::container::command()
                     .args(["run", "--rm", video::RUNNER_IMAGE, "selftest"])
                     .status()
                     .await
@@ -2475,7 +2398,7 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
             // The image carries the manifest it was built from, so this is
             // the model set that node would actually serve — not what this
             // CLI happened to be compiled with.
-            let out = tokio::process::Command::new("docker")
+            let out = c0mpute_core::container::command()
                 .args([
                     "run",
                     "--rm",

@@ -43,9 +43,25 @@ pub const WORKLOAD_IMG2VID: &str = "video.img2vid";
 /// are all present — see [`readiness`].
 pub const ROLE_TAG: &str = "c0mpute:role:video";
 
-/// The image the runner lives in. Kept in step with
-/// `plugins/video/module.toml` [module.dispatch].
-pub const RUNNER_IMAGE: &str = "ghcr.io/profullstack/c0mpute-video-runner:candidate";
+/// Where `.github/workflows/video-runner.yml` publishes the runner.
+pub const RUNNER_REPOSITORY: &str = "ghcr.io/profullstack/c0mpute-video-runner";
+
+/// The stable tag the workflow moves on every master build.
+pub const RUNNER_TAG: &str = "stable";
+
+/// The published runner this release trusts, pinned by digest: a tag that
+/// moves cannot change what a node runs. Bump it (and
+/// `plugins/video/module.toml` [module.dispatch]) to the digest the workflow
+/// prints in its job summary after a runner change.
+pub const RUNNER_DIGEST: &str = "sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c";
+
+/// What `c0mpute video setup` pulls: the repository at the pinned digest.
+pub const RUNNER_PULL_REF: &str = "ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c";
+
+/// The local name the node runs. Setup tags the pinned pull as this, or
+/// builds it from source under this name when the pull fails, so the worker
+/// never depends on how the image arrived.
+pub const RUNNER_IMAGE: &str = "c0mpute/video-runner:stable";
 
 /// Where a node can build the runner itself when it cannot pull it.
 ///
@@ -302,6 +318,71 @@ pub fn build_argv(checkout: &Path, image: &str) -> Vec<String> {
     ]
 }
 
+/// How `c0mpute video setup` got the runner image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupSource {
+    /// Pulled at the pinned digest and tagged as [`RUNNER_IMAGE`].
+    Pulled,
+    /// The pull failed (or `--build`): built from a clone of the source repo.
+    Built,
+}
+
+/// The source repo to build from: `$C0MPUTE_VIDEO_SOURCE_REPO` (the same
+/// override `install.sh` takes), else [`RUNNER_SOURCE_REPO`].
+pub fn source_repo() -> String {
+    std::env::var("C0MPUTE_VIDEO_SOURCE_REPO").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| RUNNER_SOURCE_REPO.to_string())
+}
+
+async fn run_status(cmd: &mut tokio::process::Command, what: &str) -> Result<bool> {
+    Ok(cmd
+        .stdin(std::process::Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("could not run {what}"))?
+        .success())
+}
+
+/// Put the runner image on this node as [`RUNNER_IMAGE`]: pull the pinned
+/// digest and tag it, or, when the registry will not serve it (private,
+/// rate-limited, offline) or `build_only`, shallow-clone the public repo
+/// into `scratch` and build the same Dockerfile. `say` gets progress lines.
+pub async fn setup(build_only: bool, scratch: &Path, say: &(dyn Fn(&str) + Sync)) -> Result<SetupSource> {
+    if !build_only {
+        say(&format!("pulling {RUNNER_PULL_REF} (this is a large image)"));
+        let pulled = run_status(crate::container::command().args(["pull", RUNNER_PULL_REF]), "docker; install a container runtime first").await?;
+        if pulled && run_status(crate::container::command().args(["tag", RUNNER_PULL_REF, RUNNER_IMAGE]), "docker tag").await? {
+            return Ok(SetupSource::Pulled);
+        }
+        // A registry is the kind of dependency that is private by default,
+        // rate-limited or down, and none of those are a reason a node with a
+        // card cannot serve video. The repo is public: build it.
+        say("could not pull the runner image (private, rate-limited or offline).");
+        say("building it from source instead: same Dockerfile, same runner.");
+    }
+    // A fresh directory per run: a half-finished clone from an earlier
+    // attempt would make `git clone` fail rather than resume.
+    let checkout = scratch.join(format!("c0mpute-video-src-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&checkout).await;
+    let repo = source_repo();
+    say(&format!("cloning {repo} (shallow)"));
+    let cloned = run_status(tokio::process::Command::new("git").args(["clone", "--depth", "1", &repo]).arg(&checkout), "git (building the runner needs git)").await;
+    let built = match cloned {
+        Ok(true) => {
+            say(&format!("building {RUNNER_IMAGE} (several minutes)"));
+            run_status(crate::container::command().args(build_argv(&checkout, RUNNER_IMAGE)), "docker build").await
+        }
+        Ok(false) => Err(anyhow::anyhow!("git clone of {repo} failed")),
+        Err(e) => Err(e),
+    };
+    // The checkout is scratch whether or not the build worked.
+    let _ = fs::remove_dir_all(&checkout).await;
+    if !built? {
+        bail!("docker build of the runner failed");
+    }
+    say(&format!("built {RUNNER_IMAGE}"));
+    Ok(SetupSource::Built)
+}
+
 /// The runner command for a workload type.
 pub fn command_for(workload: &str) -> Option<&'static str> {
     match workload {
@@ -335,7 +416,7 @@ impl NotReady {
 
 /// Probe the host. Blocking, and only called at boot or from the CLI.
 pub fn readiness(image: &str) -> Option<NotReady> {
-    if which("docker").is_none() {
+    if crate::container::which().is_none() {
         return Some(NotReady::NoDocker);
     }
     if !nvidia_gpu_present() {
@@ -369,14 +450,6 @@ pub fn readiness_cached(image: &str) -> Option<NotReady> {
     verdict
 }
 
-fn which(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(bin))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
 fn nvidia_gpu_present() -> bool {
     std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=name", "--format=csv,noheader"])
@@ -386,7 +459,7 @@ fn nvidia_gpu_present() -> bool {
 }
 
 fn image_present(image: &str) -> bool {
-    std::process::Command::new("docker")
+    crate::container::command_sync()
         .args(["image", "inspect", image])
         .output()
         .map(|out| out.status.success())
@@ -539,7 +612,7 @@ async fn owner_of(_path: &Path) -> Result<(u32, u32)> {
 async fn run_container(run: &ContainerRun) -> Result<()> {
     let args = docker_argv(run);
     info!(image = %run.image, command = %run.command, "video runner: starting container");
-    let mut child = tokio::process::Command::new("docker")
+    let mut child = crate::container::command()
         .args(&args)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -557,7 +630,7 @@ async fn run_container(run: &ContainerRun) -> Result<()> {
         Err(_) => {
             // kill_on_drop reaps `docker run`, but the container it started is
             // a child of the daemon and would keep the GPU busy.
-            let _ = tokio::process::Command::new("docker")
+            let _ = crate::container::command()
                 .args(["kill", &run.container_name])
                 .output()
                 .await;
@@ -744,6 +817,23 @@ mod tests {
         let fresh = readiness(RUNNER_IMAGE).is_none();
         assert_eq!(readiness_cached(RUNNER_IMAGE).is_none(), fresh);
         assert_eq!(readiness_cached(RUNNER_IMAGE).is_none(), fresh);
+    }
+
+    #[test]
+    fn the_runner_is_pinned_by_digest_and_matches_the_manifest() {
+        assert_eq!(RUNNER_PULL_REF, format!("{RUNNER_REPOSITORY}@{RUNNER_DIGEST}"));
+        let digest = RUNNER_DIGEST.strip_prefix("sha256:").unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        // The local name is not a registry reference: nothing can pull a
+        // different image under it.
+        assert!(!RUNNER_IMAGE.contains("ghcr.io") && !RUNNER_IMAGE.contains('@'));
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../../../../plugins/video/module.toml")).unwrap();
+        assert_eq!(
+            manifest["module"]["dispatch"]["image"].as_str(),
+            Some(RUNNER_PULL_REF),
+            "plugins/video/module.toml [module.dispatch] image must be the pinned digest"
+        );
     }
 
     #[test]

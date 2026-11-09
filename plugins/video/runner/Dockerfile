@@ -11,7 +11,7 @@
 #   docker run --rm --gpus all \
 #     -v c0mpute-video-weights:/weights \
 #     -v "$PWD/job:/job" \
-#     ghcr.io/profullstack/c0mpute-video-runner:candidate txt2vid
+#     c0mpute/video-runner:stable txt2vid
 #
 # No CUDA base image on purpose: the torch wheels from PyPI bring their own
 # CUDA runtime, so only the driver comes from the host via the NVIDIA
