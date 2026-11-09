@@ -20,6 +20,7 @@ pub mod opendisk;
 pub mod penalty_box;
 pub mod pricing;
 pub mod reachability;
+pub mod render;
 pub mod private;
 pub mod register;
 pub mod resources;
