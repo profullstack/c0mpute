@@ -489,7 +489,7 @@ async fn advertise(
         let ad = CapabilityAd::with_score(
             peer_id.clone(),
             tag_source.tags(),
-            hardware.clone(),
+            with_instance(hardware.clone(), net.instance_id()),
             bench_score,
         );
         let payload = match serde_json::to_vec(&ad) {
@@ -510,10 +510,31 @@ async fn advertise(
     }
 }
 
+/// `hardware` plus this process's instance id and, while a twin (another
+/// process with this identity) is active, what this one knows about it, so
+/// c0mpute.com/nodes shows the duplicate.
+pub fn with_instance(mut hardware: serde_json::Value, instance: &str) -> serde_json::Value {
+    if let Some(obj) = hardware.as_object_mut() {
+        obj.insert("instance".into(), serde_json::Value::String(instance.to_string()));
+        match crate::twin::ad_field(instance) {
+            Some(t) => {
+                obj.insert("twin".into(), t);
+            }
+            None => {
+                obj.remove("twin");
+            }
+        }
+    }
+    hardware
+}
+
 /// In-memory registry of recently-seen peer capabilities.
 #[derive(Clone, Default)]
 pub struct Registry {
     inner: Arc<RwLock<HashMap<PeerId, CapabilityAd>>>,
+    /// Per peer: instance id -> its latest ad's `published_at_ms`. More than
+    /// one fresh instance is one identity running twice.
+    instances: Arc<RwLock<HashMap<PeerId, HashMap<String, u64>>>>,
 }
 
 impl Registry {
@@ -525,6 +546,7 @@ impl Registry {
     /// registry. Spawns a task that runs until the network is dropped.
     pub fn run(&self, net: Arc<Libp2pNetwork>) {
         let inner = self.inner.clone();
+        let instances = self.instances.clone();
         tokio::spawn(async move {
             // Subscribe so we receive the topic.
             if let Err(e) = net.subscribe(CAPABILITY_TOPIC).await {
@@ -566,6 +588,22 @@ impl Registry {
                     debug!("registry: discard ad with unknown source peer");
                     continue;
                 };
+                if let Some(id) = ad.hardware.get("instance").and_then(|v| v.as_str()) {
+                    let mut seen = instances.write().await;
+                    let mine = seen.entry(source).or_default();
+                    if !mine.contains_key(id) && mine.len() < 16 {
+                        let fresh = mine
+                            .values()
+                            .filter(|t| now_ms.saturating_sub(**t) <= MAX_AD_AGE.as_millis() as u64)
+                            .count();
+                        if fresh > 0 {
+                            warn!(peer = %source, instance = id, "registry: a second process advertises this peer id (duplicate identity)");
+                        }
+                    }
+                    if mine.len() < 16 || mine.contains_key(id) {
+                        mine.insert(id.to_string(), ad.published_at_ms);
+                    }
+                }
                 let mut guard = inner.write().await;
                 guard.insert(source, ad);
             }
@@ -585,8 +623,30 @@ impl Registry {
                     .saturating_sub(MAX_AD_AGE.as_millis() as u64);
                 let mut guard = inner.write().await;
                 guard.retain(|_, ad| ad.published_at_ms >= cutoff);
+                drop(guard);
+                let mut seen = instances.write().await;
+                seen.retain(|_, m| {
+                    m.retain(|_, t| *t >= cutoff);
+                    !m.is_empty()
+                });
             }
         });
+    }
+
+    /// How many processes (instance ids) advertised each peer id within the
+    /// ad lifetime. More than one: the identity runs twice.
+    pub async fn instance_counts(&self) -> Vec<(PeerId, usize)> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            .saturating_sub(MAX_AD_AGE.as_millis() as u64);
+        self.instances
+            .read()
+            .await
+            .iter()
+            .map(|(p, m)| (*p, m.values().filter(|t| **t >= cutoff).count()))
+            .collect()
     }
 
     pub async fn list(&self) -> Vec<(PeerId, CapabilityAd)> {

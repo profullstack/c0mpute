@@ -204,6 +204,10 @@ impl JobState {
     /// A worker published a completion receipt. Any terminal receipt clears
     /// the in-flight entry; only `Completed` counts toward the 24h tally.
     async fn on_receipt(&self, r: JobReceipt) {
+        // A twin saying the job is not its own: the awarded one still runs it.
+        if r.fault.is_some() {
+            return;
+        }
         let started = self.in_flight.write().await.remove(&r.job_id);
         if r.status != JobStatus::Completed {
             return;
@@ -466,6 +470,43 @@ struct NodeRow {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     donates: Vec<String>,
     last_seen_s: u64,
+    /// One identity running as more than one process (a copied identity dir,
+    /// or two services on one box): jobs could split between them. Present
+    /// only when the node reports a twin itself or this aggregator heard ads
+    /// from two instances of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duplicate: Option<Duplicate>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+struct Duplicate {
+    /// Distinct processes (instance ids) advertising this peer id lately.
+    instances: u64,
+    /// The node itself reports a twin in its ad.
+    reported: bool,
+    /// The node reports it is the older twin and has stopped bidding.
+    yielding: bool,
+}
+
+/// The `duplicate` a node's own ad reports (`hardware.twin`).
+fn reported_duplicate(hw: &serde_json::Value) -> Option<Duplicate> {
+    let twin = hw.get("twin").filter(|t| t.is_object())?;
+    Some(Duplicate {
+        instances: 0,
+        reported: true,
+        yielding: twin.get("yielding").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Add what the aggregator saw itself: ads from more than one instance.
+fn apply_instance_counts(payload: &mut NodesPayload, instances: &HashMap<String, usize>) {
+    for n in &mut payload.nodes {
+        let count = instances.get(&n.id).copied().unwrap_or(0) as u64;
+        if count > 1 || n.duplicate.is_some() {
+            let d = n.duplicate.get_or_insert_with(Duplicate::default);
+            d.instances = count.max(d.instances);
+        }
+    }
 }
 
 /// Known donation projects a node's tags name.
@@ -633,6 +674,7 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .and_then(crate::capabilities::gateway_origin),
             donates: donates(&ad.tags),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
+            duplicate: reported_duplicate(&ad.hardware),
         })
         .collect();
     // Benchmarked nodes first, best score first; then by id for a stable order.
@@ -680,6 +722,14 @@ async fn nodes_handler(State(state): State<AppState>) -> Json<NodesPayload> {
         .map(|(p, a)| (p.to_base58(), a))
         .collect();
     let mut payload = build_nodes(&ads, now_ms());
+    let instances: HashMap<String, usize> = state
+        .registry
+        .instance_counts()
+        .await
+        .into_iter()
+        .map(|(p, n)| (short_id(&p.to_base58()), n))
+        .collect();
+    apply_instance_counts(&mut payload, &instances);
     keep_reachable_gateways(&mut payload, &*state.gateways.read().await);
     Json(payload)
 }

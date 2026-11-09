@@ -29,7 +29,7 @@ use c0mpute_proto::{ChunkRequest, Hash};
 pub use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 /// The libp2p this crate is built on, for identity and key types.
 pub use libp2p;
-pub use swarm::{GossipMessage, Libp2pNetwork, NetworkConfig, RpcHandler};
+pub use swarm::{GossipMessage, Libp2pNetwork, NetworkConfig, RpcHandler, instance_started_ms, new_instance_id};
 
 /// Trait that abstracts the underlying network so the rest of the node can be
 /// developed and tested without booting libp2p.

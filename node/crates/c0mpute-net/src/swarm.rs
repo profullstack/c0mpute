@@ -260,6 +260,24 @@ pub struct Libp2pNetwork {
     /// Root of the per-job keys this node derives as a buyer
     /// ([`Self::derive_job_secret`]). Never leaves this struct.
     job_secret: Arc<zeroize::Zeroizing<[u8; 32]>>,
+    /// This swarm's random instance id ([`Self::instance_id`]).
+    instance_id: String,
+}
+
+/// A fresh instance id: zero-padded unix-ms start time, `-`, 8 random hex
+/// digits. Ordering two ids as strings orders them by start time first, so
+/// "the newer process" is simply the larger id.
+pub fn new_instance_id() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    format!("{ms:013}-{:08x}", rand::random::<u32>())
+}
+
+/// The start time (unix ms) an instance id from [`new_instance_id`] carries.
+pub fn instance_started_ms(id: &str) -> Option<u64> {
+    id.split('-').next()?.parse().ok()
 }
 
 impl Libp2pNetwork {
@@ -315,7 +333,17 @@ impl Libp2pNetwork {
             rpc_handlers,
             keypair,
             job_secret,
+            instance_id: new_instance_id(),
         })
+    }
+
+    /// A random id for this running swarm, new on every start. The peer id
+    /// says who a node is; the instance id says which process: two with the
+    /// same peer id and different instance ids are twins (one identity
+    /// running twice), which buyers and the node board detect from bids,
+    /// accepts and capability ads.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// A 32-byte secret for `context`, derived from this node's job-key

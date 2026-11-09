@@ -89,6 +89,16 @@ export default async function NodesPage() {
                           donates idle to CrowdGPT
                         </Link>
                       )}
+                      {n.duplicate && (
+                        <Link
+                          href="/docs/troubleshooting#duplicate-workers"
+                          className="block text-red-500 !border-0"
+                          title="This identity runs as more than one process. Run `c0mpute doctor` on each machine."
+                        >
+                          duplicate identity{n.duplicate.instances > 1 ? ` (${n.duplicate.instances} processes)` : ""}
+                          {n.duplicate.yielding ? ", older one paused" : ""}
+                        </Link>
+                      )}
                     </td>
                     <td className="py-2 pr-3">{n.class}</td>
                     <td className="py-2 pr-3">{n.cores ?? "-"}</td>

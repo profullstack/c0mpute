@@ -264,6 +264,13 @@ pub struct JobBid {
     /// The worker's signed X25519 key, on bids for e2e offers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2e: Option<BidE2e>,
+    /// The bidding process's instance id ([`crate::Libp2pNetwork::instance_id`]).
+    /// Two processes running one identity (a copied identity dir, or a
+    /// system and a user service on one box) bid under one peer id with
+    /// different instance ids; buyers keep the newest and name the winner's
+    /// instance on the accept. `None` from workers older than 0.3.17.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 impl JobBid {
@@ -314,6 +321,10 @@ pub struct JobAccept {
     /// result is sealed to the buyer with. Never serialized.
     #[serde(skip)]
     pub result_key: Option<JobKey>,
+    /// The winning bid's [`JobBid::instance`]. A process with the winner's
+    /// peer id but another instance id is a twin and must not run the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winning_instance: Option<String>,
 }
 
 /// Worker's completion receipt. Includes the output hash so the buyer
@@ -337,7 +348,19 @@ pub struct JobReceipt {
     /// [`JobOffer::external_ref`]. `None` from workers older than 0.2.49.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// The reporting process's instance id (see [`JobBid::instance`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// Why a Failed receipt is not a compute fault: [`FAULT_IDENTITY_TWIN`]
+    /// when the job was awarded to another process running this identity.
+    /// Buyers re-award such a job instead of failing it or benching the peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<String>,
 }
+
+/// [`JobReceipt::fault`]: the accept (or its sealed spec) belongs to another
+/// process with this peer id, not to the one answering.
+pub const FAULT_IDENTITY_TWIN: &str = "identity_twin";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
