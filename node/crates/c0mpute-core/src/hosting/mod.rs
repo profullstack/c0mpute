@@ -20,6 +20,7 @@
 //!   through [`crate::payments`], off unless the operator turns it on).
 
 pub mod dns;
+mod edge_api;
 pub mod fetch;
 pub mod market;
 pub mod meta;
@@ -2360,6 +2361,8 @@ impl Hosting {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/hosting/v1/sites", get(list_sites))
+            .route("/hosting/v1/sites/{site}/resolve", get(edge_api::resolve))
+            .route("/hosting/v1/sites/{site}/chunks/{hash}", get(edge_api::chunk))
             .route("/s/{site}", get(redirect_site_root))
             .route("/s/{site}/", get(serve_root))
             .route("/s/{site}/{*path}", get(serve_path))
