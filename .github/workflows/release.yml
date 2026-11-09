@@ -147,6 +147,13 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # Only for minisign.pub, the public key every signature must verify against.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: minisign.pub
+          sparse-checkout-cone-mode: false
+
       # minisign from its upstream release, pinned by sha256 (the same pin
       # scripts/install.sh uses to verify downloads when minisign is missing).
       - name: Install minisign (pinned)
@@ -168,11 +175,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
-          MINISIGN_PUBKEY: RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM
         run: |
           set -eu
           [ -n "$MINISIGN_SECRET_KEY" ] && [ -n "$MINISIGN_PASSWORD" ] || { echo "MINISIGN_SECRET_KEY / MINISIGN_PASSWORD secrets missing; not publishing unsigned" >&2; exit 1; }
           umask 077
+          pub="$GITHUB_WORKSPACE/minisign.pub"
+          [ -s "$pub" ] || { echo "minisign.pub missing at $TAG; not publishing" >&2; exit 1; }
           work="$RUNNER_TEMP/sign"; mkdir -p "$work"; cd "$work"
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
           trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
@@ -184,7 +192,7 @@ jobs:
             printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$a" \
               -t "timestamp:$(date +%s) version:$TAG file:$a" >/dev/null
             # Must verify against the committed public key (minisign.pub).
-            minisign -V -P "$MINISIGN_PUBKEY" -m "$a"
+            minisign -V -p "$pub" -m "$a"
             gh release upload "$TAG" "$a.minisig" --clobber
           done
 

@@ -34,3 +34,9 @@ c429b7a6b38238f67f348c2323c1fbff41348a5e:node/crates/c0mpute-core/src/webhook.rs
 
 # Public ed25519 test vector (docs/protocol/identity.md, seed 0x77) used as a test DID in an earlier commit of PR #107.
 7b92c1c6edb562f3ecb746eab039be5b5f1f2135:apps/web/src/lib/chat/chat.test.ts:generic-api-key:17
+
+# The c0mpute release minisign PUBLIC key (minisign.pub), which an earlier
+# commit of PR #186 put in a release.yml env var. Public by design; it is also
+# in minisign.pub, scripts/install.sh and c0mpute-update. Covers the
+# pre-squash commit on branch `fix/release-signing`.
+7fb45f20b3a3f28fa802e813cfdceda3ae236d1a:.github/workflows/release.yml:generic-api-key:171
