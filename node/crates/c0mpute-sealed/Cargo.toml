@@ -1,0 +1,25 @@
+[package]
+name = "c0mpute-sealed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Client-side encrypted (sealed) objects for c0mpute private storage (DIP-0012 private tier)."
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["zeroize"] }
+# "zeroize" scrubs the AES key schedule and GHASH key when a cipher drops.
+aes-gcm = { workspace = true, features = ["zeroize"] }
+aes = { version = "0.8", features = ["zeroize"] }
+subtle = "2"
