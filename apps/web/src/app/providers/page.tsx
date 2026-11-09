@@ -108,16 +108,37 @@ $ c0mpute worker status        # the installer already started it`}</CodeBlock>
           that fit it, so a request for one can reach any node, not only ours. A model is pulled
           only when the machine has its listed RAM and the download leaves 10% of the disk free;
           one at a time, never while a job runs, and checked against its pinned digest. Models
-          you pulled yourself are never removed.
+          you pulled yourself are never removed. Uncensored models on that list are{" "}
+          <strong className="text-[var(--color-fg)]">off unless you opt in</strong>.
         </p>
         <CodeBlock>{`$ c0mpute worker status                 # lists house models + disk used
 $ infernet house-models off              # opt out (removes what it pulled)
-$ infernet house-models uncensored off   # skip uncensored models only
+$ infernet house-models uncensored on    # opt in to uncensored models (off by default)
 $ infernet house-models cap 20           # at most 20 GB`}</CodeBlock>
         <p className="text-[var(--color-dim)]">
-          At install: <code>--no-house-models</code> or <code>--no-uncensored-models</code>.
+          At install: <code>--no-house-models</code>, or <code>--uncensored-models</code> to opt in.
           The list and how to add a model:{" "}
           <a href="https://infernetprotocol.com/docs/house-models">infernetprotocol.com/docs/house-models</a>.
+        </p>
+      </section>
+
+      <section className="space-y-3 text-sm leading-7">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ before you install ]</h2>
+        <p>
+          A node runs code from this network on your machine, so here is exactly what it can do.
+          The worker runs as <strong className="text-[var(--color-fg)]">your user, not root</strong>:
+          the installer writes to <code>~/.c0mpute</code> and starts a systemd user service
+          (<code>--system-service</code> for a root-managed one, which needs sudo). Release
+          binaries are signed with minisign and the installer checks the signature before it
+          installs anything (public key: <a href="https://github.com/profullstack/c0mpute/blob/master/minisign.pub">minisign.pub</a>).
+          Jobs are the workloads your node advertises, run by those signed binaries as child
+          processes with CPU and GPU limits. That is not a sandbox: they can read what your user
+          can read. The code is MIT and <a href="https://github.com/profullstack/c0mpute">on GitHub</a>.
+        </p>
+        <p className="text-[var(--color-dim)]">
+          If you would rather not trust a new project with your main machine, run it in a VM or on a
+          spare box first. That is a reasonable call, and the node earns the same there.
+          Full details: <a href="https://github.com/profullstack/c0mpute/blob/master/docs/node-safety.md">docs/node-safety.md</a>.
         </p>
       </section>
 
@@ -159,8 +180,11 @@ $ c0mpute worker start --roles tts,stt`}</CodeBlock>
           itself by default (it learns the winning price, undercuts it, and asks
           more when busy) and never goes under the minimum you set with{" "}
           <code>c0mpute pricing set --min 0.05</code>; or ask one fixed price.
-          When you win, your node runs the job and publishes a receipt; signed
-          receipts and automatic settlement are not live yet. A direct protocol deal has{" "}
+          When you win, your node runs the job and publishes a receipt. Settlement
+          through CoinPay is built for hosting and ads but{" "}
+          <strong className="text-[var(--color-fg)]">off by default</strong> while it is
+          tested; storage payouts (<a href="https://github.com/profullstack/c0mpute/blob/master/docs/prds/006-challenges-metering-payouts.md">CIP-006</a>)
+          are not paying yet. A direct protocol deal has{" "}
           <strong className="text-[var(--color-fg)]">no protocol fee</strong>. Jobs
           bought through the <Link href="/market">market</Link> will pay you{" "}
           <strong className="text-[var(--color-fg)]">95%</strong> once market
