@@ -210,6 +210,10 @@ pub enum Role {
     /// role: it holds a port and RAM for the whole reservation, and needs a
     /// public address and docker.
     Gameserver,
+    /// `blender.render-frame`: render `.blend` frames with the box's own
+    /// Blender (Cycles on CPU, or on a GPU Blender finds). On by default;
+    /// advertised only where `blender --version` works.
+    Render,
 }
 
 #[cfg(test)]
