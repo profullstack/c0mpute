@@ -2,8 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
+import { parseImageCommand, textHistory } from "@/lib/chat/images";
 
-type Msg = { role: "user" | "assistant" | "system"; content: string };
+// An image turn keeps its picture only for this session (a blob: URL); what is
+// saved to localStorage is the text placeholder, and the model never sees it.
+type Msg = { role: "user" | "assistant" | "system"; content: string; imageTurn?: boolean; image?: string };
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
 type Me = { id: string; did: string; name: string | null; balance?: Balance | null };
@@ -53,7 +56,11 @@ function load(): Convo[] {
 }
 function save(c: Convo[]) {
   try {
-    localStorage.setItem(STORE, JSON.stringify(c.slice(0, 100)));
+    const slim = c.slice(0, 100).map((cv) => ({
+      ...cv,
+      messages: cv.messages.map(({ image: _image, ...m }) => m),
+    }));
+    localStorage.setItem(STORE, JSON.stringify(slim));
   } catch {}
 }
 const newConvo = (model: string): Convo => ({
@@ -133,6 +140,80 @@ export function ChatApp({ error }: { error: string | null }) {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [active?.messages]);
 
+  async function drawImage(convo: Convo, text: string, prompt: string) {
+    const id = convo.id;
+    const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
+    setInput("");
+    setFailure(null);
+    setBusy(true);
+    const started = Date.now();
+    const setLast = (patch: Partial<Msg>) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    setConvos((all) => {
+      const exists = all.some((c) => c.id === id);
+      const base = exists ? all : [convo, ...all];
+      const next = base.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              title,
+              messages: [
+                ...c.messages,
+                { role: "user" as const, content: text, imageTurn: true },
+                { role: "assistant" as const, content: "// drawing on a c0mpute CPU worker, about 2 minutes…", imageTurn: true },
+              ],
+              updated: Date.now(),
+            }
+          : c,
+      );
+      save(next);
+      return next;
+    });
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    try {
+      const res = await fetch("/api/v1/images", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt }),
+        signal: ctrl.signal,
+      });
+      const start = await res.json().catch(() => ({}));
+      if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
+      const deadline = Date.now() + 15 * 60_000;
+      let done: Response | null = null;
+      while (!done) {
+        if (Date.now() > deadline) throw new Error("image timed out");
+        await new Promise((r) => setTimeout(r, 4000));
+        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
+        if (poll.status === 202) {
+          setLast({ content: `// drawing on a c0mpute CPU worker… ${Math.round((Date.now() - started) / 1000)}s` });
+          continue;
+        }
+        if (!poll.ok) {
+          const j = await poll.json().catch(() => ({}));
+          throw new Error(j.error?.message ?? `HTTP ${poll.status}`);
+        }
+        done = poll;
+      }
+      const url = URL.createObjectURL(await done.blob());
+      setLast({ content: `[image: ${prompt}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute CPU worker)`, image: url });
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+      setLast({ content: "// image not drawn" });
+    } finally {
+      setBusy(false);
+      abort.current = null;
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
@@ -148,6 +229,11 @@ export function ChatApp({ error }: { error: string | null }) {
       setActiveId(c.id);
     }
     const id = convo.id;
+    const imagePrompt = parseImageCommand(text);
+    if (imagePrompt) {
+      await drawImage(convo, text, imagePrompt);
+      return;
+    }
     const history: Msg[] = [...convo.messages, { role: "user", content: text }];
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
     setInput("");
@@ -169,7 +255,11 @@ export function ChatApp({ error }: { error: string | null }) {
       const res = await fetch("/api/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: convo.model, messages: history, stream: true }),
+        body: JSON.stringify({
+          model: convo.model,
+          messages: textHistory(history).map(({ role, content }) => ({ role, content })),
+          stream: true,
+        }),
         signal: ctrl.signal,
       });
       if (!res.ok) {
@@ -325,7 +415,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -335,6 +425,15 @@ export function ChatApp({ error }: { error: string | null }) {
                 <div className="whitespace-pre-wrap break-words">
                   {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
                 </div>
+                {m.image && (
+                  <figure className="mt-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- a session blob: URL */}
+                    <img src={m.image} alt={m.content} className="max-w-full w-[640px] border border-[var(--color-rule)]" />
+                    <a href={m.image} download="c0mpute-image.png" className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
+                      download
+                    </a>
+                  </figure>
+                )}
               </div>
             ))}
             {failure && <p className="text-[var(--color-warn)] text-xs">error: {failure}</p>}
@@ -357,7 +456,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, or /image <prompt> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
