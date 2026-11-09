@@ -1000,6 +1000,11 @@ async fn fetch_sealed(net: &Libp2pNetwork, accept: &JobAccept) -> Result<Vec<u8>
         }
         net.add_peer_address(buyer, a).await;
     }
+    // A buyer heard of only through gossip relayed by other nodes (no
+    // public address on its offer, e.g. on a LAN) is found through the DHT.
+    if let Err(e) = net.reach(buyer, Duration::from_secs(10)).await {
+        tracing::debug!(%buyer, err = %e, "e2e: buyer not reachable yet; trying the fetch anyway");
+    }
     let mut last = anyhow!("not tried");
     for attempt in 0..4u32 {
         match net

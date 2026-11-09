@@ -447,6 +447,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     let mut direct_accept = accept.clone();
     direct_accept.sealed_spec = sealed_b64;
     let accept_bytes = serde_json::to_vec(&direct_accept)?;
+    // A winner whose bid reached us only over gossip may have no address we
+    // know: look it up in the DHT before the direct send.
+    if let Err(e) = net.reach(winner_peer, DIRECT_ACCEPT_TIMEOUT).await {
+        debug!(%job_id, err = %e, "buyer: winner not reachable directly yet");
+    }
     let direct = net
         .send_direct(winner_peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
         .await;
