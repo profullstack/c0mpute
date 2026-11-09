@@ -212,7 +212,7 @@ pub fn spawn_tts_runner(
             };
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
-            let result = run_tts_job(&net, &store, &cache_root, &job).await;
+            let result = crate::job_control::cancellable(&job.accept.job_id, run_tts_job(&net, &store, &cache_root, &job)).await;
             cleanup_job_dir(&cache_root, &job_id).await;
             match result {
                 Ok(hash) => {
@@ -244,7 +244,7 @@ pub fn spawn_stt_runner(
             };
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
-            let result = run_stt_job(&net, &store, &cache_root, &job).await;
+            let result = crate::job_control::cancellable(&job.accept.job_id, run_stt_job(&net, &store, &cache_root, &job)).await;
             cleanup_job_dir(&cache_root, &job_id).await;
             match result {
                 Ok(hash) => {
@@ -398,8 +398,11 @@ pub fn spawn_transcode_runner(
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
             let buyer_peer_id = job.accept.buyer_peer_id.clone();
-            let result =
-                run_transcode_job(&net, &store, &cache_root, &ffmpeg_bin, &caps, &job).await;
+            let result = crate::job_control::cancellable(
+                &job_id,
+                run_transcode_job(&net, &store, &cache_root, &ffmpeg_bin, &caps, &job),
+            )
+            .await;
             // The output now lives in the chunk store; the input, the
             // ffmpeg output file and the directory go, success or not.
             cleanup_job_dir(&cache_root, &job_id).await;
@@ -611,7 +614,7 @@ async fn reach_buyer(net: &Libp2pNetwork, buyer_peer_id: &str) {
     }
 }
 
-pub(crate) async fn publish_receipt(
+pub async fn publish_receipt(
     net: &Libp2pNetwork,
     accept: &JobAccept,
     output_hash: Option<String>,
@@ -619,6 +622,10 @@ pub(crate) async fn publish_receipt(
 ) {
     crate::activity::job_finished(&accept.job_id);
     crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
+    // Its buyer cancelled it: nobody is waiting for a receipt.
+    if crate::job_control::cancelled(&accept.job_id) {
+        return;
+    }
     let receipt = JobReceipt {
         job_id: accept.job_id.clone(),
         worker_peer_id: net.peer_id().to_base58(),
@@ -633,6 +640,8 @@ pub(crate) async fn publish_receipt(
         signature: None,
         external_ref: accept.external_ref.clone(),
     };
+    // Kept for a buyer that restarts before it hears this (`job_control`).
+    crate::job_control::done(&accept.job_id, &receipt);
     // Reach back to the buyer first: it can fetch the result only over a
     // connection, and it usually cannot dial our random, firewalled port.
     if receipt.output_hash.is_some() {

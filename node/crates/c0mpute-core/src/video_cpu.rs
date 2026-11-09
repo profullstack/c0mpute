@@ -445,7 +445,7 @@ pub fn spawn_cpu_video_runner(
             };
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
-            let result = run_job(&net, &store, &cache_root, &job).await;
+            let result = crate::job_control::cancellable(&job.accept.job_id, run_job(&net, &store, &cache_root, &job)).await;
             cleanup_job_dir(&cache_root, &job_id).await;
             match result {
                 Ok(hash) => {

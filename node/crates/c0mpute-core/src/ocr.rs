@@ -459,7 +459,7 @@ pub fn spawn_ocr_runner(
                 let _slot = slot;
                 let started = Instant::now();
                 let job_id = job.accept.job_id.clone();
-                let result = run_ocr_job(&net, &store, &cache_root, &job).await;
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_ocr_job(&net, &store, &cache_root, &job)).await;
                 cleanup_job_dir(&cache_root, &job_id).await;
                 match result {
                     Ok(hash) => {

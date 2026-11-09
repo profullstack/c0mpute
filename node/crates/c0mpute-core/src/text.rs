@@ -535,7 +535,7 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
             let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
             let run_id = accept.spec_inline.as_ref().and_then(|v| v["run_id"].as_str()).map(String::from);
             in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(accept.job_id.clone(), (job.clone(), run_id));
-            let result: Result<String> = async {
+            let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
                 let spec: TextTrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
                 let (dir, hash) = run_train(&infernet, &job_dir, &spec, &net, buyer).await?;
@@ -547,7 +547,7 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
                 }
                 upload(&spec.artifact_upload_url, &dir).await.context("upload adapter")?;
                 Ok(hash)
-            }
+            })
             .await;
             let _ = tokio::fs::remove_dir_all(&job_dir).await;
             in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&accept.job_id);
@@ -786,7 +786,7 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
         while let Some(job) = rx.recv().await {
             let accept = job.accept.clone();
             busy.store(true, Ordering::Relaxed);
-            let result: Result<String> = async {
+            let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
                 let spec: TextInferSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
                 let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec, &net, buyer).await?;
@@ -799,7 +799,7 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
                 }
                 reqwest::Client::new().put(format!("{}/answer.json", spec.answer_upload_url)).body(answer.clone()).send().await?.error_for_status()?;
                 Ok(sha256_hex(&answer))
-            }
+            })
             .await;
             busy.store(false, Ordering::Relaxed);
             match result {

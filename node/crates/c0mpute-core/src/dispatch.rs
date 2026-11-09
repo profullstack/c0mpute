@@ -155,6 +155,7 @@ pub fn run_worker_subscriber_with_load(
             return;
         }
         info!(%topic, "dispatch: subscribed for workload");
+        crate::job_control::serve(&net);
 
         let our_peer_id = net.peer_id().to_base58();
         // This node's bench score rides on every bid for smart routing;
@@ -336,6 +337,9 @@ pub fn run_worker_subscriber_with_load(
                     "dispatch: we won — forwarding to runner"
                 );
                 crate::activity::job_started(&accept.job_id);
+                // Its buyer can ask where it stands (or cancel it) after a
+                // restart (`job_control`).
+                crate::job_control::running(&accept.job_id, &accept.buyer_peer_id);
                 if let Some((session, offer)) = bid.e2e {
                     // Fetching the sealed spec takes a round trip to the
                     // buyer: never in the loop that reads offers.

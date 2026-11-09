@@ -163,7 +163,7 @@ pub fn spawn_train_runner(
             };
             let accept = job.accept.clone();
             busy.store(true, std::sync::atomic::Ordering::Relaxed);
-            let result: Result<String> = async {
+            let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
                 let spec: TrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 spec.validate()?;
                 let key = spec.idempotency_key().to_string();
@@ -183,7 +183,7 @@ pub fn spawn_train_runner(
                     upload(base, &dir).await.context("upload artifacts")?;
                 }
                 Ok(hash)
-            }
+            })
             .await;
             busy.store(false, std::sync::atomic::Ordering::Relaxed);
             match result {

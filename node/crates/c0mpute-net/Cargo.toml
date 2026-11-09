@@ -16,6 +16,9 @@ futures = { workspace = true }
 libp2p = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]

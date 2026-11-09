@@ -264,13 +264,13 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
                 let _slot = slot;
                 let started = Instant::now();
                 let job_id = job.accept.job_id.clone();
-                let result: Result<String> = async {
+                let result: Result<String> = crate::job_control::cancellable(&job.accept.job_id, async {
                     let spec = crate::workflow::resolve_spec(&net, &job).await?;
                     let answer = execute(&base, &spec, &ready_models()).await;
                     let bytes = serde_json::to_vec(&answer)?;
                     // Sealed to the buyer (e2e jobs) before it is stored.
                     crate::pieces::publish_result_bytes(&net, &store, &job.accept, &bytes).await.context("store answer")
-                }
+                })
                 .await;
                 match result {
                     Ok(hash) => {

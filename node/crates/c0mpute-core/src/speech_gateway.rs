@@ -555,6 +555,19 @@ async fn transcribe(
     Ok(response)
 }
 
+/// How long a worker gets to deliver a `workload` job's receipt.
+fn receipt_timeout_for(workload: &str) -> Duration {
+    if is_video(workload) {
+        crate::video::JOB_TIMEOUT
+    } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
+        IMAGE_RECEIPT_TIMEOUT
+    } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
+        crate::music::JOB_TIMEOUT
+    } else {
+        Duration::from_secs(15 * 60)
+    }
+}
+
 async fn run_speech_auction(
     state: &GatewayState,
     workload: &str,
@@ -582,15 +595,16 @@ async fn run_speech_auction(
         } else {
             Duration::from_secs(20 * 60)
         })
-        .with_receipt_timeout(if is_video(workload) {
-            crate::video::JOB_TIMEOUT
-        } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
-            IMAGE_RECEIPT_TIMEOUT
-        } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
-            crate::music::JOB_TIMEOUT
-        } else {
-            Duration::from_secs(15 * 60)
-        });
+        .with_receipt_timeout(receipt_timeout_for(workload));
+    // A tracked request records the job it awarded, so a restart collects it
+    // from the worker instead of auctioning it again (DIP-0032).
+    let auction = match crate::job_progress::current_key() {
+        Some(key) => {
+            let pending = state.pending.clone();
+            auction.with_on_accept(Arc::new(move |job| pending.set_in_flight(&key, Some(job.clone()))))
+        }
+        None => auction,
+    };
     // Read the winner as soon as it is chosen (not only on failure), so a
     // caller polling /v1/progress sees which node is working and its ETA.
     let auction_run = run_auction(state.net.clone(), auction);
@@ -615,6 +629,12 @@ async fn run_speech_auction(
             let winner = winner_seen
                 .or_else(|| winner_rx.try_recv().ok().map(|(_, bid)| bid.bidder_peer_id));
             tracing::warn!(workload, err = %error, winner = ?winner, "speech auction failed");
+            // A winner that never delivered may still be working: tell it to
+            // stop before the job goes to someone else.
+            if let Some(job) = crate::job_progress::current_key().and_then(|k| state.pending.in_flight(&k)) {
+                let net = state.net.clone();
+                tokio::spawn(async move { crate::buyer::cancel_job(&net, &job).await });
+            }
             (
                 ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -667,6 +687,31 @@ async fn run_checked_job(
     crate::job_progress::report(|p| p.max_wait_s = Some(max_wait.as_secs()));
     let mut attempt = 0;
     let mut no_bid_rounds = 0u32;
+    // Resumed after a restart with the auction already awarded: collect that
+    // job from its worker (same derived key, no second run). Only if the
+    // worker no longer has it is the work auctioned again.
+    let mut resumed = None;
+    if let Some(job) = crate::job_progress::take_resume() {
+        crate::job_progress::set_stage("rendering");
+        crate::job_progress::report(|p| {
+            p.worker = Some(job.winner_peer.clone());
+            p.job_id = Some(job.job_id.clone());
+        });
+        match crate::buyer::resume_auction(state.net.clone(), &job, receipt_timeout_for(workload)).await {
+            Ok(outcome) => {
+                tracing::info!(workload, job_id = %job.job_id, worker = %job.winner_peer, "resumed the in-flight job after a restart");
+                resumed = Some(outcome);
+            }
+            Err(e) => {
+                tracing::warn!(workload, job_id = %job.job_id, err = %format!("{e:#}"), "could not resume the in-flight job; auctioning it again");
+                let net = state.net.clone();
+                tokio::spawn(async move { crate::buyer::cancel_job(&net, &job).await });
+                if let Some(key) = crate::job_progress::current_key() {
+                    state.pending.set_in_flight(&key, None);
+                }
+            }
+        }
+    }
     // An update waits for this request instead of killing it mid-flight.
     // Tracked requests are on disk and resume after a restart, so they never
     // pin an update; an untracked one dies with the process, so it does.
@@ -684,7 +729,9 @@ async fn run_checked_job(
                 p.stage = "finding_worker";
             }
         });
-        let outcome = match run_speech_auction(
+        let outcome = if let Some(outcome) = resumed.take() {
+            outcome
+        } else { match run_speech_auction(
             state,
             workload,
             spec.clone(),
@@ -734,7 +781,7 @@ async fn run_checked_job(
                 ));
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
-        };
+        } };
         let worker = outcome.accepted_bid.bidder_peer_id.clone();
         crate::job_progress::set_stage("fetching_result");
         let result = if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
@@ -1227,6 +1274,7 @@ async fn run_tracked(
             max_bytes,
             started_at_ms: now,
             max_wait_ms: Some(max_wait.as_millis() as u64),
+            in_flight: None,
         },
     );
     let task = spawn_tracked(
@@ -1239,6 +1287,7 @@ async fn run_tracked(
         max_bytes,
         content_type,
         crate::job_progress::QueueCtx { max_wait, queued_at_ms: now },
+        None,
     );
     match tokio::time::timeout(sync_wait, task).await {
         Ok(Ok(Stored::Failed { status, message })) => Err(ApiError(
@@ -1266,6 +1315,7 @@ fn spawn_tracked(
     max_bytes: usize,
     content_type: fn(&[u8]) -> &'static str,
     ctx: crate::job_progress::QueueCtx,
+    resume: Option<crate::job_e2e::InFlightJob>,
 ) -> tokio::task::JoinHandle<crate::job_progress::Stored> {
     use crate::job_progress::Stored;
     st.board.enter(workload, &key, ctx.queued_at_ms, usize::MAX);
@@ -1276,7 +1326,7 @@ fn spawn_tracked(
     let scope = (st.progress.clone(), key.clone());
     tokio::spawn(crate::job_progress::CURRENT.scope(
         scope,
-        crate::job_progress::QUEUE.scope(ctx, async move {
+        crate::job_progress::QUEUE.scope(ctx, crate::job_progress::RESUME.scope(std::sync::Mutex::new(resume), async move {
             crate::job_progress::set_stage("queued");
             let result = match slots.acquire_owned().await {
                 Ok(_slot) => run_speech_job(&st, workload, spec, required, max_bytes).await,
@@ -1296,7 +1346,7 @@ fn spawn_tracked(
             st.pending.remove(&key);
             st.board.leave(workload, &key);
             stored
-        }),
+        })),
     ))
 }
 
@@ -1383,6 +1433,9 @@ fn resume_pending(state: &GatewayState) {
             job.max_bytes,
             content_type,
             crate::job_progress::QueueCtx { max_wait, queued_at_ms: job.started_at_ms },
+            // The job a worker was running for it, if the auction was
+            // already awarded: collected, not re-auctioned.
+            job.in_flight,
         ));
     }
 }

@@ -257,6 +257,9 @@ pub struct Libp2pNetwork {
     /// The node identity, kept to sign statements other peers check against
     /// our peer id ([`Self::sign`]).
     keypair: identity::Keypair,
+    /// Root of the per-job keys this node derives as a buyer
+    /// ([`Self::derive_job_secret`]). Never leaves this struct.
+    job_secret: Arc<zeroize::Zeroizing<[u8; 32]>>,
 }
 
 impl Libp2pNetwork {
@@ -264,6 +267,7 @@ impl Libp2pNetwork {
     /// returned `Libp2pNetwork` is dropped.
     pub async fn spawn(config: NetworkConfig) -> Result<Self> {
         let keypair = id_mod::load_or_create(&config.identity_dir)?;
+        let job_secret = Arc::new(id_mod::load_or_create_job_secret(&config.identity_dir)?);
         let peer_id = keypair.public().to_peer_id();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
@@ -310,7 +314,19 @@ impl Libp2pNetwork {
             peer_id,
             rpc_handlers,
             keypair,
+            job_secret,
         })
+    }
+
+    /// A 32-byte secret for `context`, derived from this node's job-key
+    /// secret with HKDF-SHA256 (domain `c0mpute/job-secret/v1`). The same
+    /// node and context always give the same bytes, across restarts; nothing
+    /// about the root secret can be learned from them.
+    pub fn derive_job_secret(&self, context: &[u8]) -> zeroize::Zeroizing<[u8; 32]> {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"c0mpute/job-secret/v1"), &**self.job_secret);
+        let mut out = zeroize::Zeroizing::new([0u8; 32]);
+        hk.expand(context, &mut *out).expect("32-byte okm");
+        out
     }
 
     /// Sign `msg` with this node's identity key. Anyone can check it against

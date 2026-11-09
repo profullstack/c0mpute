@@ -57,9 +57,9 @@ winner -> store   result   sealed to the buyer; the receipt names the
 
 ### Keys
 
-- `B` is a fresh X25519 key per auction; `W` a fresh X25519 key per bid.
-  Neither is ever reused, so a later compromise of either side opens nothing
-  old.
+- `B` is the buyer's X25519 key for one auction, derived from the buyer
+  node's job secret and the job id (see "Resuming after a restart"); `W` a
+  fresh random X25519 key per bid. Neither is ever reused for another job.
 - The worker signs the binding of `W` to the job with its libp2p ed25519
   identity: `lp(domain) lp("bid") lp(job_id) lp(workload) lp(buyer_peer)
   lp(worker_peer) lp(B) lp(W)` (every field length-prefixed). The buyer
@@ -121,6 +121,44 @@ prompts, texts, messages, URLs, headers, input hashes or keys, file names,
 client keys or tokens (`gameserver.stop` shows `sha256(token)`, which is
 already the server's public stop hash). Strings over 128 bytes never go in a
 public spec whatever the key. An unknown workload shows only `v`.
+
+## Resuming after a restart
+
+A buyer that restarts mid-job (every gateway update while an image or song
+renders) used to lose the job's keys, re-auction the work and orphan the
+render on the first worker. Keys are still never serialized. Instead:
+
+- **Derived buyer key.** `B = X25519(HKDF-SHA256(job_secret, salt =
+  "c0mpute/job-secret/v1", info = "c0mpute/job-e2e/v1 buyer-key\0" ||
+  job_id))`. `job_secret` is 32 random bytes in `<identity dir>/job-e2e.secret`,
+  created on first use with mode 600, the same protection as the libp2p
+  identity key beside it. A restarted buyer re-derives `B`, and with the
+  winner's public key `W` from its record, the job's result key.
+- **In-flight record.** When the accept is out, the buyer records
+  `InFlightJob { job_id, workload, buyer_peer, winner_peer, worker_key (W,
+  public), price, external_ref, accepted_at }` with the tracked request
+  (`JobAuction::with_on_accept`). It holds no secret and no spec.
+- **Resume.** After a restart the gateway calls `resume_auction`: it asks the
+  winner over `c0mpute.job.control.v1` (request-response; the worker answers
+  only the job's buyer, by noise-authenticated peer id). `running`: wait for
+  the receipt (re-asking every 20 s). `done`: the worker returns the receipt
+  it kept (2 h); the sealed result is still in its store. `cancelled`,
+  `unknown` or unreachable: re-auction. No second render either way.
+- **Cancel.** A buyer that abandons a job (re-auctioning after a silent
+  winner, or a resumed job it could not collect) sends `cancel`. The worker
+  aborts the job's work (runners wrap it in `job_control::cancellable`; child
+  processes die with it via `kill_on_drop`) and sends no receipt.
+
+**Trade-off.** Deriving `B` instead of drawing it at random gives up forward
+secrecy against the buyer's `job_secret`: anyone who steals that file and
+recorded a job's traffic (the sealed spec on the direct accept, the sealed
+result chunk) can re-derive that job's keys and open both. That is the same
+exposure as stealing the buyer's identity key, which already lets an attacker
+impersonate the buyer, and the file has the same protection. Workers' keys
+stay random per bid, so a worker compromise still opens nothing old.
+Deleting `job-e2e.secret` rotates it (jobs in flight then cannot be
+resumed). A buyer that wants strict forward secrecy can run without tracked
+requests (no record, nothing to resume).
 
 ## What the winning worker can still see
 
