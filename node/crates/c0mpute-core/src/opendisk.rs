@@ -452,7 +452,9 @@ mod tests {
 
     #[test]
     fn descriptor_is_valid_opendisk() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        // A fixed budget (the default, 0, follows the disk).
+        cfg.hosting.max_bytes = 5 * 1024 * 1024 * 1024;
         let key = "a".repeat(64);
         let d = descriptor(
             &cfg,
@@ -480,6 +482,14 @@ mod tests {
     }
 
     #[test]
+    fn the_automatic_budget_follows_the_disk() {
+        let cfg = Config::default();
+        assert_eq!(cfg.hosting.max_bytes, 0);
+        let (free, total) = disk_for(&cfg.storage.root);
+        assert_eq!(hosting_budget(&cfg), crate::hosting::auto_budget(0, free, total));
+    }
+
+    #[test]
     fn a_node_without_the_hosting_role_does_not_offer_hosting() {
         let mut cfg = Config::default();
         cfg.roles.retain(|r| *r != c0mpute_proto::Role::Hosting);
@@ -495,7 +505,8 @@ mod tests {
     fn the_descriptor_parses_as_a_marketplace_hosting_disk() {
         // What d1sks stores is the descriptor under `data`; the publisher's
         // ranking reads it back as a hosting node.
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.hosting.max_bytes = 5 * 1024 * 1024 * 1024;
         let peer = c0mpute_net::libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id()
