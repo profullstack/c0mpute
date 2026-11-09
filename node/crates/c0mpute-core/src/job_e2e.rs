@@ -62,6 +62,9 @@ pub const DOMAIN: &[u8] = b"c0mpute/job-e2e/v1";
 pub const PAYLOAD_SERVICE: &str = "c0mpute.job.payload.v1";
 /// Largest sealed spec a worker accepts (the largest spec is 1 MiB).
 pub const MAX_SEALED_SPEC: usize = 4 * 1024 * 1024;
+/// Largest sealed spec pushed on the direct accept (one request carries at
+/// most 1 MiB, and the accept is JSON with the spec in base64).
+pub const MAX_PUSHED_SPEC: usize = 512 * 1024;
 /// How long a buyer keeps a sealed spec for its winner to fetch.
 const PAYLOAD_TTL: Duration = Duration::from_secs(10 * 60);
 /// Plaintext bytes per sealed segment of a blob.
@@ -968,7 +971,11 @@ impl WorkerSession {
             buyer_key: &e.buyer_key,
             worker_key: &self.public_hex,
         };
-        let sealed = fetch_sealed(net, accept).await?;
+        let sealed = match &accept.sealed_spec {
+            // Pushed on the direct accept (its source was checked: the buyer).
+            Some(b64) => B64.decode(b64).map_err(|_| anyhow!("pushed sealed spec is not base64"))?,
+            None => fetch_sealed(net, accept).await?,
+        };
         let keys = derive(&self.secret, &e.buyer_key, &b)?;
         let bytes = open_spec(&keys, &b, &sealed, &offer.spec_hash)?;
         let spec: Value = serde_json::from_slice(&bytes).context("sealed spec is not JSON")?;
