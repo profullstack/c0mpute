@@ -18,3 +18,4 @@ reed-solomon-erasure = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
+sysinfo = { workspace = true }
