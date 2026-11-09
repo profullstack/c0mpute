@@ -35,6 +35,20 @@
 # --gpu); no GPU is required, so keep base models small (0.5B-class trains on
 # CPU in hours).
 #
+# Replicated verification (opt in, `--replicas 3`, or `"replicas": 3` in the
+# job file for `c0mpute infernet text train`): the same corpus, seed and step
+# count run on N distinct workers; the buyer downloads every adapter, measures
+# the relative distance between the weight deltas (dW = B @ A per module,
+# computed exactly from rank-by-rank products), and keeps the medoid of a
+# group that a strict majority agrees on within `--replica-tolerance`
+# (default 0.30). Step counts and final eval perplexity must also match.
+# Outliers' workers are benched in the buyer's penalty box
+# (<data dir>/train-penalties.json); no majority fails the job and benches
+# nobody. Replicas are never bit-identical (CPU vs CUDA dropout masks, BLAS
+# reduction order), hence a tolerance. Each replica is its own job capped at
+# --max-price, so N replicas cost up to N times one job. Default stays 1
+# replica: no cost change. See node/crates/c0mpute-core/src/train_verify.rs.
+#
 # No QLoRA: the peft runner loads the base model in fp32 with no 4-bit
 # quantization (no bitsandbytes), so `train.qlora` is not offered.
 
@@ -58,7 +72,7 @@ arch         = ["x86_64", "aarch64"]
 capabilities = ["bin:infernet", "infernet:text:runtime:peft", "infernet:text:format:messages?", "gpu:cuda?"]
 
 [module.workloads]
-"train.lora" = { command = "lora", runs = "infernet.text.train", validation = "adapter_sha256_matches_receipt_manifest" }
+"train.lora" = { command = "lora", runs = "infernet.text.train", validation = "adapter_sha256_matches_receipt_manifest", replicated_validation = "majority_within_delta_tolerance" }
 
 [module.dispatch]
 mode = "subprocess"
@@ -72,3 +86,4 @@ rank       = 8
 lr         = 0.0002
 seq_len    = 256
 batch_size = 4
+replicas   = 1
