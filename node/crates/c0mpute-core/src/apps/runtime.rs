@@ -281,25 +281,51 @@ pub async fn snapshot_state(app_id: &str, state_path: &str) -> Result<Vec<u8>> {
     out
 }
 
-/// Put a state tar (from [`snapshot_state`]) back into a created container,
-/// before it starts.
-pub async fn restore_state(app_id: &str, state_path: &str, tar: &[u8]) -> Result<()> {
-    let parent = Path::new(state_path)
-        .parent()
-        .map(|p| p.display().to_string())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "/".into());
-    docker(
-        &[
-            "cp".into(),
-            "-".into(),
-            format!("{}:{parent}", container_name(app_id)),
-        ],
-        Some(tar),
-        Duration::from_secs(300),
-    )
-    .await
-    .map(|_| ())
+/// The image that unpacks a snapshot into an app's state volume: busybox
+/// 1.36, pinned by its multi-arch index digest.
+pub const RESTORE_HELPER: &str =
+    "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662";
+
+/// The `docker run` argv that unpacks a state tar (from [`snapshot_state`],
+/// whose entries start with the state directory's own name) into the app's
+/// volume. Pure, so it is tested without docker.
+pub fn restore_args(app_id: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        "--interactive".into(),
+        "--network".into(),
+        "none".into(),
+        "--label".into(),
+        format!("{LABEL}.restore={app_id}"),
+        "--volume".into(),
+        format!("{}:/restore", volume_name(app_id)),
+        RESTORE_HELPER.into(),
+        "tar".into(),
+        "-x".into(),
+        "-f".into(),
+        "-".into(),
+        "-C".into(),
+        "/restore".into(),
+        "--strip-components=1".into(),
+    ]
+}
+
+/// Put a state tar back into the app's (fresh) state volume before its
+/// container is created. Not `docker cp` into a created container: with the
+/// containerd image store (Docker 29) a container that never started has no
+/// filesystem to copy into ("destination must be a directory"). Docker
+/// leaves a non-empty named volume alone when the app container mounts it,
+/// so the app starts on exactly this state.
+pub async fn restore_state(app_id: &str, tar: &[u8]) -> Result<()> {
+    if !image_present(RESTORE_HELPER).await {
+        pull(RESTORE_HELPER)
+            .await
+            .context("pull the restore helper image")?;
+    }
+    docker(&restore_args(app_id), Some(tar), Duration::from_secs(300))
+        .await
+        .map(|_| ())
 }
 
 pub async fn logs(app_id: &str, tail: u32) -> Result<String> {
@@ -396,6 +422,20 @@ mod tests {
             || x == "--restart"
             || x == "sh"));
         assert!(!a.iter().any(|x| x.starts_with("SYS_") || x == "NET_ADMIN"));
+    }
+
+    #[test]
+    fn restore_unpacks_into_the_volume_offline() {
+        let a = restore_args("abc");
+        let pair = |k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
+        assert_eq!(a[0], "run");
+        assert!(pair(
+            "--volume",
+            &format!("{}:/restore", volume_name("abc"))
+        ));
+        assert!(pair("--network", "none"), "the helper has no network");
+        assert!(a.iter().any(|x| x == RESTORE_HELPER) && RESTORE_HELPER.contains("@sha256:"));
+        assert_eq!(a.last().unwrap(), "--strip-components=1");
     }
 
     #[test]
