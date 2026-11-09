@@ -448,6 +448,10 @@ impl Supervisor {
                 app = app.merge(l.router());
             }
             if let Some(h) = &hosting {
+                match self.start_ads(h.clone()).await {
+                    Ok(ads) => app = app.merge(ads.router()),
+                    Err(e) => tracing::warn!(err = %e, "ads: not started"),
+                }
                 app = app.merge(h.router());
             }
             tokio::spawn(async move {
@@ -494,6 +498,44 @@ impl Supervisor {
             },
         )
         .await
+    }
+
+    /// Start the ads service on a gateway: campaign index, VAST/VMAP, and
+    /// podcast ad insertion when ffmpeg is here.
+    pub async fn start_ads(&self, hosting: crate::hosting::Hosting) -> Result<crate::ads::Ads> {
+        let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let signer = c0mpute_net::identity::load_or_create(&identity_dir).ok();
+        let cfg = &self.config.ads;
+        let (ffmpeg, ffprobe) = if cfg.serve && cfg.podcast_insertion {
+            (crate::ads::stitch::find_tool("ffmpeg"), crate::ads::stitch::find_tool("ffprobe"))
+        } else {
+            (None, None)
+        };
+        let ads = crate::ads::Ads::start(
+            self.libp2p.clone(),
+            hosting,
+            crate::ads::Options {
+                signer,
+                data_dir: Some(self.config.storage.root.join("ads")),
+                serve: cfg.serve,
+                ffmpeg,
+                ffprobe,
+                public_origin: crate::opendisk::public_origin(&self.config),
+                ..Default::default()
+            },
+        )
+        .await?;
+        if cfg.serve {
+            // Without ffmpeg the hook still answers ?ads=1, with the clean
+            // episode and an x-c0mpute-ads header saying why.
+            ads.install_podcast_hook();
+        }
+        info!(
+            serve = cfg.serve,
+            podcast_insertion = ads.can_stitch(),
+            "ads: campaign index on the gateway (/ads/v1)"
+        );
+        Ok(ads)
     }
 
     /// The storage API (CIP-002) and this node's OpenDisk descriptor, served

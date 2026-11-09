@@ -4,6 +4,7 @@
 //! flags + config + detected hardware, and supervises the long-lived tasks
 //! for each role.
 
+pub mod ads;
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
