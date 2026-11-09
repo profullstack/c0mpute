@@ -43,7 +43,7 @@ libc = "0.2"
 # fuser mounts through the `fusermount3` binary, so the static musl release
 # build has nothing extra to link. Build without it: --no-default-features.
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15.1", default-features = false, optional = true }
+fuser = { version = "0.18.0", default-features = false, optional = true }
 
 [features]
 default = ["fuse"]

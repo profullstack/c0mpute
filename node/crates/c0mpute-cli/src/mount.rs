@@ -12,17 +12,17 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use c0mpute_core::sealed_store::{BlobStore, NetworkStore, Volume};
 use c0mpute_sealed::StorageSecret;
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
+    MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
-use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTDIR, ENOTEMPTY};
 use tokio::runtime::Handle;
 use zeroize::Zeroizing;
 
@@ -35,8 +35,8 @@ struct Open {
     dirty: bool,
 }
 
-/// The FUSE side of a [`Volume`].
-pub struct VolumeFs {
+/// State behind the FUSE callbacks (fuser 0.18 calls `&self`).
+struct Inner {
     rt: Handle,
     vol: Volume,
     inodes: HashMap<u64, String>,
@@ -60,8 +60,8 @@ fn secs(t: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(t)
 }
 
-impl VolumeFs {
-    pub fn new(rt: Handle, vol: Volume) -> Self {
+impl Inner {
+    fn new(rt: Handle, vol: Volume) -> Self {
         let mut fs = Self {
             rt,
             vol,
@@ -110,7 +110,7 @@ impl VolumeFs {
             return None;
         };
         Some(FileAttr {
-            ino,
+            ino: INodeNo(ino),
             size,
             blocks: size.div_ceil(512),
             atime: mtime,
@@ -128,7 +128,7 @@ impl VolumeFs {
         })
     }
 
-    fn save(&mut self, fh: u64) -> Result<(), i32> {
+    fn save(&mut self, fh: u64) -> Result<(), Errno> {
         let Some(h) = self.handles.get_mut(&fh) else { return Ok(()) };
         if !h.dirty {
             return Ok(());
@@ -145,7 +145,7 @@ impl VolumeFs {
             }
             Err(e) => {
                 eprintln!("c0mpute mount: could not store {path}: {e:#}");
-                Err(EIO)
+                Err(Errno::EIO)
             }
         }
     }
@@ -158,28 +158,43 @@ impl VolumeFs {
     }
 }
 
+/// The FUSE side of a [`Volume`].
+pub struct VolumeFs(Mutex<Inner>);
+
+impl VolumeFs {
+    pub fn new(rt: Handle, vol: Volume) -> Self {
+        Self(Mutex::new(Inner::new(rt, vol)))
+    }
+}
+
 impl Filesystem for VolumeFs {
-    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let Some(p) = self.path(parent) else { return reply.error(ENOENT) };
-        let Some(path) = join(&p, name) else { return reply.error(ENOENT) };
-        match self.attr(&path) {
-            Some(a) => reply.entry(&TTL, &a, 0),
-            None => reply.error(ENOENT),
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let parent = parent.0;
+        let Some(p) = s.path(parent) else { return reply.error(Errno::ENOENT) };
+        let Some(path) = join(&p, name) else { return reply.error(Errno::ENOENT) };
+        match s.attr(&path) {
+            Some(a) => reply.entry(&TTL, &a, Generation(0)),
+            None => reply.error(Errno::ENOENT),
         }
     }
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let Some(p) = self.path(ino) else { return reply.error(ENOENT) };
-        match self.attr(&p) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let ino = ino.0;
+        let Some(p) = s.path(ino) else { return reply.error(Errno::ENOENT) };
+        match s.attr(&p) {
             Some(a) => reply.attr(&TTL, &a),
-            None => reply.error(ENOENT),
+            None => reply.error(Errno::ENOENT),
         }
     }
 
     fn setattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
@@ -187,166 +202,195 @@ impl Filesystem for VolumeFs {
         _atime: Option<TimeOrNow>,
         _mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
-        fh: Option<u64>,
+        fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        let Some(p) = self.path(ino) else { return reply.error(ENOENT) };
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let ino = ino.0;
+        let fh = fh.map(|f| f.0);
+        let Some(p) = s.path(ino) else { return reply.error(Errno::ENOENT) };
         if let Some(size) = size {
-            let handle = fh.filter(|f| self.handles.contains_key(f)).or_else(|| self.handles.iter().find(|(_, h)| h.path == p).map(|(k, _)| *k));
+            let handle = fh.filter(|f| s.handles.contains_key(f)).or_else(|| s.handles.iter().find(|(_, h)| h.path == p).map(|(k, _)| *k));
             match handle {
                 Some(f) => {
-                    let h = self.handles.get_mut(&f).expect("present");
+                    let h = s.handles.get_mut(&f).expect("present");
                     h.data.resize(size as usize, 0);
                     h.dirty = true;
                 }
                 None => {
                     // Truncate a closed file: load, resize, store.
-                    let mut data = if self.vol.index.files.contains_key(&p) {
-                        match self.rt.block_on(self.vol.read(&p)) {
+                    let mut data = if s.vol.index.files.contains_key(&p) {
+                        match s.rt.block_on(s.vol.read(&p)) {
                             Ok(d) => d,
-                            Err(_) => return reply.error(EIO),
+                            Err(_) => return reply.error(Errno::EIO),
                         }
                     } else {
                         Zeroizing::new(Vec::new())
                     };
                     data.resize(size as usize, 0);
-                    if self.rt.block_on(self.vol.write(&p, &data)).is_err() {
-                        return reply.error(EIO);
+                    if s.rt.block_on(s.vol.write(&p, &data)).is_err() {
+                        return reply.error(Errno::EIO);
                     }
                 }
             }
         }
-        match self.attr(&p) {
+        match s.attr(&p) {
             Some(a) => reply.attr(&TTL, &a),
-            None => reply.error(ENOENT),
+            None => reply.error(Errno::ENOENT),
         }
     }
 
-    fn mkdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
-        let Some(p) = self.path(parent) else { return reply.error(ENOENT) };
-        let Some(path) = join(&p, name) else { return reply.error(EINVAL) };
-        if self.attr(&path).is_some() {
-            return reply.error(EEXIST);
+    fn mkdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let parent = parent.0;
+        let Some(p) = s.path(parent) else { return reply.error(Errno::ENOENT) };
+        let Some(path) = join(&p, name) else { return reply.error(Errno::EINVAL) };
+        if s.attr(&path).is_some() {
+            return reply.error(Errno::EEXIST);
         }
-        if self.rt.block_on(self.vol.mkdir(&path)).is_err() {
-            return reply.error(EIO);
+        if s.rt.block_on(s.vol.mkdir(&path)).is_err() {
+            return reply.error(Errno::EIO);
         }
-        match self.attr(&path) {
-            Some(a) => reply.entry(&TTL, &a, 0),
-            None => reply.error(EIO),
+        match s.attr(&path) {
+            Some(a) => reply.entry(&TTL, &a, Generation(0)),
+            None => reply.error(Errno::EIO),
         }
     }
 
-    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let Some(p) = self.path(parent) else { return reply.error(ENOENT) };
-        let Some(path) = join(&p, name) else { return reply.error(ENOENT) };
-        if !self.vol.index.files.contains_key(&path) {
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let parent = parent.0;
+        let Some(p) = s.path(parent) else { return reply.error(Errno::ENOENT) };
+        let Some(path) = join(&p, name) else { return reply.error(Errno::ENOENT) };
+        if !s.vol.index.files.contains_key(&path) {
             // Created but never stored (still open): just forget it.
-            let pending: Vec<u64> = self.handles.iter().filter(|(_, h)| h.path == path).map(|(k, _)| *k).collect();
+            let pending: Vec<u64> = s.handles.iter().filter(|(_, h)| h.path == path).map(|(k, _)| *k).collect();
             if pending.is_empty() {
-                return reply.error(ENOENT);
+                return reply.error(Errno::ENOENT);
             }
             for fh in pending {
-                if let Some(h) = self.handles.get_mut(&fh) {
+                if let Some(h) = s.handles.get_mut(&fh) {
                     h.dirty = false;
                     h.path = String::new();
                 }
             }
             return reply.ok();
         }
-        match self.rt.block_on(self.vol.remove(&path)) {
+        match s.rt.block_on(s.vol.remove(&path)) {
             Ok(()) => reply.ok(),
-            Err(_) => reply.error(EIO),
+            Err(_) => reply.error(Errno::EIO),
         }
     }
 
-    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let Some(p) = self.path(parent) else { return reply.error(ENOENT) };
-        let Some(path) = join(&p, name) else { return reply.error(ENOENT) };
-        if !self.vol.is_dir(&path) {
-            return reply.error(ENOTDIR);
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let parent = parent.0;
+        let Some(p) = s.path(parent) else { return reply.error(Errno::ENOENT) };
+        let Some(path) = join(&p, name) else { return reply.error(Errno::ENOENT) };
+        if !s.vol.is_dir(&path) {
+            return reply.error(Errno::ENOTDIR);
         }
-        if self.vol.children(&path).next().is_some() {
-            return reply.error(ENOTEMPTY);
+        if s.vol.children(&path).next().is_some() {
+            return reply.error(Errno::ENOTEMPTY);
         }
-        match self.rt.block_on(self.vol.rmdir(&path)) {
+        match s.rt.block_on(s.vol.rmdir(&path)) {
             Ok(()) => reply.ok(),
-            Err(_) => reply.error(EIO),
+            Err(_) => reply.error(Errno::EIO),
         }
     }
 
-    fn rename(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
-        let (Some(p), Some(np)) = (self.path(parent), self.path(newparent)) else { return reply.error(ENOENT) };
-        let (Some(from), Some(to)) = (join(&p, name), join(&np, newname)) else { return reply.error(EINVAL) };
+    fn rename(&self, _req: &Request, parent: INodeNo, name: &OsStr, newparent: INodeNo, newname: &OsStr, _flags: RenameFlags, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let (parent, newparent) = (parent.0, newparent.0);
+        let (Some(p), Some(np)) = (s.path(parent), s.path(newparent)) else { return reply.error(Errno::ENOENT) };
+        let (Some(from), Some(to)) = (join(&p, name), join(&np, newname)) else { return reply.error(Errno::EINVAL) };
         // Flush unsaved writes first so the data moves with the name.
-        let open: Vec<u64> = self.handles.iter().filter(|(_, h)| h.path == from).map(|(k, _)| *k).collect();
+        let open: Vec<u64> = s.handles.iter().filter(|(_, h)| h.path == from).map(|(k, _)| *k).collect();
         for fh in &open {
-            if self.save(*fh).is_err() {
-                return reply.error(EIO);
+            if s.save(*fh).is_err() {
+                return reply.error(Errno::EIO);
             }
         }
-        match self.rt.block_on(self.vol.rename(&from, &to)) {
+        match s.rt.block_on(s.vol.rename(&from, &to)) {
             Ok(()) => {
                 for fh in open {
-                    if let Some(h) = self.handles.get_mut(&fh) {
+                    if let Some(h) = s.handles.get_mut(&fh) {
                         h.path = to.clone();
                     }
                 }
-                if let Some(ino) = self.paths.remove(&from) {
-                    self.inodes.insert(ino, to.clone());
-                    self.paths.insert(to, ino);
+                if let Some(ino) = s.paths.remove(&from) {
+                    s.inodes.insert(ino, to.clone());
+                    s.paths.insert(to, ino);
                 }
                 reply.ok()
             }
-            Err(_) => reply.error(EIO),
+            Err(_) => reply.error(Errno::EIO),
         }
     }
 
-    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        let Some(p) = self.path(ino) else { return reply.error(ENOENT) };
-        if self.vol.is_dir(&p) && !self.vol.index.files.contains_key(&p) {
-            return reply.error(EISDIR);
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let ino = ino.0;
+        let flags = flags.0;
+        let Some(p) = s.path(ino) else { return reply.error(Errno::ENOENT) };
+        if s.vol.is_dir(&p) && !s.vol.index.files.contains_key(&p) {
+            return reply.error(Errno::EISDIR);
         }
         let truncate = flags & libc::O_TRUNC != 0;
-        let data = if truncate || !self.vol.index.files.contains_key(&p) {
-            self.pending(&p).map(|h| h.data.clone()).unwrap_or_default()
+        let data = if truncate || !s.vol.index.files.contains_key(&p) {
+            s.pending(&p).map(|h| h.data.clone()).unwrap_or_default()
         } else {
-            match self.rt.block_on(self.vol.read(&p)) {
+            match s.rt.block_on(s.vol.read(&p)) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("c0mpute mount: could not fetch {p}: {e:#}");
-                    return reply.error(EIO);
+                    return reply.error(Errno::EIO);
                 }
             }
         };
-        let fh = self.open_handle(p, data, truncate);
-        reply.opened(fh, 0);
+        let fh = s.open_handle(p, data, truncate);
+        reply.opened(FileHandle(fh), FopenFlags::empty());
     }
 
-    fn create(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
-        let Some(p) = self.path(parent) else { return reply.error(ENOENT) };
-        let Some(path) = join(&p, name) else { return reply.error(EINVAL) };
-        let fh = self.open_handle(path.clone(), Zeroizing::new(Vec::new()), true);
-        match self.attr(&path) {
-            Some(a) => reply.created(&TTL, &a, 0, fh, 0),
-            None => reply.error(EIO),
+    fn create(&self, _req: &Request, parent: INodeNo, name: &OsStr, _mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let parent = parent.0;
+        let Some(p) = s.path(parent) else { return reply.error(Errno::ENOENT) };
+        let Some(path) = join(&p, name) else { return reply.error(Errno::EINVAL) };
+        let fh = s.open_handle(path.clone(), Zeroizing::new(Vec::new()), true);
+        match s.attr(&path) {
+            Some(a) => reply.created(&TTL, &a, Generation(0), FileHandle(fh), FopenFlags::empty()),
+            None => reply.error(Errno::EIO),
         }
     }
 
-    fn read(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock: Option<u64>, reply: ReplyData) {
-        let Some(h) = self.handles.get(&fh) else { return reply.error(EIO) };
-        let start = (offset.max(0) as usize).min(h.data.len());
+    fn read(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, size: u32, _flags: OpenFlags, _lock: Option<LockOwner>, reply: ReplyData) {
+        let g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &*g;
+        let fh = fh.0;
+        let Some(h) = s.handles.get(&fh) else { return reply.error(Errno::EIO) };
+        let start = (offset as usize).min(h.data.len());
         let end = (start + size as usize).min(h.data.len());
         reply.data(&h.data[start..end]);
     }
 
-    fn write(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, offset: i64, data: &[u8], _wf: u32, _flags: i32, _lock: Option<u64>, reply: ReplyWrite) {
-        let Some(h) = self.handles.get_mut(&fh) else { return reply.error(EIO) };
-        let start = offset.max(0) as usize;
+    fn write(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, offset: u64, data: &[u8], _wf: WriteFlags, _flags: OpenFlags, _lock: Option<LockOwner>, reply: ReplyWrite) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let fh = fh.0;
+        let Some(h) = s.handles.get_mut(&fh) else { return reply.error(Errno::EIO) };
+        let start = offset as usize;
         if h.data.len() < start + data.len() {
             h.data.resize(start + data.len(), 0);
         }
@@ -355,44 +399,59 @@ impl Filesystem for VolumeFs {
         reply.written(data.len() as u32);
     }
 
-    fn flush(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _lock: u64, reply: ReplyEmpty) {
-        match self.save(fh) {
+    fn flush(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _lock: LockOwner, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let fh = fh.0;
+        match s.save(fh) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e),
         }
     }
 
-    fn fsync(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        match self.save(fh) {
+    fn fsync(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let fh = fh.0;
+        match s.save(fh) {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e),
         }
     }
 
-    fn release(&mut self, _req: &Request<'_>, _ino: u64, fh: u64, _flags: i32, _lock: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-        let res = self.save(fh);
-        self.handles.remove(&fh);
+    fn release(&self, _req: &Request, _ino: INodeNo, fh: FileHandle, _flags: OpenFlags, _lock: Option<LockOwner>, _flush: bool, reply: ReplyEmpty) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let fh = fh.0;
+        let res = s.save(fh);
+        s.handles.remove(&fh);
         match res {
             Ok(()) => reply.ok(),
             Err(e) => reply.error(e),
         }
     }
 
-    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
-        match self.path(ino) {
-            Some(p) if self.vol.is_dir(&p) => reply.opened(0, 0),
-            Some(_) => reply.error(ENOTDIR),
-            None => reply.error(ENOENT),
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &*g;
+        let ino = ino.0;
+        match s.path(ino) {
+            Some(p) if s.vol.is_dir(&p) => reply.opened(FileHandle(0), FopenFlags::empty()),
+            Some(_) => reply.error(Errno::ENOTDIR),
+            None => reply.error(Errno::ENOENT),
         }
     }
 
-    fn readdir(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        let Some(p) = self.path(ino) else { return reply.error(ENOENT) };
+    fn readdir(&self, _req: &Request, ino: INodeNo, _fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let s = &mut *g;
+        let ino = ino.0;
+        let Some(p) = s.path(ino) else { return reply.error(Errno::ENOENT) };
         let mut entries: Vec<(u64, FileType, String)> = vec![(ino, FileType::Directory, ".".into()), (ROOT, FileType::Directory, "..".into())];
-        let mut kids: Vec<(String, bool)> = self.vol.children(&p).collect();
+        let mut kids: Vec<(String, bool)> = s.vol.children(&p).collect();
         // Files created but not yet stored show up too.
         let prefix = if p.is_empty() { String::new() } else { format!("{p}/") };
-        for h in self.handles.values() {
+        for h in s.handles.values() {
             if let Some(rest) = h.path.strip_prefix(&prefix)
                 && !rest.is_empty()
                 && !rest.contains('/')
@@ -403,11 +462,11 @@ impl Filesystem for VolumeFs {
         }
         for (name, is_dir) in kids {
             let child = if p.is_empty() { name.clone() } else { format!("{p}/{name}") };
-            let ino = self.ino(&child);
+            let ino = s.ino(&child);
             entries.push((ino, if is_dir { FileType::Directory } else { FileType::RegularFile }, name));
         }
         for (i, (ino, kind, name)) in entries.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(ino, (i + 1) as i64, kind, name) {
+            if reply.add(INodeNo(ino), (i + 1) as u64, kind, name) {
                 break;
             }
         }
@@ -426,7 +485,9 @@ fn options() -> Vec<MountOption> {
 
 /// Mount `vol` at `dir` until the returned session is dropped.
 pub fn mount_volume(rt: Handle, vol: Volume, dir: &Path) -> Result<fuser::BackgroundSession> {
-    fuser::spawn_mount2(VolumeFs::new(rt, vol), dir, &options())
+    let mut config = Config::default();
+    config.mount_options = options();
+    fuser::spawn_mount(VolumeFs::new(rt, vol), dir, &config)
         .with_context(|| format!("mount at {} (is FUSE installed? `fusermount3` must be on PATH)", dir.display()))
 }
 
@@ -444,7 +505,9 @@ pub async fn run(dir: &Path, label: &str, gateway: &str) -> Result<()> {
     eprintln!("  files are encrypted on this machine when closed; the network holds only ciphertext");
     let session = mount_volume(Handle::current(), vol, dir)?;
     tokio::signal::ctrl_c().await?;
-    drop(session);
+    if let Err(e) = session.umount_and_join() {
+        eprintln!("unmount: {e}");
+    }
     eprintln!("unmounted; making sure the network has copies of what you wrote...");
     let counts = net
         .wait_for_copies(Duration::from_secs(300), |_, _| {})
@@ -500,7 +563,7 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(mnt.join("taxes")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
         names.sort();
         assert_eq!(names, vec!["archive.bin", "return-2026.txt"]);
-        drop(session);
+        session.umount_and_join().unwrap();
 
         // Fresh mount, state comes only from the (ciphertext) store.
         let vol = rt.block_on(Volume::open(store.clone(), secret.clone(), "test")).unwrap();
@@ -509,7 +572,7 @@ mod tests {
         assert_eq!(std::fs::read(mnt.join("taxes/archive.bin")).unwrap(), big);
         std::fs::remove_file(mnt.join("taxes/archive.bin")).unwrap();
         assert!(!mnt.join("taxes/archive.bin").exists());
-        drop(session);
+        session.umount_and_join().unwrap();
 
         for e in std::fs::read_dir(&blobs).unwrap() {
             let b = std::fs::read(e.unwrap().path()).unwrap();

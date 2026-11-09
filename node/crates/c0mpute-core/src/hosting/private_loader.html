@@ -190,13 +190,15 @@
   }
 
   function renderSite(meta, content, blobUrl) {
-    const files = meta.files || {};
-    const bytesOf = (p) => content.subarray(files[p].offset, files[p].offset + files[p].len);
+    // Maps, not objects: paths come from the (signed, but owner-chosen)
+    // metadata, and a path like __proto__ must never reach a prototype.
+    const files = new Map(Object.entries(meta.files || {}));
+    const bytesOf = (p) => { const f = files.get(p); return content.subarray(f.offset, f.offset + f.len); };
     const resolve = (req) => {
       let p = (req || "").replace(/^\/+/, "").split(/[?#]/)[0];
       try { p = decodeURIComponent(p); } catch (_) {}
       const c = (p === "" || p.endsWith("/")) ? [p + "index.html"] : [p, ...(/\.[^/]*$/.test(p) ? [] : [p + ".html", p + "/index.html"])];
-      return c.find((x) => files[x]);
+      return c.find((x) => files.has(x));
     };
     const join = (dir, ref) => {
       const parts = (ref.startsWith("/") ? "" : dir).split("/").filter(Boolean);
@@ -204,15 +206,17 @@
       return parts.join("/") + (ref.split(/[?#]/)[0].endsWith("/") ? "/" : "");
     };
     const isRelative = (v) => v && !/^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(v.trim());
-    const cache = {};
+    const cache = new Map();
     const assetUrl = (p) => {
-      if (cache[p]) return cache[p];
-      const type = files[p].content_type;
+      if (cache.has(p)) return cache.get(p);
+      const type = files.get(p).content_type;
       let bytes = bytesOf(p);
       if (type.startsWith("text/css")) bytes = te.encode(rewriteCss(new TextDecoder().decode(bytes), dirOf(p)));
       // data: URLs, not blob: ones: the frame has an opaque origin and may
       // not load blob: URLs minted by this page's origin.
-      return (cache[p] = dataUrl(bytes, type));
+      const url = dataUrl(bytes, type);
+      cache.set(p, url);
+      return url;
     };
     const dataUrl = (bytes, type) => {
       let bin = "";
@@ -232,7 +236,7 @@
     const show = (req) => {
       const p = resolve(req);
       if (!p) { frame.srcdoc = "<p style='font:14px system-ui;padding:16px'>Not found in this private site.</p>"; return; }
-      const type = files[p].content_type;
+      const type = files.get(p).content_type;
       if (!type.startsWith("text/html")) { frame.src = assetUrl(p); return; }
       const doc = new DOMParser().parseFromString(new TextDecoder().decode(bytesOf(p)), "text/html");
       const dir = dirOf(p);
@@ -242,7 +246,7 @@
           if (!isRelative(v)) continue;
           const t = resolve(join(dir, v));
           if (!t) continue;
-          if (el.tagName === "A" && files[t].content_type.startsWith("text/html")) { el.setAttribute("href", "#"); el.setAttribute("data-c0p-nav", t); }
+          if (el.tagName === "A" && files.get(t).content_type.startsWith("text/html")) { el.setAttribute("href", "#"); el.setAttribute("data-c0p-nav", t); }
           else el.setAttribute(attr, assetUrl(t));
         }
       }
