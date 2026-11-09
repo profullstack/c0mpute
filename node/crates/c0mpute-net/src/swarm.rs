@@ -470,21 +470,26 @@ impl Libp2pNetwork {
             }
             false
         };
-        let short = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
-        let dialed = self.connect(peer).await;
-        debug!(%peer, dial = ?dialed.as_ref().err(), "reach: dial by peer id");
-        if dialed.is_ok() && wait_connected(short).await {
-            return Ok(());
-        }
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if self.find_peer(peer, left).await.is_empty() {
-            bail!("no address known or found in the DHT for {peer}");
-        }
-        self.connect(peer).await?;
-        if wait_connected(deadline).await {
-            Ok(())
-        } else {
-            bail!("could not connect to {peer} within {timeout:?}")
+        // Dial with what we know; failing that, ask the DHT (a routing table
+        // still filling right after start may need another round) and dial
+        // again, until the deadline.
+        loop {
+            let dialed = self.connect(peer).await;
+            debug!(%peer, dial = ?dialed.as_ref().err(), "reach: dial by peer id");
+            let step = (tokio::time::Instant::now() + Duration::from_millis(1500)).min(deadline);
+            if dialed.is_ok() && wait_connected(step).await {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
+            if self.find_peer(peer, left.min(Duration::from_secs(3))).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(500).min(left)).await;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
         }
     }
 
@@ -1546,6 +1551,40 @@ mod tests {
     /// A direct send arrives on the receiver's gossip stream, attributed to
     /// the sender, with no topic subscription or mesh at all; non-job topics
     /// and sends to ourselves are refused.
+    /// Two peers that only share a third (both bootstrapped to it, never
+    /// told each other's address) find and reach each other through the DHT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peers_known_only_through_a_third_reach_each_other() {
+        // SAFETY: set before any node starts; the test owns its process env.
+        unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
+        let hub = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("reach-hub")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        let hub_addr = wait_for_listen(&hub).await.with(libp2p::multiaddr::Protocol::P2p(hub.peer_id()));
+        let mk = |name: &'static str, boot: Multiaddr| async move {
+            Libp2pNetwork::spawn(
+                NetworkConfig::for_dir(tempdir(name))
+                    .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
+                    .with_bootstrap(vec![boot]),
+            )
+            .await
+            .unwrap()
+        };
+        let a = mk("reach-a", hub_addr.clone()).await;
+        let b = mk("reach-b", hub_addr).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The hub's routing table knows b: a DHT lookup from a finds it.
+        let found = a.find_peer(b.peer_id(), Duration::from_secs(10)).await;
+        assert!(!found.is_empty(), "find_peer found b's addresses through the hub");
+        a.reach(b.peer_id(), Duration::from_secs(10)).await.expect("a reaches b through the hub's routing table");
+        assert!(a.is_connected(b.peer_id()).await);
+        let topic = "c0mpute/jobs/diffusion.txt2img";
+        b.reach(a.peer_id(), Duration::from_secs(10)).await.unwrap();
+        a.send_direct(b.peer_id(), topic, b"x", Duration::from_secs(5)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn direct_send_reaches_the_peer_without_a_mesh() {
         let net_a = Libp2pNetwork::spawn(
