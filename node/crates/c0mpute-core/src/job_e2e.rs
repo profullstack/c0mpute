@@ -99,7 +99,14 @@ impl Binding<'_> {
         let mut out = Vec::with_capacity(256);
         lp(&mut out, DOMAIN);
         lp(&mut out, label);
-        for f in [self.job_id, self.workload, self.buyer_peer, self.worker_peer, self.buyer_key, self.worker_key] {
+        for f in [
+            self.job_id,
+            self.workload,
+            self.buyer_peer,
+            self.worker_peer,
+            self.buyer_key,
+            self.worker_key,
+        ] {
             lp(&mut out, f.as_bytes());
         }
         out
@@ -139,9 +146,14 @@ pub fn derive(secret: &StaticSecret, peer_key_hex: &str, b: &Binding) -> Result<
     let hk = Hkdf::<Sha256>::new(Some(DOMAIN), shared.as_bytes());
     let mut spec = [0u8; 32];
     let mut result = [0u8; 32];
-    hk.expand(&b.encode(b"spec-key"), &mut spec).map_err(|_| anyhow!("hkdf"))?;
-    hk.expand(&b.encode(b"result-key"), &mut result).map_err(|_| anyhow!("hkdf"))?;
-    Ok(JobKeys { spec: JobKey(spec), result: JobKey(result) })
+    hk.expand(&b.encode(b"spec-key"), &mut spec)
+        .map_err(|_| anyhow!("hkdf"))?;
+    hk.expand(&b.encode(b"result-key"), &mut result)
+        .map_err(|_| anyhow!("hkdf"))?;
+    Ok(JobKeys {
+        spec: JobKey(spec),
+        result: JobKey(result),
+    })
 }
 
 pub fn random_key() -> JobKey {
@@ -182,7 +194,10 @@ impl Commitment {
     pub fn new(spec: &Value) -> Result<Self> {
         let mut salt = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut salt);
-        Ok(Self { salt, spec: Zeroizing::new(serde_json::to_vec(spec)?) })
+        Ok(Self {
+            salt,
+            spec: Zeroizing::new(serde_json::to_vec(spec)?),
+        })
     }
 
     pub fn hash_hex(&self) -> String {
@@ -204,7 +219,13 @@ pub fn seal_spec(keys: &JobKeys, b: &Binding, c: &Commitment) -> Result<Vec<u8>>
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let aad = b.encode(b"spec");
     let ct = aead(&keys.spec)
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &aad })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &plain,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow!("seal spec"))?;
     let mut out = nonce.to_vec();
     out.extend(ct);
@@ -213,14 +234,25 @@ pub fn seal_spec(keys: &JobKeys, b: &Binding, c: &Commitment) -> Result<Vec<u8>>
 
 /// Open a sealed spec and check it against the offer's commitment. Returns
 /// the spec bytes.
-pub fn open_spec(keys: &JobKeys, b: &Binding, sealed: &[u8], commitment: &str) -> Result<Zeroizing<Vec<u8>>> {
+pub fn open_spec(
+    keys: &JobKeys,
+    b: &Binding,
+    sealed: &[u8],
+    commitment: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     if sealed.len() < 12 + TAG_LEN + 32 || sealed.len() > MAX_SEALED_SPEC {
         bail!("sealed spec has an impossible size");
     }
     let aad = b.encode(b"spec");
     let plain = Zeroizing::new(
         aead(&keys.spec)
-            .decrypt(Nonce::from_slice(&sealed[..12]), Payload { msg: &sealed[12..], aad: &aad })
+            .decrypt(
+                Nonce::from_slice(&sealed[..12]),
+                Payload {
+                    msg: &sealed[12..],
+                    aad: &aad,
+                },
+            )
             .map_err(|_| anyhow!("sealed spec does not open (wrong key, wrong job or tampered)"))?,
     );
     let (salt, spec) = plain.split_at(32);
@@ -247,7 +279,8 @@ pub fn sealed_len(plain: u64) -> u64 {
 fn blob_cipher(root: &JobKey, salt: &[u8]) -> Aes256Gcm {
     let hk = Hkdf::<Sha256>::new(Some(salt), &root.0);
     let mut k = Zeroizing::new([0u8; 32]);
-    hk.expand(b"c0mpute/job-e2e/v1 blob", &mut *k).expect("32-byte okm");
+    hk.expand(b"c0mpute/job-e2e/v1 blob", &mut *k)
+        .expect("32-byte okm");
     Aes256Gcm::new_from_slice(&*k).expect("32-byte key")
 }
 
@@ -273,10 +306,17 @@ pub fn seal_blob(root: &JobKey, plain: &[u8]) -> Result<Vec<u8>> {
     out.extend_from_slice(&header);
     let segments = plain.len().div_ceil(BLOB_SEGMENT).max(1);
     for i in 0..segments {
-        let seg = &plain[(i * BLOB_SEGMENT).min(plain.len())..((i + 1) * BLOB_SEGMENT).min(plain.len())];
+        let seg =
+            &plain[(i * BLOB_SEGMENT).min(plain.len())..((i + 1) * BLOB_SEGMENT).min(plain.len())];
         let last = i + 1 == segments;
         let ct = cipher
-            .encrypt(Nonce::from_slice(&seg_nonce(i as u64, last)), Payload { msg: seg, aad: &header })
+            .encrypt(
+                Nonce::from_slice(&seg_nonce(i as u64, last)),
+                Payload {
+                    msg: seg,
+                    aad: &header,
+                },
+            )
             .map_err(|_| anyhow!("seal blob"))?;
         out.extend(ct);
     }
@@ -300,7 +340,13 @@ pub fn open_blob(root: &JobKey, sealed: &[u8]) -> Result<Vec<u8>> {
         }
         let last = i + 1 == segments;
         let pt = cipher
-            .decrypt(Nonce::from_slice(&seg_nonce(i as u64, last)), Payload { msg: seg, aad: header })
+            .decrypt(
+                Nonce::from_slice(&seg_nonce(i as u64, last)),
+                Payload {
+                    msg: seg,
+                    aad: header,
+                },
+            )
             .map_err(|_| anyhow!("sealed blob does not open (wrong key, tampered or truncated)"))?;
         out.extend(pt);
     }
@@ -320,8 +366,12 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 fn seal_file_sync(root: &JobKey, src: &Path, dst: &Path) -> Result<u64> {
-    let mut input = std::io::BufReader::new(std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?);
-    let mut output = std::io::BufWriter::new(std::fs::File::create(dst).with_context(|| format!("create {}", dst.display()))?);
+    let mut input = std::io::BufReader::new(
+        std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?,
+    );
+    let mut output = std::io::BufWriter::new(
+        std::fs::File::create(dst).with_context(|| format!("create {}", dst.display()))?,
+    );
     let header = new_header();
     let cipher = blob_cipher(root, &header[8..]);
     output.write_all(&header)?;
@@ -332,10 +382,20 @@ fn seal_file_sync(root: &JobKey, src: &Path, dst: &Path) -> Result<u64> {
     let mut i = 0u64;
     loop {
         // Read ahead: a segment is the last one when nothing follows it.
-        let next_len = if cur_len == BLOB_SEGMENT { read_full(&mut input, &mut next)? } else { 0 };
+        let next_len = if cur_len == BLOB_SEGMENT {
+            read_full(&mut input, &mut next)?
+        } else {
+            0
+        };
         let last = next_len == 0;
         let ct = cipher
-            .encrypt(Nonce::from_slice(&seg_nonce(i, last)), Payload { msg: &cur[..cur_len], aad: &header })
+            .encrypt(
+                Nonce::from_slice(&seg_nonce(i, last)),
+                Payload {
+                    msg: &cur[..cur_len],
+                    aad: &header,
+                },
+            )
             .map_err(|_| anyhow!("seal blob"))?;
         output.write_all(&ct)?;
         written += ct.len() as u64;
@@ -351,13 +411,17 @@ fn seal_file_sync(root: &JobKey, src: &Path, dst: &Path) -> Result<u64> {
 }
 
 fn open_file_sync(root: &JobKey, src: &Path, dst: &Path) -> Result<u64> {
-    let mut input = std::io::BufReader::new(std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?);
+    let mut input = std::io::BufReader::new(
+        std::fs::File::open(src).with_context(|| format!("open {}", src.display()))?,
+    );
     let mut header = [0u8; BLOB_HEADER];
     if read_full(&mut input, &mut header)? != BLOB_HEADER || &header[..8] != BLOB_MAGIC {
         bail!("not a sealed job blob");
     }
     let cipher = blob_cipher(root, &header[8..]);
-    let mut output = std::io::BufWriter::new(std::fs::File::create(dst).with_context(|| format!("create {}", dst.display()))?);
+    let mut output = std::io::BufWriter::new(
+        std::fs::File::create(dst).with_context(|| format!("create {}", dst.display()))?,
+    );
     let full = BLOB_SEGMENT + TAG_LEN;
     let mut cur = vec![0u8; full];
     let mut next = vec![0u8; full];
@@ -365,15 +429,27 @@ fn open_file_sync(root: &JobKey, src: &Path, dst: &Path) -> Result<u64> {
     let mut i = 0u64;
     let mut written = 0u64;
     loop {
-        let next_len = if cur_len == full { read_full(&mut input, &mut next)? } else { 0 };
+        let next_len = if cur_len == full {
+            read_full(&mut input, &mut next)?
+        } else {
+            0
+        };
         let last = next_len == 0;
         if cur_len < TAG_LEN {
             bail!("sealed blob is truncated");
         }
         let pt = Zeroizing::new(
             cipher
-                .decrypt(Nonce::from_slice(&seg_nonce(i, last)), Payload { msg: &cur[..cur_len], aad: &header })
-                .map_err(|_| anyhow!("sealed blob does not open (wrong key, tampered or truncated)"))?,
+                .decrypt(
+                    Nonce::from_slice(&seg_nonce(i, last)),
+                    Payload {
+                        msg: &cur[..cur_len],
+                        aad: &header,
+                    },
+                )
+                .map_err(|_| {
+                    anyhow!("sealed blob does not open (wrong key, tampered or truncated)")
+                })?,
         );
         output.write_all(&pt)?;
         written += pt.len() as u64;
@@ -442,14 +518,28 @@ fn public_keys(workload: &str) -> &'static [&'static str] {
         "stt.transcribe" => &["model", "language", "audio_format"],
         "diffusion.txt2img" => &["model", "width", "height", "steps"],
         "music.txt2music" => &["model", "duration", "steps"],
-        "video.txt2vid" | "video.img2vid" => {
-            &["model", "image_format", "frames", "fps", "steps", "width", "height", "guidance_scale"]
-        }
+        "video.txt2vid" | "video.img2vid" => &[
+            "model",
+            "image_format",
+            "frames",
+            "fps",
+            "steps",
+            "width",
+            "height",
+            "guidance_scale",
+        ],
         "embed.text" => &["v", "model"],
         "ocr.extract" => &["v", "format", "lang"],
         "crawl.fetch" => &["v", "timeout_ms"],
         "blender.render-frame" => &[
-            "v", "frame_start", "frame_end", "engine", "device", "format", "resolution_pct", "samples",
+            "v",
+            "frame_start",
+            "frame_end",
+            "engine",
+            "device",
+            "format",
+            "resolution_pct",
+            "samples",
             "frame_timeout_secs",
         ],
         "workflow.step" => &["v", "kind"],
@@ -457,7 +547,15 @@ fn public_keys(workload: &str) -> &'static [&'static str] {
         "infernet.text.infer" => &["base_model", "max_new_tokens"],
         "infernet.temporal.infer" => &["model_hash", "ttl_s"],
         "webhook.deliver" => &["v", "max_attempts", "timeout_ms", "backoff_ms"],
-        "gameserver.start" => &["v", "game", "hours", "ram_gb", "cpus", "accept_eula", "backup_mins"],
+        "gameserver.start" => &[
+            "v",
+            "game",
+            "hours",
+            "ram_gb",
+            "cpus",
+            "accept_eula",
+            "backup_mins",
+        ],
         "gameserver.stop" => &["v", "id"],
         "captcha.solve" => &["v", "kind"],
         _ => &["v"],
@@ -477,14 +575,20 @@ fn public_scalar(v: &Value) -> bool {
 
 fn pick(obj: &Map<String, Value>, keys: &[&str]) -> Map<String, Value> {
     keys.iter()
-        .filter_map(|k| obj.get(*k).filter(|v| public_scalar(v)).map(|v| ((*k).to_string(), v.clone())))
+        .filter_map(|k| {
+            obj.get(*k)
+                .filter(|v| public_scalar(v))
+                .map(|v| ((*k).to_string(), v.clone()))
+        })
         .collect()
 }
 
 /// What a worker needs to decide whether to bid on `spec`, and nothing more.
 pub fn public_view(workload: &str, spec: &Value) -> Value {
     let mut out = Map::new();
-    let size = serde_json::to_vec(spec).map(|b| b.len() as u64).unwrap_or(0);
+    let size = serde_json::to_vec(spec)
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
     out.insert("spec_bytes".into(), bucket(size).into());
     let Some(obj) = spec.as_object() else {
         return Value::Object(out);
@@ -498,27 +602,46 @@ pub fn public_view(workload: &str, spec: &Value) -> Value {
     match workload {
         "ffmpeg.transcode" => {
             if let Some(s) = obj.get("spec").and_then(Value::as_object) {
-                let p = pick(s, &["codec", "bitrate_bps", "width", "height", "keyframe_interval", "hardware_pref"]);
+                let p = pick(
+                    s,
+                    &[
+                        "codec",
+                        "bitrate_bps",
+                        "width",
+                        "height",
+                        "keyframe_interval",
+                        "hardware_pref",
+                    ],
+                );
                 out.insert("spec".into(), Value::Object(p));
             }
         }
         "infernet.text.train" => {
             if let Some(j) = obj.get("job").and_then(Value::as_object) {
-                out.insert("job".into(), Value::Object(pick(j, &["kind", "base_model"])));
+                out.insert(
+                    "job".into(),
+                    Value::Object(pick(j, &["kind", "base_model"])),
+                );
             }
         }
         "infernet.temporal.train" => {
             if let Some(j) = obj.get("train_job").and_then(Value::as_object) {
                 let mut p = pick(j, &["schema_version", "kind", "model_type"]);
                 if let Some(pr) = j.get("privacy").and_then(Value::as_object) {
-                    p.insert("privacy".into(), Value::Object(pick(pr, &["mode", "upload_approved"])));
+                    p.insert(
+                        "privacy".into(),
+                        Value::Object(pick(pr, &["mode", "upload_approved"])),
+                    );
                 }
                 out.insert("train_job".into(), Value::Object(p));
             }
         }
         "gameserver.stop" => {
             if let Some(t) = obj.get("token").and_then(Value::as_str) {
-                out.insert("token_hash".into(), format!("sha256:{}", hex::encode(Sha256::digest(t.as_bytes()))).into());
+                out.insert(
+                    "token_hash".into(),
+                    format!("sha256:{}", hex::encode(Sha256::digest(t.as_bytes()))).into(),
+                );
             }
         }
         _ => {}
@@ -533,7 +656,9 @@ pub fn public_view_consistent(workload: &str, spec: &Value, published: &Value) -
     let actual = public_view(workload, spec);
     fn subset(p: &Value, a: &Value) -> bool {
         match (p, a) {
-            (Value::Object(p), Value::Object(a)) => p.iter().all(|(k, v)| a.get(k).is_some_and(|av| subset(v, av))),
+            (Value::Object(p), Value::Object(a)) => p
+                .iter()
+                .all(|(k, v)| a.get(k).is_some_and(|av| subset(v, av))),
             _ => p == a,
         }
     }
@@ -598,7 +723,12 @@ impl BuyerSession {
             rand::rngs::OsRng.fill_bytes(&mut n);
             hex::encode(n)
         });
-        Ok(Self { public_hex: public_hex(&secret), secret, commitment: Commitment::new(spec)?, attest_nonce })
+        Ok(Self {
+            public_hex: public_hex(&secret),
+            secret,
+            commitment: Commitment::new(spec)?,
+            attest_nonce,
+        })
     }
 
     pub fn spec_hash(&self) -> String {
@@ -614,7 +744,14 @@ impl BuyerSession {
         }
     }
 
-    fn binding<'a>(&'a self, job_id: &'a str, workload: &'a str, buyer_peer: &'a str, bid: &'a JobBid, e: &'a BidE2e) -> Binding<'a> {
+    fn binding<'a>(
+        &'a self,
+        job_id: &'a str,
+        workload: &'a str,
+        buyer_peer: &'a str,
+        bid: &'a JobBid,
+        e: &'a BidE2e,
+    ) -> Binding<'a> {
         Binding {
             job_id,
             workload,
@@ -628,17 +765,31 @@ impl BuyerSession {
     /// A bid is usable only with an X25519 key its bidder signed for this
     /// job and buyer key (and, for confidential work, attestation evidence
     /// that binds the key and verifies).
-    pub fn check_bid(&self, job_id: &str, workload: &str, buyer_peer: &str, bid: &JobBid) -> Result<()> {
+    pub fn check_bid(
+        &self,
+        job_id: &str,
+        workload: &str,
+        buyer_peer: &str,
+        bid: &JobBid,
+    ) -> Result<()> {
         let e = bid.e2e.as_ref().context("bid carries no e2e key")?;
         parse_public(&e.worker_key)?;
-        let peer: PeerId = bid.bidder_peer_id.parse().map_err(|_| anyhow!("bidder peer id"))?;
-        let sig = B64.decode(&e.sig).map_err(|_| anyhow!("bid key signature is not base64"))?;
+        let peer: PeerId = bid
+            .bidder_peer_id
+            .parse()
+            .map_err(|_| anyhow!("bidder peer id"))?;
+        let sig = B64
+            .decode(&e.sig)
+            .map_err(|_| anyhow!("bid key signature is not base64"))?;
         let stmt = bid_statement(&self.binding(job_id, workload, buyer_peer, bid, e));
         if !c0mpute_net::identity::verify_peer_signature(&peer, &stmt, &sig) {
             bail!("bid key signature does not verify against the bidder's peer id");
         }
         if let Some(nonce) = &self.attest_nonce {
-            let evidence = e.attestation.as_ref().context("confidential job: bid has no attestation")?;
+            let evidence = e
+                .attestation
+                .as_ref()
+                .context("confidential job: bid has no attestation")?;
             let rd = report_data(job_id, &bid.bidder_peer_id, &e.worker_key, nonce);
             attestation_verifier()
                 .context("confidential job: no attestation verifier is configured on this buyer")?
@@ -650,7 +801,13 @@ impl BuyerSession {
 
     /// Seal the spec to the winner. Returns the sealed bytes and the key its
     /// result will be sealed back with.
-    pub fn seal_for(&self, job_id: &str, workload: &str, buyer_peer: &str, winner: &JobBid) -> Result<(Vec<u8>, JobKey)> {
+    pub fn seal_for(
+        &self,
+        job_id: &str,
+        workload: &str,
+        buyer_peer: &str,
+        winner: &JobBid,
+    ) -> Result<(Vec<u8>, JobKey)> {
         let e = winner.e2e.as_ref().context("winner has no e2e key")?;
         let b = self.binding(job_id, workload, buyer_peer, winner, e);
         let keys = derive(&self.secret, &e.worker_key, &b)?;
@@ -682,12 +839,24 @@ impl Drop for PayloadGuard {
 }
 
 /// Hold `sealed` for `winner` to fetch over [`PAYLOAD_SERVICE`].
-pub fn hold_payload(net: &Libp2pNetwork, job_id: &str, winner: PeerId, sealed: Vec<u8>) -> PayloadGuard {
+pub fn hold_payload(
+    net: &Libp2pNetwork,
+    job_id: &str,
+    winner: PeerId,
+    sealed: Vec<u8>,
+) -> PayloadGuard {
     net.register_rpc(PAYLOAD_SERVICE, Arc::new(PayloadHandler));
     if let Ok(mut p) = payloads().lock() {
         let now = Instant::now();
         p.retain(|_, v| v.until > now);
-        p.insert(job_id.to_string(), PendingPayload { winner, sealed: Arc::new(sealed), until: now + PAYLOAD_TTL });
+        p.insert(
+            job_id.to_string(),
+            PendingPayload {
+                winner,
+                sealed: Arc::new(sealed),
+                until: now + PAYLOAD_TTL,
+            },
+        );
     }
     PayloadGuard(job_id.to_string())
 }
@@ -702,7 +871,9 @@ impl RpcHandler for PayloadHandler {
         let job_id = std::str::from_utf8(&body).map_err(|_| "bad job id".to_string())?;
         let p = payloads().lock().map_err(|_| "unavailable".to_string())?;
         match p.get(job_id) {
-            Some(x) if x.winner == peer && x.until > Instant::now() => Ok(x.sealed.as_ref().clone()),
+            Some(x) if x.winner == peer && x.until > Instant::now() => {
+                Ok(x.sealed.as_ref().clone())
+            }
             // Same answer for "no such job" and "not yours".
             _ => Err("no sealed spec for this peer".into()),
         }
@@ -728,7 +899,10 @@ impl WorkerSession {
     #[cfg(test)]
     pub(crate) fn for_tests() -> Self {
         let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        Self { public_hex: public_hex(&secret), secret }
+        Self {
+            public_hex: public_hex(&secret),
+            secret,
+        }
     }
 
     /// A fresh key for a bid on `offer`, signed by our identity, plus TEE
@@ -754,17 +928,36 @@ impl WorkerSession {
         let attestation = match &e.attest_nonce {
             Some(nonce) => {
                 let rd = report_data(&offer.job_id, &me, &public_hex, nonce);
-                Some(attestation_provider().context("no TEE attestation provider on this node")?.evidence(&rd)?)
+                Some(
+                    attestation_provider()
+                        .context("no TEE attestation provider on this node")?
+                        .evidence(&rd)?,
+                )
             }
             None => None,
         };
-        Ok((Self { secret, public_hex: public_hex.clone() }, BidE2e { worker_key: public_hex, sig, attestation }))
+        Ok((
+            Self {
+                secret,
+                public_hex: public_hex.clone(),
+            },
+            BidE2e {
+                worker_key: public_hex,
+                sig,
+                attestation,
+            },
+        ))
     }
 
     /// Fetch the sealed spec from the buyer (point to point), open it, check
     /// it against the offer's commitment and public spec, and return the spec
     /// with the key the result must be sealed with.
-    pub async fn open_accept(&self, net: &Libp2pNetwork, offer: &JobOffer, accept: &JobAccept) -> Result<(Value, JobKey)> {
+    pub async fn open_accept(
+        &self,
+        net: &Libp2pNetwork,
+        offer: &JobOffer,
+        accept: &JobAccept,
+    ) -> Result<(Value, JobKey)> {
         let e = offer.e2e.as_ref().context("offer is not e2e")?;
         let me = net.peer_id().to_base58();
         let b = Binding {
@@ -787,8 +980,13 @@ impl WorkerSession {
 }
 
 async fn fetch_sealed(net: &Libp2pNetwork, accept: &JobAccept) -> Result<Vec<u8>> {
-    let buyer: PeerId = accept.buyer_peer_id.parse().map_err(|_| anyhow!("buyer peer id"))?;
-    for addr in crate::reachability::dialable_buyer_addrs(&accept.buyer_addrs, &accept.buyer_peer_id) {
+    let buyer: PeerId = accept
+        .buyer_peer_id
+        .parse()
+        .map_err(|_| anyhow!("buyer peer id"))?;
+    for addr in
+        crate::reachability::dialable_buyer_addrs(&accept.buyer_addrs, &accept.buyer_peer_id)
+    {
         let mut a = addr;
         if matches!(a.iter().last(), Some(c0mpute_net::Protocol::P2p(_))) {
             a.pop();
@@ -797,7 +995,10 @@ async fn fetch_sealed(net: &Libp2pNetwork, accept: &JobAccept) -> Result<Vec<u8>
     }
     let mut last = anyhow!("not tried");
     for attempt in 0..4u32 {
-        match net.rpc(buyer, PAYLOAD_SERVICE, accept.job_id.as_bytes().to_vec()).await {
+        match net
+            .rpc(buyer, PAYLOAD_SERVICE, accept.job_id.as_bytes().to_vec())
+            .await
+        {
             Ok(b) if b.len() <= MAX_SEALED_SPEC => return Ok(b),
             Ok(_) => bail!("sealed spec from the buyer is over the limit"),
             Err(e) => last = e,
@@ -826,14 +1027,30 @@ pub fn seal_result(accept: &JobAccept, plain: &[u8]) -> Result<Option<Vec<u8>>> 
 
 /// For a result file: the path to store (a sealed copy next to `path` for an
 /// e2e job, removed by the caller with [`SealedCopy`]'s drop) and its limit.
-pub async fn sealed_result_file(accept: &JobAccept, path: &Path, max_bytes: u64) -> Result<(SealedCopy, u64)> {
+pub async fn sealed_result_file(
+    accept: &JobAccept,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(SealedCopy, u64)> {
     match result_key(accept)? {
         Some(k) => {
             let sealed = path.with_extension("sealed");
             seal_file(k, path, &sealed).await?;
-            Ok((SealedCopy { path: sealed, temp: true }, sealed_len(max_bytes)))
+            Ok((
+                SealedCopy {
+                    path: sealed,
+                    temp: true,
+                },
+                sealed_len(max_bytes),
+            ))
         }
-        None => Ok((SealedCopy { path: path.to_path_buf(), temp: false }, max_bytes)),
+        None => Ok((
+            SealedCopy {
+                path: path.to_path_buf(),
+                temp: false,
+            },
+            max_bytes,
+        )),
     }
 }
 
@@ -924,7 +1141,14 @@ mod tests {
     use serde_json::json;
 
     fn binding<'a>(bk: &'a str, wk: &'a str) -> Binding<'a> {
-        Binding { job_id: "job-1", workload: "infernet.inference", buyer_peer: "B", worker_peer: "W", buyer_key: bk, worker_key: wk }
+        Binding {
+            job_id: "job-1",
+            workload: "infernet.inference",
+            buyer_peer: "B",
+            worker_peer: "W",
+            buyer_key: bk,
+            worker_key: wk,
+        }
     }
 
     #[test]
@@ -959,12 +1183,34 @@ mod tests {
         let bind = binding(&bp, &wp);
         let sealed = seal_spec(&derive(&b, &wp, &bind).unwrap(), &bind, &c).unwrap();
         assert!(!String::from_utf8_lossy(&sealed).contains("secret prompt"));
-        let opened = open_spec(&derive(&w, &bp, &bind).unwrap(), &bind, &sealed, &c.hash_hex()).unwrap();
+        let opened = open_spec(
+            &derive(&w, &bp, &bind).unwrap(),
+            &bind,
+            &sealed,
+            &c.hash_hex(),
+        )
+        .unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&opened).unwrap(), spec);
         // The loser (or anyone else) derives a different key.
         let lbind = binding(&bp, &lp_);
-        assert!(open_spec(&derive(&loser, &bp, &lbind).unwrap(), &lbind, &sealed, &c.hash_hex()).is_err());
-        assert!(open_spec(&derive(&loser, &bp, &bind).unwrap(), &bind, &sealed, &c.hash_hex()).is_err());
+        assert!(
+            open_spec(
+                &derive(&loser, &bp, &lbind).unwrap(),
+                &lbind,
+                &sealed,
+                &c.hash_hex()
+            )
+            .is_err()
+        );
+        assert!(
+            open_spec(
+                &derive(&loser, &bp, &bind).unwrap(),
+                &bind,
+                &sealed,
+                &c.hash_hex()
+            )
+            .is_err()
+        );
         // Tampering anywhere fails.
         for i in [0, 12, sealed.len() - 1] {
             let mut t = sealed.clone();
@@ -974,10 +1220,26 @@ mod tests {
         // Moved to another job: the associated data no longer matches.
         let mut moved = bind;
         moved.job_id = "job-2";
-        assert!(open_spec(&derive(&w, &bp, &bind).unwrap(), &moved, &sealed, &c.hash_hex()).is_err());
+        assert!(
+            open_spec(
+                &derive(&w, &bp, &bind).unwrap(),
+                &moved,
+                &sealed,
+                &c.hash_hex()
+            )
+            .is_err()
+        );
         // A different commitment is refused even with the right key.
         let other = Commitment::new(&spec).unwrap();
-        assert!(open_spec(&derive(&w, &bp, &bind).unwrap(), &bind, &sealed, &other.hash_hex()).is_err());
+        assert!(
+            open_spec(
+                &derive(&w, &bp, &bind).unwrap(),
+                &bind,
+                &sealed,
+                &other.hash_hex()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -985,14 +1247,30 @@ mod tests {
         let spec = json!({"text": "hi"});
         let a = Commitment::new(&spec).unwrap();
         let b = Commitment::new(&spec).unwrap();
-        assert_ne!(a.hash_hex(), b.hash_hex(), "salted: equal specs commit differently");
-        assert_ne!(a.hash_hex(), blake3::hash(spec.to_string().as_bytes()).to_hex().to_string());
+        assert_ne!(
+            a.hash_hex(),
+            b.hash_hex(),
+            "salted: equal specs commit differently"
+        );
+        assert_ne!(
+            a.hash_hex(),
+            blake3::hash(spec.to_string().as_bytes())
+                .to_hex()
+                .to_string()
+        );
     }
 
     #[test]
     fn blobs_round_trip_at_segment_edges_and_reject_tampering() {
         let k = random_key();
-        for n in [0, 1, BLOB_SEGMENT - 1, BLOB_SEGMENT, BLOB_SEGMENT + 1, 3 * BLOB_SEGMENT] {
+        for n in [
+            0,
+            1,
+            BLOB_SEGMENT - 1,
+            BLOB_SEGMENT,
+            BLOB_SEGMENT + 1,
+            3 * BLOB_SEGMENT,
+        ] {
             let plain: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
             let sealed = seal_blob(&k, &plain).unwrap();
             assert_eq!(sealed.len() as u64, sealed_len(n as u64), "n={n}");
@@ -1024,7 +1302,10 @@ mod tests {
             let size = seal_file(&k, &src, &sealed).await.unwrap();
             assert_eq!(size, sealed_len(n as u64));
             // File and memory formats are the same.
-            assert_eq!(open_blob(&k, &std::fs::read(&sealed).unwrap()).unwrap(), plain);
+            assert_eq!(
+                open_blob(&k, &std::fs::read(&sealed).unwrap()).unwrap(),
+                plain
+            );
             let out = dir.path().join("out");
             assert_eq!(open_file(&k, &sealed, &out).await.unwrap(), n as u64);
             assert_eq!(std::fs::read(&out).unwrap(), plain);
@@ -1040,26 +1321,86 @@ mod tests {
     #[test]
     fn public_views_carry_no_content() {
         let cases = [
-            ("infernet.inference", json!({"v": 1, "model": "qwen2.5:0.5b", "messages": [{"role": "user", "content": "SECRET-1"}], "max_tokens": 64})),
-            ("tts.synthesize", json!({"text": "SECRET-1", "engine": "kokoro", "voice": "af_heart", "locale": "en-US", "speed": 1.0, "persona": "SECRET-1"})),
-            ("stt.transcribe", json!({"audio_hash": "SECRET-1", "audio_size": 12345, "audio_pieces": ["SECRET-1"], "audio_key": "SECRET-1", "model": "base", "audio_format": "wav"})),
-            ("diffusion.txt2img", json!({"prompt": "SECRET-1", "model": "sd", "width": 512, "height": 512, "steps": 20, "seed": 7})),
-            ("music.txt2music", json!({"prompt": "SECRET-1", "lyrics": "SECRET-1", "duration": 30})),
-            ("video.img2vid", json!({"model": "m", "prompt": "SECRET-1", "negative_prompt": "SECRET-1", "image_hash": "SECRET-1", "image_key": "SECRET-1", "frames": 16})),
-            ("embed.text", json!({"v": 1, "model": "e5", "texts": ["SECRET-1"]})),
-            ("ocr.extract", json!({"v": 1, "input_hash": "SECRET-1", "input_key": "SECRET-1", "format": "png", "lang": "eng"})),
-            ("crawl.fetch", json!({"v": 1, "url": "https://SECRET-1.example/", "headers": {"cookie": "SECRET-1"}})),
-            ("blender.render-frame", json!({"v": 1, "input_hash": "SECRET-1", "input_size": 9, "input_pieces": ["SECRET-1"], "frame_start": 1, "frame_end": 2})),
-            ("workflow.step", json!({"v": 1, "kind": "http_call", "config": {"url": "https://SECRET-1/"}, "input": "SECRET-1"})),
-            ("ffmpeg.transcode", json!({"input_url": "https://SECRET-1/a.mp4", "preset": "720p", "spec": {"codec": "h264", "bitrate_bps": 1, "width": 1, "height": 1, "keyframe_interval": 1, "extra_ffmpeg_args": ["drawtext=SECRET-1"]}})),
-            ("infernet.text.train", json!({"job": {"kind": "lora", "base_model": "org/m", "data": "SECRET-1"}, "dataset_hash": "SECRET-1", "dataset_url": "https://SECRET-1"})),
-            ("infernet.text.infer", json!({"adapter_hash": "SECRET-1", "base_model": "org/m", "messages": [{"role": "user", "content": "SECRET-1"}], "max_new_tokens": 9})),
-            ("gameserver.stop", json!({"v": 1, "id": "srv", "token": "SECRET-1"})),
-            ("gameserver.start", json!({"v": 1, "game": "minecraft", "hours": 1, "ram_gb": 2, "cpus": 1.0, "stop_hash": "SECRET-1", "client_pubkey": "SECRET-1", "backup_pubkey": "SECRET-1", "world": "SECRET-1", "server_name": "SECRET-1"})),
-            ("captcha.solve", json!({"v": 1, "kind": "text", "image": "SECRET-1"})),
-            ("webhook.deliver", json!({"v": 1, "client_pubkey": "SECRET-1", "max_attempts": 3, "timeout_ms": 1000, "backoff_ms": 100})),
-            ("infernet.temporal.infer", json!({"model_hash": "sha256:00", "session_id": "SECRET-1", "ttl_s": 60, "account_scope": "SECRET-1", "client_pubkey": "SECRET-1"})),
-            ("infernet.temporal.train", json!({"train_job": {"kind": "train_job", "dataset_hash": "SECRET-1", "privacy": {"mode": "trusted_worker"}}, "dataset_url": "https://SECRET-1", "dataset_hash": "SECRET-1"})),
+            (
+                "infernet.inference",
+                json!({"v": 1, "model": "qwen2.5:0.5b", "messages": [{"role": "user", "content": "SECRET-1"}], "max_tokens": 64}),
+            ),
+            (
+                "tts.synthesize",
+                json!({"text": "SECRET-1", "engine": "kokoro", "voice": "af_heart", "locale": "en-US", "speed": 1.0, "persona": "SECRET-1"}),
+            ),
+            (
+                "stt.transcribe",
+                json!({"audio_hash": "SECRET-1", "audio_size": 12345, "audio_pieces": ["SECRET-1"], "audio_key": "SECRET-1", "model": "base", "audio_format": "wav"}),
+            ),
+            (
+                "diffusion.txt2img",
+                json!({"prompt": "SECRET-1", "model": "sd", "width": 512, "height": 512, "steps": 20, "seed": 7}),
+            ),
+            (
+                "music.txt2music",
+                json!({"prompt": "SECRET-1", "lyrics": "SECRET-1", "duration": 30}),
+            ),
+            (
+                "video.img2vid",
+                json!({"model": "m", "prompt": "SECRET-1", "negative_prompt": "SECRET-1", "image_hash": "SECRET-1", "image_key": "SECRET-1", "frames": 16}),
+            ),
+            (
+                "embed.text",
+                json!({"v": 1, "model": "e5", "texts": ["SECRET-1"]}),
+            ),
+            (
+                "ocr.extract",
+                json!({"v": 1, "input_hash": "SECRET-1", "input_key": "SECRET-1", "format": "png", "lang": "eng"}),
+            ),
+            (
+                "crawl.fetch",
+                json!({"v": 1, "url": "https://SECRET-1.example/", "headers": {"cookie": "SECRET-1"}}),
+            ),
+            (
+                "blender.render-frame",
+                json!({"v": 1, "input_hash": "SECRET-1", "input_size": 9, "input_pieces": ["SECRET-1"], "frame_start": 1, "frame_end": 2}),
+            ),
+            (
+                "workflow.step",
+                json!({"v": 1, "kind": "http_call", "config": {"url": "https://SECRET-1/"}, "input": "SECRET-1"}),
+            ),
+            (
+                "ffmpeg.transcode",
+                json!({"input_url": "https://SECRET-1/a.mp4", "preset": "720p", "spec": {"codec": "h264", "bitrate_bps": 1, "width": 1, "height": 1, "keyframe_interval": 1, "extra_ffmpeg_args": ["drawtext=SECRET-1"]}}),
+            ),
+            (
+                "infernet.text.train",
+                json!({"job": {"kind": "lora", "base_model": "org/m", "data": "SECRET-1"}, "dataset_hash": "SECRET-1", "dataset_url": "https://SECRET-1"}),
+            ),
+            (
+                "infernet.text.infer",
+                json!({"adapter_hash": "SECRET-1", "base_model": "org/m", "messages": [{"role": "user", "content": "SECRET-1"}], "max_new_tokens": 9}),
+            ),
+            (
+                "gameserver.stop",
+                json!({"v": 1, "id": "srv", "token": "SECRET-1"}),
+            ),
+            (
+                "gameserver.start",
+                json!({"v": 1, "game": "minecraft", "hours": 1, "ram_gb": 2, "cpus": 1.0, "stop_hash": "SECRET-1", "client_pubkey": "SECRET-1", "backup_pubkey": "SECRET-1", "world": "SECRET-1", "server_name": "SECRET-1"}),
+            ),
+            (
+                "captcha.solve",
+                json!({"v": 1, "kind": "text", "image": "SECRET-1"}),
+            ),
+            (
+                "webhook.deliver",
+                json!({"v": 1, "client_pubkey": "SECRET-1", "max_attempts": 3, "timeout_ms": 1000, "backoff_ms": 100}),
+            ),
+            (
+                "infernet.temporal.infer",
+                json!({"model_hash": "sha256:00", "session_id": "SECRET-1", "ttl_s": 60, "account_scope": "SECRET-1", "client_pubkey": "SECRET-1"}),
+            ),
+            (
+                "infernet.temporal.train",
+                json!({"train_job": {"kind": "train_job", "dataset_hash": "SECRET-1", "privacy": {"mode": "trusted_worker"}}, "dataset_url": "https://SECRET-1", "dataset_hash": "SECRET-1"}),
+            ),
             ("unknown.workload", json!({"v": 1, "anything": "SECRET-1"})),
         ];
         for (w, spec) in cases {
@@ -1069,7 +1410,10 @@ mod tests {
         }
         let v = public_view("infernet.inference", &cases_model());
         assert_eq!(v["model"], "qwen2.5:0.5b");
-        assert_eq!(public_view("stt.transcribe", &json!({"audio_size": 12345}))["audio_size"], 16384);
+        assert_eq!(
+            public_view("stt.transcribe", &json!({"audio_size": 12345}))["audio_size"],
+            16384
+        );
     }
 
     fn cases_model() -> Value {
@@ -1079,10 +1423,25 @@ mod tests {
     #[test]
     fn a_buyer_cannot_publish_one_spec_and_seal_another() {
         let spec = json!({"v": 1, "model": "big-model", "messages": []});
-        let claimed = public_view("infernet.inference", &json!({"v": 1, "model": "small-model", "messages": []}));
-        assert!(!public_view_consistent("infernet.inference", &spec, &claimed));
-        assert!(public_view_consistent("infernet.inference", &spec, &json!({})));
-        assert!(!public_view_consistent("infernet.inference", &spec, &json!("x")));
+        let claimed = public_view(
+            "infernet.inference",
+            &json!({"v": 1, "model": "small-model", "messages": []}),
+        );
+        assert!(!public_view_consistent(
+            "infernet.inference",
+            &spec,
+            &claimed
+        ));
+        assert!(public_view_consistent(
+            "infernet.inference",
+            &spec,
+            &json!({})
+        ));
+        assert!(!public_view_consistent(
+            "infernet.inference",
+            &spec,
+            &json!("x")
+        ));
     }
 
     #[test]
@@ -1090,6 +1449,9 @@ mod tests {
         let a = report_data("j", "w", "k", "n");
         assert_ne!(a, report_data("j", "w", "k", "m"));
         assert_ne!(a, report_data("j", "w", "kk", "n"));
-        assert_ne!(report_data("ab", "c", "k", "n"), report_data("a", "bc", "k", "n"));
+        assert_ne!(
+            report_data("ab", "c", "k", "n"),
+            report_data("a", "bc", "k", "n")
+        );
     }
 }
