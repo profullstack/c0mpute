@@ -534,12 +534,9 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
         .arg(prompt)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().context("start sd-cli")?;
-    let result = tokio::time::timeout(JOB_TIMEOUT, child.wait_with_output())
-        .await
-        .context("sd-cli timed out")??;
+        .stderr(std::process::Stdio::piped());
+    // Kills sd-cli's whole process group on a timeout or a cancel.
+    let result = crate::job_process::run_with_timeout(&mut command, JOB_TIMEOUT, "sd-cli").await?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let tail: String = stderr

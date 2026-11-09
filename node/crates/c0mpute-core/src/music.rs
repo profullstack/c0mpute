@@ -547,12 +547,10 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
         .env("TMPDIR", job_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().context("start the ACE-Step worker")?;
-    let result = tokio::time::timeout(JOB_TIMEOUT, child.wait_with_output())
-        .await
-        .context("ACE-Step timed out")??;
+        .stderr(std::process::Stdio::piped());
+    // Kills the worker's whole process group on a timeout or a cancel.
+    let result =
+        crate::job_process::run_with_timeout(&mut command, JOB_TIMEOUT, "ACE-Step").await?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
