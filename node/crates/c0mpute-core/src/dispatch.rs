@@ -782,6 +782,7 @@ mod tests {
             external_ref: Some("infernet:job_42".into()),
             buyer_addrs: Vec::new(),
             e2e: None,
+            sealed_spec: None,
             result_key: None,
         }
     }

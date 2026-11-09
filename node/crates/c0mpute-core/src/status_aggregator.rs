@@ -955,6 +955,7 @@ mod tests {
             external_ref: None,
             buyer_addrs: Vec::new(),
             e2e: None,
+            sealed_spec: None,
             result_key: None,
         })
         .await;
@@ -995,6 +996,7 @@ mod tests {
             external_ref: None,
             buyer_addrs: Vec::new(),
             e2e: None,
+            sealed_spec: None,
             result_key: None,
         })
         .await;
