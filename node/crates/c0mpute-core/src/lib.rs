@@ -26,6 +26,7 @@ pub mod podcast;
 pub mod pricing;
 pub mod reachability;
 pub mod render;
+pub mod inference;
 pub mod private;
 pub mod register;
 pub mod resources;

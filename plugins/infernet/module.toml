@@ -1,7 +1,19 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# Source code lives upstream at github.com/infernetprotocol/infernet-protocol, NOT
-# this repo. This directory is a marketplace wrapper only.
+# Two halves:
+#
+# - `infernet.inference` (chat) is NATIVE in the c0mpute binary since this
+#   release: buyers run `c0mpute chat --p2p "..."` (the default when not signed
+#   in to c0mpute.com) or POST it to `c0mpute jobs serve`; workers answer from
+#   their own OpenAI-compatible runtime (Ollama at 127.0.0.1:11434 by default,
+#   or llama-server etc. via C0MPUTE_INFERENCE_URL; `off` disables), role
+#   `inference`, on by default, advertised only while the runtime lists chat
+#   models (tags infernet:inference + infernet:inference:model:<id>). Answers
+#   come back as content-addressed chunks checked against the receipt. Neither
+#   side needs the infernet binary or c0mpute.com (node/crates/c0mpute-core/src/inference.rs).
+# - The temporal and text (LoRA) workloads below still run Infernet's own
+#   runtimes on the worker, so those workers need the infernet CLI (installed by
+#   install.sh). Source: github.com/infernetprotocol/infernet-protocol.
 #
 # `version` is this wrapper's, kept in lockstep with c0mpute by
 # scripts/bump-version.sh. The installed infernet CLI's own version is what
@@ -13,9 +25,8 @@ name        = "Infernet Protocol — AI inference"
 version     = "0.2.79"
 kind        = "workload"
 category    = "ai"
-status      = "partial"
-status_note = "Chat runs through the separate infernet CLI, not the c0mpute binary."
-description = "Decentralized AI inference workloads on c0mpute. Runs models on consumer/prosumer GPUs with model-hash and runtime-image verification. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) and fine-tunes language models (LoRA) with live progress, on CPU or GPU."
+status      = "available"
+description = "Chat with open models peer to peer from the c0mpute binary itself (`c0mpute chat --p2p`): workers answer from their own Ollama or llama.cpp server, no account or extra CLI. Also trains and serves temporal policies (CfC/LTC liquid networks, GRU baseline) and fine-tunes language models (LoRA) with live progress, on CPU or GPU."
 author      = "Infernet Protocol"
 license     = "MIT"
 homepage    = "https://infernetprotocol.com"
@@ -23,13 +34,15 @@ source      = "https://github.com/infernetprotocol/infernet-protocol"
 keywords    = ["ai", "llm", "inference", "gpu", "temporal-policy", "liquid-neural-network", "cfc", "lora", "fine-tuning"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["gpu:nvidia?", "model-runtime"]
 
 [module.workloads]
-"infernet.inference" = { command = "chat", validation = "schema_and_spotcheck" }
+# Native (no infernet binary): `c0mpute chat --p2p`; workers serve their local
+# OpenAI-compatible runtime. Receipts carry the answer chunk's content hash.
+"infernet.inference" = { command = "c0mpute chat --p2p", runs = "builtin", validation = "answer_chunk_hash" }
 # Temporal policies (liquid-agent/v1). Executed by Infernet >= 0.1.66
 # (`infernet model train --job` / `infernet model serve --stdio`, which run
 # the infernet-liquid runtime the operator installs with
@@ -67,6 +80,11 @@ runtime  = "infernet:text:runtime:peft"
 devices  = ["infernet:text:device:cpu", "infernet:text:device:cuda"]
 ram      = "c0mpute:ram:<n>gb+"
 
+[module.capabilities.inference]
+# Tags a worker serving chat advertises; buyers naming a model require its tag.
+role  = "infernet:inference"
+model = "infernet:inference:model:<id>"
+
 [module.surfaces]
-cli = "infernet"
+cli = "c0mpute chat --p2p"
 # web = "c0mpute.com/infernet"   # planned

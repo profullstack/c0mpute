@@ -1,6 +1,10 @@
-//! `c0mpute chat`: chat with models on the c0mpute network through c0mpute.com.
+//! `c0mpute chat`: chat with models on the c0mpute network, either peer to
+//! peer (`--p2p`, and the default when not signed in: an `infernet.inference`
+//! auction over libp2p, answered by a worker's own Ollama/llama-server; see
+//! `c0mpute_core::inference`) or through c0mpute.com with a signed-in key.
 //!
 //! ```text
+//! c0mpute chat --p2p "explain LoRA"      # a worker answers over libp2p, no account
 //! c0mpute chat login                     # device sign-in: approve on c0mpute.com with CoinPay (DID required)
 //! c0mpute chat "explain LoRA"            # one answer, streamed
 //! c0mpute chat                           # interactive session (TTY)
@@ -52,6 +56,16 @@ struct Args {
     /// Print the full JSON response instead of streaming text.
     #[arg(long)]
     json: bool,
+    /// Ask a worker directly over libp2p (`infernet.inference`): no sign-in,
+    /// no c0mpute.com. The default when this machine is not signed in.
+    #[arg(long)]
+    p2p: bool,
+    /// With --p2p: the most you pay a worker for one answer, in USD.
+    #[arg(long, default_value_t = 0.01)]
+    max_price: f64,
+    /// With --p2p: seconds to wait for an answer.
+    #[arg(long, default_value_t = 300)]
+    timeout_s: u64,
     /// c0mpute site URL (default https://c0mpute.com, or $C0MPUTE_URL).
     #[arg(long)]
     url: Option<String>,
@@ -151,7 +165,10 @@ pub async fn run(args: &[String]) -> Result<()> {
     let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
         .unwrap_or_else(|e| e.exit());
     let url = base_url(a.url.as_deref());
-    let key = require_key()?;
+    let p2p = a.p2p || api_key().is_none();
+    if p2p && !a.p2p {
+        eprintln!("(not signed in: asking a c0mpute worker peer to peer; `c0mpute chat login` uses c0mpute.com instead)");
+    }
 
     let mut prompt = a.prompt.join(" ");
     let stdin = std::io::stdin();
@@ -171,9 +188,23 @@ pub async fn run(args: &[String]) -> Result<()> {
         if !std::io::stdin().is_terminal() {
             bail!("no prompt: pass it as an argument or pipe it on stdin");
         }
-        return repl(&url, &key, &a, messages).await;
+        if p2p {
+            return P2pChat::boot(&a).await?.repl(&a, messages).await;
+        }
+        return repl(&url, &require_key()?, &a, messages).await;
     }
     messages.push(json!({"role": "user", "content": prompt}));
+    if p2p {
+        let chat = P2pChat::boot(&a).await?;
+        let (text, raw) = chat.ask(&a, a.model.clone(), &messages).await?;
+        if a.json {
+            println!("{}", serde_json::to_string_pretty(&raw)?);
+        } else {
+            println!("{text}");
+        }
+        return Ok(());
+    }
+    let key = require_key()?;
     let answer = complete(&url, &key, &a, &messages, a.json).await?;
     if a.json {
         println!("{answer}");
@@ -300,8 +331,104 @@ fn clone_args(a: &Args) -> Args {
         max_tokens: a.max_tokens,
         temperature: a.temperature,
         json: false,
+        p2p: a.p2p,
+        max_price: a.max_price,
+        timeout_s: a.timeout_s,
         url: a.url.clone(),
         prompt: vec![],
+    }
+}
+
+/// The `infernet.inference` spec for one turn.
+fn p2p_spec(a: &Args, model: Option<String>, messages: &[Value]) -> Result<Value> {
+    let mut spec = json!({"v": 1, "messages": messages});
+    if let Some(m) = model {
+        spec["model"] = json!(m);
+    }
+    if let Some(t) = a.max_tokens {
+        spec["max_tokens"] = json!(t);
+    }
+    if let Some(t) = a.temperature {
+        spec["temperature"] = json!(t);
+    }
+    c0mpute_core::inference::parse_spec(&spec).map_err(|e| anyhow!(e))?;
+    Ok(spec)
+}
+
+/// Chat with workers over libp2p: one buyer node for the whole session, one
+/// `infernet.inference` auction per turn, answers fetched from the winner and
+/// checked against its receipt.
+struct P2pChat {
+    bridge: c0mpute_core::jobs_gateway::JobsBridge,
+}
+
+impl P2pChat {
+    async fn boot(a: &Args) -> Result<Self> {
+        let sup = c0mpute_core::Supervisor::boot_buyer(c0mpute_core::Config::default()).await?;
+        // Any token: the bridge's HTTP side is never mounted here.
+        let token: String = std::iter::repeat_n('x', 32).collect();
+        let bridge = c0mpute_core::jobs_gateway::JobsBridge::new(sup.libp2p, sup.store, token, a.max_price, Vec::new())?;
+        // Let the swarm reach peers before the first auction.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok(Self { bridge })
+    }
+
+    async fn ask(&self, a: &Args, model: Option<String>, messages: &[Value]) -> Result<(String, Value)> {
+        let spec = p2p_spec(a, model, messages)?;
+        let r = self
+            .bridge
+            .submit_once(c0mpute_core::inference::WORKLOAD, spec, Duration::from_secs(a.timeout_s.clamp(10, 900)))
+            .await
+            .context("no worker answered (none serving infernet.inference for this model, or all over --max-price)")?;
+        let v = r.get("result").cloned().unwrap_or(r.clone());
+        if v["ok"] != json!(true) {
+            bail!("the worker could not answer: {}", v["error"].as_str().unwrap_or("?"));
+        }
+        Ok((v["text"].as_str().unwrap_or_default().to_string(), r))
+    }
+
+    async fn repl(&self, a: &Args, mut messages: Vec<Value>) -> Result<()> {
+        let mut model = a.model.clone();
+        eprintln!("c0mpute chat (peer to peer) · {} · /model <id>, /reset, /exit", model.as_deref().unwrap_or("any served model"));
+        let stdin = std::io::stdin();
+        let base = messages.clone();
+        loop {
+            eprint!("\x1b[32m> \x1b[0m");
+            std::io::stderr().flush().ok();
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line)? == 0 {
+                eprintln!();
+                return Ok(());
+            }
+            let line = line.trim();
+            match line {
+                "" => continue,
+                "/exit" | "/quit" => return Ok(()),
+                "/reset" => {
+                    messages = base.clone();
+                    eprintln!("(new conversation)");
+                    continue;
+                }
+                _ if line.starts_with("/model") => {
+                    let m = line.trim_start_matches("/model").trim();
+                    model = (!m.is_empty() && m != "auto").then(|| m.to_string());
+                    eprintln!("(model: {})", model.as_deref().unwrap_or("any served model"));
+                    continue;
+                }
+                _ => {}
+            }
+            messages.push(json!({"role": "user", "content": line}));
+            match self.ask(a, model.clone(), &messages).await {
+                Ok((answer, _)) => {
+                    println!("{answer}");
+                    messages.push(json!({"role": "assistant", "content": answer}));
+                }
+                Err(e) => {
+                    messages.pop();
+                    eprintln!("error: {e:#}");
+                }
+            }
+        }
     }
 }
 
@@ -497,6 +624,27 @@ mod tests {
         assert_eq!(a.model.as_deref(), Some("qwen2.5:7b"));
         assert_eq!(a.system.as_deref(), Some("terse"));
         assert_eq!(a.prompt.join(" "), "what is 2+2");
+        assert!(!a.p2p);
+    }
+
+    #[test]
+    fn p2p_turn_is_a_valid_inference_spec() {
+        let a = Args::try_parse_from(["c0mpute chat", "--p2p", "--max-tokens", "64", "--temperature", "0.3", "hi"]).unwrap();
+        assert!(a.p2p);
+        let msgs = vec![json!({"role": "system", "content": "terse"}), json!({"role": "user", "content": "hi"})];
+        let spec = p2p_spec(&a, Some("qwen2.5:0.5b".into()), &msgs).unwrap();
+        assert_eq!(spec["v"], 1);
+        assert_eq!(spec["model"], "qwen2.5:0.5b");
+        assert_eq!(spec["max_tokens"], 64);
+        assert_eq!(
+            c0mpute_core::inference::required_capabilities(&spec),
+            vec!["infernet:inference".to_string(), "infernet:inference:model:qwen2.5:0.5b".to_string()]
+        );
+        let any = p2p_spec(&a, None, &msgs).unwrap();
+        assert!(any.get("model").is_none());
+        // A turn the workers would refuse never leaves this machine.
+        let bad = Args::try_parse_from(["c0mpute chat", "--p2p", "--temperature", "9", "hi"]).unwrap();
+        assert!(p2p_spec(&bad, None, &msgs).is_err());
     }
 
     #[test]

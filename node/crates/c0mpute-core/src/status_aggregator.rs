@@ -55,8 +55,8 @@ const DHT_CRAWL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Workload job topics we subscribe to. Gossipsub can't wildcard, so we
 /// enumerate the known workload types. `ffmpeg.transcode` is emitted by the
-/// worker daemon; `infernet.inference` is emitted by the infernet peer
-/// binary. Both always appear in the output (as zeros when idle) to mirror
+/// worker daemon; `infernet.inference` by workers serving their
+/// local OpenAI-compatible runtime. Both always appear in the output (as zeros when idle) to mirror
 /// the page's stub shape.
 // The temporal workloads (DIP 0026) are listed so seeds running the
 // aggregator also relay them for buyers that only know the seeds; their

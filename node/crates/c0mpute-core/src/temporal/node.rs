@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::{Libp2pNetwork, Multiaddr, NetworkConfig, bootstrap};
+use c0mpute_store::ChunkStore;
 use tokio::sync::Semaphore;
 use tracing::info;
 
@@ -27,6 +28,16 @@ pub struct NetOptions {
 }
 
 pub async fn spawn_node(o: &NetOptions) -> Result<Arc<Libp2pNetwork>> {
+    spawn(o, None).await
+}
+
+/// [`spawn_node`] that also answers chunk fetches from `store`, so peers can
+/// pull pieces this node stored and announced (text-train datasets and adapters).
+pub async fn spawn_node_with_store(o: &NetOptions, store: ChunkStore) -> Result<Arc<Libp2pNetwork>> {
+    spawn(o, Some(store)).await
+}
+
+async fn spawn(o: &NetOptions, store: Option<ChunkStore>) -> Result<Arc<Libp2pNetwork>> {
     std::fs::create_dir_all(&o.identity_dir)?;
     let parse = |v: &[String]| -> Result<Vec<Multiaddr>> { v.iter().map(|s| s.parse::<Multiaddr>().with_context(|| format!("bad multiaddr {s}"))).collect() };
     let mut boot = parse(&o.bootstrap)?;
@@ -34,7 +45,10 @@ pub async fn spawn_node(o: &NetOptions) -> Result<Arc<Libp2pNetwork>> {
         boot.extend(bootstrap::fetch_or_fallback(bootstrap::DEFAULT_BOOTSTRAP_URL, bootstrap::default_seeds()).await);
     }
     let listen = if o.listen.is_empty() { vec!["/ip4/0.0.0.0/tcp/0".to_string()] } else { o.listen.clone() };
-    let cfg = NetworkConfig::for_dir(o.identity_dir.clone()).with_listen(parse(&listen)?).with_bootstrap(boot);
+    let mut cfg = NetworkConfig::for_dir(o.identity_dir.clone()).with_listen(parse(&listen)?).with_bootstrap(boot);
+    if let Some(store) = store {
+        cfg = cfg.with_local_source(Arc::new(crate::supervisor::StoreSource(store)));
+    }
     Ok(Arc::new(Libp2pNetwork::spawn(cfg).await?))
 }
 

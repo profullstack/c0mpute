@@ -2,18 +2,26 @@
 //! `infernet.text.infer` (answers from a trained adapter, further down).
 //!
 //! A buyer has a job file (`@infernetprotocol/training` job config, `kind:
-//! "lora"`) and a JSONL corpus. `c0mpute infernet text train` serves the
-//! corpus from a token-gated transfer server, auctions the job to workers that
-//! advertise `infernet:text:train`, and shows the winner's training live: the
-//! worker relays every training-protocol v1 event (`meta`, `step`, `eval`,
-//! `checkpoint`, `done`) to the transfer server as it happens. The worker then
-//! uploads the LoRA adapter, and the buyer keeps it only if its sha256 matches
-//! the receipt's `output_hash`.
+//! "lora"`) and a JSONL corpus. `c0mpute infernet text train` (and its front
+//! door `c0mpute train lora`) stores the corpus as content-addressed pieces in
+//! its own chunk store, auctions the job to workers that advertise
+//! `infernet:text:train`, and shows the winner's training live: the worker
+//! pulls the pieces over libp2p and publishes every training-protocol v1
+//! event (`meta`, `step`, `eval`, `checkpoint`, `done`) on the job topic as it
+//! happens. The worker then stores the LoRA adapter as pieces behind an
+//! [`AdapterManifest`] whose hash its receipt carries; the buyer fetches it
+//! over libp2p and keeps it only if the weights' sha256 matches. Peer to peer
+//! end to end: neither side needs a reachable HTTP address.
+//!
+//! Workers before the pieces transport take the corpus and return the adapter
+//! over HTTP from the buyer's transfer server; buyers opt into serving them
+//! with `--legacy-http` (see [`TextTrainSpec`]).
 //!
 //! The training itself is Infernet's (`infernet model train --job <job.json>
-//! --json`, the `peft` backend). c0mpute only moves the data, the progress and
-//! the result, over the same offer → bid → accept → receipt protocol as every
-//! other workload. One job per node at a time.
+//! --json`, the `peft` backend); c0mpute hands it local file paths. c0mpute
+//! only moves the data, the progress and the result, over the same offer →
+//! bid → accept → receipt protocol as every other workload. One job per node
+//! at a time.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -23,7 +31,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use c0mpute_net::Libp2pNetwork;
+use c0mpute_net::{Libp2pNetwork, Network, PeerId};
+use c0mpute_store::ChunkStore;
 use c0mpute_net::topics::JobStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,7 +45,7 @@ use crate::buyer::JobAuction;
 use crate::runner::{AcceptedJob, publish_receipt};
 use crate::temporal::client::auction_with_mesh_retry;
 use crate::temporal::http::{SlotEvent, TransferServer};
-use crate::temporal::node::{NetOptions, spawn_node};
+use crate::temporal::node::{NetOptions, spawn_node_with_store};
 
 pub const TRAIN_WORKLOAD: &str = "infernet.text.train";
 pub const KINDS: [&str; 2] = ["lora", "peft"];
@@ -49,19 +58,91 @@ pub fn tag(workload: &str) -> String {
     workload.replace('.', ":")
 }
 
+/// Capability tag: this worker's runner trains `{"messages": [...]}` records
+/// as whole multi-turn conversations (Infernet's peft runner reports
+/// `formats: ["text", "messages"]`). Buyers whose corpus has conversations
+/// require it, so an older runner (which would drop them) never wins.
+pub const MESSAGES_FORMAT_TAG: &str = "infernet:text:format:messages";
+/// Largest adapter file a buyer accepts as pieces.
+pub const MAX_ADAPTER_FILE_BYTES: usize = 2 << 30;
+/// How long a worker keeps a finished adapter's pieces for the buyer to fetch.
+const ADAPTER_PIECES_TTL: Duration = Duration::from_secs(6 * 3600);
+/// Gossip message type a worker publishes each training event as.
+pub const EVENT_MSG: &str = "text_train_event";
+/// At most one `step` event per this interval goes on the wire.
+const STEP_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+
 /// `JobOffer.spec_inline` for `infernet.text.train`.
+///
+/// Two transports, both checked against the same `dataset_hash` and adapter
+/// hash:
+///
+/// - **pieces (peer to peer, this version on)**: the buyer stores the corpus
+///   as [`crate::pieces::INPUT_PIECE_BYTES`] pieces and names them in
+///   `corpus_hash` / `corpus_size` / `corpus_pieces`; the worker pulls them
+///   over libp2p. With `adapter_pieces` the worker stores the adapter files as
+///   pieces too and its receipt's `output_hash` is the content hash of an
+///   [`AdapterManifest`] chunk. With `run_id` it publishes every training
+///   event on the job topic. Nothing needs to be dialable over HTTP.
+/// - **HTTP (workers before this version)**: `dataset_url`,
+///   `artifact_upload_url` and `events_url` on the buyer's transfer server;
+///   the receipt's `output_hash` is `sha256:` of the adapter weights. A buyer
+///   fills these only with `--legacy-http`. Older workers cannot parse a spec
+///   without `dataset_url`, so they never bid on a pieces-only job.
+///
+/// A worker that understands both prefers pieces.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TextTrainSpec {
     /// The job config. The worker rewrites `dataset.url` and
     /// `output.destination_url` to local paths; everything else is Infernet's.
     pub job: Value,
-    pub dataset_url: String,
     /// `sha256:<hex>` of the corpus; the worker refuses a mismatch.
     pub dataset_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dataset_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub artifact_upload_url: String,
-    /// Where the worker posts each training event as it happens.
+    /// Where the worker posts each training event as it happens (HTTP).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_url: Option<String>,
+    /// Content hash of the corpus as stored pieces (see [`crate::pieces::InputRef`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_pieces: Option<Vec<String>>,
+    /// Return the adapter as pieces behind an [`AdapterManifest`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adapter_pieces: bool,
+    /// Publish training events on the job topic tagged with this id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// What a worker's receipt points at when the adapter travels as pieces.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AdapterManifest {
+    pub v: u32,
+    /// `sha256:` of adapter_model.safetensors (the checkpoint's `model`).
+    pub adapter_sha256: String,
+    /// Each of [`ARTIFACTS`] the worker produced.
+    pub files: std::collections::BTreeMap<String, ManifestFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManifestFile {
+    pub hash: String,
+    pub size: u64,
+    pub pieces: Vec<String>,
+}
+
+/// A training event as published on the job topic.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EventMsg {
+    pub t: String,
+    pub run_id: String,
+    pub event: Value,
 }
 
 fn is_http(u: &str) -> bool {
@@ -82,11 +163,48 @@ impl TextTrainSpec {
         if !crate::temporal::is_sha256_ref(&self.dataset_hash) {
             bail!("dataset_hash must be sha256:<64 lowercase hex>");
         }
-        if !is_http(&self.dataset_url) || !is_http(&self.artifact_upload_url) || self.events_url.as_deref().is_some_and(|u| !is_http(u)) {
+        let urls = [Some(self.dataset_url.as_str()), Some(self.artifact_upload_url.as_str()), self.events_url.as_deref()];
+        if urls.into_iter().flatten().any(|u| !u.is_empty() && !is_http(u)) {
             bail!("dataset, upload and events URLs must be http(s)");
+        }
+        if self.corpus_ref().transpose()?.is_none() && self.dataset_url.is_empty() {
+            bail!("the spec names no corpus: corpus pieces or a dataset URL");
+        }
+        if !self.adapter_pieces && self.artifact_upload_url.is_empty() {
+            bail!("the spec names no way back for the adapter: adapter_pieces or an upload URL");
+        }
+        if self.run_id.as_ref().is_some_and(|r| r.is_empty() || r.len() > 64 || !r.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+            bail!("run_id must be 1-64 letters, digits or '-'");
         }
         Ok(())
     }
+
+    /// The corpus as pieces, when the spec names them.
+    pub fn corpus_ref(&self) -> Option<Result<crate::pieces::InputRef>> {
+        let hash = self.corpus_hash.as_deref()?;
+        Some(
+            crate::pieces::InputRef::parse("corpus", hash, self.corpus_size, self.corpus_pieces.as_deref(), MAX_DATASET as usize)
+                .map_err(anyhow::Error::msg),
+        )
+    }
+}
+
+/// Capability tags a worker needs to train `corpus`.
+pub fn required_tags(corpus: &[u8]) -> Vec<String> {
+    let mut t = vec![tag(TRAIN_WORKLOAD)];
+    if corpus_has_conversations(corpus) {
+        t.push(MESSAGES_FORMAT_TAG.into());
+    }
+    t
+}
+
+/// Does any record of a JSONL corpus carry `messages` (a conversation)?
+pub fn corpus_has_conversations(corpus: &[u8]) -> bool {
+    corpus.split(|b| *b == b'\n').any(|line| {
+        // Cheap pre-check before parsing: most corpora are {title, text}.
+        line.windows(10).any(|w| w == b"\"messages\"")
+            && serde_json::from_slice::<Value>(line).is_ok_and(|v| v.get("messages").is_some_and(Value::is_array))
+    })
 }
 
 pub fn sha256_hex(b: &[u8]) -> String {
@@ -126,6 +244,11 @@ pub fn worker_tags(runtime: &Value, ram_mb: u64) -> Vec<String> {
     if runtime["cuda"] == json!(true) {
         t.push("infernet:text:device:cuda".into());
     }
+    // Infernet's runner trains whole conversations from the release that
+    // reports it; older ones would silently keep only {title, text} records.
+    if runtime["formats"].as_array().is_some_and(|f| f.iter().any(|x| x == "messages")) {
+        t.push(MESSAGES_FORMAT_TAG.into());
+    }
     for gb in crate::temporal::caps::RAM_BUCKETS_GB {
         if ram_mb >= gb * 1024 {
             t.push(format!("c0mpute:ram:{gb}gb+"));
@@ -151,13 +274,32 @@ async fn download(url: &str, dst: &Path, want: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fetch the corpus into `dst`: pieces over libp2p (from the buyer first)
+/// when the spec names them, else the legacy HTTP URL. Either way the file's
+/// sha256 must be the offer's `dataset_hash`.
+pub async fn fetch_corpus(net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>, spec: &TextTrainSpec, dst: &Path) -> Result<()> {
+    match spec.corpus_ref() {
+        Some(r) => {
+            r?.fetch_to_file(net, buyer, MAX_DATASET as usize, dst).await.context("fetch corpus pieces")?;
+            let got = crate::temporal::worker::file_sha256(dst)?;
+            if got != spec.dataset_hash {
+                let _ = tokio::fs::remove_file(dst).await;
+                bail!("dataset hash {got} differs from the offer's {}", spec.dataset_hash);
+            }
+            Ok(())
+        }
+        None => download(&spec.dataset_url, dst, &spec.dataset_hash).await,
+    }
+}
+
 /// Run one accepted job: fetch the corpus, run `infernet model train --job
 /// --json`, relay every event, return the adapter dir and its weights hash.
-pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) -> Result<(PathBuf, String)> {
+/// `buyer` is the peer the corpus pieces are fetched from first.
+pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>) -> Result<(PathBuf, String)> {
     spec.validate()?;
     tokio::fs::create_dir_all(job_dir).await?;
     let dataset = job_dir.join("dataset.jsonl");
-    download(&spec.dataset_url, &dataset, &spec.dataset_hash).await.context("fetch dataset")?;
+    fetch_corpus(net, buyer, spec, &dataset).await.context("fetch dataset")?;
     let mut job = spec.job.clone();
     job["dataset"] = json!({"url": "dataset.jsonl", "sha256": spec.dataset_hash.trim_start_matches("sha256:")});
     job["output"] = json!({"destination_url": "adapter"});
@@ -188,13 +330,34 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
         last
     });
 
-    // Events go to the buyer from their own task so a slow link never stalls training.
+    // Events go to the buyer from their own task so a slow link never stalls
+    // training: on the job topic (p2p, `run_id`) and/or to the legacy HTTP URL.
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Value>();
-    let relay = spec.events_url.clone().map(|url| {
+    let relaying = spec.events_url.is_some() || spec.run_id.is_some();
+    let relay = relaying.then(|| {
+        let (url, run_id, net) = (spec.events_url.clone(), spec.run_id.clone(), net.clone());
         tokio::spawn(async move {
             let c = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+            let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
+            let mut last_step: Option<std::time::Instant> = None;
             while let Some(ev) = ev_rx.recv().await {
-                if let Err(e) = c.post(&url).json(&ev).send().await {
+                if let Some(run_id) = &run_id {
+                    let step = ev["type"] == "step";
+                    if !(step && last_step.is_some_and(|t| t.elapsed() < STEP_EVENT_INTERVAL)) {
+                        if step {
+                            last_step = Some(std::time::Instant::now());
+                        }
+                        let msg = EventMsg { t: EVENT_MSG.into(), run_id: run_id.clone(), event: ev.clone() };
+                        if let Ok(b) = serde_json::to_vec(&msg)
+                            && let Err(e) = net.publish(&topic, b).await
+                        {
+                            warn!(err = %e, "text: could not publish a training event");
+                        }
+                    }
+                }
+                if let Some(url) = &url
+                    && let Err(e) = c.post(url).json(&ev).send().await
+                {
                     warn!(err = %e, "text: could not relay a training event");
                 }
             }
@@ -215,7 +378,7 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec) ->
                 Some("done") => done = Some(ev.clone()),
                 _ => {}
             }
-            if spec.events_url.is_some() {
+            if relaying {
                 let _ = ev_tx.send(ev);
             }
         }
@@ -253,21 +416,61 @@ async fn upload(base: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>) -> mpsc::Sender<AcceptedJob> {
+/// Store the adapter files as pieces, then the [`AdapterManifest`] naming
+/// them; returns the manifest's content hash (what the receipt carries). The
+/// pieces are dropped from the store after [`ADAPTER_PIECES_TTL`].
+pub async fn store_adapter(net: &Arc<Libp2pNetwork>, store: &ChunkStore, dir: &Path, adapter_sha256: &str) -> Result<String> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut held = Vec::new();
+    for f in ARTIFACTS {
+        let p = dir.join(f);
+        if !p.exists() {
+            continue;
+        }
+        let stored = crate::pieces::put_file_pieces(net, store, &p, MAX_ADAPTER_FILE_BYTES as u64, crate::pieces::INPUT_PIECE_BYTES).await.with_context(|| format!("store {f}"))?;
+        held.extend(stored.pieces.iter().cloned());
+        files.insert(f.to_string(), ManifestFile { hash: stored.hash, size: stored.size, pieces: stored.pieces });
+    }
+    if !files.contains_key("adapter_model.safetensors") {
+        bail!("no adapter_model.safetensors to store");
+    }
+    let manifest = serde_json::to_vec(&AdapterManifest { v: 1, adapter_sha256: adapter_sha256.to_string(), files })?;
+    let hash = store.put(&manifest).await.context("store adapter manifest")?;
+    net.announce(&hash).await.context("announce adapter manifest")?;
+    held.push(hash.to_hex());
+    let store = store.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(ADAPTER_PIECES_TTL).await;
+        for h in held {
+            if let Ok(h) = c0mpute_proto::Hash::from_hex(&h) {
+                let _ = store.delete(&h).await;
+            }
+        }
+    });
+    Ok(hash.to_hex())
+}
+
+pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let Ok(_slot) = slots.clone().acquire_owned().await else { return };
             let accept = job.accept.clone();
             busy.store(true, Ordering::Relaxed);
+            let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
             let result: Result<String> = async {
                 let spec: TextTrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
-                let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
-                let (dir, hash) = run_train(&infernet, &job_dir, &spec).await?;
+                let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
+                let (dir, hash) = run_train(&infernet, &job_dir, &spec, &net, buyer).await?;
+                if spec.adapter_pieces {
+                    // Receipt -> manifest -> pieces, all over libp2p.
+                    return store_adapter(&net, &store, &dir, &hash).await;
+                }
                 upload(&spec.artifact_upload_url, &dir).await.context("upload adapter")?;
                 Ok(hash)
             }
             .await;
+            let _ = tokio::fs::remove_dir_all(&job_dir).await;
             busy.store(false, Ordering::Relaxed);
             match result {
                 Ok(hash) => {
@@ -309,9 +512,17 @@ const MAX_PROMPT_BYTES: usize = 32 * 1024;
 const ANSWER_SLOT: &str = "answer";
 
 /// `JobOffer.spec_inline` for `infernet.text.infer`: one answer from a base
-/// model + LoRA adapter. The adapter travels with the request (a bundle on
-/// the buyer's transfer server) and is cached by hash, so any worker can
-/// serve any adapter; the buyer does retrieval, the worker only generates.
+/// model + LoRA adapter. The adapter travels with the request and is cached
+/// by hash, so any worker can serve any adapter; the buyer does retrieval,
+/// the worker only generates.
+///
+/// Peer to peer (this version on): the buyer stores the adapter as pieces
+/// behind an [`AdapterManifest`] (`adapter_manifest`), the worker fetches it
+/// over libp2p on a cache miss, and with `answer_chunk` stores `answer.json`
+/// as a chunk whose hash its receipt carries. Workers before this version need
+/// `adapter_url` / `answer_upload_url` on the buyer's transfer server (the
+/// buyer's `--legacy-http`); they cannot parse a spec without them, so they
+/// never bid on a pieces-only request.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TextInferSpec {
     /// `sha256:` of adapter_model.safetensors.
@@ -320,9 +531,17 @@ pub struct TextInferSpec {
     pub messages: Vec<Value>,
     pub max_new_tokens: u32,
     /// `{"files": {"<name>": "<base64>"}}` for the adapter, fetched only on a cache miss.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub adapter_url: String,
     /// Base URL the worker PUTs `answer.json` to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub answer_upload_url: String,
+    /// Content hash of the adapter's [`AdapterManifest`] chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_manifest: Option<String>,
+    /// Return `answer.json` as a chunk (receipt `output_hash` = its content hash).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answer_chunk: bool,
 }
 
 fn valid_repo_id(base: &str) -> bool {
@@ -354,8 +573,17 @@ impl TextInferSpec {
         if !(1..=1024).contains(&self.max_new_tokens) {
             bail!("max_new_tokens must be 1..=1024");
         }
-        if !is_http(&self.adapter_url) || !is_http(&self.answer_upload_url) {
+        if [&self.adapter_url, &self.answer_upload_url].iter().any(|u| !u.is_empty() && !is_http(u)) {
             bail!("adapter and answer URLs must be http(s)");
+        }
+        if self.adapter_manifest.as_deref().is_some_and(|h| c0mpute_proto::Hash::from_hex(h).is_err()) {
+            bail!("adapter_manifest must be a hex content hash");
+        }
+        if self.adapter_manifest.is_none() && self.adapter_url.is_empty() {
+            bail!("the spec names no adapter: adapter_manifest or adapter_url");
+        }
+        if !self.answer_chunk && self.answer_upload_url.is_empty() {
+            bail!("the spec names no way back for the answer: answer_chunk or an upload URL");
         }
         Ok(())
     }
@@ -407,12 +635,23 @@ async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
 }
 
 /// Answer one request: adapter from the cache (or fetched), then `infernet model generate`.
-pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec) -> Result<Vec<u8>> {
+/// `buyer` is the peer adapter pieces are fetched from first.
+pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>) -> Result<Vec<u8>> {
     spec.validate()?;
     let adapter = cache_root.join("text").join("adapters").join(spec.adapter_hash.trim_start_matches("sha256:"));
     let cached = crate::temporal::worker::file_sha256(&adapter.join("adapter_model.safetensors")).ok();
     if cached.as_deref() != Some(spec.adapter_hash.as_str()) {
-        fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?;
+        match &spec.adapter_manifest {
+            Some(m) => {
+                let _ = tokio::fs::remove_dir_all(&adapter).await;
+                let got = fetch_adapter_pieces(net, buyer, m, &adapter).await.context("fetch adapter pieces")?;
+                if got != spec.adapter_hash {
+                    let _ = tokio::fs::remove_dir_all(&adapter).await;
+                    bail!("adapter {got} differs from the offer's {}", spec.adapter_hash);
+                }
+            }
+            None => fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?,
+        }
     }
     let dir = cache_root.join("text").join("infer").join(job_id);
     tokio::fs::create_dir_all(&dir).await?;
@@ -434,7 +673,7 @@ pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &
     Ok(serde_json::to_vec(&ans)?)
 }
 
-pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -442,7 +681,13 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, cache_root: PathBuf, infernet
             busy.store(true, Ordering::Relaxed);
             let result: Result<String> = async {
                 let spec: TextInferSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
-                let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec).await?;
+                let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
+                let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec, &net, buyer).await?;
+                if spec.answer_chunk {
+                    let hash = store.put(&answer).await.context("store answer")?;
+                    net.announce(&hash).await.context("announce answer")?;
+                    return Ok(hash.to_hex());
+                }
                 reqwest::Client::new().put(format!("{}/answer.json", spec.answer_upload_url)).body(answer.clone()).send().await?.error_for_status()?;
                 Ok(sha256_hex(&answer))
             }
@@ -500,16 +745,18 @@ pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf
     if infer {
         tags.push(tag(INFER_WORKLOAD));
     }
-    let net = spawn_node(net_opts).await?;
+    // Adapter pieces live here until the buyer has fetched them.
+    let store = ChunkStore::open(cache_root.join("text").join("store")).await?;
+    let net = spawn_node_with_store(net_opts, store.clone()).await?;
     let hardware = json!({"version": env!("CARGO_PKG_VERSION"), "text_runtime": "peft", "ram_mb": ram_mb, "cuda": runtime["cuda"]});
     tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
     let busy = Arc::new(AtomicBool::new(false));
     let slots = Arc::new(Semaphore::new(1));
-    let tx = spawn_train_runner(net.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots);
+    let tx = spawn_train_runner(net.clone(), store.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots);
     crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy)));
     if infer {
         let ibusy = Arc::new(AtomicBool::new(false));
-        let itx = spawn_infer_runner(net.clone(), cache_root, infernet, ibusy.clone());
+        let itx = spawn_infer_runner(net.clone(), store.clone(), cache_root, infernet, ibusy.clone());
         crate::dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(itx), Some(infer_offer_filter(ibusy)));
     }
     info!(peer = %net.peer_id().to_base58(), ?tags, "text: serving");
@@ -529,6 +776,10 @@ pub struct TrainRequest {
     pub max_price_usd: f64,
     pub gpu: bool,
     pub min_ram_gb: Option<u64>,
+    /// Also serve the corpus and take the adapter over HTTP from this machine,
+    /// so workers older than the pieces transport can bid (they need to reach
+    /// `public_url` / `bind`). Off by default: the job is fully peer to peer.
+    pub legacy_http: bool,
     pub public_url: Option<String>,
     pub bind: SocketAddr,
     pub timeout_s: u64,
@@ -602,19 +853,43 @@ pub fn render(ev: &Value, total: &mut Option<u64>) -> Option<String> {
 }
 
 /// Auction the job, stream its progress through `on_event`, verify and keep the adapter.
-pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: impl FnMut(&Value) + Send) -> Result<Value> {
+///
+/// Peer to peer: the corpus goes out as pieces from `store` (served by `net`),
+/// progress arrives on the job topic, and the adapter comes back as pieces
+/// named by the manifest the worker's receipt points at. With
+/// `req.legacy_http` the buyer also runs the HTTP transfer server, so a worker
+/// that predates pieces can win; its adapter then arrives over HTTP and is
+/// checked against the receipt exactly as before.
+pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainRequest, mut on_event: impl FnMut(&Value) + Send) -> Result<Value> {
     let (job, bytes, preview) = load(req)?;
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<SlotEvent>();
-    let server = TransferServer::start_with(req.bind, req.public_url.clone(), bytes, &ARTIFACTS, Some(ev_tx)).await?;
-    let spec = TextTrainSpec {
+    let stored = crate::pieces::put_bytes_pieces(&net, store, &bytes, crate::pieces::INPUT_PIECE_BYTES).await.context("store the corpus as pieces")?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut spec = TextTrainSpec {
         job,
-        dataset_url: server.dataset_url(),
         dataset_hash: preview.dataset_hash.clone(),
-        artifact_upload_url: server.upload_url(SLOT),
-        events_url: Some(server.events_url(SLOT)),
+        dataset_url: String::new(),
+        artifact_upload_url: String::new(),
+        events_url: None,
+        corpus_hash: Some(stored.hash.clone()),
+        corpus_size: (stored.pieces.len() > 1).then_some(stored.size),
+        corpus_pieces: (stored.pieces.len() > 1).then(|| stored.pieces.clone()),
+        adapter_pieces: true,
+        run_id: Some(run_id.clone()),
+    };
+    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<SlotEvent>();
+    let server = if req.legacy_http {
+        let s = TransferServer::start_with(req.bind, req.public_url.clone(), bytes.clone(), &ARTIFACTS, Some(ev_tx)).await?;
+        spec.dataset_url = s.dataset_url();
+        spec.artifact_upload_url = s.upload_url(SLOT);
+        spec.events_url = Some(s.events_url(SLOT));
+        Some(s)
+    } else {
+        drop(ev_tx);
+        None
     };
     spec.validate()?;
-    let mut tags = vec![tag(TRAIN_WORKLOAD)];
+    let mut tags = required_tags(&bytes);
+    drop(bytes);
     if req.gpu {
         tags.push("infernet:text:device:cuda".into());
     }
@@ -622,6 +897,16 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
         let b = crate::temporal::caps::RAM_BUCKETS_GB.iter().copied().find(|b| *b >= min).unwrap_or(128);
         tags.push(format!("c0mpute:ram:{b}gb+"));
     }
+    // Training events published on the job topic for this run.
+    let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
+    let mut gossip = net.messages();
+    let p2p_event = |m: &c0mpute_net::GossipMessage| -> Option<Value> {
+        if m.topic != topic {
+            return None;
+        }
+        let msg: EventMsg = serde_json::from_slice(&m.data).ok()?;
+        (msg.t == EVENT_MSG && msg.run_id == run_id).then_some(msg.event)
+    };
     let spec_v = serde_json::to_value(&spec)?;
     let mut last_err = None;
     let mut outcome = None;
@@ -642,10 +927,20 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
             tokio::select! {
                 r = &mut auction => break r,
                 Some((_, ev)) = ev_rx.recv() => on_event(&ev),
+                m = gossip.recv() => match m {
+                    Ok(m) => if let Some(ev) = p2p_event(&m) { on_event(&ev) },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => {}
+                },
             }
         };
         while let Ok((_, ev)) = ev_rx.try_recv() {
             on_event(&ev);
+        }
+        while let Ok(m) = gossip.try_recv() {
+            if let Some(ev) = p2p_event(&m) {
+                on_event(&ev);
+            }
         }
         match res {
             Ok(o) if o.receipt.status == JobStatus::Completed => {
@@ -656,22 +951,84 @@ pub async fn train(net: Arc<Libp2pNetwork>, req: &TrainRequest, mut on_event: im
             Err(e) => last_err = Some(e.context(format!("attempt {}", attempt + 1))),
         }
     }
-    let o = outcome.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("training failed")))?;
-    let files: HashMap<String, Vec<u8>> = server.take(SLOT).await;
-    let weights = files.get("adapter_model.safetensors").context("worker did not upload adapter_model.safetensors")?;
-    let got = sha256_hex(weights);
-    let claimed = o.receipt.output_hash.clone().unwrap_or_default();
-    if got != claimed {
-        bail!("adapter {got} does not match the receipt's {claimed}");
+    let result = async {
+        let o = outcome.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("training failed")))?;
+        let claimed = o.receipt.output_hash.clone().unwrap_or_default();
+        let (got, transport) = if claimed.starts_with("sha256:") {
+            // A worker before pieces: it uploaded over HTTP.
+            let server = server.as_ref().context("the worker answered with an HTTP upload, but this job has no HTTP transfer server")?;
+            let files: HashMap<String, Vec<u8>> = server.take(SLOT).await;
+            let weights = files.get("adapter_model.safetensors").context("worker did not upload adapter_model.safetensors")?;
+            let got = sha256_hex(weights);
+            if got != claimed {
+                bail!("adapter {got} does not match the receipt's {claimed}");
+            }
+            std::fs::create_dir_all(&req.output)?;
+            for (name, data) in &files {
+                std::fs::write(req.output.join(name), data)?;
+            }
+            (got, "http")
+        } else {
+            let worker = o.receipt.worker_peer_id.parse::<PeerId>().ok();
+            (fetch_adapter_pieces(&net, worker, &claimed, &req.output).await?, "pieces")
+        };
+        Ok(json!({
+            "adapter_dir": req.output, "adapter_hash": got, "base_model": preview.base_model, "dataset_hash": preview.dataset_hash,
+            "transport": transport,
+            "receipt": {"job_id": o.receipt.job_id, "worker_peer_id": o.receipt.worker_peer_id, "output_hash": o.receipt.output_hash, "price_usd": o.accepted_bid.price_usd}
+        }))
     }
-    std::fs::create_dir_all(&req.output)?;
-    for (name, data) in &files {
-        std::fs::write(req.output.join(name), data)?;
+    .await;
+    // The corpus pieces have done their job (stored whole too when small).
+    for h in stored.pieces.iter().chain(std::iter::once(&stored.hash)) {
+        if let Ok(h) = c0mpute_proto::Hash::from_hex(h) {
+            let _ = store.delete(&h).await;
+        }
     }
-    Ok(json!({
-        "adapter_dir": req.output, "adapter_hash": got, "base_model": preview.base_model, "dataset_hash": preview.dataset_hash,
-        "receipt": {"job_id": o.receipt.job_id, "worker_peer_id": o.receipt.worker_peer_id, "output_hash": o.receipt.output_hash, "price_usd": o.accepted_bid.price_usd}
-    }))
+    result
+}
+
+/// Fetch the [`AdapterManifest`] a receipt names, then every file it lists,
+/// into `out`; keep them only if adapter_model.safetensors hashes to the
+/// manifest's `adapter_sha256`. Returns that hash.
+pub async fn fetch_adapter_pieces(net: &Arc<Libp2pNetwork>, worker: Option<PeerId>, manifest_hash: &str, out: &Path) -> Result<String> {
+    let mref = crate::pieces::InputRef::parse("adapter_manifest", manifest_hash, None, None, 1 << 20).map_err(anyhow::Error::msg)?;
+    let manifest: AdapterManifest = serde_json::from_slice(&mref.fetch(net, worker, 1 << 20).await.context("fetch the adapter manifest")?).context("adapter manifest is not JSON")?;
+    if manifest.v != 1 || !crate::temporal::is_sha256_ref(&manifest.adapter_sha256) {
+        bail!("adapter manifest has an unknown version or a bad adapter_sha256");
+    }
+    if !manifest.files.contains_key("adapter_model.safetensors") || manifest.files.keys().any(|k| !ARTIFACTS.contains(&k.as_str())) {
+        bail!("adapter manifest must list adapter_model.safetensors and only {ARTIFACTS:?}");
+    }
+    let tmp = out.with_extension(format!("partial-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&tmp).await?;
+    let fetched: Result<String> = async {
+        for (name, f) in &manifest.files {
+            let (size, pieces) = if f.pieces.len() > 1 { (Some(f.size), Some(f.pieces.as_slice())) } else { (None, None) };
+            let r = crate::pieces::InputRef::parse("adapter", &f.hash, size, pieces, MAX_ADAPTER_FILE_BYTES).map_err(anyhow::Error::msg)?;
+            r.fetch_to_file(net, worker, MAX_ADAPTER_FILE_BYTES, &tmp.join(name)).await.with_context(|| format!("fetch {name}"))?;
+        }
+        let got = crate::temporal::worker::file_sha256(&tmp.join("adapter_model.safetensors"))?;
+        if got != manifest.adapter_sha256 {
+            bail!("adapter {got} does not match the manifest's {}", manifest.adapter_sha256);
+        }
+        Ok(got)
+    }
+    .await;
+    match fetched {
+        Ok(got) => {
+            tokio::fs::create_dir_all(out).await?;
+            for name in manifest.files.keys() {
+                tokio::fs::rename(tmp.join(name), out.join(name)).await?;
+            }
+            let _ = tokio::fs::remove_dir_all(&tmp).await;
+            Ok(got)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&tmp).await;
+            Err(e)
+        }
+    }
 }
 
 // ── chat (buyer) ────────────────────────────────────────────────────────
@@ -723,6 +1080,8 @@ pub struct ChatRequest {
     pub max_new_tokens: u32,
     pub workers: Vec<String>,
     pub max_price_usd: f64,
+    /// Also serve workers older than the pieces transport over HTTP.
+    pub legacy_http: bool,
     pub public_url: Option<String>,
     pub bind: SocketAddr,
     pub timeout_s: u64,
@@ -730,7 +1089,12 @@ pub struct ChatRequest {
 }
 
 /// Ask a worker; returns the answer, its sources and the receipt.
-pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
+///
+/// Peer to peer: the adapter goes out as pieces from `store` (the worker
+/// fetches them only on a cache miss) and the answer comes back as a chunk
+/// named by the receipt. `req.legacy_http` adds the HTTP transfer server for
+/// older workers.
+pub async fn chat(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &ChatRequest) -> Result<Value> {
     let (bundle, adapter_hash, manifest) = adapter_bundle(&req.adapter_dir)?;
     let base_model = manifest["base_model"].as_str().context("the adapter's manifest.json has no base_model")?.to_string();
     let sources = match &req.search {
@@ -742,14 +1106,24 @@ pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
         messages.push(json!({"role": "system", "content": system}));
     }
     messages.push(json!({"role": "user", "content": chat_prompt(&req.question, &sources)}));
-    let server = TransferServer::start_with(req.bind, req.public_url.clone(), bundle, &ANSWER_ARTIFACTS, None).await?;
-    let spec = TextInferSpec {
+    let adapter_manifest = store_adapter(&net, store, &req.adapter_dir, &adapter_hash).await.context("store the adapter as pieces")?;
+    let mut spec = TextInferSpec {
         adapter_hash: adapter_hash.clone(),
         base_model: base_model.clone(),
         messages,
         max_new_tokens: req.max_new_tokens,
-        adapter_url: server.dataset_url(),
-        answer_upload_url: server.upload_url(ANSWER_SLOT),
+        adapter_url: String::new(),
+        answer_upload_url: String::new(),
+        adapter_manifest: Some(adapter_manifest),
+        answer_chunk: true,
+    };
+    let server = if req.legacy_http {
+        let s = TransferServer::start_with(req.bind, req.public_url.clone(), bundle, &ANSWER_ARTIFACTS, None).await?;
+        spec.adapter_url = s.dataset_url();
+        spec.answer_upload_url = s.upload_url(ANSWER_SLOT);
+        Some(s)
+    } else {
+        None
     };
     spec.validate()?;
     let spec_v = serde_json::to_value(&spec)?;
@@ -762,17 +1136,30 @@ pub async fn chat(net: Arc<Libp2pNetwork>, req: &ChatRequest) -> Result<Value> {
             .with_deadline(Duration::from_secs(req.timeout_s + 120))
             .with_receipt_timeout(Duration::from_secs(req.timeout_s + 60))
     };
-    let o = auction_with_mesh_retry(net, make).await?;
+    let o = auction_with_mesh_retry(net.clone(), make).await?;
     if o.receipt.status != JobStatus::Completed {
         bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
     }
-    let files = server.take(ANSWER_SLOT).await;
-    let answer = files.get("answer.json").context("worker did not upload answer.json")?;
-    let got = sha256_hex(answer);
-    if Some(got.as_str()) != o.receipt.output_hash.as_deref() {
-        bail!("answer {got} does not match the receipt's {:?}", o.receipt.output_hash);
+    let claimed = o.receipt.output_hash.clone().unwrap_or_default();
+    let answer = if claimed.starts_with("sha256:") {
+        // A worker before pieces: it uploaded over HTTP.
+        let server = server.as_ref().context("the worker answered over HTTP, but this request has no transfer server")?;
+        let files = server.take(ANSWER_SLOT).await;
+        let answer = files.get("answer.json").context("worker did not upload answer.json")?.clone();
+        let got = sha256_hex(&answer);
+        if got != claimed {
+            bail!("answer {got} does not match the receipt's {claimed}");
+        }
+        answer
+    } else {
+        // The fetch checks the bytes against the receipt's content hash.
+        let r = crate::pieces::InputRef::parse("answer", &claimed, None, None, 1 << 20).map_err(anyhow::Error::msg)?;
+        r.fetch(&net, o.receipt.worker_peer_id.parse::<PeerId>().ok(), 1 << 20).await.context("fetch the answer")?
+    };
+    let ans: Value = serde_json::from_slice(&answer)?;
+    if ans["adapter"].as_str().is_some_and(|a| a != adapter_hash) {
+        bail!("the worker answered with adapter {} instead of {adapter_hash}", ans["adapter"]);
     }
-    let ans: Value = serde_json::from_slice(answer)?;
     Ok(json!({
         "text": ans["text"], "sources": sources, "base_model": base_model, "adapter_hash": adapter_hash,
         "tokens": ans["tokens"], "seconds": ans["seconds"],
@@ -792,7 +1179,33 @@ mod tests {
             max_new_tokens: 200,
             adapter_url: "http://127.0.0.1:1/t/x/dataset.json".into(),
             answer_upload_url: "http://127.0.0.1:1/t/x/a/answer".into(),
+            adapter_manifest: None,
+            answer_chunk: false,
         }
+    }
+
+    #[test]
+    fn p2p_infer_specs() {
+        let s = TextInferSpec {
+            adapter_url: String::new(),
+            answer_upload_url: String::new(),
+            adapter_manifest: Some(c0mpute_proto::Hash::of(b"m").to_hex()),
+            answer_chunk: true,
+            ..infer_spec()
+        };
+        s.validate().unwrap();
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("adapter_url").is_none());
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldInfer {
+            adapter_url: String,
+            answer_upload_url: String,
+        }
+        assert!(serde_json::from_value::<OldInfer>(v).is_err(), "old workers never bid on a pieces-only chat");
+        assert!(TextInferSpec { adapter_manifest: None, ..s.clone() }.validate().is_err());
+        assert!(TextInferSpec { answer_chunk: false, ..s.clone() }.validate().is_err());
+        assert!(TextInferSpec { adapter_manifest: Some("zz".into()), ..s }.validate().is_err());
     }
 
     #[test]
@@ -847,7 +1260,72 @@ mod tests {
             dataset_hash: format!("sha256:{}", "a".repeat(64)),
             artifact_upload_url: "http://127.0.0.1:1/t/x/a/adapter".into(),
             events_url: Some("http://127.0.0.1:1/t/x/e/adapter".into()),
+            corpus_hash: None,
+            corpus_size: None,
+            corpus_pieces: None,
+            adapter_pieces: false,
+            run_id: None,
         }
+    }
+
+    fn p2p_spec() -> TextTrainSpec {
+        TextTrainSpec {
+            dataset_url: String::new(),
+            artifact_upload_url: String::new(),
+            events_url: None,
+            corpus_hash: Some(c0mpute_proto::Hash::of(b"corpus").to_hex()),
+            adapter_pieces: true,
+            run_id: Some("0e1f2a3b-run".into()),
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn p2p_specs_validate_and_old_workers_cannot_parse_them() {
+        let s = p2p_spec();
+        s.validate().unwrap();
+        let v = serde_json::to_value(&s).unwrap();
+        // No HTTP fields on the wire at all.
+        assert!(v.get("dataset_url").is_none() && v.get("artifact_upload_url").is_none() && v.get("events_url").is_none());
+        // A worker before pieces requires dataset_url, so it never bids.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSpec {
+            job: Value,
+            dataset_url: String,
+            dataset_hash: String,
+            artifact_upload_url: String,
+        }
+        assert!(serde_json::from_value::<OldSpec>(v.clone()).is_err());
+        assert_eq!(serde_json::from_value::<TextTrainSpec>(v).unwrap(), s);
+        // A legacy spec (an old buyer) still parses and validates.
+        let old = json!({"job": spec().job, "dataset_url": "http://h/d", "dataset_hash": spec().dataset_hash, "artifact_upload_url": "http://h/u"});
+        serde_json::from_value::<TextTrainSpec>(old).unwrap().validate().unwrap();
+
+        let mut bad = p2p_spec();
+        bad.corpus_hash = None;
+        assert!(bad.validate().unwrap_err().to_string().contains("no corpus"));
+        let mut bad = p2p_spec();
+        bad.adapter_pieces = false;
+        assert!(bad.validate().unwrap_err().to_string().contains("way back"));
+        let mut bad = p2p_spec();
+        bad.corpus_size = Some(3 << 20);
+        bad.corpus_pieces = Some(vec![c0mpute_proto::Hash::of(b"x").to_hex()]);
+        assert!(bad.validate().is_err(), "3 MiB cannot be one piece");
+        let mut bad = p2p_spec();
+        bad.run_id = Some("no spaces".into());
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn conversations_require_the_messages_format_tag() {
+        let text = b"{\"title\":\"a\",\"text\":\"b\"}\n{\"title\":\"c\",\"text\":\"the word \\\"messages\\\" in text\"}\n";
+        assert_eq!(required_tags(text), vec!["infernet:text:train".to_string()]);
+        let chat = b"{\"title\":\"a\",\"text\":\"b\"}\n{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"yo\"}]}\n";
+        assert_eq!(required_tags(chat), vec!["infernet:text:train".to_string(), MESSAGES_FORMAT_TAG.to_string()]);
+        let t = worker_tags(&json!({"cuda": false, "formats": ["text", "messages"]}), 0);
+        assert!(t.contains(&MESSAGES_FORMAT_TAG.to_string()));
+        assert!(!worker_tags(&json!({"cuda": false}), 0).contains(&MESSAGES_FORMAT_TAG.to_string()));
     }
 
     #[test]

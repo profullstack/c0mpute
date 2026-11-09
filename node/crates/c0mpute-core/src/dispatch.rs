@@ -519,8 +519,8 @@ async fn handle_offer(
 
 /// Workload types this worker should listen for, derived from its
 /// configured roles. Each modality maps to a separate job topic.
-/// `infernet.inference` is handled by the infernet peer binary, not
-/// this daemon.
+/// `infernet.inference` is served natively from the box's own
+/// OpenAI-compatible runtime ([`crate::inference`]).
 pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     let mut types = Vec::new();
     if roles.contains(&c0mpute_proto::Role::Transcode) {
@@ -554,6 +554,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     }
     if roles.contains(&c0mpute_proto::Role::Embed) {
         types.push(crate::embed::WORKLOAD.to_string());
+    }
+    if roles.contains(&c0mpute_proto::Role::Inference) {
+        types.push(crate::inference::WORKLOAD.to_string());
     }
     if roles.contains(&c0mpute_proto::Role::Render) {
         types.push(crate::render::WORKLOAD.to_string());

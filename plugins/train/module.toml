@@ -8,20 +8,32 @@
 #   1. checks the dataset: UTF-8 JSONL, one object per line as {text, title?},
 #      {prompt, completion} or {messages: [{role, content}]}; at least 2
 #      records, at most 1,000,000 records, 1 MiB per record, 512 MiB in all;
-#   2. converts it to the {title, text} corpus the worker's peft runner reads
-#      (prompt -> title, completion -> text; for messages the last user and
-#      assistant turns, and a shared system turn becomes the system prompt);
+#   2. converts it to the corpus the worker's peft runner reads: {title, text}
+#      stays a "Brief me on: <title>" exchange; prompt/completion and messages
+#      become whole conversations ({messages: [...]}, every turn in order) that
+#      the runner renders with the base model's chat template and trains with
+#      the loss on the assistant turns only;
 #   3. writes the @infernetprotocol/training job (kind "lora", base_model,
 #      hyperparams lr / epochs / lora_r / seq_len / batch_size / max_steps);
-#   4. auctions it through text::train, relays live progress, downloads the
-#      adapter and keeps it only if its sha256 matches the receipt;
-#   5. prints how to use it: `c0mpute infernet text chat --adapter <out>`.
+#   4. auctions it through text::train PEER TO PEER: the corpus goes out as
+#      content-addressed 1 MiB pieces the worker pulls over libp2p, progress
+#      comes back as gossip on the job topic, and the adapter comes back as
+#      pieces behind a manifest whose hash the receipt carries; the buyer keeps
+#      the adapter only if its sha256 matches. Nothing needs a reachable HTTP
+#      address (`--legacy-http` additionally serves workers from before the pieces transport over HTTP);
+#   5. prints how to use it: `c0mpute infernet text chat --adapter <out>`, which
+#      is peer to peer the same way (adapter out as pieces, answer back as a chunk).
 #
-# Worker side (unchanged): `c0mpute infernet text serve`, which needs Infernet
-# >= 0.1.79 with the peft runtime (`infernet model runtime setup --peft --yes`:
-# torch + transformers + peft in Infernet's venv). Training is fp32 LoRA on CPU
-# or a CUDA GPU when torch sees one (buyers can require it with --gpu); no GPU
-# is required, so keep base models small (0.5B-class trains on CPU in hours).
+# Worker side: `c0mpute infernet text serve`. c0mpute moves the data and hands
+# Infernet's trainer local file paths; the training itself needs Infernet with
+# the peft runtime (`infernet model runtime setup --peft --yes`: torch +
+# transformers + peft in Infernet's venv). A corpus with conversations goes
+# only to workers whose runner reports the `messages` dataset format (tag
+# infernet:text:format:messages, Infernet with infernetprotocol/infernet-protocol#161
+# "peft: train multi-turn conversations"); older runners would drop them. Training is
+# fp32 LoRA on CPU or a CUDA GPU when torch sees one (buyers can require it with
+# --gpu); no GPU is required, so keep base models small (0.5B-class trains on
+# CPU in hours).
 #
 # No QLoRA: the peft runner loads the base model in fp32 with no 4-bit
 # quantization (no bitsandbytes), so `train.qlora` is not offered.
@@ -32,22 +44,21 @@ name        = "Fine-tune — LoRA training"
 version     = "0.2.79"
 kind        = "workload"
 category    = "ai"
-status      = "partial"
-status_note = "LoRA works end to end through infernet.text.train (`c0mpute train lora`). The buyer serves the corpus and receives the adapter over HTTP from its own machine, so the worker must reach it: same LAN, or pass --public-url to a forwarded https address. Each record trains as one 'Brief me on: <title>' exchange, so multi-turn chats keep only their last turn. No QLoRA (the peft runner trains fp32 LoRA)."
+status      = "available"
 builtin     = true
-description = "Fine-tune a LoRA adapter on a c0mpute worker from a JSONL dataset (text, prompt/completion or chat messages): live progress, adapter verified by hash, then chat with it."
+description = "Fine-tune a LoRA adapter on a c0mpute worker from a JSONL dataset (text, prompt/completion or multi-turn chats, trained on every turn): dataset and adapter move peer to peer as verified pieces, live progress, then chat with it."
 author      = "Profullstack"
 license     = "MIT"
 keywords    = ["train", "finetune", "lora", "peft", "adapter", "infernet"]
 
 [module.requirements]
-c0mpute      = ">=0.2.77"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["bin:infernet", "infernet:text:runtime:peft", "gpu:cuda?"]
+capabilities = ["bin:infernet", "infernet:text:runtime:peft", "infernet:text:format:messages?", "gpu:cuda?"]
 
 [module.workloads]
-"train.lora" = { command = "lora", runs = "infernet.text.train", validation = "adapter_sha256_matches_receipt" }
+"train.lora" = { command = "lora", runs = "infernet.text.train", validation = "adapter_sha256_matches_receipt_manifest" }
 
 [module.dispatch]
 mode = "subprocess"
