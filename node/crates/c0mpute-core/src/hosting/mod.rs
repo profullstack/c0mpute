@@ -166,6 +166,11 @@ struct Inner {
     map: RwLock<ReplicaMap>,
     catalog: RwLock<Catalog>,
     catalog_path: Option<PathBuf>,
+    /// Every site record this node has seen (records.json next to the
+    /// catalog), so a restart does not forget sites whose holders are quiet.
+    records_path: Option<PathBuf>,
+    /// A record arrived since records.json was last written.
+    records_dirty: std::sync::atomic::AtomicBool,
     /// Parsed manifests by hash (small cache).
     manifests: RwLock<HashMap<String, Arc<Manifest>>>,
     /// Parts of large sites' manifests, by hash (a small cache: a gateway
@@ -307,6 +312,12 @@ impl Hosting {
             })
             .unwrap_or_default();
         let challenger_hex = opts.challenger.as_ref().and_then(site::owner_hex);
+        let records_path = opts.catalog_path.as_ref().map(|p| p.with_file_name("records.json"));
+        let known: Vec<SiteRecord> = records_path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         let inner = Arc::new(Inner {
             net: net.clone(),
             store,
@@ -317,6 +328,8 @@ impl Hosting {
             map: RwLock::new(ReplicaMap::default()),
             catalog: RwLock::new(Catalog::default()),
             catalog_path: opts.catalog_path,
+            records_path,
+            records_dirty: std::sync::atomic::AtomicBool::new(false),
             manifests: RwLock::new(HashMap::new()),
             parts: RwLock::new(HashMap::new()),
             replicating: RwLock::new(HashSet::new()),
@@ -336,6 +349,13 @@ impl Hosting {
             receipts_path: opts.receipts_path,
         });
         let h = Hosting(inner);
+        // Records seen before a restart (each re-verified).
+        {
+            let mut map = h.0.map.write().await;
+            for rec in known {
+                map.apply_record(rec);
+            }
+        }
         // Sites held before a restart: keep them only if their chunks are
         // still here.
         for (id, rec) in catalog.sites {
@@ -394,6 +414,7 @@ impl Hosting {
                     HostingMsg::Record { record } => {
                         let changed = h.0.map.write().await.apply_record(record);
                         if changed {
+                            h.0.records_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                             debug!(from = %source, "hosting: new site record");
                         }
                     }
@@ -517,9 +538,46 @@ impl Hosting {
     }
 
     async fn announce_records(&self) {
-        let recs: Vec<SiteRecord> = self.0.catalog.read().await.sites.values().cloned().collect();
+        let mut recs: Vec<SiteRecord> = self.0.catalog.read().await.sites.values().cloned().collect();
+        // Also keep short sites alive: a record we know but do not hold, with
+        // fewer than the target live copies, is re-gossiped too (a few per
+        // round). Otherwise a site whose holders are quiet on gossip and whose
+        // publisher has exited is forgotten by every node that restarts.
+        {
+            let map = self.0.map.read().await;
+            let held: HashSet<&String> = recs.iter().map(|r| &r.site_id).collect();
+            let mut short: Vec<&SiteRecord> = map
+                .records
+                .values()
+                .filter(|r| !held.contains(&r.site_id) && map.holders(&r.site_id).len() < TARGET_REPLICAS)
+                .collect();
+            short.sort_by(|a, b| b.seq.cmp(&a.seq));
+            recs.extend(short.into_iter().take(SHORT_RECORDS_PER_ROUND).cloned());
+        }
         for record in recs {
             self.publish(&HostingMsg::Record { record }).await;
+        }
+        self.0.records_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.save_records().await;
+    }
+
+    /// Write every known record to records.json (newest first, capped).
+    async fn save_records(&self) {
+        let Some(path) = &self.0.records_path else {
+            return;
+        };
+        let mut recs: Vec<SiteRecord> = self.0.map.read().await.records.values().cloned().collect();
+        recs.sort_by(|a, b| b.seq.cmp(&a.seq));
+        recs.truncate(MAX_SAVED_RECORDS);
+        let Ok(bytes) = serde_json::to_vec(&recs) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
         }
     }
 
@@ -535,6 +593,8 @@ impl Hosting {
                 if last_records.elapsed() >= h.0.timing.records_every {
                     h.announce_records().await;
                     last_records = Instant::now();
+                } else if h.0.records_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    h.save_records().await;
                 }
                 tokio::time::sleep(jitter(h.0.timing.announce_every)).await;
             }
@@ -1461,6 +1521,11 @@ const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 /// whichever is more, capped at 50 GiB. Every node hosts by default, including
 /// busy production boxes, so the 5 GiB hosting budget alone could fill a disk
 /// that was already nearly full.
+/// Known-but-not-held records under target re-gossiped per records round.
+const SHORT_RECORDS_PER_ROUND: usize = 50;
+/// Records kept in records.json across restarts.
+const MAX_SAVED_RECORDS: usize = 20_000;
+
 /// Room a node must have beyond its floor/budget to call itself not full.
 const FULL_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
