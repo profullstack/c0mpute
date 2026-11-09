@@ -753,6 +753,8 @@ pub fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     walk(dir, dir, &mut paths)?;
     paths.sort();
     Ok(paths)
+}
+
 /// Where one chunk of a scanned site lives on the publisher's disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkLoc {
