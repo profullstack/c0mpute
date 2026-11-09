@@ -1414,14 +1414,52 @@ fn maybe_self_update(cli: &Cli) {
 #[cfg(not(unix))]
 fn maybe_self_update(_cli: &Cli) {}
 
+/// A server or worker (`... serve`, `worker start`, `status-aggregator`): a
+/// process that must survive a peer closing a pipe on it, so it keeps Rust's
+/// ignored SIGPIPE (writes fail with EPIPE instead of killing it).
+fn long_running(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| matches!(a.as_str(), "serve" | "start" | "status-aggregator"))
+}
+
+#[cfg(test)]
+mod sigpipe_tests {
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn daemons_keep_sigpipe_ignored() {
+        assert!(super::long_running(&argv("c0mpute worker start")));
+        assert!(super::long_running(&argv("c0mpute worker start --roles tts,stt")));
+        assert!(super::long_running(&argv("c0mpute speech serve --bind 0.0.0.0:8787")));
+        assert!(super::long_running(&argv("c0mpute jobs serve")));
+        assert!(super::long_running(&argv("c0mpute status-aggregator --bind 127.0.0.1:8091")));
+        assert!(!super::long_running(&argv("c0mpute storage ls")));
+        assert!(!super::long_running(&argv("c0mpute captcha code.png --plain")));
+        assert!(!super::long_running(&argv("c0mpute embed -- start")));
+    }
+}
+
 fn main() -> Result<()> {
     // Rust ignores SIGPIPE, so writing to a closed pipe returns EPIPE and the
     // stdlib panics on it. For a CLI that prints lists that is a crash on
     // `c0mpute storage ls | head`, which is ordinary shell usage. Restore the
     // default disposition so the process exits quietly instead.
+    //
+    // Not for daemons, though: with the default disposition one write to a
+    // closed pipe kills `worker start` / `speech serve` outright, and systemd
+    // counts death by SIGPIPE as a clean exit, so `Restart=on-failure` never
+    // brings the node back. That took down dev2's gateway (and every Moshpit
+    // name behind edge.c0mpute.com) during the 0.2.100 self-update restart.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let args: Vec<String> = std::env::args().collect();
+        if !long_running(&args) {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
     }
 
     // Invoked by git as `git-remote-c0mpute <remote> <url>`: speak the

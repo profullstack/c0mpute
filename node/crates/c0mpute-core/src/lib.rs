@@ -89,9 +89,15 @@ pub fn init_tracing() -> Result<()> {
     //
     // Daemon mode is unaffected: daemonize_worker points stdout and stderr at
     // the same log file.
+    //
+    // log_internal_errors(false): when a log line cannot be written (stderr is
+    // a pipe whose reader went away), tracing-subscriber would report it with
+    // eprintln!, to that same broken stderr, which panics and kills a
+    // long-running node. A lost log line must never take the node down.
     fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .log_internal_errors(false)
         .try_init()
         .ok();
     info!("tracing initialised");
