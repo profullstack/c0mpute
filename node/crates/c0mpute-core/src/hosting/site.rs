@@ -18,9 +18,27 @@ use serde::{Deserialize, Serialize};
 /// as a CBOR integer array (about 2x on the wire and slow to decode), so
 /// small chunks keep each fetch quick and well under the 10 MiB response cap.
 pub const FILE_CHUNK_BYTES: usize = 1024 * 1024;
-/// Largest site a node will publish or replicate (equal to the per-owner
-/// hosting budget, so one site always fits it).
-pub const MAX_SITE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Largest site a node will publish or replicate (with paid preferred hosts).
+pub const MAX_SITE_BYTES: u64 = 256 * GIB;
+/// Largest free site (a v1 record, no preferred hosts). Volunteers hold free
+/// copies, so a free site may use at most a quarter of what a paid one may.
+pub const MAX_FREE_SITE_BYTES: u64 = 64 * GIB;
+/// Largest site that is built in memory ([`build_from_dir`]), and the cap for
+/// the small sites other features publish (ad creatives, app images, podcast
+/// shows, git repos). It was the only site cap before striping.
+pub const MAX_SMALL_SITE_BYTES: u64 = GIB;
+/// Sites above this size are striped: every holder keeps some chunk groups
+/// rather than the whole site (see [`super::stripe`]). At or below it a site
+/// is replicated whole, exactly as before, so nodes from 0.3.0 to 0.3.2 (which
+/// accept sites up to this size) keep holding and serving it.
+pub const STRIPE_ABOVE: u64 = GIB;
+/// Largest single file. One file's chunk list lives in one manifest part,
+/// which must stay one chunk fetch (under the protocol's 10 MiB response cap).
+pub const MAX_FILE_BYTES: u64 = 128 * GIB;
+/// Chunks per manifest part (besides [`PART_FILES`]): a part closes before
+/// it lists more than this, unless one file alone is bigger.
+pub const PART_CHUNKS: usize = 65_536;
+const GIB: u64 = 1024 * 1024 * 1024;
 /// Most files in one site. Above [`INLINE_FILES`] the manifest is split into
 /// parts of [`PART_FILES`], so a gateway loads only the part a request needs.
 pub const MAX_FILES: usize = 10_000_000;
@@ -30,6 +48,8 @@ pub const INLINE_FILES: usize = 5_000;
 /// Files per manifest part (a part stays a few hundred KiB, well under the
 /// chunk protocol's response cap).
 pub const PART_FILES: usize = 4_000;
+/// Most parts a root may list: file-bounded parts plus chunk-bounded ones.
+const MAX_PARTS: usize = MAX_FILES.div_ceil(PART_FILES) + 2 * (MAX_SITE_BYTES as usize / FILE_CHUNK_BYTES).div_ceil(PART_CHUNKS) + 2;
 /// Most files a v1 (single-chunk) manifest may list when read.
 const MAX_INLINE_FILES: usize = 10_000;
 /// Longest site name.
@@ -196,7 +216,7 @@ impl Manifest {
                 if r.files as usize > MAX_FILES || r.bytes > MAX_SITE_BYTES || r.parts.is_empty() {
                     bail!("site manifest root out of bounds");
                 }
-                if r.parts.len() > MAX_FILES.div_ceil(PART_FILES) {
+                if r.parts.len() > MAX_PARTS {
                     bail!("site manifest has too many parts");
                 }
                 if r.parts.iter().map(|p| p.files as u64).sum::<u64>() != r.files
@@ -497,8 +517,9 @@ impl SiteRecord {
         if self.domains.len() > MAX_DOMAINS || !self.domains.iter().all(|d| valid_domain(d)) {
             bail!("invalid domain list");
         }
-        if self.size > MAX_SITE_BYTES {
-            bail!("site is over {MAX_SITE_BYTES} bytes");
+        let cap = if self.v >= 2 { MAX_SITE_BYTES } else { MAX_FREE_SITE_BYTES };
+        if self.size > cap {
+            bail!("site is over {cap} bytes");
         }
         if Hash::from_hex(&self.manifest).is_err() {
             bail!("manifest is not a hash");
@@ -559,8 +580,13 @@ pub fn content_type_for(path: &str) -> &'static str {
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
         "otf" => "font/otf",
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        "m3u8" => "application/vnd.apple.mpegurl",
+        "srt" => "application/x-subrip",
         "mp3" => "audio/mpeg",
         "ogg" | "oga" => "audio/ogg",
         "m4a" => "audio/x-m4a",
@@ -597,20 +623,49 @@ impl StoredManifest {
 }
 
 impl BuiltSite {
-    /// Encode the manifest: one chunk up to [`INLINE_FILES`] files, else a
-    /// root plus parts of [`PART_FILES`].
+    /// The stored manifest (see [`SiteManifest::stored`]).
     pub fn stored(&self) -> StoredManifest {
-        let m = &self.manifest;
-        if m.files.len() <= INLINE_FILES {
+        self.manifest.stored()
+    }
+
+    /// The hash a record pins.
+    pub fn manifest_hash(&self) -> Hash {
+        self.stored().hash()
+    }
+}
+
+impl SiteManifest {
+    /// Encode the manifest: one chunk up to [`INLINE_FILES`] files and
+    /// [`STRIPE_ABOVE`] bytes (byte for byte what older nodes read), else a
+    /// root plus parts of at most [`PART_FILES`] files and [`PART_CHUNKS`]
+    /// chunks, so even a 256 GiB site's chunk lists are fetched a part at a
+    /// time.
+    pub fn stored(&self) -> StoredManifest {
+        let m = self;
+        if m.files.len() <= INLINE_FILES && m.total_bytes() <= super::stripe::stripe_above() {
             return StoredManifest {
                 root: m.to_bytes(),
                 parts: Vec::new(),
             };
         }
         let entries: Vec<(&String, &FileEntry)> = m.files.iter().collect();
+        let mut runs: Vec<&[(&String, &FileEntry)]> = Vec::new();
+        let (mut start, mut chunks) = (0usize, 0usize);
+        for (i, (_, f)) in entries.iter().enumerate() {
+            let n = f.chunks.len();
+            if i > start && (i - start >= PART_FILES || chunks + n > PART_CHUNKS) {
+                runs.push(&entries[start..i]);
+                start = i;
+                chunks = 0;
+            }
+            chunks += n;
+        }
+        if start < entries.len() {
+            runs.push(&entries[start..]);
+        }
         let mut parts = Vec::new();
         let mut refs = Vec::new();
-        for run in entries.chunks(PART_FILES) {
+        for run in runs {
             let part = ManifestPart {
                 v: 2,
                 files: run.iter().map(|(k, v)| ((*k).clone(), (*v).clone())).collect(),
@@ -636,11 +691,6 @@ impl BuiltSite {
             parts,
         }
     }
-
-    /// The hash a record pins.
-    pub fn manifest_hash(&self) -> Hash {
-        self.stored().hash()
-    }
 }
 
 pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
@@ -662,8 +712,11 @@ pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
     for (rel, abs) in paths {
         let bytes = std::fs::read(&abs).with_context(|| format!("read {}", abs.display()))?;
         total += bytes.len() as u64;
-        if total > MAX_SITE_BYTES {
-            bail!("site is over {} MiB", MAX_SITE_BYTES / (1024 * 1024));
+        if total > MAX_SMALL_SITE_BYTES {
+            bail!(
+                "site is over {} MiB (publish it with `c0mpute hosting publish`, which scans in place)",
+                MAX_SMALL_SITE_BYTES / (1024 * 1024)
+            );
         }
         let mut hashes = Vec::new();
         if bytes.is_empty() {
@@ -700,6 +753,234 @@ pub fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     walk(dir, dir, &mut paths)?;
     paths.sort();
     Ok(paths)
+/// Where one chunk of a scanned site lives on the publisher's disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkLoc {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub len: u32,
+}
+
+/// A site scanned in place: the manifest, and where each chunk is in the
+/// source files. Nothing is copied: the publisher serves chunks straight from
+/// the files (see [`super::seed`]), so publishing 50 GiB of video does not
+/// need another 50 GiB of local disk.
+pub struct ScannedSite {
+    pub manifest: SiteManifest,
+    pub locations: std::collections::HashMap<Hash, ChunkLoc>,
+}
+
+/// Chunk hashes of files already scanned, keyed by absolute path and checked
+/// against size and mtime, so publishing the same folder again (to resume, or
+/// after changing a few files) reads only what changed.
+#[derive(Default, Serialize, Deserialize)]
+pub struct ScanCache {
+    files: std::collections::HashMap<String, CachedFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedFile {
+    size: u64,
+    mtime_ns: u128,
+    chunks: Vec<String>,
+}
+
+impl ScanCache {
+    pub fn load(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("tmp");
+        if serde_json::to_vec(self)
+            .ok()
+            .is_some_and(|b| std::fs::write(&tmp, b).is_ok())
+        {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+fn mtime_ns(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn human_bytes(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// The size limit for a site, as an error that says which limit and what to
+/// do about it. `paid` = the site will have preferred (paid) hosts.
+pub fn check_site_size(total: u64, paid: bool) -> Result<()> {
+    if total > MAX_SITE_BYTES {
+        bail!(
+            "the site is {}; the most one site can be is {} (paid, --disks) or {} (free). \
+             Split the folder into several sites (one --name each).",
+            human_bytes(total),
+            human_bytes(MAX_SITE_BYTES),
+            human_bytes(MAX_FREE_SITE_BYTES)
+        );
+    }
+    if !paid && total > MAX_FREE_SITE_BYTES {
+        bail!(
+            "the site is {}; a free site can be at most {}, volunteers hold its copies. \
+             Add --disks auto to pay hosts (up to {} per site), or split the folder into several sites.",
+            human_bytes(total),
+            human_bytes(MAX_FREE_SITE_BYTES),
+            human_bytes(MAX_SITE_BYTES)
+        );
+    }
+    Ok(())
+}
+
+/// Walk `dir` and hash every file in 1 MiB chunks without copying anything.
+/// `progress(done, total)` is called as bytes are read. Sizes are checked
+/// against [`MAX_SITE_BYTES`] before anything is read.
+pub fn scan_dir(
+    dir: &Path,
+    name: &str,
+    cache: &mut ScanCache,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<ScannedSite> {
+    use std::io::Read;
+    if !valid_name(name) {
+        bail!("site name must be 1-63 of a-z, 0-9 and '-'");
+    }
+    if !dir.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    let mut paths = Vec::new();
+    walk(dir, dir, &mut paths)?;
+    paths.sort();
+    if paths.is_empty() {
+        bail!("{} has no files to publish", dir.display());
+    }
+    if paths.len() > MAX_FILES {
+        bail!(
+            "{} has {} files; a site holds at most {MAX_FILES}",
+            dir.display(),
+            paths.len()
+        );
+    }
+    let mut metas = Vec::with_capacity(paths.len());
+    let mut total = 0u64;
+    for (_, abs) in &paths {
+        let m = std::fs::metadata(abs).with_context(|| format!("stat {}", abs.display()))?;
+        total += m.len();
+        metas.push(m);
+    }
+    check_site_size(total, true)?;
+    for ((rel, _), m) in paths.iter().zip(&metas) {
+        if m.len() > MAX_FILE_BYTES {
+            bail!(
+                "{rel} is {}; one file can be at most {}. Split it (for video: `ffmpeg -i in -c copy -f segment ...`).",
+                human_bytes(m.len()),
+                human_bytes(MAX_FILE_BYTES)
+            );
+        }
+    }
+    let mut files = BTreeMap::new();
+    let mut locations = std::collections::HashMap::new();
+    let mut done = 0u64;
+    let mut buf = vec![0u8; FILE_CHUNK_BYTES];
+    progress(0, total);
+    for ((rel, abs), meta) in paths.into_iter().zip(metas) {
+        let size = meta.len();
+        let key = abs
+            .canonicalize()
+            .unwrap_or(abs.clone())
+            .to_string_lossy()
+            .to_string();
+        let mt = mtime_ns(&meta);
+        let n = size.div_ceil(FILE_CHUNK_BYTES as u64).max(1) as usize;
+        let cached = cache
+            .files
+            .get(&key)
+            .filter(|c| c.size == size && c.mtime_ns == mt && c.chunks.len() == n)
+            .map(|c| c.chunks.clone());
+        let hashes = match cached {
+            Some(h) => {
+                done += size;
+                progress(done, total);
+                h
+            }
+            None => {
+                let mut f =
+                    std::fs::File::open(&abs).with_context(|| format!("open {}", abs.display()))?;
+                let mut hashes = Vec::with_capacity(n);
+                if size == 0 {
+                    hashes.push(Hash::of(&[]).to_hex());
+                }
+                let mut left = size;
+                while left > 0 {
+                    let want = left.min(FILE_CHUNK_BYTES as u64) as usize;
+                    f.read_exact(&mut buf[..want]).with_context(|| {
+                        format!("read {} (did it change while publishing?)", abs.display())
+                    })?;
+                    hashes.push(Hash::of(&buf[..want]).to_hex());
+                    left -= want as u64;
+                    done += want as u64;
+                    progress(done, total);
+                }
+                cache.files.insert(
+                    key,
+                    CachedFile {
+                        size,
+                        mtime_ns: mt,
+                        chunks: hashes.clone(),
+                    },
+                );
+                hashes
+            }
+        };
+        for (i, h) in hashes.iter().enumerate() {
+            if let Ok(hash) = Hash::from_hex(h) {
+                let offset = i as u64 * FILE_CHUNK_BYTES as u64;
+                locations.entry(hash).or_insert(ChunkLoc {
+                    path: abs.clone(),
+                    offset,
+                    len: (size.saturating_sub(offset)).min(FILE_CHUNK_BYTES as u64) as u32,
+                });
+            }
+        }
+        files.insert(
+            rel.clone(),
+            FileEntry {
+                size,
+                content_type: content_type_for(&rel).to_string(),
+                chunks: hashes,
+            },
+        );
+    }
+    Ok(ScannedSite {
+        manifest: SiteManifest {
+            v: 1,
+            name: name.to_string(),
+            files,
+        },
+        locations,
+    })
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
@@ -1014,6 +1295,120 @@ mod tests {
         assert_eq!(resolve_path(m, "/about").unwrap().0, "about.html");
         assert_eq!(resolve_path(m, "/about.html?x=1").unwrap().0, "about.html");
         assert!(resolve_path(m, "/nope").is_none());
+    }
+
+    #[test]
+    fn large_sites_split_parts_by_chunks_and_every_part_stays_one_fetch() {
+        let mk = |n: usize, seed: u64| -> Vec<String> {
+            (0..n).map(|i| Hash::of(&(seed * 1_000_000 + i as u64).to_le_bytes()).to_hex()).collect()
+        };
+        let mut files = BTreeMap::new();
+        for (i, n) in [40_000usize, 40_000, 3, 1].into_iter().enumerate() {
+            files.insert(
+                format!("movies/{i}.mp4"),
+                FileEntry {
+                    size: n as u64 * FILE_CHUNK_BYTES as u64 - 5,
+                    content_type: "video/mp4".into(),
+                    chunks: mk(n, i as u64),
+                },
+            );
+        }
+        let m = SiteManifest {
+            v: 1,
+            name: "big".into(),
+            files,
+        };
+        let st = m.stored();
+        // Two files of 40k chunks cannot share a 65,536-chunk part.
+        assert_eq!(st.parts.len(), 2);
+        let Manifest::Parted(r) = Manifest::from_bytes(&st.root).unwrap() else {
+            panic!("a site over STRIPE_ABOVE is parted");
+        };
+        assert_eq!(r.bytes, m.total_bytes());
+        let mut back = BTreeMap::new();
+        for (pr, b) in r.parts.iter().zip(&st.parts) {
+            assert!(b.len() < 10 * 1024 * 1024, "a part is one fetch: {}", b.len());
+            back.extend(ManifestPart::from_bytes(b, pr).unwrap().files);
+        }
+        assert_eq!(back, m.files);
+        // The largest single file still fits one part (one chunk fetch).
+        let huge = (MAX_FILE_BYTES / FILE_CHUNK_BYTES as u64) as usize;
+        let part = ManifestPart {
+            v: 2,
+            files: [(
+                "x/".repeat(100) + "f.mkv",
+                FileEntry {
+                    size: MAX_FILE_BYTES,
+                    content_type: "video/x-matroska".into(),
+                    chunks: vec!["f".repeat(64); huge],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert!(serde_json::to_vec(&part).unwrap().len() < 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn size_caps_split_free_and_paid() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let h = Hash::of(b"m");
+        assert!(SiteRecord::sign(&kp, "x", &h, 1, MAX_FREE_SITE_BYTES, vec![]).unwrap().verify());
+        assert!(SiteRecord::sign(&kp, "x", &h, 1, MAX_FREE_SITE_BYTES + 1, vec![]).is_err(), "free cap");
+        let terms = HostingTerms {
+            preferred_hosts: vec![peer()],
+            price_per_gib_month: 4_000,
+            payer: None,
+        };
+        assert!(
+            SiteRecord::sign_with_terms(&kp, "x", &h, 1, MAX_SITE_BYTES, vec![], Some(terms.clone()))
+                .unwrap()
+                .verify()
+        );
+        assert!(SiteRecord::sign_with_terms(&kp, "x", &h, 1, MAX_SITE_BYTES + 1, vec![], Some(terms)).is_err());
+        let e = check_site_size(70 * GIB, false).unwrap_err().to_string();
+        assert!(e.contains("--disks auto"), "{e}");
+        assert!(check_site_size(70 * GIB, true).is_ok());
+        assert!(check_site_size(300 * GIB, true).unwrap_err().to_string().contains("Split"));
+    }
+
+    #[test]
+    fn scanning_hashes_in_place_and_reuses_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let big: Vec<u8> = (0..(2 * FILE_CHUNK_BYTES + 7)).map(|i| (i % 249) as u8).collect();
+        std::fs::write(dir.path().join("v.mp4"), &big).unwrap();
+        std::fs::write(dir.path().join("index.html"), b"hi").unwrap();
+        std::fs::write(dir.path().join(".secret"), b"no").unwrap();
+        let mut cache = ScanCache::default();
+        let mut calls = 0;
+        let s = scan_dir(dir.path(), "v", &mut cache, &mut |_, _| calls += 1).unwrap();
+        assert!(calls > 2);
+        let built = build_from_dir(dir.path(), "v").unwrap();
+        assert_eq!(s.manifest, built.manifest, "same manifest as the in-memory builder");
+        assert_eq!(s.manifest.files["v.mp4"].content_type, "video/mp4");
+        let h = Hash::from_hex(&s.manifest.files["v.mp4"].chunks[2]).unwrap();
+        let loc = &s.locations[&h];
+        assert_eq!((loc.offset, loc.len), (2 * FILE_CHUNK_BYTES as u64, 7));
+        // Second scan: nothing read again.
+        let mut reads = 0u64;
+        let mut last = 0u64;
+        let s2 = scan_dir(dir.path(), "v", &mut cache, &mut |d, _| {
+            reads += 1;
+            last = d;
+        })
+        .unwrap();
+        assert_eq!(s2.manifest, s.manifest);
+        assert_eq!(last, big.len() as u64 + 2);
+        assert!(reads <= 3, "cached files are not re-read ({reads} progress calls)");
+    }
+
+    #[test]
+    fn media_types_for_video() {
+        assert_eq!(content_type_for("a/b.mkv"), "video/x-matroska");
+        assert_eq!(content_type_for("a/b.m4v"), "video/mp4");
+        assert_eq!(content_type_for("a/b.MP4"), "video/mp4");
+        assert_eq!(content_type_for("a/b.webm"), "video/webm");
+        assert_eq!(content_type_for("a/b.mp3"), "audio/mpeg");
     }
 
     #[test]

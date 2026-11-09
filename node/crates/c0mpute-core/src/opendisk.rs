@@ -184,7 +184,7 @@ pub fn descriptor(
     if hosts {
         doc["c0mpute"]["hosting"] = json!({
             "price_per_gib_month": config.hosting.price_micros() as f64 / crate::payments::MICROS_PER_USD as f64,
-            "max_gib": gib(config.hosting.max_bytes),
+            "max_gib": gib(hosting_budget(config)),
             "publish": "c0mpute hosting publish <dir> --name <site> --disks auto",
         });
     }
@@ -192,6 +192,16 @@ pub fn descriptor(
         doc["key"] = Value::String(format!("ed25519:{k}"));
     }
     doc
+}
+
+/// The hosting budget to advertise: `[hosting] max_bytes`, or the automatic
+/// budget of the storage disk when it is 0.
+fn hosting_budget(config: &Config) -> u64 {
+    if config.hosting.max_bytes > 0 {
+        return config.hosting.max_bytes;
+    }
+    let (free, total) = disk_for(&config.storage.root);
+    crate::hosting::auto_budget(0, free, total)
 }
 
 fn chrono_now() -> String {
