@@ -391,6 +391,12 @@ struct NodeRow {
     /// What the node offers as storage (`free_bytes`, `total_bytes`,
     /// `per_gib_month`), when it runs the storage role. Numbers only.
     storage: Option<serde_json::Value>,
+    /// The public origin of the node's gateway (`http://host:7777`), only
+    /// when its operator announced one. Opt-in, so it does not break the rule
+    /// above: the operator published this address themselves. Re-validated to
+    /// a bare http(s) origin. Clients that are not libp2p peers use it to find
+    /// gateways that serve `/s/<site>/`.
+    gateway: Option<String>,
     last_seen_s: u64,
 }
 
@@ -546,6 +552,11 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .and_then(crate::capabilities::sanitize_ref),
             pricing: listing(&ad.hardware),
             storage: storage_offer(&ad.hardware),
+            gateway: ad
+                .hardware
+                .get("gateway")
+                .and_then(|v| v.as_str())
+                .and_then(crate::capabilities::gateway_origin),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
         })
         .collect();
@@ -798,6 +809,7 @@ mod tests {
                         "version": "0.2.32",
                         "ref": "chovy",
                         "name": "profullstack",
+                        "gateway": "http://203.0.113.7:7777/",
                         "cpu": "Example CPU",
                         "bench_at": "2026-11-01T12:00:00Z",
                         "benchmark": {"workloads": {"fib": {
@@ -812,7 +824,7 @@ mod tests {
                 mk(
                     &["c0mpute:cpu"],
                     Some(100),
-                    serde_json::json!({"ref": "<bad>", "name": "has space"}),
+                    serde_json::json!({"ref": "<bad>", "name": "has space", "gateway": "javascript:alert(1)"}),
                 ),
             ),
         ];
@@ -832,6 +844,13 @@ mod tests {
         assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
         assert_eq!(p.nodes[1].name, None, "invalid name dropped");
         assert_eq!(p.nodes[0].name.as_deref(), Some("profullstack"));
+        assert_eq!(
+            p.nodes[0].gateway.as_deref(),
+            Some("http://203.0.113.7:7777"),
+            "an announced gateway is published as a bare origin"
+        );
+        assert_eq!(p.nodes[1].gateway, None, "an invalid gateway is dropped");
+        assert_eq!(p.nodes[2].gateway, None, "no gateway unless announced");
         assert_eq!(
             p.operators,
             vec![OperatorRow {
