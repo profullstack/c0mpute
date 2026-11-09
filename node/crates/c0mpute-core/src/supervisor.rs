@@ -306,6 +306,22 @@ impl Supervisor {
             );
         }
 
+        // Hosting: `hosting` nodes hold copies; every gateway serves sites,
+        // proxying from holders. Either role starts the service.
+        let hosting = if self.config.roles.contains(&c0mpute_proto::Role::Hosting)
+            || self.config.roles.contains(&c0mpute_proto::Role::Gateway)
+        {
+            match self.start_hosting().await {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::warn!(err = %e, "hosting: not started");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;
             let state = c0mpute_gateway::GatewayState {
@@ -315,6 +331,9 @@ impl Supervisor {
             let mut app = c0mpute_gateway::router(state);
             if self.config.roles.contains(&c0mpute_proto::Role::Storage) {
                 app = app.merge(self.storage_router());
+            }
+            if let Some(h) = &hosting {
+                app = app.merge(h.router());
             }
             tokio::spawn(async move {
                 if let Err(e) = c0mpute_gateway::serve_router(app, bind).await {
@@ -343,6 +362,23 @@ impl Supervisor {
         tokio::signal::ctrl_c().await?;
         info!("ctrl-c received; shutting down");
         Ok(())
+    }
+
+    /// Start the hosting service: gossip, replica map, self-healing copies.
+    pub async fn start_hosting(&self) -> Result<crate::hosting::Hosting> {
+        let hosts = self.config.roles.contains(&c0mpute_proto::Role::Hosting);
+        let catalog_path = Some(self.config.storage.root.join("hosting").join("catalog.json"));
+        crate::hosting::Hosting::start(
+            self.libp2p.clone(),
+            self.store.clone(),
+            crate::hosting::Options {
+                hosts,
+                max_bytes: self.config.hosting.max_bytes,
+                catalog_path,
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// The storage API (CIP-002) and this node's OpenDisk descriptor, served

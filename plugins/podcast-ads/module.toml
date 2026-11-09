@@ -22,7 +22,7 @@
 [module]
 id          = "podcast-ads"
 name        = "Podcast Ads — audio ad marketplace"
-version     = "0.2.71"
+version     = "0.2.72"
 kind        = "service"
 category    = "applications"
 status      = "coming-soon"

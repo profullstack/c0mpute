@@ -178,6 +178,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CrawlCmd,
     },
+    /// Hosting plugin: put a static site on the network. Hosting nodes keep
+    /// three copies and heal themselves; every gateway serves it at
+    /// /s/<site_id>/ and on custom domains confirmed by DNS.
+    Hosting {
+        #[command(subcommand)]
+        cmd: HostingCmd,
+    },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
         /// Arguments forwarded to `coinpay`.
@@ -454,6 +461,36 @@ const SECURE_CHAT_CMDS: &[&str] = &[
 struct DmCli {
     #[command(subcommand)]
     cmd: ChatCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostingCmd {
+    /// Publish (or update) a site from a directory of static files.
+    ///
+    /// The site is signed with this machine's identity, so only this machine
+    /// can update it; publishing the same --name again ships a new version.
+    /// Stays up until three hosting nodes hold copies, then exits.
+    #[command(verbatim_doc_comment)]
+    Publish {
+        /// Directory to publish (hidden files are skipped, .well-known kept).
+        dir: std::path::PathBuf,
+        /// Site name: 1-63 of a-z, 0-9 and '-'.
+        #[arg(long)]
+        name: String,
+        /// A custom domain for the site (repeatable). Point it at gateways and
+        /// add TXT `_c0mpute-hosting.<domain>` = `site=<site_id>`.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Give up waiting for network copies after this many seconds.
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
+    },
+    /// List the sites a gateway knows, with live copy counts.
+    Ls {
+        /// Gateway to ask.
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -755,6 +792,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             run_jobs(cmd).await
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
+        Cmd::Hosting { cmd } => run_hosting(cmd).await,
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
@@ -1011,6 +1049,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::WorkflowStep,
                     Role::Diffusion,
                     Role::Crawl,
+                    Role::Hosting,
                 ] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
@@ -1973,6 +2012,73 @@ async fn run_speech(cmd: SpeechCmd) -> Result<()> {
     }
 }
 
+async fn run_hosting(cmd: HostingCmd) -> Result<()> {
+    match cmd {
+        HostingCmd::Publish {
+            dir,
+            name,
+            domains,
+            wait_secs,
+        } => {
+            let domains: Vec<String> = domains.into_iter().map(|d| d.to_ascii_lowercase()).collect();
+            let (record, copies) = c0mpute_core::hosting::publish_dir(
+                &dir,
+                &name,
+                domains.clone(),
+                std::time::Duration::from_secs(wait_secs),
+            )
+            .await?;
+            println!("site:    {}", record.site_id);
+            println!("version: {}", record.seq);
+            println!("copies:  {copies}/{}", c0mpute_core::hosting::TARGET_REPLICAS);
+            println!("path:    /s/{}/   (on any c0mpute gateway, e.g. http://<gateway>:7777/s/{}/)", record.site_id, record.site_id);
+            for d in &domains {
+                println!(
+                    "domain:  {d}  -> add TXT {}.{d} \"site={}\" and point {d} at gateway nodes",
+                    c0mpute_core::hosting::dns::TXT_PREFIX,
+                    record.site_id
+                );
+            }
+            if copies < c0mpute_core::hosting::TARGET_REPLICAS {
+                eprintln!(
+                    "note: fewer than {} hosting nodes took a copy before the wait ran out; \
+                     the network keeps replicating as hosting nodes see the record, but \
+                     re-run publish (same --name) if no copies appear",
+                    c0mpute_core::hosting::TARGET_REPLICAS
+                );
+            }
+            Ok(())
+        }
+        HostingCmd::Ls { gateway } => {
+            let url = format!("{}/hosting/v1/sites", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url)
+                .await
+                .with_context(|| format!("GET {url}"))?
+                .json()
+                .await?;
+            let sites = v["sites"].as_array().cloned().unwrap_or_default();
+            if sites.is_empty() {
+                println!("no sites known to {gateway} yet");
+            }
+            for s in sites {
+                println!(
+                    "{:<22} {:<24} copies {}/{}  {} bytes  {}",
+                    s["site_id"].as_str().unwrap_or(""),
+                    s["name"].as_str().unwrap_or(""),
+                    s["copies"],
+                    v["target_copies"],
+                    s["size"],
+                    s["domains"]
+                        .as_array()
+                        .map(|d| d.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                        .unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn run_crawl(cmd: CrawlCmd) -> Result<()> {
     match cmd {
         CrawlCmd::Fetch {
@@ -2381,6 +2487,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "video" => Some(Role::Video),
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
         "crawl" | "fetch" => Some(Role::Crawl),
+        "hosting" | "host" | "sites" => Some(Role::Hosting),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

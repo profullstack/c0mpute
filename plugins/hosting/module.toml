@@ -1,45 +1,54 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — manifest stub for the DIP-0015 hosting vertical.
-# Brief for the implementer:
-#   Censorship-resistant static-site hosting. Built on the storage
-#   plugin (DIP-0012, RS-10/14 shards) plus continuous reservations
-#   (DIP-0015). Differentiates on takedown resistance and replica
-#   diversity as contract terms — NOT on $/GB. First-party in-tree:
-#   should compile into the c0mpute binary alongside transcode.
-#   Live code will land at node/crates/c0mpute-hosting.
+# First-party, compiled into the c0mpute binary, ON BY DEFAULT (role
+# `hosting`). Code: node/crates/c0mpute-core/src/hosting/. Docs:
+# docs/hosting.md.
+#
+# Fully peer to peer, no coordinator:
+#   - A site is a signed record (owner ed25519 key + name -> manifest hash,
+#     version) pointing at a content-addressed manifest of 1 MiB chunks.
+#   - Hosting nodes gossip what they hold on c0mpute/hosting/v1 every minute,
+#     so every node knows where each site's copies are.
+#   - Fewer than 3 live copies: the hosting nodes that rank highest for that
+#     site (rendezvous hashing, same answer on every node) fetch a copy. A node
+#     that leaves stops counting after ~200 s and another takes over; above 5
+#     copies the lowest-ranked holder lets go.
+#   - Every gateway is a proxy: /s/<site_id>/... and custom domains (DNS TXT
+#     _c0mpute-hosting.<domain> = "site=<id>") are served from local chunks or
+#     fetched over libp2p from the fastest live holder, round-robin among
+#     equally fast ones, failing over to the next.
+#
+# Not yet: paid reservations, epoch settlement and proof-of-serve challenges
+# from DIP-0015. Hosting is free while it is in beta.
 
 [module]
 id          = "hosting"
-name        = "Hosting — censorship-resistant static sites"
-version     = "0.2.71"
-kind        = "workload"
+name        = "Hosting — p2p static sites"
+version     = "0.2.72"
+kind        = "service"
 category    = "data"
-status      = "coming-soon"
-description = "Static-site hosting with multi-replica placement, mutable naming, epoch settlement, and slashable proof-of-serve. See DIP-0015."
+status      = "available"
+builtin     = true
+description = "Static sites kept alive by the network: three self-healing copies on hosting nodes, served by every gateway at /s/<site_id>/ and on DNS-verified custom domains. Signed, content-addressed, no coordinator. Free in beta."
 author      = "Profullstack"
 license     = "MIT"
-source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/hosting"
-keywords    = ["hosting", "static", "censorship-resistant", "ipfs-alt", "dweb"]
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/hosting"
+keywords    = ["hosting", "static", "p2p", "censorship-resistant", "self-healing", "dweb"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.72"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["storage-role", "network:ingress", "continuous-reservation"]
-
-[module.workloads]
-"hosting.serve" = { command = "serve", validation = "proof_of_serve_challenge" }
+capabilities = ["disk", "network:ingress?"]
 
 [module.dispatch]
 mode = "in-process"
-# First-party in-tree, compiled into the c0mpute binary.
 
 [module.surfaces]
 cli = "c0mpute hosting"
-# web = "c0mpute.com/hosting"   # planned
 
 [module.config.defaults]
-replicas        = 4
-epoch_secs      = 3600
-challenge_quota = 12
+replicas      = 3
+max_replicas  = 5
+max_site_mib  = 256
+max_bytes_gib = 5

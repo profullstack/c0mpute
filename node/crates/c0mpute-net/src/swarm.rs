@@ -52,6 +52,16 @@ enum Cmd {
         peer: PeerId,
         reply: oneshot::Sender<bool>,
     },
+    /// Teach Kad an address for `peer` (learned from gossip), so a later
+    /// dial or fetch by peer id can reach it.
+    AddAddress {
+        peer: PeerId,
+        addr: Multiaddr,
+    },
+    /// Our own dialable addresses: confirmed external ones, then listeners.
+    Advertised {
+        reply: oneshot::Sender<Vec<Multiaddr>>,
+    },
     Announce {
         hash: Hash,
         reply: oneshot::Sender<Result<()>>,
@@ -279,6 +289,20 @@ impl Libp2pNetwork {
         rx.await.map_err(|_| anyhow!("swarm task closed"))?
     }
 
+    /// Teach the routing table an address for `peer`.
+    pub async fn add_peer_address(&self, peer: PeerId, addr: Multiaddr) {
+        let _ = self.cmd_tx.send(Cmd::AddAddress { peer, addr }).await;
+    }
+
+    /// This node's dialable addresses (external first, then listeners).
+    pub async fn advertised_addrs(&self) -> Vec<Multiaddr> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::Advertised { reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Whether a connection to `peer` is open now.
     pub async fn is_connected(&self, peer: PeerId) -> bool {
         let (tx, rx) = oneshot::channel();
@@ -484,6 +508,19 @@ impl SwarmTask {
             Cmd::Dial { addr, reply } => {
                 let r = self.swarm.lock().await.dial(addr).map_err(Into::into);
                 let _ = reply.send(r);
+            }
+            Cmd::AddAddress { peer, addr } => {
+                self.swarm.lock().await.behaviour_mut().kad.add_address(&peer, addr);
+            }
+            Cmd::Advertised { reply } => {
+                let swarm = self.swarm.lock().await;
+                let mut addrs: Vec<Multiaddr> = swarm.external_addresses().cloned().collect();
+                for a in swarm.listeners() {
+                    if !addrs.contains(a) {
+                        addrs.push(a.clone());
+                    }
+                }
+                let _ = reply.send(addrs);
             }
             Cmd::IsConnected { peer, reply } => {
                 let _ = reply.send(self.swarm.lock().await.is_connected(&peer));

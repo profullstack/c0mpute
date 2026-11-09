@@ -26,6 +26,8 @@ use async_trait::async_trait;
 use c0mpute_proto::{ChunkRequest, Hash};
 
 pub use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
+/// The libp2p this crate is built on, for identity and key types.
+pub use libp2p;
 pub use swarm::{GossipMessage, Libp2pNetwork, NetworkConfig};
 
 /// Trait that abstracts the underlying network so the rest of the node can be
