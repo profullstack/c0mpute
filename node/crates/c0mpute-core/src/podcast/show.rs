@@ -52,6 +52,69 @@ pub struct ShowMeta {
     /// Public URL the site is reachable at (for absolute enclosure URLs).
     pub base_url: Option<String>,
     pub value: Option<ValueMeta>,
+    /// Opt in to dynamic ad insertion (`podcast-ads`). Absent = no ads, ever.
+    pub ads: Option<AdsMeta>,
+}
+
+/// `[ads]` in `show.toml`: the publisher's consent to dynamic ad insertion.
+/// Written into the site as `c0mpute-ads.json`, so it is signed with the
+/// show; enclosure URLs then carry `?ads=1`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdsMeta {
+    /// Default true when the table is present.
+    pub enabled: Option<bool>,
+    /// Which breaks: "pre", "mid", "post" (default pre + post).
+    #[serde(default)]
+    pub placements: Vec<String>,
+    /// Default: the show's category.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    pub mid_at_secs: Option<u64>,
+    /// Lowest CPM in USD, e.g. "1.50".
+    pub min_cpm: Option<String>,
+    pub max_ad_secs: Option<u64>,
+}
+
+impl AdsMeta {
+    /// The opt-in file contents, or `None` when ads are off.
+    pub fn opt_in(&self, show_category: Option<&str>) -> Result<Option<crate::ads::stitch::ShowAds>> {
+        use crate::ads::campaign::{Placement, norm_terms, parse_usd_micros};
+        if self.enabled == Some(false) {
+            return Ok(None);
+        }
+        let names: Vec<String> = if self.placements.is_empty() {
+            vec!["pre".into(), "post".into()]
+        } else {
+            self.placements.clone()
+        };
+        let mut placements = Vec::new();
+        for n in norm_terms(&names) {
+            let p = Placement::parse(&n)
+                .filter(|p| p.is_podcast())
+                .with_context(|| format!("[ads] placements are pre, mid and post (got {n:?})"))?;
+            if !placements.contains(&p) {
+                placements.push(p);
+            }
+        }
+        let mut s = crate::ads::stitch::ShowAds::new(placements);
+        s.categories = if self.categories.is_empty() {
+            norm_terms(show_category)
+        } else {
+            norm_terms(&self.categories)
+        };
+        s.keywords = norm_terms(&self.keywords);
+        s.mid_at_secs = self.mid_at_secs;
+        if let Some(m) = &self.min_cpm {
+            s.floor_cpm_micros = parse_usd_micros(m).context("[ads] min_cpm")?;
+        }
+        if let Some(m) = self.max_ad_secs {
+            s.max_ad_secs = m;
+        }
+        Ok(Some(s))
+    }
 }
 
 /// A `podcast:value` block. Written only when an address is given.
@@ -224,6 +287,8 @@ pub struct BuiltShow {
     pub episodes: Vec<BuiltEpisode>,
     pub base_url: Option<String>,
     pub total_bytes: u64,
+    /// The show opted in to dynamic ad insertion.
+    pub ads: bool,
 }
 
 /// `podcast:guid` for a c0mpute show: uuid v5 (Podcasting 2.0 namespace) of
@@ -321,6 +386,13 @@ pub fn build_show(input: &ShowInput, name: &str, site_id: &str, base_url: Option
         Some(b) => format!("{b}{rel}"),
         None => rel.to_string(),
     };
+    let opt_in = match &input.show.ads {
+        Some(a) => a.opt_in(input.show.category.as_deref())?,
+        None => None,
+    };
+    // Episodes of an opted-in show are fetched with ?ads=1 so gateways
+    // splice ads in; the bare path stays the clean file.
+    let ad_suffix = if opt_in.is_some() { "?ads=1" } else { "" };
     let mut total: u64 = 0;
     for (src, _) in &input.episodes {
         total += std::fs::metadata(src).with_context(|| format!("stat {}", src.display()))?.len();
@@ -373,7 +445,7 @@ pub fn build_show(input: &ShowInput, name: &str, site_id: &str, base_url: Option
             title: meta.title.clone().unwrap_or(stem),
             description: meta.description.clone().unwrap_or_default(),
             guid: meta.guid.clone().unwrap_or_else(|| format!("c0mpute:{site_id}:{fname}")),
-            url: url_for(&rel),
+            url: format!("{}{ad_suffix}", url_for(&rel)),
             path: rel,
             bytes,
             mime,
@@ -413,7 +485,11 @@ pub fn build_show(input: &ShowInput, name: &str, site_id: &str, base_url: Option
         episodes,
         base_url: base.clone(),
         total_bytes: total,
+        ads: opt_in.is_some(),
     };
+    if let Some(o) = &opt_in {
+        std::fs::write(out.join(crate::ads::stitch::OPT_IN_FILE), serde_json::to_vec_pretty(o)?)?;
+    }
     let feed_xml = render_feed(show, &built, cover.as_deref().map(url_for).as_deref(), now_unix());
     std::fs::write(out.join("feed.xml"), &feed_xml)?;
     std::fs::write(out.join("index.html"), render_index(show, &built, cover.as_deref()))?;
@@ -579,6 +655,7 @@ img.cover{{max-width:12rem;border-radius:.5rem}}article{{border-top:1px solid #8
         h,
         "<p><a href=\"feed.xml\">RSS feed</a> (paste it into any podcast app, or <code>c0mpute podcasts subscribe</code>)</p>"
     );
+    let ad_suffix = if b.ads { "?ads=1" } else { "" };
     for e in &b.episodes {
         let _ = writeln!(h, "<article><h2>{}</h2>", esc(&e.title));
         let mut meta = dates::fmt_rfc2822(e.published)[..16].to_string();
@@ -591,7 +668,7 @@ img.cover{{max-width:12rem;border-radius:.5rem}}article{{border-top:1px solid #8
         }
         let _ = writeln!(
             h,
-            "<audio controls preload=\"none\" src=\"{}\"></audio>\n<p class=\"meta\"><a href=\"{}\" download>download</a> ({} MB)</p></article>",
+            "<audio controls preload=\"none\" src=\"{}{ad_suffix}\"></audio>\n<p class=\"meta\"><a href=\"{}{ad_suffix}\" download>download</a> ({} MB)</p></article>",
             esc(&e.path),
             esc(&e.path),
             (e.bytes as f64 / 1_000_000.0 * 10.0).round() / 10.0
@@ -768,6 +845,48 @@ episode = 2
         let input = load_input(&[src.path().join("a.mp3")]).unwrap();
         let out = tempfile::tempdir().unwrap();
         assert!(build_show(&input, "Bad Name", "a", None, out.path()).is_err());
+    }
+
+    #[test]
+    fn ads_opt_in_is_written_only_when_asked() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.mp3"), vec![0u8; 10]).unwrap();
+        std::fs::write(
+            src.path().join("show.toml"),
+            "category = \"Technology\"\n[ads]\nplacements = [\"pre\", \"mid\"]\nmin_cpm = \"1.50\"\nmid_at_secs = 300\n",
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let input = load_input(&[src.path().to_path_buf()]).unwrap();
+        let b = build_show(&input, "with-ads", "aaaaaaaaaaaaaaaaaaaa", None, &out.path().join("s")).unwrap();
+        assert!(b.ads);
+        assert_eq!(b.episodes[0].url, "episodes/a.mp3?ads=1");
+        let raw = std::fs::read(out.path().join("s").join(crate::ads::stitch::OPT_IN_FILE)).unwrap();
+        let o = crate::ads::stitch::ShowAds::parse(&raw).unwrap();
+        use crate::ads::campaign::Placement;
+        assert_eq!(o.placements, vec![Placement::PodcastPre, Placement::PodcastMid]);
+        assert_eq!(o.categories, vec!["technology"]);
+        assert_eq!(o.floor_cpm_micros, 1_500_000);
+        assert_eq!(o.mid_at_secs, Some(300));
+        let index = std::fs::read_to_string(out.path().join("s/index.html")).unwrap();
+        assert!(index.contains("src=\"episodes/a.mp3?ads=1\""));
+        // The built folder is still a valid hosting site (the opt-in is a file in it).
+        let site = site::build_from_dir(&out.path().join("s"), "with-ads").unwrap();
+        assert!(site.manifest.files.contains_key(crate::ads::stitch::OPT_IN_FILE));
+
+        // No [ads] table: no opt-in file, clean URLs.
+        let plain = tempfile::tempdir().unwrap();
+        let input = load_input(&[src.path().join("a.mp3")]).unwrap();
+        let b = build_show(&input, "no-ads", "aaaaaaaaaaaaaaaaaaaa", None, &plain.path().join("s")).unwrap();
+        assert!(!b.ads);
+        assert!(!plain.path().join("s").join(crate::ads::stitch::OPT_IN_FILE).exists());
+        assert_eq!(b.episodes[0].url, "episodes/a.mp3");
+
+        // enabled = false and bad placements.
+        let off = AdsMeta { enabled: Some(false), ..Default::default() };
+        assert!(off.opt_in(None).unwrap().is_none());
+        let bad = AdsMeta { placements: vec!["preroll".into()], ..Default::default() };
+        assert!(bad.opt_in(None).is_err(), "ctv placements are not podcast breaks");
     }
 
     #[test]

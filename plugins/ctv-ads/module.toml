@@ -1,76 +1,59 @@
-# c0mpute plugin manifest. See dips/0006-module-model.md.
+# c0mpute plugin manifest. See dips/0006-module-model.md and
+# dips/0020-ctv-ads-plugin.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# See dips/0020-ctv-ads-plugin.md for the full PRD.
+# First-party, compiled into the c0mpute binary, on every gateway. Code:
+# node/crates/c0mpute-core/src/ads/vast.rs (+ routes in ads/mod.rs). Docs:
+# docs/ads.md. Campaigns come from ads-manager (signed, gossiped).
 #
-# Brief for the implementer:
-#   CTV-specific layer on top of ads-manager (DIP-0021).
-#   Owns: VAST 4.x XML assembly and endpoint, OpenRTB video imp object,
-#   quartile beacon handling (impression/firstQuartile/midpoint/thirdQuartile/
-#   complete), anti-fraud beacon validation (timing + replay bloom filter),
-#   SCTE-35 cue detection and SSAI splice coordination with live-stream plugin,
-#   and signed impression receipt production.
-#   Gossip message types: 0x40 CTV_BID_REQUEST, 0x41 CTV_BID_RESPONSE,
-#   0x42 CTV_WIN_NOTIFY, 0x43 CTV_BEACON.
-#   VAST endpoint: GET /ctv/vast?pub=<did>&slot=<preroll|midroll|postroll>&...
-#   Creative CDN: same p2p swarm transport as live-stream (DIP-0019).
-#   All campaign/creative/reporting/escrow operations delegated to ads-manager.
-#   First-party in-tree target: node/crates/c0mpute-ctv-ads
+#   GET /ads/v1/vast?placement=ctv_preroll|ctv_midroll|ctv_postroll
+#       &uid=<device id>&categories=..&keywords=..&country=..&floor=<usd>
+#     -> VAST 4.2 InLine (AdSystem, Error, Impression, AdServingId, AdTitle,
+#        Creative + UniversalAdId, Linear Duration, TrackingEvents,
+#        VideoClicks, progressive MediaFile), or the empty <VAST/> on no fill.
+#   GET /ads/v1/vmap?breaks=start,600,end  -> VMAP 1.0, one VAST tag per break.
+#   GET /ads/v1/creative/<campaign>/<hash>  -> the video from the hosting
+#       swarm, hash-checked, with Range support.
+#   GET /ads/v1/t?ev=impression|start|firstQuartile|midpoint|thirdQuartile|
+#       complete|click&tok=..  -> a signed receipt (ads-manager), once per
+#       play and event; tokens are HMAC'd by the gateway that served the ad.
+#   Also at /ads/vast and /ads/vmap. CORS open, so web players can call them.
+#
+# Not built: OpenRTB bidding, SCTE-35 / live-stream SSAI, beacon timing
+# checks, and billing (see ads-manager).
 
 [module]
 id          = "ctv-ads"
-name        = "CTV Ads — Connected TV ad marketplace"
-version     = "0.2.76"
+name        = "CTV Ads — VAST and VMAP from every gateway"
+version     = "0.2.78"
 kind        = "service"
 category    = "applications"
-status      = "coming-soon"
-description = "Decentralised Connected TV advertising on the c0mpute network. VAST 4.x endpoint, OpenRTB real-time auction, cryptographically verified impressions, CoinPay settlement. Supports Roku, Fire TV, Apple TV, Smart TVs, and FAST channels. Live-stream integration for ad-monetised broadcasts."
+status      = "partial"
+status_note = "VAST 4.2 / VMAP ad serving with signed impression and quartile receipts works on every gateway; there is no billing, OpenRTB bidding or live-stream (SCTE-35) insertion yet."
+builtin     = true
+description = "Video ads for connected TV and web players: every c0mpute gateway answers VAST 4.2 and VMAP requests from the gossiped campaign index, serves the video creative from hosting copies, and turns impression, quartile and click beacons into signed receipts."
 author      = "Profullstack"
 license     = "MIT"
-source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/ctv-ads"
-keywords    = ["ctv", "connected-tv", "advertising", "vast", "openrtb", "streaming", "fast", "roku", "programmatic"]
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/ads"
+keywords    = ["ctv", "connected-tv", "advertising", "vast", "vmap", "video", "streaming", "p2p"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.78"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["network:ingress", "network:egress"]
+capabilities = ["network:ingress"]
 
-# Required peer plugins
 [module.requirements.plugins]
-ads-manager = ">=0.0.1"   # DIP-0021: campaign, creative, auction, reporting
-live-stream = ">=0.0.1"   # DIP-0019: SSAI integration + creative CDN swarm
-coinpay     = ">=0.2.0"   # DIP-0007: DID identity + escrow
+ads-manager = ">=0.0.1"     # campaigns, selection, receipts
+hosting     = ">=0.2.72"   # creative storage
 
 [module.workloads]
-# No one-shot workloads. ctv-ads is a continuous service.
-# SSP (auction), DSP (bidding), CDN, and measurement are event-driven roles.
+# None: gateway routes.
 
 [module.dispatch]
 mode = "in-process"
-# First-party in-tree, compiled into the c0mpute binary.
 
 [module.surfaces]
-cli = "c0mpute ctv"
-# web = "c0mpute.com/ctv"   # planned (VAST tag generator, publisher/advertiser portal)
+cli = "c0mpute ads"
 
 [module.config.defaults]
-# Default VAST ad slot durations supported (seconds).
-supported_durations    = [15, 30, 60]
-
-# Minimum CPM floor (USD) for inventory this node will serve.
-default_floor_cpm      = 1.00
-
-# Node roles this instance plays. Operators enable roles explicitly.
-# ssp = true      # run auction, serve VAST responses
-# dsp = false     # hold campaigns, submit bids
-# cdn = true      # cache and serve ad creatives
-# measure = true  # validate beacons, sign impression receipts
-
-# SSAI: automatically insert ad breaks into live-stream plugin broadcasts.
-ssai_enabled           = false
-ssai_break_interval_s  = 900   # 15 minutes between ad breaks
-ssai_break_duration_s  = 30    # 30-second breaks
-
-# Anti-fraud beacon replay bloom filter TTL (seconds).
-beacon_bloom_ttl_secs  = 300
+vast_version = "4.2"

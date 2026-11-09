@@ -1,80 +1,64 @@
-# c0mpute plugin manifest. See dips/0006-module-model.md.
+# c0mpute plugin manifest. See dips/0006-module-model.md and
+# dips/0023-podcast-ads-plugin.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# See dips/0023-podcast-ads-plugin.md for the full PRD.
+# First-party, compiled into the c0mpute binary, on every gateway. Code:
+# node/crates/c0mpute-core/src/ads/stitch.rs (+ the hosting serve hook in
+# ads/mod.rs). Docs: docs/ads.md. Campaigns come from ads-manager.
 #
-# Brief for the implementer:
-#   Audio ad format layer on top of ads-manager (DIP-0021).
-#   Owns: DAAST 1.0 XML assembly and endpoint, IAB audio impression
-#   tracking (start/firstQuartile/midpoint/thirdQuartile/complete),
-#   <podcast:value> split injection into RSS feeds (Podcasting 2.0),
-#   dynamic ad insertion (DAI) hook into the podcasting plugin's episode
-#   serve path, host-read ad slot management, and per-listen micropayment
-#   settlement via CoinPay.
-#   Gossip message types: 0x50 AUDIO_BID_REQUEST, 0x51 AUDIO_BID_RESPONSE,
-#   0x52 AUDIO_WIN_NOTIFY, 0x53 AUDIO_BEACON.
-#   DAAST endpoint: GET /podcast-ads/daast?pub=<did>&slot=<preroll|midroll|postroll>&...
-#   All campaign/creative/reporting/escrow operations delegated to ads-manager.
-#   Both sides supported: publishers list ad slots for sale; advertisers run
-#   audio campaigns — both managed through ads-manager's unified dashboard.
-#   First-party in-tree target: node/crates/c0mpute-podcast-ads
+# Consent: a show takes ads only if its own hosting site carries
+# c0mpute-ads.json (written by `c0mpute podcasting publish --ads pre,mid,post`
+# or an [ads] table in show.toml). The site record is signed by the show's
+# owner and pins that file by hash, so no gateway can add ads to a show that
+# did not opt in. Opted-in feeds point players at episodes/<file>?ads=1.
+#
+# Insertion: on /s/<site>/episodes/<file>?ads=1 a gateway picks one campaign
+# per break the show sells (podcast_pre / podcast_mid / podcast_post), fetches
+# the audio creative from hosting, and splices it in with its own ffmpeg
+# (resample to the episode's rate and layout, concat filter, re-encode in the
+# episode's format), serves it with the right Content-Length and Range
+# support, reuses it for the same listener for 10 minutes, and signs an
+# impression receipt per ad. No ffmpeg, no fill or any failure: the clean
+# episode, with x-c0mpute-ads saying why.
+#
+# Not built: DAAST endpoint, <podcast:value> split injection, host-read
+# slots, and billing (see ads-manager).
 
 [module]
 id          = "podcast-ads"
-name        = "Podcast Ads — audio ad marketplace"
-version     = "0.2.76"
+name        = "Podcast Ads — dynamic ad insertion"
+version     = "0.2.78"
 kind        = "service"
 category    = "applications"
-status      = "coming-soon"
-description = "Decentralised audio advertising for c0mpute-hosted podcasts. DAAST 1.0 endpoint, dynamic ad insertion, Podcasting 2.0 <podcast:value> revenue splits, and CoinPay settlement. Publishers sell ad slots; advertisers run campaigns — zero platform cut beyond protocol split."
+status      = "partial"
+status_note = "Dynamic ad insertion into opted-in c0mpute podcasts works on gateways with ffmpeg, with signed impression receipts; there is no billing or payout to shows yet, and no DAAST endpoint."
+builtin     = true
+description = "Dynamic ad insertion for c0mpute-hosted podcasts: shows opt in with a signed flag in their own site, and any gateway with ffmpeg splices a matching audio ad before, inside or after the episode, falling back to the clean episode otherwise."
 author      = "Profullstack"
 license     = "MIT"
-source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/podcast-ads"
-keywords    = ["podcast", "audio", "ads", "advertising", "daast", "dai", "podcasting2", "value4value", "programmatic"]
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/ads"
+keywords    = ["podcast", "audio", "ads", "advertising", "dai", "dynamic-ad-insertion", "p2p"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.78"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["network:ingress", "network:egress"]
+capabilities = ["network:ingress", "bin:ffmpeg", "bin:ffprobe"]
 
 [module.requirements.plugins]
-ads-manager = ">=0.0.1"   # DIP-0021: campaign CRUD, auction, CoinPay escrow, reporting
-podcasting  = ">=0.0.1"   # DIP-0022: DAI hook into episode serve path + RSS feed patching
-coinpay     = ">=0.2.0"   # DIP-0007: DID identity + per-listen micropayment settlement
+ads-manager = ">=0.0.1"     # campaigns, selection, receipts
+podcasting  = ">=0.0.1"     # shows as hosting sites; --ads opt-in
+hosting     = ">=0.2.72"
 
 [module.workloads]
-# No one-shot workloads. podcast-ads is a continuous service.
-# Auction, DAI, and beacon handling are event-driven.
+# None: a serve hook on the gateway's hosting routes.
 
 [module.dispatch]
 mode = "in-process"
 
 [module.surfaces]
-cli = "c0mpute podcast-ads"
-# web = "c0mpute.com/podcast-ads"   # planned: publisher slot manager + advertiser campaign UI
+cli = "c0mpute podcasting publish --ads pre,post"
 
 [module.config.defaults]
-# Default ad slot durations supported (seconds).
-supported_durations    = [15, 30, 60]
-
-# Minimum CPM floor (USD) for audio inventory this node will serve.
-default_floor_cpm      = 0.50
-
-# Dynamic ad insertion: stitch ads into episode audio on-the-fly (requires transcode plugin).
-dai_enabled            = false
-
-# Host-read ad slots: publisher records their own read; matched to campaigns manually.
-host_read_enabled      = true
-
-# Podcasting 2.0 <podcast:value> auto-injection into RSS feeds for v4v ad splits.
-value_block_injection  = true
-
-# Revenue split for ad-supported episodes (basis points, must sum to 10000).
-split_publisher_bps    = 6000   # 60% to podcaster
-split_ad_nodes_bps     = 2000   # 20% to auction/serving nodes
-split_protocol_bps     = 1000   # 10% to c0mpute protocol
-split_advertiser_bps   = 1000   # 10% back to advertiser (performance rebate)
-
-# Anti-fraud beacon replay bloom filter TTL (seconds).
-beacon_bloom_ttl_secs  = 300
+podcast_insertion = true   # [ads] podcast_insertion
+max_ad_secs       = 60     # per show: [ads] max_ad_secs
+stitch_cache_secs = 600

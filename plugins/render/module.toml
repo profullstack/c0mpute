@@ -33,7 +33,7 @@
 [module]
 id          = "render"
 name        = "Render — Blender 3D rendering"
-version     = "0.2.76"
+version     = "0.2.78"
 kind        = "workload"
 category    = "media"
 status      = "available"
@@ -44,7 +44,7 @@ license     = "MIT"
 keywords    = ["blender", "3d", "render", "cycles", "eevee", "vfx", "animation"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.77"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["cpu", "bin:blender", "gpu:nvidia?", "gpu:amd?", "gpu:apple?"]

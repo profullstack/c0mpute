@@ -4,6 +4,7 @@
 //! flags + config + detected hardware, and supervises the long-lived tasks
 //! for each role.
 
+pub mod ads;
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod hosting;
 pub mod live;
 pub mod dispatch;
 pub mod embed;
+pub mod gameserver;
 pub(crate) mod gateway_util;
 pub mod jobs_gateway;
 pub mod net_guard;
@@ -37,6 +39,7 @@ pub mod status_aggregator;
 pub mod supervisor;
 pub mod temporal;
 pub mod text;
+pub mod train;
 pub mod video;
 pub mod webhook;
 pub mod workflow;
