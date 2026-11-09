@@ -1113,11 +1113,32 @@ impl Hosting {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/hosting/v1/sites", get(list_sites))
-            .route("/s/{site}", get(serve_root))
+            .route("/s/{site}", get(redirect_site_root))
             .route("/s/{site}/", get(serve_root))
             .route("/s/{site}/{*path}", get(serve_path))
             .fallback(serve_by_host)
             .with_state(self.clone())
+    }
+}
+
+/// `/s/<site>` -> `/s/<site>/` (query kept). Serving the page at the slashless
+/// path made every relative asset (`img/a.png`, `og.png`) resolve to `/s/img/...`.
+async fn redirect_site_root(AxPath(site): AxPath<String>, uri: axum::http::Uri) -> Response {
+    site_root_redirect(&site, uri.query())
+}
+
+fn site_root_redirect(site: &str, query: Option<&str>) -> Response {
+    let target = match query {
+        Some(q) if !q.is_empty() => format!("/s/{site}/?{q}"),
+        _ => format!("/s/{site}/"),
+    };
+    match HeaderValue::from_str(&target) {
+        Ok(location) => {
+            let mut resp = StatusCode::PERMANENT_REDIRECT.into_response();
+            resp.headers_mut().insert(header::LOCATION, location);
+            resp
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -1221,6 +1242,17 @@ async fn serve_by_host(State(h): State<Hosting>, headers: HeaderMap, uri: axum::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slashless_site_path_redirects_with_query() {
+        let r = site_root_redirect("53021d6e8d5a0e1aac48", None);
+        assert_eq!(r.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(r.headers()[header::LOCATION], "/s/53021d6e8d5a0e1aac48/");
+        let r = site_root_redirect("53021d6e8d5a0e1aac48", Some("ads=1"));
+        assert_eq!(r.headers()[header::LOCATION], "/s/53021d6e8d5a0e1aac48/?ads=1");
+        let r = site_root_redirect("bad\r\nset-cookie: x", None);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
     use super::*;
 
     #[test]
