@@ -43,7 +43,6 @@ x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
 hmac = { workspace = true }
 aes-gcm = { workspace = true }
-zeroize = { workspace = true }
 base64 = { workspace = true }
 sysinfo = { workspace = true }
 zip = { workspace = true }
