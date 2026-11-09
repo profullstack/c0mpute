@@ -1031,10 +1031,9 @@ impl Apps {
     }
 
     async fn prepare_image(&self, rec: &AppRecord) -> Result<()> {
-        if runtime::image_present(rec.image_ref()).await {
-            return Ok(());
-        }
+        let present = runtime::image_present(rec.image_ref()).await;
         match &rec.image {
+            ImageSource::Pull { .. } if present => Ok(()),
             ImageSource::Pull { reference } => runtime::pull(reference).await,
             ImageSource::Site {
                 site_id,
@@ -1042,20 +1041,21 @@ impl Apps {
                 file,
                 tag,
             } => {
-                let hosting = self
-                    .0
-                    .hosting
-                    .as_ref()
-                    .context("hosting is off on this node")?;
-                let site = self
-                    .site_record(hosting, site_id)
-                    .await
-                    .context("image site is not known yet")?;
-                if site.manifest != *manifest {
-                    anyhow::bail!(
+                // A node that already has the image is ready whatever happens
+                // below; it only tries to become a source for the others.
+                let hosting = match self.0.hosting.as_ref() {
+                    Some(h) => h,
+                    None if present => return Ok(()),
+                    None => anyhow::bail!("hosting is off on this node"),
+                };
+                let site = match self.site_record(hosting, site_id).await {
+                    Some(s) if s.manifest == *manifest => s,
+                    _ if present => return Ok(()),
+                    Some(_) => anyhow::bail!(
                         "image site is at another version (waiting for the matching record)"
-                    );
-                }
+                    ),
+                    None => anyhow::bail!("image site is not known yet"),
+                };
                 // Keep a real copy of the image site (stored and announced), so
                 // every holder of the app is a source the next one can fetch
                 // from: an app never depends on hosting nodes it cannot reach.
@@ -1065,6 +1065,9 @@ impl Apps {
                     Err(e) => {
                         debug!(app = %rec.app_id, err = %e, "apps: not keeping a copy of the image site")
                     }
+                }
+                if present {
+                    return Ok(());
                 }
                 let (_, bytes) = hosting
                     .read_file(&site, file)
