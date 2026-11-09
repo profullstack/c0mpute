@@ -32,7 +32,7 @@ version     = "0.2.80"
 kind        = "service"
 category    = "applications"
 status      = "partial"
-status_note = "VAST 4.2 / VMAP serving with signed, priced receipts works on every gateway, and gateways are paid per verified impression through ads-manager billing (tested end to end on a fake rail). Not built: OpenRTB bidding and live-stream (SCTE-35) insertion. Real payouts are off until the switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
+status_note = "VAST 4.2 / VMAP serving with signed, priced receipts works on every gateway, and gateways are paid per verified impression through ads-manager billing (tested end to end on a fake rail). Not built: OpenRTB bidding and live-stream (SCTE-35) insertion. Remaining switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
 builtin     = true
 description = "Video ads for connected TV and web players: every c0mpute gateway answers VAST 4.2 and VMAP requests from the gossiped campaign index, serves the video creative from hosting copies, and turns impression, quartile and click beacons into signed receipts."
 author      = "Profullstack"

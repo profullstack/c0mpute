@@ -35,7 +35,7 @@ version     = "0.2.80"
 kind        = "service"
 category    = "applications"
 status      = "partial"
-status_note = "Dynamic ad insertion into opted-in podcasts works on gateways with ffmpeg, and shows that name a payout address earn 75% of each paid impression through ads-manager billing (tested end to end on a fake rail). Not built: a DAAST endpoint. Real payouts are off until the switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
+status_note = "Dynamic ad insertion into opted-in podcasts works on gateways with ffmpeg, and shows that name a payout address earn 75% of each paid impression through ads-manager billing (tested end to end on a fake rail). Not built: a DAAST endpoint. Remaining switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
 builtin     = true
 description = "Dynamic ad insertion for c0mpute-hosted podcasts: shows opt in with a signed flag (and payout address) in their own site, any gateway with ffmpeg splices a matching audio ad before, inside or after the episode, and the show is paid for each verified impression."
 author      = "Profullstack"
