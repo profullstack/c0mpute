@@ -9,8 +9,10 @@ Three plugins, one peer-to-peer system, no ad server and no registry:
 
 Code: `node/crates/c0mpute-core/src/ads/`.
 
-**Not built yet: billing.** `--max-cpm` only ranks campaigns. Nothing is
-escrowed, charged or paid out, and there is no OpenRTB auction.
+Billing is built (see [Billing and payouts](#billing-and-payouts)): a
+campaign with a budget pays gateways and shows for verified impressions at
+the second price, from the advertiser's own CoinPay wallet. Real payouts are
+**off by default**. There is no OpenRTB auction.
 
 ## Advertisers
 
@@ -20,6 +22,7 @@ escrowed, charged or paid out, and there is no OpenRTB auction.
 c0mpute ads campaign create --name spring-launch \
   --creative ./adset --placement pre,post,ctv_preroll \
   --max-cpm 2.50 --landing https://example.org/ \
+  --budget 500 --daily-budget 50 --payer SOL:<your wallet> \
   --category technology --geo US,CA --freq-cap 3/day \
   --start 2026-12-01 --end 2027-01-01
 
@@ -52,7 +55,9 @@ The same rule runs on every gateway (`ads/select.rs`):
    placement, no fitting creative, category, keyword, country (or country
    unknown when the campaign targets countries), below the publisher's floor,
    frequency cap reached for this listener.
-2. The highest max CPM wins.
+2. The highest max CPM wins and pays the second price: the best losing bid
+   or the publisher's floor, whichever is higher, never more than its own
+   bid. Uncontested with no floor, it pays its bid.
 3. Equal bids are settled by rendezvous hashing of (campaign id, slot), so
    every gateway gives the same answer for the same slot.
 
@@ -80,7 +85,74 @@ unique listeners. `--gateway <url>` also fetches the log straight from a
 gateway. A gateway that is offline shows up as missing until it returns.
 
 A receipt is a gateway's signed claim, not proof that someone heard or saw
-the ad. Settlement will be built on these chains.
+the ad. Settlement is built on these chains (next section).
+
+## Billing and payouts
+
+The rail is CoinPay, the settlement adapter c0mpute already names everywhere,
+through the `coinpay` CLI the `coinpay` plugin delegates to. Nothing in
+c0mpute holds anyone's money; there is no clearing house and no ad server.
+Code: `ads/billing.rs`.
+
+1. **Budget.** `--budget` (total, USD), `--daily-budget`, `--payer
+   <CHAIN>:<address>` (your paying wallet) and `--funding-ref` (a CoinPay
+   escrow or payment id as proof of funds) are signed into the campaign
+   record. A campaign without a budget runs unpaid, as before.
+2. **Cleared price.** Every impression receipt carries the price it cleared
+   at and the campaign version it was served under. Payment never exceeds
+   that version's bid.
+3. **Claims.** A gateway with `[ads] payout` signs a claim over a contiguous
+   range of its own receipt batches for a campaign, naming the hash of the
+   last one, every `claim_every` (5 min) once at least `min_claim_usd` ($1)
+   is owed. The range has to start right after its last settled batch. It
+   sizes the claim to the budget it knows is left.
+4. **Verification** is a pure function (any node gets the same answer). The
+   batches must be signed by the claimant and chain from its last settled
+   head to the claimed head; two different batches with one seq is refused.
+   The verifier recomputes the amount itself. Not paid: plays already paid
+   (by serving id, across claims), receipts without a price or listener id,
+   outside the schedule, stamped in the future, for a creative or placement
+   the campaign does not have, on a show that did not opt in or names no
+   payout, over the frequency cap (per listener, across claims) or over the
+   daily cap. Refused outright: the gateway is the advertiser's key or pays
+   out to the payer wallet, a show owned by the advertiser (those
+   impressions), a gap or replay, and any claim that would overspend.
+5. **Settlement.** `c0mpute ads settle <campaign>` gathers claims and
+   receipts over gossip, verifies them in gateway-key order, and prints what
+   it would pay. With `--pay` it signs a settlement per claim (chained, with
+   the running total spent), pays each line, and gossips the settlements so
+   gateways learn the budget left and where their next claim starts. A
+   gateway stops serving a campaign once settled spend plus its own
+   unsettled spend reaches the budget. Lines are idempotent: a paid line is
+   never sent again, a failed one is retried by the next `settle --pay`.
+
+Split of each paid impression: **5% network fee** (the single fee c0mpute's
+market and Infernet take; operators keep 95%), **75% to the show** that
+carried the ad, **20% to the gateway** that served it (plus rounding).
+With no show (VAST straight to a player) the gateway gets 95%.
+
+```toml
+# Gateway
+[ads]
+payout = "SOL:9xQe..."    # where this gateway is paid; no payout, no claims
+min_claim_usd = "1.00"
+
+# Advertiser
+[ads]
+payouts = true            # allow `c0mpute ads settle --pay` to send money
+fee_payout = "SOL:..."    # network fee address; without it the fee is owed, not sent
+```
+
+Shows add `payout = "SOL:..."` to `[ads]` in `show.toml` (or
+`c0mpute podcasting publish --ads pre --ads-payout SOL:...`). It lives in
+the signed `c0mpute-ads.json`, so no gateway can redirect a show's money.
+
+What is not proven: `--pay` runs `coinpay wallet send --chain <CHAIN> --to
+<address> --amount-fiat <usd> --fiat USD` from your wallet. Every test uses
+an in-memory rail; real transfers have not been exercised, and they stay off
+until `[ads] payouts = true`. A receipt is still a gateway's claim, not
+proof a person heard the ad: caps, dedupe and the self-dealing rules limit
+what a dishonest gateway can bill, they do not eliminate it.
 
 ## Podcasters: opting in
 
@@ -139,6 +211,7 @@ campaign index and relays `c0mpute/ads/v1`. Only gateways answer ad requests.
 [ads]
 serve = true              # answer ad requests (false: empty VAST, clean episodes)
 podcast_insertion = true  # splice ads into opted-in episodes (needs ffmpeg)
+payout = "SOL:9xQe..."    # claim payment for billed campaigns (see Billing)
 ```
 
 Set `gateway.announce` to the gateway's public https origin so VAST URLs are

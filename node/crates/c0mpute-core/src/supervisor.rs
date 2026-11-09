@@ -550,6 +550,9 @@ impl Supervisor {
                 ffmpeg,
                 ffprobe,
                 public_origin: crate::opendisk::public_origin(&self.config),
+                payout: cfg.payout.clone(),
+                min_claim_micros: crate::ads::campaign::parse_usd_micros(&cfg.min_claim_usd)
+                    .unwrap_or(crate::ads::billing::DEFAULT_MIN_CLAIM_MICROS),
                 ..Default::default()
             },
         )

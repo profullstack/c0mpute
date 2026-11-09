@@ -15,7 +15,7 @@
 //!
 //! What this does not do: prove a human heard or saw the ad. A receipt is a
 //! gateway's signed claim; the chain makes the claim permanent and
-//! attributable, which is what settlement will need later.
+//! attributable, and [`super::billing`] settles payment on these chains.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -91,6 +91,18 @@ pub struct Receipt {
     pub site: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// The price this play cleared at (second price), USD millionths per
+    /// thousand. 0 on receipts from before billing: those are never paid.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cpm_micros: u64,
+    /// The campaign version (`seq`) it was served under: payment never
+    /// exceeds that version's bid.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub campaign_seq: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A gateway's signed, chained batch of receipts for one campaign.
@@ -216,6 +228,15 @@ impl ReceiptLog {
 
     pub fn pending_len(&self) -> usize {
         self.pending.values().map(Vec::len).sum()
+    }
+
+    /// Receipts recorded for a campaign but not signed yet.
+    pub fn pending(&self, campaign_id: &str) -> &[Receipt] {
+        self.pending.get(campaign_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn pending_campaigns(&self) -> Vec<String> {
+        self.pending.keys().cloned().collect()
     }
 
     /// Sign everything pending into batches, append them to the log, and
@@ -383,6 +404,8 @@ mod tests {
             serving_id: serving.into(),
             site: Some("site1".into()),
             country: None,
+            cpm_micros: 0,
+            campaign_seq: 0,
         }
     }
 
