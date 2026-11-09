@@ -127,6 +127,8 @@ impl User {
             .env("GIT_COMMITTER_EMAIL", "riotcoder@example.org")
             .env("C0MPUTE_NO_AUTO_UPDATE", "1")
             .env("C0MPUTE_GIT_TRACE", "1")
+            // The c0mpute identity's password, for private repos.
+            .env("C0MPUTE_DM_PASSWORD", "correct horse battery staple")
             .env("C0MPUTE_GIT_GATEWAY", &self.gateway);
         c
     }
@@ -168,6 +170,39 @@ impl User {
             args.join(" ")
         );
         text
+    }
+
+    /// Run `c0mpute <args>` as this user; panics with its output on failure.
+    fn c0(&self, cwd: &Path, args: &[&str]) -> String {
+        let out = self
+            .cmd(env!("CARGO_BIN_EXE_c0mpute"), cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprintln!("$ c0mpute {}\n{text}", args.join(" "));
+        assert!(out.status.success(), "c0mpute {} failed:\n{text}", args.join(" "));
+        text
+    }
+
+    /// This user's storage identity (`c0ps1...`), creating it on first use.
+    fn storage_identity(&self) -> String {
+        let backup = self.home.join("identity-backup.json");
+        if !backup.exists() {
+            self.c0(
+                &self.home,
+                &["storage", "key", "init", "--backup-to", &backup.to_string_lossy()],
+            );
+        }
+        let out = self.c0(&self.home, &["storage", "key", "show"]);
+        out.split_whitespace()
+            .find(|w| w.starts_with("c0ps1."))
+            .unwrap_or_else(|| panic!("no c0ps1 identity in: {out}"))
+            .to_string()
     }
 
     fn key(&self) -> String {
@@ -259,6 +294,9 @@ async fn git_push_and_clone_through_the_network() {
             o.git(&w, &["add", "."]);
             o.git(&w, &["commit", "-q", "-m", "first"]);
             o.git(&w, &["remote", "add", "origin", &r]);
+            // This test covers public repos (plain HTTPS clones); private is
+            // the default and has its own test below.
+            o.git(&w, &["config", "c0mpute.public", "true"]);
             let out = o.git(&w, &["push", "origin", "main"]);
             assert!(out.contains("main -> main"), "{out}");
         })
@@ -626,5 +664,170 @@ async fn legacy_bundle_repo_clones_and_migrates_on_push() {
     }
     assert_eq!(reader.git(&c2, &["rev-parse", "HEAD"]).trim(), new_sha);
     assert_eq!(reader.git(&c2, &["rev-parse", "HEAD~1"]).trim(), old_sha);
+    drop(hosts);
+}
+
+/// Private is the default: the network only ever holds ciphertext, the owner
+/// clones, a stranger cannot, `share` lets them in and `unshare` (a re-key)
+/// shuts them out again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn private_repo_is_ciphertext_and_shareable() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let tmp = tempfile::Builder::new()
+        .prefix("git-private")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let root = tmp.path().to_path_buf();
+    let opts = |dir: &Path| Options {
+        hosts: true,
+        catalog_path: Some(dir.join("catalog.json")),
+        timing: fast(),
+        ..Default::default()
+    };
+    let (hub_net, hub_store) = node(&root.join("h0"), vec![]).await;
+    let hub_addr = listen_addr(&hub_net).await;
+    let mut hosts = vec![
+        Hosting::start(hub_net, hub_store, opts(&root.join("h0")))
+            .await
+            .unwrap(),
+    ];
+    for i in 1..4 {
+        let d = root.join(format!("h{i}"));
+        let (n, s) = node(&d, vec![hub_addr.clone()]).await;
+        hosts.push(Hosting::start(n, s, opts(&d)).await.unwrap());
+    }
+    let (an, as_) = node(&root.join("gwa"), vec![hub_addr.clone()]).await;
+    let gw = Hosting::start(an, as_, opts(&root.join("gwa")))
+        .await
+        .unwrap();
+    let url = serve(&gw).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_c0mpute"),
+        bin.join("git-remote-c0mpute"),
+    )
+    .unwrap();
+
+    // The owner: identity, a private repo (the default), a push.
+    let owner = User::new(&root, "owner", &bin, &url);
+    let key = owner.key();
+    let owner_id = owner.storage_identity();
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    owner.git(&work, &["init", "-q", "-b", "main"]);
+    let marker = "TOP SECRET: the launch codes are 0000";
+    std::fs::write(work.join("secret.txt"), format!("{marker}\n")).unwrap();
+    owner.git(&work, &["add", "."]);
+    owner.git(&work, &["commit", "-q", "-m", "the plan"]);
+    let sha = owner.git(&work, &["rev-parse", "HEAD"]).trim().to_string();
+    owner.c0(&work, &["git", "init", "secret"]);
+    {
+        let (o, w) = (owner.clone(), work.clone());
+        let out = blocking(move || o.git(&w, &["push", "origin", "main"])).await;
+        assert!(out.contains("main -> main"), "{out}");
+    }
+
+    // What the network holds: a v2 doc with no refs, sealed packs, no
+    // plaintext refs files, and no sign of the branch, commit or content.
+    let state = gw.git_state(&key, "secret").await.expect("repo state");
+    let m: serde_json::Value = serde_json::from_str(&state.manifest).unwrap();
+    let files: Vec<String> = m["files"].as_object().unwrap().keys().cloned().collect();
+    assert!(files.contains(&c0mpute_core::git::SEALED_REFS.to_string()), "{files:?}");
+    assert!(!files.iter().any(|f| f == "info/refs" || f == "HEAD"), "{files:?}");
+    let client = reqwest::Client::new();
+    let get = |path: String| {
+        let c = client.clone();
+        let u = format!("{url}/git/{key}/secret.git/{path}");
+        async move { c.get(u).send().await.unwrap().bytes().await.unwrap().to_vec() }
+    };
+    let doc: serde_json::Value =
+        serde_json::from_slice(&get(c0mpute_core::git::DOC_PATH.into()).await).unwrap();
+    assert_eq!(doc["v"], 2, "{doc}");
+    assert_eq!(doc["sealed"], true, "{doc}");
+    assert!(doc["refs"].as_object().unwrap().is_empty(), "{doc}");
+    for f in &files {
+        let bytes = get(f.clone()).await;
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(marker), "{f} leaks the content");
+        assert!(!text.contains(&sha), "{f} leaks the commit id");
+        assert!(!text.contains("refs/heads/main"), "{f} leaks the branch");
+        if f.ends_with(".pack") || f.ends_with(".idx") || f == c0mpute_core::git::SEALED_REFS {
+            assert!(bytes.starts_with(b"C0PRIV"), "{f} is not sealed");
+        }
+    }
+
+    // The owner clones it back.
+    let o1 = root.join("owner-clone");
+    {
+        let (o, d, at) = (
+            owner.clone(),
+            o1.to_string_lossy().to_string(),
+            root.clone(),
+        );
+        let u = format!("c0mpute://{key}/secret");
+        blocking(move || o.git(&at, &["clone", &u, &d])).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(o1.join("secret.txt")).unwrap(),
+        format!("{marker}\n")
+    );
+
+    // A stranger with their own identity cannot.
+    let stranger = User::new(&root, "stranger", &bin, &url);
+    let stranger_id = stranger.storage_identity();
+    assert_ne!(stranger_id, owner_id);
+    let clone_as = |u: User, dir: &str| {
+        let (d, at) = (root.join(dir).to_string_lossy().to_string(), root.clone());
+        let src = format!("c0mpute://{key}/secret");
+        (u, src, d, at)
+    };
+    {
+        let (u, src, d, at) = clone_as(stranger.clone(), "s1");
+        let out = blocking(move || u.git_fails(&at, &["clone", &src, &d])).await;
+        assert!(out.contains("is private"), "{out}");
+    }
+
+    // Shared: now they can, and see the readers.
+    owner.c0(&work, &["git", "share", "secret", "--with", &stranger_id]);
+    let readers = owner.c0(&work, &["git", "readers", "secret"]);
+    assert!(readers.contains(&stranger_id) && readers.contains(&owner_id), "{readers}");
+    {
+        let (u, src, d, at) = clone_as(stranger.clone(), "s2");
+        blocking(move || u.git(&at, &["clone", &src, &d])).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("s2/secret.txt")).unwrap(),
+        format!("{marker}\n")
+    );
+
+    // Unshared (re-keyed): locked out again; the owner still reads it.
+    owner.c0(&work, &["git", "unshare", "secret", "--from", &stranger_id]);
+    {
+        let (u, src, d, at) = clone_as(stranger.clone(), "s3");
+        let out = blocking(move || u.git_fails(&at, &["clone", &src, &d])).await;
+        assert!(out.contains("is private"), "{out}");
+    }
+    {
+        let (u, src, d, at) = clone_as(owner.clone(), "o2");
+        blocking(move || u.git(&at, &["clone", &src, &d])).await;
+    }
+    assert_eq!(
+        owner.git(&root.join("o2"), &["rev-parse", "HEAD"]).trim(),
+        sha
+    );
+
+    // A private repo stays private: asking to push it public is refused.
+    owner.git(&work, &["config", "c0mpute.public", "true"]);
+    std::fs::write(work.join("more.txt"), "more\n").unwrap();
+    owner.git(&work, &["add", "."]);
+    owner.git(&work, &["commit", "-q", "-m", "more"]);
+    let out = owner.git_fails(&work, &["push", "origin", "main"]);
+    assert!(out.contains("is private"), "{out}");
     drop(hosts);
 }

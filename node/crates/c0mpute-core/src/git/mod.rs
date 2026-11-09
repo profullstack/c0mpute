@@ -573,6 +573,30 @@ mod tests {
     }
 
     #[test]
+    fn private_doc_rules() {
+        let mut d = doc(&[], None, false);
+        d.v = 2;
+        d.head = None;
+        d.sealed = true;
+        assert!(RepoDoc::from_bytes(&d.to_bytes()).is_ok());
+        // A sealed doc must not carry plaintext refs.
+        let mut leaky = d.clone();
+        leaky.refs.insert("refs/heads/main".into(), "c".repeat(40));
+        assert!(RepoDoc::from_bytes(&leaky.to_bytes()).is_err());
+        // Version and mode must agree.
+        let mut v1_sealed = d.clone();
+        v1_sealed.v = 1;
+        assert!(RepoDoc::from_bytes(&v1_sealed.to_bytes()).is_err());
+        let mut v2_plain = doc(&[], None, false);
+        v2_plain.v = 2;
+        assert!(RepoDoc::from_bytes(&v2_plain.to_bytes()).is_err());
+        // A public doc never serializes the flag (older readers parse it).
+        assert!(!String::from_utf8(doc(&[], None, false).to_bytes()).unwrap().contains("sealed"));
+        assert!(valid_pack_name(&random_pack_name()));
+        assert_ne!(random_pack_name(), random_pack_name());
+    }
+
+    #[test]
     fn legacy_layout() {
         let sha = "a".repeat(40);
         let json = format!(r#"{{"head":"refs/heads/main","refs":{{"refs/heads/main":"{sha}"}}}}"#);
