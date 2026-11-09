@@ -1,77 +1,70 @@
-# c0mpute plugin manifest. See dips/0006-module-model.md.
+# c0mpute plugin manifest. See dips/0006-module-model.md and
+# dips/0021-ads-manager-plugin.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# See dips/0021-ads-manager-plugin.md for the full PRD.
+# First-party, compiled into the c0mpute binary. Code:
+# node/crates/c0mpute-core/src/ads/ (campaign.rs, select.rs, receipt.rs,
+# manage.rs). Docs: docs/ads.md.
 #
-# Brief for the implementer:
-#   Shared ad operations layer consumed by all ad format plugins.
-#   Owns: campaign CRUD + CoinPay escrow lifecycle, creative registry
-#   (upload → transcode plugin → CDN DHT announcement), publisher inventory
-#   DHT, OpenRTB 2.6 BidRequest/BidResponse primitives and second-price
-#   auction, signed impression receipt indexing, and unified reporting.
-#   Also owns the SSAI (server-side ad insertion) hook into the live-stream
-#   plugin (DIP-0019) so broadcasters can monetise their streams automatically.
-#   Format-specific plugins (ctv-ads, display-ads, audio-ads) declare this
-#   as a required dependency and call into it for everything non-format-specific.
-#   First-party in-tree target: node/crates/c0mpute-ads-manager
+# Fully peer to peer, no ad server and no registry:
+#   - A campaign is a signed record: advertiser ed25519 key, campaign id =
+#     hash(owner, name), seq (higher wins), creatives by blake3 hash with
+#     type/size/duration, targeting (placements, categories, keywords,
+#     countries), schedule, per-listener frequency cap hint, max CPM in USD,
+#     landing URL. Gossiped on c0mpute/ads/v1; every gateway keeps the index
+#     and re-gossips a campaign only when nobody else has lately.
+#   - Creatives are a hosting site owned by the same key ("ads-<name>"):
+#     three self-healing copies, fetched by any gateway with failover and
+#     checked against the signed hash.
+#   - select(placement, context) on each gateway: named filters, highest bid,
+#     rendezvous tie-break (every gateway agrees), frequency cap per listener
+#     id. GET /ads/v1/select shows the winner and why every other campaign lost.
+#   - Receipts: each gateway signs per-campaign, hash-chained, append-only
+#     receipt batches (impressions, VAST quartiles, clicks), keeps them in a
+#     JSONL log, serves them at /ads/v1/receipts and re-gossips them when an
+#     advertiser asks. `c0mpute ads report` verifies the chains and counts.
+#
+# Not built: billing. Bids only rank campaigns; nothing is escrowed or paid,
+# and there is no OpenRTB auction or CoinPay settlement yet.
 
 [module]
 id          = "ads-manager"
 name        = "Ads Manager — shared ad operations layer"
-version     = "0.2.77"
+version     = "0.2.78"
 kind        = "service"
 category    = "applications"
-status      = "coming-soon"
-description = "Unified ad operations for the c0mpute network: campaign management, creative registry, publisher inventory, OpenRTB auction primitives, CoinPay escrow, and reporting. Required dependency for ctv-ads and all future ad format plugins."
+status      = "partial"
+status_note = "Campaigns, creatives, ad selection and signed impression receipts work peer to peer; billing does not exist yet (bids only rank campaigns, nothing is escrowed, charged or paid out)."
+builtin     = true
+description = "Peer-to-peer ad operations: advertisers sign campaigns that gossip to every gateway, creatives live on self-healing hosting copies, each gateway picks ads with an explainable, deterministic rule, and gateways sign chained impression receipts that advertisers count with their own CLI. No ad server."
 author      = "Profullstack"
 license     = "MIT"
-source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/ads-manager"
-keywords    = ["ads", "advertising", "campaigns", "openrtb", "programmatic", "ctv", "publisher", "creative"]
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/ads"
+keywords    = ["ads", "advertising", "campaigns", "p2p", "receipts", "publisher", "creative"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.78"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["network:ingress", "network:egress", "storage:ephemeral"]
+capabilities = ["network:ingress?", "network:egress", "disk"]
 
-# Required peer plugins
 [module.requirements.plugins]
-coinpay   = ">=0.2.0"   # DID identity + escrow + payments
-transcode = ">=0.2.0"   # creative transcoding (mp4 → variants)
-storage   = ">=0.0.1"   # receipt log persistence (optional but recommended)
+hosting = ">=0.2.72"   # creative storage: three self-healing copies
+
+[module.requirements.optional_plugins]
+ctv-ads            = ">=0.0.1"     # VAST 4.2 / VMAP on gateways
+podcast-ads        = ">=0.0.1"     # dynamic ad insertion into hosted podcasts
+ad-generator-agent = ">=0.2.53"   # makes the creative folder `--creative` takes
 
 [module.workloads]
-# No one-shot workloads. ads-manager is a continuous service.
-# Auction, escrow, and reporting are event-driven via gossip.
+# None: a continuous service on every gateway, driven by gossip.
 
 [module.dispatch]
 mode = "in-process"
-# First-party in-tree, compiled into the c0mpute binary.
 
 [module.surfaces]
 cli = "c0mpute ads"
-# web = "c0mpute.com/ads"   # planned (advertiser + publisher dashboards)
-
-[module.requirements.optional_plugins]
-# Format-specific ad plugins that ads-manager can install on demand.
-# These are NOT required — ads-manager works without them.
-# Install with: c0mpute plugin install ctv-ads   (adds CTV/VAST support)
-#               c0mpute plugin install podcast-ads (adds DAAST audio ad support)
-ctv-ads     = ">=0.0.1"   # DIP-0020: CTV/streaming video ads (VAST 4.x, OpenRTB video)
-podcast-ads = ">=0.0.1"   # DIP-0023: audio/podcast ads (DAAST, Podcasting 2.0 <podcast:value>)
 
 [module.config.defaults]
-# OpenRTB bid deadline (ms). Nodes that miss this are excluded from auction.
-bid_timeout_ms         = 120
-
-# Epoch length for CoinPay batch settlement of impression receipts.
-settlement_epoch_secs  = 300
-
-# Max receipt log size per campaign on this node before offloading to storage plugin.
-receipt_log_max_bytes  = 104_857_600   # 100 MB
-
-# Default revenue split for ad-supported live streams (basis points, must sum to 10000).
-split_broadcaster_bps  = 5500   # 55%
-split_ad_nodes_bps     = 2000   # 20%
-split_cdn_bps          = 1500   # 15%
-split_protocol_bps     = 1000   # 10%
+serve             = true    # [ads] serve: answer ad requests on this gateway
+regossip_secs     = 600
+receipt_flush_secs = 60

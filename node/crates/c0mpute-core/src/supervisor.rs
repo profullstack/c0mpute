@@ -427,6 +427,21 @@ impl Supervisor {
             None
         };
 
+        // Ads: every node that runs hosting keeps the campaign index and
+        // relays c0mpute/ads/v1 (gossipsub forwards only through subscribed
+        // peers); only gateways answer ad requests.
+        let gateway = self.config.roles.contains(&c0mpute_proto::Role::Gateway);
+        let ads = match &hosting {
+            Some(h) => match self.start_ads(h.clone(), gateway).await {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    tracing::warn!(err = %e, "ads: not started");
+                    None
+                }
+            },
+            None => None,
+        };
+
         // Live streams: every `live-stream` node relays (verifies records,
         // holds and re-serves the segments it fetched); a gateway also serves
         // the playlists and segments over HTTP.
@@ -460,6 +475,9 @@ impl Supervisor {
             }
             if let Some(l) = &live {
                 app = app.merge(l.router());
+            }
+            if let Some(a) = &ads {
+                app = app.merge(a.router());
             }
             if let Some(h) = &hosting {
                 app = app.merge(h.router());
@@ -508,6 +526,45 @@ impl Supervisor {
             },
         )
         .await
+    }
+
+    /// Start the ads service on a gateway: campaign index, VAST/VMAP, and
+    /// podcast ad insertion when ffmpeg is here.
+    pub async fn start_ads(&self, hosting: crate::hosting::Hosting, gateway: bool) -> Result<crate::ads::Ads> {
+        let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let signer = c0mpute_net::identity::load_or_create(&identity_dir).ok();
+        let cfg = &self.config.ads;
+        let serve = gateway && cfg.serve;
+        let (ffmpeg, ffprobe) = if serve && cfg.podcast_insertion {
+            (crate::ads::stitch::find_tool("ffmpeg"), crate::ads::stitch::find_tool("ffprobe"))
+        } else {
+            (None, None)
+        };
+        let ads = crate::ads::Ads::start(
+            self.libp2p.clone(),
+            hosting,
+            crate::ads::Options {
+                signer,
+                data_dir: Some(self.config.storage.root.join("ads")),
+                serve,
+                ffmpeg,
+                ffprobe,
+                public_origin: crate::opendisk::public_origin(&self.config),
+                ..Default::default()
+            },
+        )
+        .await?;
+        if serve {
+            // Without ffmpeg the hook still answers ?ads=1, with the clean
+            // episode and an x-c0mpute-ads header saying why.
+            ads.install_podcast_hook();
+        }
+        info!(
+            serve,
+            podcast_insertion = ads.can_stitch(),
+            "ads: campaign index (gateways serve /ads/v1)"
+        );
+        Ok(ads)
     }
 
     /// The storage API (CIP-002) and this node's OpenDisk descriptor, served

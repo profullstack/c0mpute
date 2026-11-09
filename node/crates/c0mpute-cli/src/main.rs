@@ -302,6 +302,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PodcastsCmd,
     },
+    /// Ads (ads-manager, ctv-ads, podcast-ads): signed campaigns gossiped to
+    /// every gateway, creatives on hosting, VAST/VMAP and podcast ad
+    /// insertion served by gateways, receipts counted here. No billing yet.
+    Ads {
+        #[command(subcommand)]
+        cmd: AdsCmd,
+    },
     /// Live-stream plugin: p2p HLS live streaming. `go` broadcasts (needs
     /// ffmpeg); every gateway serves /live/<stream_id>/index.m3u8 and peers
     /// swarm the segments.
@@ -683,6 +690,11 @@ enum PodcastingCmd {
         value_type: String,
         #[arg(long, default_value = "keysend")]
         value_method: String,
+        /// Opt in to dynamic ad insertion (podcast-ads) for these breaks:
+        /// comma list of pre, mid, post. Same as an [ads] table in show.toml.
+        /// Without it (or [ads]) no gateway ever inserts ads.
+        #[arg(long, value_name = "BREAKS")]
+        ads: Option<String>,
         /// Build the show folder only; do not publish.
         #[arg(long)]
         dry_run: bool,
@@ -690,6 +702,114 @@ enum PodcastingCmd {
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdsCmd {
+    /// Create, change, pause and list your campaigns.
+    Campaign {
+        #[command(subcommand)]
+        cmd: AdsCampaignCmd,
+    },
+    /// Count a campaign's impressions from the gateways' signed receipts.
+    Report {
+        /// Campaign name (local) or id.
+        campaign: String,
+        /// Also fetch receipts straight from these gateways (repeatable).
+        #[arg(long = "gateway")]
+        gateways: Vec<String>,
+        /// How long to collect receipts over gossip.
+        #[arg(long, default_value_t = 20)]
+        wait_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask a gateway which campaign it would serve, and why the others lost.
+    Select {
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+        /// podcast_pre|podcast_mid|podcast_post|ctv_preroll|ctv_midroll|ctv_postroll|display
+        #[arg(long)]
+        placement: String,
+        #[arg(long)]
+        category: Vec<String>,
+        #[arg(long)]
+        keyword: Vec<String>,
+        #[arg(long)]
+        country: Option<String>,
+    },
+}
+
+/// Targeting and money flags shared by create and update.
+#[derive(clap::Args, Debug, Default)]
+struct AdsTargetArgs {
+    /// Creative files or folders (e.g. an ad-generator-agent output folder
+    /// with an optional ad-set.json). On update, replaces the creatives.
+    #[arg(long = "creative")]
+    creatives: Vec<std::path::PathBuf>,
+    /// Where it runs (comma list): pre, mid, post (podcast), ctv_preroll,
+    /// ctv_midroll, ctv_postroll, display.
+    #[arg(long)]
+    placement: Option<String>,
+    /// Highest CPM in USD, e.g. 2.50. A ranking signal: no billing yet.
+    #[arg(long)]
+    max_cpm: Option<String>,
+    /// Where a click goes.
+    #[arg(long)]
+    landing: Option<String>,
+    /// Categories (repeatable or comma list). None = any.
+    #[arg(long)]
+    category: Vec<String>,
+    #[arg(long)]
+    keyword: Vec<String>,
+    /// Countries, ISO 3166-1 alpha-2 (US,CA). None = anywhere.
+    #[arg(long)]
+    geo: Vec<String>,
+    /// Start (YYYY-MM-DD, RFC 3339 or unix seconds).
+    #[arg(long)]
+    start: Option<String>,
+    #[arg(long)]
+    end: Option<String>,
+    /// Frequency cap per listener: N/hour, N/day, N/week or N/<seconds>.
+    #[arg(long)]
+    freq_cap: Option<String>,
+    /// Duration for audio/video creatives when ffprobe is not installed.
+    #[arg(long)]
+    duration_secs: Option<u64>,
+}
+
+#[derive(Subcommand, Debug)]
+enum AdsCampaignCmd {
+    /// Publish a new campaign: creatives go to a hosting site you own, the
+    /// signed record is gossiped to every gateway.
+    Create {
+        /// Campaign name: 1-63 of a-z, 0-9 and '-'.
+        #[arg(long)]
+        name: String,
+        #[command(flatten)]
+        t: AdsTargetArgs,
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
+    },
+    /// Publish a new version with changed fields.
+    Update {
+        campaign: String,
+        #[command(flatten)]
+        t: AdsTargetArgs,
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
+    },
+    /// Stop serving (a signed new version with paused = true).
+    Pause { campaign: String },
+    /// Serve again.
+    Resume { campaign: String },
+    /// Your campaigns (or, with --gateway, every campaign a gateway knows).
+    Ls {
+        #[arg(long)]
+        gateway: Option<String>,
+    },
+    /// The signed record of one of your campaigns.
+    Show { campaign: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1171,6 +1291,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         } => run_embed(cmd, texts, model, max_price, timeout_secs).await,
         Cmd::Podcasting { cmd } => run_podcasting(cmd).await,
         Cmd::Podcasts { cmd } => run_podcasts(cmd).await,
+        Cmd::Ads { cmd } => run_ads(cmd).await,
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
@@ -2414,10 +2535,16 @@ async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
             value_address,
             value_type,
             value_method,
+            ads,
             dry_run,
             wait_secs,
         } => {
             let mut input = show::load_input(&inputs)?;
+            if let Some(breaks) = ads {
+                let meta = input.show.ads.get_or_insert_with(Default::default);
+                meta.enabled = Some(true);
+                meta.placements = breaks.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
             let m = &mut input.show;
             m.title = title.or(m.title.take());
             m.author = author.or(m.author.take());
@@ -2482,6 +2609,12 @@ async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
                 );
             }
             println!("listen:  c0mpute podcasts subscribe {}", record.site_id);
+            if built.ads {
+                println!(
+                    "ads:     opted in (c0mpute-ads.json); gateways with ffmpeg splice ads into /s/{}/episodes/<file>?ads=1",
+                    record.site_id
+                );
+            }
             for d in &domains {
                 println!(
                     "domain:  {d}  -> add TXT {}.{d} \"site={}\" and point {d} at gateway nodes",
@@ -2726,6 +2859,325 @@ async fn run_stream(cmd: StreamCmd) -> Result<()> {
                     s["path"].as_str().unwrap_or("")
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+fn parse_freq_cap(s: &str) -> Result<c0mpute_core::ads::campaign::FreqCap> {
+    let (n, per) = s.split_once('/').context("frequency cap is N/hour, N/day, N/week or N/<seconds>")?;
+    let max: u32 = n.trim().parse().context("frequency cap count")?;
+    let per_secs = match per.trim() {
+        "hour" | "h" => 3600,
+        "day" | "d" => 86_400,
+        "week" | "w" => 7 * 86_400,
+        x => x.parse().context("frequency cap period")?,
+    };
+    Ok(c0mpute_core::ads::campaign::FreqCap { max, per_secs })
+}
+
+fn parse_placements(s: &str) -> Result<Vec<c0mpute_core::ads::campaign::Placement>> {
+    use c0mpute_core::ads::campaign::Placement;
+    let mut out = Vec::new();
+    for p in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let pl = Placement::parse(p).with_context(|| format!("unknown placement {p:?}"))?;
+        if !out.contains(&pl) {
+            out.push(pl);
+        }
+    }
+    if out.is_empty() {
+        bail!("give at least one placement");
+    }
+    Ok(out)
+}
+
+/// Apply flags to a spec (create starts from an empty one, update from the
+/// current record).
+fn apply_ads_args(spec: &mut c0mpute_core::ads::manage::CampaignSpec, t: &AdsTargetArgs) -> Result<()> {
+    use c0mpute_core::ads::{campaign, manage};
+    if let Some(p) = &t.placement {
+        spec.placements = parse_placements(p)?;
+    }
+    if let Some(m) = &t.max_cpm {
+        spec.max_cpm_micros = campaign::parse_usd_micros(m)?;
+    }
+    if let Some(l) = &t.landing {
+        spec.landing_url = l.clone();
+    }
+    if !t.category.is_empty() {
+        spec.categories = campaign::norm_terms(&t.category);
+    }
+    if !t.keyword.is_empty() {
+        spec.keywords = campaign::norm_terms(&t.keyword);
+    }
+    if !t.geo.is_empty() {
+        spec.geo = campaign::norm_countries(&t.geo);
+    }
+    if let Some(s) = &t.start {
+        spec.start = Some(manage::parse_time(s)?);
+    }
+    if let Some(e) = &t.end {
+        spec.end = Some(manage::parse_time(e)?);
+    }
+    if let Some(f) = &t.freq_cap {
+        spec.freq_cap = Some(parse_freq_cap(f)?);
+    }
+    Ok(())
+}
+
+fn print_campaign(r: &c0mpute_core::ads::campaign::CampaignRecord) {
+    use c0mpute_core::ads::campaign::fmt_usd;
+    let now = c0mpute_core::ads::now_unix();
+    let state = if r.paused {
+        "paused"
+    } else if !r.schedule.contains(now) {
+        "outside schedule"
+    } else {
+        "active"
+    };
+    println!("campaign:   {} ({})", r.name, r.campaign_id);
+    println!("state:      {state}   version {}   signature {}", r.seq, if r.verify() { "ok" } else { "INVALID" });
+    println!(
+        "placements: {}",
+        r.targeting.placements.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(",")
+    );
+    println!("max cpm:    {} (ranking only; no billing yet)", fmt_usd(r.max_cpm_micros));
+    println!("landing:    {}", r.landing_url);
+    if !r.targeting.categories.is_empty() {
+        println!("categories: {}", r.targeting.categories.join(","));
+    }
+    if !r.targeting.keywords.is_empty() {
+        println!("keywords:   {}", r.targeting.keywords.join(","));
+    }
+    if !r.targeting.geo.is_empty() {
+        println!("geo:        {}", r.targeting.geo.join(","));
+    }
+    if let Some(f) = r.freq_cap {
+        println!("freq cap:   {} per {} s per listener", f.max, f.per_secs);
+    }
+    println!("creatives:  site {}", r.creative_site);
+    for c in &r.creatives {
+        let mut extra = String::new();
+        if let Some(d) = c.duration_ms {
+            extra.push_str(&format!(" {:.1}s", d as f64 / 1000.0));
+        }
+        if let (Some(w), Some(h)) = (c.width, c.height) {
+            extra.push_str(&format!(" {w}x{h}"));
+        }
+        println!(
+            "  {:<6} {:<32} {} bytes{extra}  {}",
+            format!("{:?}", c.kind).to_lowercase(),
+            c.path,
+            c.bytes,
+            &c.hash[..16]
+        );
+    }
+}
+
+async fn set_campaign_paused(which: &str, pause: bool) -> Result<()> {
+    use c0mpute_core::ads::manage;
+    let mut record = manage::load_local(which)?;
+    record.paused = pause;
+    record.seq = manage::now_seq();
+    let keypair = c0mpute_core::hosting::publisher_keypair()?;
+    let record = record.sign(&keypair)?;
+    manage::save_local(&record)?;
+    manage::publish(&record, None, std::time::Duration::from_secs(20)).await?;
+    println!("{} {}", record.name, if pause { "paused" } else { "resumed" });
+    Ok(())
+}
+
+async fn run_ads(cmd: AdsCmd) -> Result<()> {
+    use c0mpute_core::ads::{campaign, manage};
+    let wait = |s: u64| std::time::Duration::from_secs(s);
+    match cmd {
+        AdsCmd::Campaign { cmd } => match cmd {
+            AdsCampaignCmd::Create { name, t, wait_secs } => {
+                if manage::campaign_dir(&name).join("campaign.json").exists() {
+                    bail!("campaign {name} exists; use `c0mpute ads campaign update {name}`");
+                }
+                if t.creatives.is_empty() {
+                    bail!("give --creative <file|folder> (repeatable)");
+                }
+                let input = manage::collect_creatives(&t.creatives)?;
+                let mut spec = manage::CampaignSpec {
+                    name: name.clone(),
+                    landing_url: input.meta.landing_url.clone().unwrap_or_default(),
+                    ..Default::default()
+                };
+                apply_ads_args(&mut spec, &t)?;
+                if spec.placements.is_empty() {
+                    bail!("give --placement (e.g. pre,post or ctv_preroll or display)");
+                }
+                if spec.max_cpm_micros == 0 {
+                    bail!("give --max-cpm in USD (e.g. 2.50)");
+                }
+                if spec.landing_url.is_empty() {
+                    bail!("give --landing <url> (or landing_url in ad-set.json)");
+                }
+                let site_dir = manage::campaign_dir(&name).join("site");
+                let creatives = manage::build_creative_dir(&input.files, &site_dir, t.duration_secs.map(|s| s * 1000))?;
+                let keypair = c0mpute_core::hosting::publisher_keypair()?;
+                let owner = c0mpute_core::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
+                let record = manage::record_from_spec(&spec, &owner, creatives, manage::now_seq()).sign(&keypair)?;
+                manage::save_local(&record)?;
+                let copies = manage::publish(&record, Some(&site_dir), wait(wait_secs)).await?;
+                print_campaign(&record);
+                println!("copies:     {copies}/{} of the creative site", c0mpute_core::hosting::TARGET_REPLICAS);
+                println!("vast:       http://<gateway>:7777/ads/v1/vast?placement=ctv_preroll");
+                println!("report:     c0mpute ads report {name}");
+                Ok(())
+            }
+            AdsCampaignCmd::Update { campaign: which, t, wait_secs } => {
+                let current = manage::load_local(&which)?;
+                let mut spec = manage::CampaignSpec {
+                    name: current.name.clone(),
+                    placements: current.targeting.placements.clone(),
+                    categories: current.targeting.categories.clone(),
+                    keywords: current.targeting.keywords.clone(),
+                    geo: current.targeting.geo.clone(),
+                    start: current.schedule.start,
+                    end: current.schedule.end,
+                    freq_cap: current.freq_cap,
+                    max_cpm_micros: current.max_cpm_micros,
+                    landing_url: current.landing_url.clone(),
+                };
+                apply_ads_args(&mut spec, &t)?;
+                let site_dir = manage::campaign_dir(&current.name).join("site");
+                let (creatives, republish) = if t.creatives.is_empty() {
+                    (current.creatives.clone(), false)
+                } else {
+                    let input = manage::collect_creatives(&t.creatives)?;
+                    (
+                        manage::build_creative_dir(&input.files, &site_dir, t.duration_secs.map(|s| s * 1000))?,
+                        true,
+                    )
+                };
+                let keypair = c0mpute_core::hosting::publisher_keypair()?;
+                let owner = c0mpute_core::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
+                let mut record = manage::record_from_spec(&spec, &owner, creatives, manage::now_seq());
+                record.paused = current.paused;
+                let record = record.sign(&keypair)?;
+                manage::save_local(&record)?;
+                manage::publish(&record, republish.then_some(site_dir.as_path()), wait(wait_secs)).await?;
+                print_campaign(&record);
+                Ok(())
+            }
+            AdsCampaignCmd::Pause { campaign: which } => set_campaign_paused(&which, true).await,
+            AdsCampaignCmd::Resume { campaign: which } => set_campaign_paused(&which, false).await,
+            AdsCampaignCmd::Ls { gateway } => {
+                if let Some(g) = gateway {
+                    let url = format!("{}/ads/v1/campaigns", g.trim_end_matches('/'));
+                    let v: serde_json::Value = reqwest::get(&url)
+                        .await
+                        .with_context(|| format!("GET {url}"))?
+                        .json()
+                        .await?;
+                    let list = v["campaigns"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        println!("{g} knows no campaigns yet");
+                    }
+                    for c in list {
+                        println!(
+                            "{:<22} {:<28} {:<7} cpm ${:<6} {}",
+                            c["campaign_id"].as_str().unwrap_or(""),
+                            c["name"].as_str().unwrap_or(""),
+                            if c["active"].as_bool() == Some(true) { "active" } else { "idle" },
+                            c["max_cpm_usd"],
+                            c["placements"]
+                                .as_array()
+                                .map(|p| p.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
+                                .unwrap_or_default()
+                        );
+                    }
+                    return Ok(());
+                }
+                let list = manage::list_local()?;
+                if list.is_empty() {
+                    println!(
+                        "no campaigns yet: c0mpute ads campaign create --name <n> --creative <dir> --placement pre --max-cpm 2 --landing <url>"
+                    );
+                }
+                for r in list {
+                    println!(
+                        "{:<22} {:<28} {:<7} {} {}",
+                        r.campaign_id,
+                        r.name,
+                        if r.paused { "paused" } else { "live" },
+                        campaign::fmt_usd(r.max_cpm_micros),
+                        r.targeting.placements.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(",")
+                    );
+                }
+                Ok(())
+            }
+            AdsCampaignCmd::Show { campaign: which } => {
+                print_campaign(&manage::load_local(&which)?);
+                Ok(())
+            }
+        },
+        AdsCmd::Report {
+            campaign: which,
+            gateways,
+            wait_secs,
+            json,
+        } => {
+            let id = manage::load_local(&which).map(|r| r.campaign_id).unwrap_or(which);
+            let rep = manage::report(&id, &gateways, wait(wait_secs)).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rep)?);
+                return Ok(());
+            }
+            println!("campaign:     {}", rep.campaign_id);
+            println!("impressions:  {}", rep.impressions());
+            println!("listeners:    {} unique (per gateway hashing)", rep.unique_listeners);
+            for (ev, n) in &rep.events {
+                println!("  {ev:<14} {n}");
+            }
+            for (p, n) in &rep.by_placement {
+                println!("  placement {p:<14} {n}");
+            }
+            for (g, n) in &rep.by_gateway {
+                println!("  gateway {}  {n}", &g[..16.min(g.len())]);
+            }
+            for (s, n) in &rep.by_site {
+                println!("  show /s/{s}/  {n}");
+            }
+            println!("batches:      {} verified, {} rejected", rep.batches, rep.rejected_batches);
+            for (g, seq) in &rep.gaps {
+                println!(
+                    "  gap: gateway {} is missing batch {seq} (offline, or not yet re-gossiped)",
+                    &g[..16.min(g.len())]
+                );
+            }
+            Ok(())
+        }
+        AdsCmd::Select {
+            gateway,
+            placement,
+            category,
+            keyword,
+            country,
+        } => {
+            let mut url = reqwest::Url::parse(&format!("{}/ads/v1/select", gateway.trim_end_matches('/')))?;
+            {
+                let mut q = url.query_pairs_mut();
+                q.append_pair("placement", &placement);
+                if !category.is_empty() {
+                    q.append_pair("categories", &category.join(","));
+                }
+                if !keyword.is_empty() {
+                    q.append_pair("keywords", &keyword.join(","));
+                }
+                if let Some(c) = &country {
+                    q.append_pair("country", c);
+                }
+            }
+            let v: serde_json::Value = reqwest::get(url.clone())
+                .await
+                .with_context(|| format!("GET {url}"))?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }
     }

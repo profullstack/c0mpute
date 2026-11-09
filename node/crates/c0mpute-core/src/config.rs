@@ -50,9 +50,34 @@ pub struct Config {
     /// CPU text embeddings (`embed.text`) provisioning.
     #[serde(default)]
     pub embed: EmbedConfig,
+    /// Ads: gateways serve VAST/VMAP and podcast ad insertion from the
+    /// gossiped campaign index.
+    #[serde(default)]
+    pub ads: AdsConfig,
     /// Game server rentals (`gameserver` role, opt-in).
     #[serde(default)]
     pub gameserver: GameserverConfig,
+}
+
+/// Ads on a gateway (`ads-manager`, `ctv-ads`, `podcast-ads`). Every gateway
+/// keeps the campaign index; `serve = false` stops it answering ad requests
+/// (VAST stays empty, podcast episodes are always served clean).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdsConfig {
+    #[serde(default = "default_true")]
+    pub serve: bool,
+    /// Splice ads into opted-in podcast episodes (needs ffmpeg + ffprobe).
+    #[serde(default = "default_true")]
+    pub podcast_insertion: bool,
+}
+
+impl Default for AdsConfig {
+    fn default() -> Self {
+        Self {
+            serve: true,
+            podcast_insertion: true,
+        }
+    }
 }
 
 /// Game server rentals (`gameserver` role). Opt-in: a rented server holds a
@@ -299,6 +324,7 @@ impl Default for Config {
             speech: SpeechConfig::default(),
             diffusion: DiffusionConfig::default(),
             hosting: HostingConfig::default(),
+            ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
             gameserver: GameserverConfig::default(),
         }

@@ -142,6 +142,17 @@ struct Inner {
     stopped: std::sync::atomic::AtomicBool,
     fetch_slots: Semaphore,
     dns: dns::Verifier,
+    /// Optional handler for requests with a query string (podcast ad
+    /// insertion installs one); it may decline and let the plain serve run.
+    hook: std::sync::OnceLock<Arc<dyn ServeHook>>,
+}
+
+/// A handler a gateway can put in front of plain site serving for requests
+/// that carry a query string (e.g. `?ads=1` on a podcast episode).
+#[async_trait::async_trait]
+pub trait ServeHook: Send + Sync {
+    /// `None` = not mine, serve the file as usual.
+    async fn serve(&self, hosting: &Hosting, rec: &SiteRecord, path: &str, query: &str, headers: &HeaderMap) -> Option<Response>;
 }
 
 /// The hosting service: one per node. Cheap to clone.
@@ -195,6 +206,7 @@ impl Hosting {
             stopped: std::sync::atomic::AtomicBool::new(false),
             fetch_slots: Semaphore::new(8),
             dns: opts.dns,
+            hook: std::sync::OnceLock::new(),
         });
         let h = Hosting(inner);
         // Sites held before a restart: keep them only if their chunks are
@@ -696,8 +708,41 @@ impl Hosting {
 
     // ── serving ──────────────────────────────────────────────────────────
 
-    async fn record_for(&self, site_id: &str) -> Option<SiteRecord> {
+    /// The current record of a site, when this node knows it.
+    pub async fn record_for(&self, site_id: &str) -> Option<SiteRecord> {
         self.0.map.read().await.records.get(site_id).cloned()
+    }
+
+    /// Put a [`ServeHook`] in front of site serving (once per node).
+    pub fn set_serve_hook(&self, hook: Arc<dyn ServeHook>) -> bool {
+        self.0.hook.set(hook).is_ok()
+    }
+
+    /// The file a request path resolves to, without its bytes.
+    pub async fn resolve(&self, rec: &SiteRecord, path: &str) -> Result<Option<site::FileEntry>> {
+        let manifest = self.manifest(rec).await?;
+        Ok(site::resolve_path(&manifest, path).map(|(_, e)| e.clone()))
+    }
+
+    /// Read a whole file of a site (local chunks, else fetched from holders).
+    /// `Ok(None)` when the site has no such file.
+    pub async fn read_file(&self, rec: &SiteRecord, path: &str) -> Result<Option<(site::FileEntry, Vec<u8>)>> {
+        let manifest = self.manifest(rec).await?;
+        let Some(entry) = manifest.files.get(path).cloned() else {
+            return Ok(None);
+        };
+        let body = self.read_entry(rec, &entry).await?;
+        Ok(Some((entry, body)))
+    }
+
+    async fn read_entry(&self, rec: &SiteRecord, entry: &site::FileEntry) -> Result<Vec<u8>> {
+        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let mut body = Vec::with_capacity(entry.size as usize);
+        for h in &entry.chunks {
+            let hash = Hash::from_hex(h).context("bad chunk hash")?;
+            body.extend_from_slice(&self.fetch_chunk(&hash, &holders).await?);
+        }
+        Ok(body)
     }
 
     /// Serve `path` of a site: from local chunks, else proxied from holders.
@@ -716,20 +761,13 @@ impl Hosting {
                 None => return (StatusCode::NOT_FOUND, "not found").into_response(),
             },
         };
-        let holders = self.0.map.read().await.sources(&rec.site_id);
-        let mut body = Vec::with_capacity(entry.size as usize);
-        for h in &entry.chunks {
-            let Ok(hash) = Hash::from_hex(h) else {
-                return (StatusCode::BAD_GATEWAY, "bad chunk hash").into_response();
-            };
-            match self.fetch_chunk(&hash, &holders).await {
-                Ok(b) => body.extend_from_slice(&b),
-                Err(e) => {
-                    warn!(site = %rec.site_id, err = %e, "hosting: chunk unavailable");
-                    return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
-                }
+        let body = match self.read_entry(rec, &entry).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(site = %rec.site_id, err = %e, "hosting: chunk unavailable");
+                return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
             }
-        }
+        };
         let etag = format!("\"{}\"", &Hash::of(entry.chunks.join(",").as_bytes()).to_hex()[..32]);
         let mut resp = (status, Body::from(body)).into_response();
         let hdr = resp.headers_mut();
@@ -789,18 +827,39 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
     axum::Json(serde_json::json!({ "target_copies": TARGET_REPLICAS, "sites": sites })).into_response()
 }
 
-async fn serve_root(State(h): State<Hosting>, AxPath(site): AxPath<String>) -> Response {
-    serve_site(&h, &site, "").await
+async fn serve_root(
+    State(h): State<Hosting>,
+    AxPath(site): AxPath<String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    serve_site(&h, &site, "", uri.query(), &headers).await
 }
 
-async fn serve_path(State(h): State<Hosting>, AxPath((site, path)): AxPath<(String, String)>) -> Response {
-    serve_site(&h, &site, &path).await
+async fn serve_path(
+    State(h): State<Hosting>,
+    AxPath((site, path)): AxPath<(String, String)>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    serve_site(&h, &site, &path, uri.query(), &headers).await
 }
 
-async fn serve_site(h: &Hosting, site: &str, path: &str) -> Response {
+async fn serve_site(h: &Hosting, site: &str, path: &str, query: Option<&str>, headers: &HeaderMap) -> Response {
     match h.record_for(site).await {
-        Some(rec) => h.serve(&rec, path).await,
+        Some(rec) => h.serve_with_hook(&rec, path, query, headers).await,
         None => (StatusCode::NOT_FOUND, "no such site on the network (yet)").into_response(),
+    }
+}
+
+impl Hosting {
+    async fn serve_with_hook(&self, rec: &SiteRecord, path: &str, query: Option<&str>, headers: &HeaderMap) -> Response {
+        if let (Some(q), Some(hook)) = (query.filter(|q| !q.is_empty()), self.0.hook.get())
+            && let Some(resp) = hook.serve(self, rec, path, q, headers).await
+        {
+            return resp;
+        }
+        self.serve(rec, path).await
     }
 }
 
@@ -827,7 +886,7 @@ async fn serve_by_host(State(h): State<Hosting>, headers: HeaderMap, uri: axum::
         .collect();
     for rec in candidates {
         if h.0.dns.confirms(&host, &rec.site_id).await {
-            return h.serve(&rec, uri.path()).await;
+            return h.serve_with_hook(&rec, uri.path(), uri.query(), &headers).await;
         }
     }
     (StatusCode::NOT_FOUND, "not found").into_response()
