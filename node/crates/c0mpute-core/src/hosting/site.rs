@@ -1028,6 +1028,128 @@ pub fn resolve_path<'a>(manifest: &'a SiteManifest, request: &str) -> Option<(&'
     None
 }
 
+/// The directory a request path names (`""` for the root, else ending in
+/// `/`), when it names one. Used for the generated listing of a directory
+/// that has no `index.html`.
+pub fn listing_dir(request: &str) -> Option<String> {
+    let p = request.trim_start_matches('/');
+    let p = p.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode(p);
+    (decoded.is_empty() || decoded.ends_with('/')).then_some(decoded)
+}
+
+/// Most rows a generated listing shows.
+pub const LISTING_MAX_ROWS: usize = 2_000;
+
+/// The immediate children of directory `dir` among `files`: subdirectories
+/// (name -> files under it, bytes under it) and files (name, entry).
+pub fn dir_children<'a>(
+    files: impl IntoIterator<Item = (&'a String, &'a FileEntry)>,
+    dir: &str,
+) -> (BTreeMap<String, (u64, u64)>, Vec<(String, FileEntry)>) {
+    let mut dirs: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut out = Vec::new();
+    for (path, entry) in files {
+        let Some(rest) = path.strip_prefix(dir) else { continue };
+        match rest.split_once('/') {
+            Some((d, _)) => {
+                let e = dirs.entry(d.to_string()).or_default();
+                e.0 += 1;
+                e.1 += entry.size;
+            }
+            None if !rest.is_empty() => out.push((rest.to_string(), entry.clone())),
+            None => {}
+        }
+    }
+    (dirs, out)
+}
+
+fn listing_href(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$()*,;=:@".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn listing_esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// A plain HTML index of one directory of a site that has no `index.html`
+/// there: links relative to the directory, inline players for audio/video.
+pub fn render_listing(
+    site_name: &str,
+    dir: &str,
+    dirs: &BTreeMap<String, (u64, u64)>,
+    files: &[(String, FileEntry)],
+) -> String {
+    let title = if dir.is_empty() {
+        site_name.to_string()
+    } else {
+        format!("{site_name}/{}", dir.trim_end_matches('/'))
+    };
+    let mut rows = String::new();
+    if !dir.is_empty() {
+        rows.push_str("<li><a href=\"../\">../</a></li>\n");
+    }
+    let mut shown = 0usize;
+    for (name, (count, bytes)) in dirs {
+        if shown >= LISTING_MAX_ROWS {
+            break;
+        }
+        shown += 1;
+        rows.push_str(&format!(
+            "<li><a href=\"{}/\">{}/</a> <small>{} file{}, {}</small></li>\n",
+            listing_href(name),
+            listing_esc(name),
+            count,
+            if *count == 1 { "" } else { "s" },
+            human_bytes(*bytes)
+        ));
+    }
+    for (name, e) in files {
+        if shown >= LISTING_MAX_ROWS {
+            break;
+        }
+        shown += 1;
+        let href = listing_href(name);
+        let player = if e.content_type.starts_with("audio/") {
+            format!("<audio controls preload=none src=\"{href}\"></audio>")
+        } else if e.content_type.starts_with("video/") {
+            format!("<video controls preload=none src=\"{href}\"></video>")
+        } else if e.content_type.starts_with("image/") {
+            format!("<a href=\"{href}\"><img loading=lazy decoding=async alt=\"\" src=\"{href}\"></a>")
+        } else {
+            String::new()
+        };
+        rows.push_str(&format!(
+            "<li><a href=\"{href}\">{}</a> <small>{}</small>{player}</li>\n",
+            listing_esc(name),
+            human_bytes(e.size)
+        ));
+    }
+    let total = dirs.len() + files.len();
+    let more = if total > shown { format!("<p>{} more not shown.</p>", total - shown) } else { String::new() };
+    format!(
+        "<!doctype html><html lang=en><head><meta charset=utf-8>\
+<meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{t}</title>\
+<style>:root{{color-scheme:light dark}}body{{font:16px/1.5 system-ui,sans-serif;max-width:56rem;margin:0 auto;padding:1rem}}\
+ul{{list-style:none;padding:0}}li{{padding:.4rem 0;border-bottom:1px solid #8884;overflow-wrap:anywhere}}\
+small{{opacity:.7;margin-left:.5rem}}audio,video{{display:block;width:100%;margin-top:.3rem}}video{{max-height:60vh}}img{{display:block;max-width:100%;max-height:40vh;margin-top:.3rem}}</style>\
+</head><body><h1>{t}</h1><ul>\n{rows}</ul>{more}</body></html>",
+        t = listing_esc(&title)
+    )
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1054,6 +1176,37 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_of_a_folder_of_mp3s() {
+        let fe = |size, ct: &str| FileEntry { size, content_type: ct.into(), chunks: vec![] };
+        let mut files = BTreeMap::new();
+        files.insert("After the Winter/001. Frost & Oar.mp3".to_string(), fe(5_918_737, "audio/mpeg"));
+        files.insert("After the Winter/002.mp3".to_string(), fe(100, "audio/mpeg"));
+        files.insert("cover.jpg".to_string(), fe(2048, "image/jpeg"));
+        assert_eq!(listing_dir("/"), Some(String::new()));
+        assert_eq!(listing_dir(""), Some(String::new()));
+        assert_eq!(listing_dir("After%20the%20Winter/"), Some("After the Winter/".into()));
+        assert_eq!(listing_dir("cover.jpg"), None);
+
+        let (dirs, fs) = dir_children(files.iter(), "");
+        assert_eq!(dirs.get("After the Winter"), Some(&(2, 5_918_837)));
+        assert_eq!(fs.len(), 1);
+        let html = render_listing("brongva", "", &dirs, &fs);
+        assert!(html.contains("href=\"After%20the%20Winter/\""), "{html}");
+        assert!(html.contains("href=\"cover.jpg\""));
+        assert!(html.contains("<img loading=lazy decoding=async alt=\"\" src=\"cover.jpg\">"), "{html}");
+
+        let (dirs, fs) = dir_children(files.iter(), "After the Winter/");
+        assert!(dirs.is_empty());
+        let html = render_listing("brongva", "After the Winter/", &dirs, &fs);
+        assert!(html.contains("<audio controls preload=none src=\"001.%20Frost%20%26%20Oar.mp3\">"), "{html}");
+        assert!(html.contains("001. Frost &amp; Oar.mp3"));
+        assert!(html.contains("href=\"../\""));
+
+        let (dirs, fs) = dir_children(files.iter(), "nope/");
+        assert!(dirs.is_empty() && fs.is_empty());
+    }
 
     fn synthetic(n: usize) -> BuiltSite {
         let files = (0..n)

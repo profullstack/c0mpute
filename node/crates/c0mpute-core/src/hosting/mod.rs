@@ -2060,6 +2060,44 @@ impl Hosting {
         }
     }
 
+    /// The generated HTML listing of directory `dir` (`""` or ending in `/`),
+    /// or `None` when nothing lives under it.
+    async fn listing(&self, rec: &SiteRecord, m: &Manifest, dir: &str) -> Result<Option<String>> {
+        /// Most manifest parts one listing reads.
+        const MAX_LISTING_PARTS: usize = 16;
+        let (dirs, files) = match m {
+            Manifest::Inline(sm) => site::dir_children(sm.files.iter(), dir),
+            Manifest::Parted(r) => {
+                // Parts are in path order: start at the part that would hold
+                // `dir` and stop once a part begins past the prefix.
+                let start = r.parts.partition_point(|p| p.first.as_str() <= dir).saturating_sub(1);
+                let mut dirs = std::collections::BTreeMap::new();
+                let mut files = Vec::new();
+                for (n, pr) in r.parts[start..].iter().enumerate() {
+                    if n > 0 && pr.first.as_str() > dir && !pr.first.starts_with(dir) {
+                        break;
+                    }
+                    if n >= MAX_LISTING_PARTS || files.len() + dirs.len() >= site::LISTING_MAX_ROWS {
+                        break;
+                    }
+                    let part = self.part(&rec.site_id, pr).await?;
+                    let (d, f) = site::dir_children(part.files.iter(), dir);
+                    for (k, (c, b)) in d {
+                        let e: &mut (u64, u64) = dirs.entry(k).or_default();
+                        e.0 += c;
+                        e.1 += b;
+                    }
+                    files.extend(f);
+                }
+                (dirs, files)
+            }
+        };
+        if dirs.is_empty() && files.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(site::render_listing(m.name(), dir, &dirs, &files)))
+    }
+
     /// The entry a request path resolves to (`/` → index.html, etc.).
     async fn resolve_entry(&self, rec: &SiteRecord, m: &Manifest, request: &str) -> Result<Option<site::FileEntry>> {
         for c in site::candidates(request) {
@@ -2180,7 +2218,32 @@ impl Hosting {
                 return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
             }
         };
-        let found = match self.resolve_entry(rec, &manifest, path).await {
+        let resolved = self.resolve_entry(rec, &manifest, path).await;
+        // A directory with no index.html (a folder of mp3s, say) gets a
+        // generated listing instead of a bare 404.
+        if let Ok(None) = resolved
+            && let Some(dir) = site::listing_dir(path)
+        {
+            match self.listing(rec, &manifest, &dir).await {
+                Ok(Some(html)) => {
+                    let mut resp = (StatusCode::OK, html).into_response();
+                    let h = resp.headers_mut();
+                    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+                    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
+                    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+                    if let Ok(v) = HeaderValue::from_str(&rec.site_id) {
+                        h.insert("x-c0mpute-site", v);
+                    }
+                    return resp;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(site = %rec.site_id, err = %e, "hosting: manifest part unavailable");
+                    return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
+                }
+            }
+        }
+        let found = match resolved {
             Ok(Some(e)) => Some((e, StatusCode::OK)),
             Ok(None) => match self.lookup(rec, &manifest, "404.html").await {
                 Ok(Some(e)) => Some((e, StatusCode::NOT_FOUND)),
@@ -3151,6 +3214,10 @@ pub async fn publish_dir_with(
             bail!("invalid domain {d:?}");
         }
     }
+    // Before hashing anything: a big folder takes minutes to scan, and an
+    // unreadable identity (created by `sudo c0mpute ...`) used to fail only
+    // after the scan finished.
+    publisher_keypair()?;
     let cache_path = crate::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hosting")

@@ -858,7 +858,7 @@ enum HostingCmd {
         /// With --private: draw a new key, killing every link given out so far.
         #[arg(long, requires = "private")]
         rekey: bool,
-        /// With --private: the gateway the printed link points at.
+        /// The gateway the printed link points at (public and --private sites).
         #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
         gateway: String,
     },
@@ -4080,7 +4080,8 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                      holders and settles (dry run until [payments] is enabled)"
                 );
             }
-            println!("path:    /s/{}/   (on any c0mpute gateway, e.g. http://<gateway>:7777/s/{}/)", record.site_id, record.site_id);
+            println!("url:     {}/s/{}/", gateway.trim_end_matches('/'), record.site_id);
+            println!("path:    /s/{}/   (works on any c0mpute gateway, including http://127.0.0.1:7777 on a node)", record.site_id);
             for d in &domains {
                 println!(
                     "domain:  {d}  -> add TXT {}.{d} \"site={}\" and point {d} at gateway nodes",
