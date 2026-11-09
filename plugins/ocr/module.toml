@@ -8,7 +8,8 @@
 # and bids only on languages it has (and PDFs only with poppler).
 #
 # Input: a PNG, JPEG, TIFF, WebP or PDF up to 32 MiB / 50 pages, carried by
-# content hash like stt.transcribe audio. Output: JSON
+# content hash in 1 MiB pieces (input_hash + input_size + input_pieces; a
+# lone input_hash is one chunk). Output: JSON
 # {v, ok, text, pages: [{page, text}], engine: "tesseract", lang}.
 # Buyers: `c0mpute ocr <file> [--lang eng]`, POST /v1/ocr?lang=eng on
 # `c0mpute speech serve` (raw bytes body), or the jobs bridge by hash.
@@ -18,7 +19,7 @@
 [module]
 id          = "ocr"
 name        = "OCR — document text extraction"
-version     = "0.2.78"
+version     = "0.2.79"
 kind        = "workload"
 category    = "ai"
 status      = "available"

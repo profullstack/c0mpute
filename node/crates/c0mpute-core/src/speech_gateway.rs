@@ -418,19 +418,24 @@ async fn transcribe(
             "speech queue is unavailable".into(),
         )
     })?;
-    let audio_hash = state.store.put(&body).await.map_err(gateway_failure)?;
-    state
-        .net
-        .announce(&audio_hash)
-        .await
-        .map_err(gateway_failure)?;
-    let spec = serde_json::json!({
-        "audio_hash": audio_hash.to_hex(),
+    // One network message carries ~5 MiB at most: store the audio in pieces.
+    let audio = crate::pieces::put_bytes_pieces(
+        &state.net,
+        &state.store,
+        &body,
+        crate::pieces::INPUT_PIECE_BYTES,
+    )
+    .await
+    .map_err(gateway_failure)?;
+    let mut spec = serde_json::json!({
         "audio_provider_peer_id": state.net.peer_id().to_string(),
         "audio_format": format,
         "model": query.model,
         "language": query.language,
     });
+    spec.as_object_mut()
+        .expect("spec is an object")
+        .extend(audio.spec_fields("audio"));
     let (outcome, bytes) = run_speech_job(
         &state,
         "stt.transcribe",
@@ -891,17 +896,19 @@ async fn generate_video(
                     "image must be 1 byte to 32 MiB".into(),
                 ));
             }
-            let hash = state
-                .store
-                .put(&bytes)
-                .await
-                .map_err(|error| gateway_failure(error.into()))?;
-            state
-                .net
-                .announce(&hash)
-                .await
-                .map_err(gateway_failure)?;
-            job.image_hash = Some(hash.to_hex());
+            let image = crate::pieces::put_bytes_pieces(
+                &state.net,
+                &state.store,
+                &bytes,
+                crate::pieces::INPUT_PIECE_BYTES,
+            )
+            .await
+            .map_err(gateway_failure)?;
+            job.image_hash = Some(image.hash.clone());
+            if image.pieces.len() > 1 {
+                job.image_size = Some(image.size);
+                job.image_pieces = Some(image.pieces);
+            }
             job.image_provider_peer_id = Some(state.net.peer_id().to_base58());
             crate::video::WORKLOAD_IMG2VID
         }
@@ -1032,19 +1039,24 @@ async fn ocr_extract(
     let _slot = state.ocr_slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(StatusCode::SERVICE_UNAVAILABLE, "OCR queue is unavailable".into())
     })?;
-    let input_hash = state.store.put(&body).await.map_err(gateway_failure)?;
-    state
-        .net
-        .announce(&input_hash)
-        .await
-        .map_err(gateway_failure)?;
-    let spec = serde_json::json!({
+    // One network message carries ~5 MiB at most: store the document in pieces.
+    let input = crate::pieces::put_bytes_pieces(
+        &state.net,
+        &state.store,
+        &body,
+        crate::pieces::INPUT_PIECE_BYTES,
+    )
+    .await
+    .map_err(gateway_failure)?;
+    let mut spec = serde_json::json!({
         "v": 1,
-        "input_hash": input_hash.to_hex(),
         "input_provider_peer_id": state.net.peer_id().to_base58(),
         "format": format,
         "lang": query.lang,
     });
+    spec.as_object_mut()
+        .expect("spec is an object")
+        .extend(input.spec_fields("input"));
     let (outcome, bytes) = run_speech_job(
         &state,
         crate::ocr::WORKLOAD,

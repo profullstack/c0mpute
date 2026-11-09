@@ -33,11 +33,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::{JobOffer, JobStatus};
 use c0mpute_net::{Libp2pNetwork, Network};
-use c0mpute_proto::{ChunkRequest, Hash};
+use c0mpute_proto::Hash;
+use tokio::io::AsyncReadExt;
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, mpsc};
 use tracing::{info, warn};
@@ -52,7 +52,7 @@ pub const GPU_TAG: &str = "c0mpute:render:gpu";
 /// Largest `.blend` a buyer may send.
 pub const MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 /// Input and output files move in pieces of this size (one network message
-/// carries at most 10 MiB).
+/// carries at most 10 MiB; see [`crate::pieces`]).
 pub const PIECE_BYTES: usize = 4 * 1024 * 1024;
 /// Most pieces a `.blend` may have (`MAX_INPUT_BYTES / PIECE_BYTES`).
 pub const MAX_PIECES: usize = (MAX_INPUT_BYTES as usize).div_ceil(PIECE_BYTES);
@@ -72,8 +72,6 @@ pub const MAX_RESOLUTION_PCT: u32 = 200;
 pub const MAX_SAMPLES: u32 = 16_384;
 /// How much `.blend` cache a worker keeps (oldest files go first).
 const CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const PIECE_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-const PIECE_FETCH_CONCURRENCY: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ─── spec ────────────────────────────────────────────────────────────────
@@ -343,7 +341,7 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<Parsed, String> {
 }
 
 pub fn piece_count(size: u64) -> usize {
-    (size as usize).div_ceil(PIECE_BYTES).max(1)
+    crate::pieces::piece_count(size, PIECE_BYTES)
 }
 
 /// The tags a worker must advertise to win this job.
@@ -997,146 +995,17 @@ async fn log_tail(path: &Path) -> String {
 
 // ─── moving files in pieces ──────────────────────────────────────────────
 
-/// A file split into stored, announced pieces.
-#[derive(Debug, Clone)]
-pub struct Pieces {
-    pub hash: String,
-    pub size: u64,
-    pub pieces: Vec<String>,
-}
+pub use crate::pieces::Pieces;
 
-/// Store `path` as [`PIECE_BYTES`] pieces and announce each. Streams: the
-/// file is never in memory whole.
+/// Store `path` as [`PIECE_BYTES`] pieces and announce each
+/// ([`crate::pieces::put_file_pieces`]).
 pub async fn put_file_pieces(
     net: &Libp2pNetwork,
     store: &ChunkStore,
     path: &Path,
     max_bytes: u64,
 ) -> Result<Pieces> {
-    let size = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?
-        .len();
-    if size == 0 || size > max_bytes {
-        bail!(
-            "{} is {size} bytes; the limit is {max_bytes}",
-            path.display()
-        );
-    }
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut pieces = Vec::with_capacity(piece_count(size));
-    let mut buf = vec![0u8; PIECE_BYTES];
-    let mut total = 0u64;
-    loop {
-        let mut filled = 0;
-        while filled < PIECE_BYTES {
-            let n = file.read(&mut buf[filled..]).await?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        if filled == 0 {
-            break;
-        }
-        let piece = &buf[..filled];
-        hasher.update(piece);
-        total += filled as u64;
-        let hash = store.put(piece).await.context("store piece")?;
-        net.announce(&hash).await.context("announce piece")?;
-        pieces.push(hash.to_hex());
-        if filled < PIECE_BYTES {
-            break;
-        }
-    }
-    if total != size {
-        bail!("{} changed while it was read", path.display());
-    }
-    Ok(Pieces {
-        hash: hasher.finalize().to_hex().to_string(),
-        size,
-        pieces,
-    })
-}
-
-async fn fetch_piece(
-    net: &Libp2pNetwork,
-    provider: Option<c0mpute_net::PeerId>,
-    hash: Hash,
-) -> Result<Vec<u8>> {
-    let request = ChunkRequest {
-        chunk_hash: hash,
-        shard_index: None,
-    };
-    let fetch = async {
-        match provider {
-            Some(peer) => match net.fetch_from_peer(peer, &request).await {
-                Ok(bytes) => Ok(bytes),
-                Err(_) => net.fetch(&request).await,
-            },
-            None => net.fetch(&request).await,
-        }
-    };
-    let bytes = tokio::time::timeout(PIECE_FETCH_TIMEOUT, fetch)
-        .await
-        .context("timed out fetching a piece")??;
-    if Hash::of(&bytes) != hash || bytes.len() > PIECE_BYTES {
-        bail!("piece does not match its hash or is too big");
-    }
-    Ok(bytes)
-}
-
-/// Fetch every piece (a few at a time), check each piece's hash, the piece
-/// sizes, and the whole hash, and write the file to `dest`.
-async fn fetch_pieces_to_file(
-    net: &Arc<Libp2pNetwork>,
-    provider: Option<c0mpute_net::PeerId>,
-    pieces: &[Hash],
-    size: u64,
-    whole: &str,
-    dest: &Path,
-) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let tmp = dest.with_extension(format!("part-{}", uuid::Uuid::new_v4()));
-    let result: Result<()> = async {
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        let mut hasher = blake3::Hasher::new();
-        let mut written = 0u64;
-        for window in pieces.chunks(PIECE_FETCH_CONCURRENCY) {
-            let mut set = tokio::task::JoinSet::new();
-            for (k, hash) in window.iter().enumerate() {
-                let net = net.clone();
-                let hash = *hash;
-                set.spawn(async move { (k, fetch_piece(&net, provider, hash).await) });
-            }
-            let mut got: Vec<Option<Vec<u8>>> = vec![None; window.len()];
-            while let Some(joined) = set.join_next().await {
-                let (k, bytes) = joined?;
-                got[k] = Some(bytes?);
-            }
-            for bytes in got.into_iter().flatten() {
-                written += bytes.len() as u64;
-                let last = written >= size;
-                if (!last && bytes.len() != PIECE_BYTES) || written > size {
-                    bail!("pieces do not add up to {size} bytes");
-                }
-                hasher.update(&bytes);
-                file.write_all(&bytes).await?;
-            }
-        }
-        file.flush().await?;
-        if written != size || hasher.finalize().to_hex().as_str() != whole {
-            bail!("reassembled file does not match its hash");
-        }
-        tokio::fs::rename(&tmp, dest).await?;
-        Ok(())
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result
+    crate::pieces::put_file_pieces(net, store, path, max_bytes, PIECE_BYTES).await
 }
 
 /// One lock per input hash, so two frames of the same job on one worker
@@ -1178,12 +1047,13 @@ pub async fn ensure_input(
         .map(|p| p.parse())
         .transpose()
         .context("invalid input provider peer id")?;
-    fetch_pieces_to_file(
+    crate::pieces::fetch_pieces_to_file(
         net,
         provider,
         &parsed.pieces,
         parsed.spec.input_size,
-        &hex,
+        parsed.input_hash,
+        PIECE_BYTES,
         &path,
     )
     .await
