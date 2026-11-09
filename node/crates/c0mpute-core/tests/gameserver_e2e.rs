@@ -266,7 +266,7 @@ async fn secrets_are_sealed_and_backups_readable_only_by_the_buyer() {
 /// from that backup (handed to B under a fresh key).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn watch_fails_over_to_another_worker_from_the_latest_backup() {
-    let _ = tracing_subscriber::fmt().with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,c0mpute_core::buyer=info,c0mpute_core::dispatch=info,c0mpute_core::gameserver=info,c0mpute_core::handoff=debug".into())).with_test_writer().try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,c0mpute_core::buyer=info,c0mpute_core::dispatch=info,c0mpute_core::gameserver=info,c0mpute_core::handoff=debug,c0mpute_net=debug,libp2p_kad=debug,libp2p_swarm=debug".into())).with_test_writer().try_init();
     let tmp = tempdir().unwrap();
     let rt_a = Fake::new(world(11));
     let rt_b = Fake::new(world(99));

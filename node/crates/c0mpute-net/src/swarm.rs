@@ -471,7 +471,9 @@ impl Libp2pNetwork {
             false
         };
         let short = (tokio::time::Instant::now() + Duration::from_secs(2)).min(deadline);
-        if self.connect(peer).await.is_ok() && wait_connected(short).await {
+        let dialed = self.connect(peer).await;
+        debug!(%peer, dial = ?dialed.as_ref().err(), "reach: dial by peer id");
+        if dialed.is_ok() && wait_connected(short).await {
             return Ok(());
         }
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1230,6 +1232,8 @@ impl SwarmTask {
             for a in &addrs {
                 sw.behaviour_mut().kad.add_address(&target, a.clone());
             }
+            let table: usize = sw.behaviour_mut().kad.kbuckets().map(|b| b.num_entries()).sum();
+            debug!(%target, found = addrs.len(), peers_seen = peers.len(), routing_table = table, ok = r.is_ok(), "find_peer: DHT lookup done");
             let _ = reply.send(addrs);
             return;
         }
