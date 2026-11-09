@@ -12,6 +12,8 @@ use c0mpute_proto::Hash;
 
 use super::*;
 use crate::hosting::site::{SiteManifest, SiteRecord};
+use c0mpute_sealed::{DataKey, Kind, SealParams, StoragePublic, StorageSecret};
+use std::sync::Arc;
 
 /// Gateways to read from and push to, in order of preference.
 #[derive(Clone, Debug)]
@@ -148,6 +150,8 @@ pub async fn fetch_state(
                 record: state.record,
                 manifest,
                 doc,
+                key: None,
+                sealed_refs: None,
             },
             gw.clone(),
         ));
@@ -156,6 +160,62 @@ pub async fn fetch_state(
         bail!("no gateway reachable: {}", errors.join("; "));
     }
     Ok(best)
+}
+
+/// Loads this machine's storage identity (the one `c0mpute storage` and `dm`
+/// use). Only called for private repos; the CLI caches it, so the password
+/// is asked at most once per command.
+pub type SecretLoader<'a> = &'a (dyn Fn() -> Result<Arc<StorageSecret>> + Sync);
+
+/// For a private repo: download the sealed ref map, open it with `secret`
+/// and fill in refs, head and the repo key. A no-op for public repos.
+pub async fn unseal(
+    gws: &Gateways,
+    state: &mut (Verified, String),
+    owner: &str,
+    repo: &str,
+    secret: &StorageSecret,
+) -> Result<()> {
+    let (v, gw) = state;
+    if !v.doc.sealed || v.key.is_some() {
+        return Ok(());
+    }
+    let entry = v
+        .manifest
+        .files
+        .get(SEALED_REFS)
+        .with_context(|| format!("private repo has no {SEALED_REFS}"))?;
+    let blob = download_any(gws, gw, owner, repo, SEALED_REFS, entry).await?;
+    let (opened, dek) = c0mpute_sealed::open_with_secret(&blob, secret, None).map_err(|_| {
+        anyhow!(
+            "{} is private and this machine's identity is not one of its readers. Send the owner \
+             your `c0mpute storage key show` (c0ps1...) and ask for `c0mpute git share {repo} --with <it>`",
+            url_for(owner, repo)
+        )
+    })?;
+    let r: SealedRefs = serde_json::from_slice(&opened.content).context("sealed ref map")?;
+    for (name, oid) in &r.refs {
+        if !valid_ref_name(name) || !valid_oid(oid) {
+            bail!("bad ref {name:?} -> {oid:?} in the sealed ref map");
+        }
+    }
+    if let Some(h) = &r.head
+        && !valid_ref_name(h)
+    {
+        bail!("bad HEAD {h:?} in the sealed ref map");
+    }
+    v.doc.refs = r.refs;
+    v.doc.head = r.head;
+    v.key = Some(Arc::new(dek));
+    v.sealed_refs = Some(blob);
+    Ok(())
+}
+
+/// Plaintext of one sealed pack or index.
+fn open_sealed(blob: &[u8], key: &DataKey) -> Result<Vec<u8>> {
+    let o = c0mpute_sealed::open(blob, key, None)
+        .map_err(|e| anyhow!("a sealed pack does not open with the repo key: {e}"))?;
+    Ok(o.content.to_vec())
 }
 
 /// `(owner, repo)` of the repo with hosting site id `site_id`, from the
@@ -460,6 +520,9 @@ pub async fn fetch_objects(
     if local.complete(wants) {
         return Ok(0);
     }
+    if v.doc.sealed && v.key.is_none() {
+        bail!("private repo: unseal it before fetching");
+    }
     for base in v.doc.packs.iter().rev() {
         if local.has_pack(base) {
             continue;
@@ -468,8 +531,12 @@ pub async fn fetch_objects(
         let (Some(pe), Some(ie)) = (v.manifest.files.get(&pp), v.manifest.files.get(&ip)) else {
             bail!("ref map names {base} but the repo has no such pack");
         };
-        let pack = download_any(gws, gw, owner, repo, &pp, pe).await?;
-        let idx = download_any(gws, gw, owner, repo, &ip, ie).await?;
+        let mut pack = download_any(gws, gw, owner, repo, &pp, pe).await?;
+        let mut idx = download_any(gws, gw, owner, repo, &ip, ie).await?;
+        if let Some(k) = &v.key {
+            pack = open_sealed(&pack, k)?;
+            idx = open_sealed(&idx, k)?;
+        }
         local.install_pack(base, &pack, &idx)?;
         downloaded += 1;
         if local.complete(wants) {
@@ -533,6 +600,21 @@ pub struct PushReport {
     pub head_moved: Option<String>,
 }
 
+/// Private/public mode and readers for [`push`].
+#[derive(Default)]
+pub struct PushOptions<'a> {
+    /// This machine's storage identity, for private repos.
+    pub secret: Option<SecretLoader<'a>>,
+    /// Mode for a NEW repo: `Some(true)` public, otherwise private. An
+    /// existing repo keeps its mode; asking for the other one is an error.
+    pub public: Option<bool>,
+    /// Private repos: identities to add as readers (key header only).
+    pub add_readers: Vec<StoragePublic>,
+    /// Private repos: identities to remove. Re-keys the repo and re-seals
+    /// every pack, since a removed reader may already hold the old key.
+    pub remove_readers: Vec<StoragePublic>,
+}
+
 /// Push `specs` from `local` to `<owner>/<repo>`, signed with `keypair`
 /// (which must be the owner's).
 pub async fn push(
@@ -542,6 +624,7 @@ pub async fn push(
     owner: &str,
     repo: &str,
     specs: &[PushSpec],
+    opts: &PushOptions<'_>,
 ) -> Result<PushReport> {
     let me = crate::hosting::site::owner_hex(keypair)
         .context("an ed25519 identity is needed to push")?;
@@ -553,8 +636,47 @@ pub async fn push(
         );
     }
     let t0 = std::time::Instant::now();
-    let state = fetch_state(gws, owner, repo).await?;
+    let mut state = fetch_state(gws, owner, repo).await?;
     trace(&format!("state fetched in {:?}", t0.elapsed()));
+    if specs.is_empty() && state.is_none() {
+        bail!("{} does not exist (push something first)", url_for(owner, repo));
+    }
+    let private = match &state {
+        Some((v, _)) => {
+            if opts.public == Some(v.doc.sealed) {
+                if v.doc.sealed {
+                    bail!(
+                        "{} is private; making it public would publish its whole history. \
+                         Push to a new repo with `git config c0mpute.public true` instead",
+                        url_for(owner, repo)
+                    );
+                }
+                bail!(
+                    "{} is public; its history is already readable. Push to a new repo \
+                     (private by default) instead",
+                    url_for(owner, repo)
+                );
+            }
+            v.doc.sealed
+        }
+        None => opts.public != Some(true),
+    };
+    if !private && !(opts.add_readers.is_empty() && opts.remove_readers.is_empty()) {
+        bail!("{} is public: there are no readers to change", url_for(owner, repo));
+    }
+    let secret: Option<Arc<StorageSecret>> = if private {
+        let load = opts.secret.context(
+            "private repos need this machine's c0mpute identity (run `c0mpute storage key init`)",
+        )?;
+        Some(load()?)
+    } else {
+        None
+    };
+    if let (Some(st), Some(sec)) = (state.as_mut(), secret.as_ref()) {
+        unseal(gws, st, owner, repo, sec).await?;
+    }
+    let rekey = !opts.remove_readers.is_empty();
+    let readers_change = !opts.add_readers.is_empty() || rekey;
     let remote_refs: BTreeMap<String, String> = state
         .as_ref()
         .map(|(v, _)| v.doc.refs.clone())
@@ -566,6 +688,7 @@ pub async fn push(
         t
     };
     if let Some(s) = &state
+        && (!specs.is_empty() || rekey)
         && !local.complete(&tips)
     {
         fetch_objects(local, gws, s, owner, repo, &tips).await?;
@@ -611,11 +734,11 @@ pub async fn push(
         holders,
         head_moved: None,
     };
-    if new_refs == remote_refs && state.is_some() {
+    if new_refs == remote_refs && state.is_some() && !readers_change {
         let seq = state.as_ref().map(|(v, _)| v.record.seq).unwrap_or(0);
         return Ok(report(None, seq, 0, results));
     }
-    if results.iter().all(|(_, r)| r.is_err()) {
+    if !results.is_empty() && results.iter().all(|(_, r)| r.is_err()) {
         return Ok(report(None, 0, 0, results));
     }
 
@@ -637,33 +760,6 @@ pub async fn push(
         w.dedup();
         w
     };
-    let mut packs = old_packs.clone();
-    let mut new_files: Vec<(String, Vec<u8>)> = Vec::new();
-    // An old bundle-layout repo becomes one full pack (its bundle is dropped).
-    let legacy = state.as_ref().is_some_and(|(v, _)| is_legacy(&v.manifest));
-    let repack = legacy || old_packs.len() + 1 > REPACK_AFTER;
-    if repack {
-        files.clear();
-        packs.clear();
-        if let Some((name, pack, idx)) = local.pack(&wants, &[])? {
-            new_files.push((pack_path(&name), pack));
-            new_files.push((idx_path(&name), idx));
-            packs.push(name);
-        }
-    } else if let Some((name, pack, idx)) = local.pack(&wants, &tips)?
-        && !packs.contains(&name)
-    {
-        new_files.push((pack_path(&name), pack));
-        new_files.push((idx_path(&name), idx));
-        packs.push(name);
-    }
-
-    let mut peeled = BTreeMap::new();
-    for (name, oid) in &new_refs {
-        if name.starts_with("refs/tags/") && local.object_type(oid).as_deref() == Some("tag") {
-            peeled.insert(oid.clone(), local.rev_parse(&format!("{oid}^{{}}"))?);
-        }
-    }
     let head = state
         .as_ref()
         .and_then(|(v, _)| v.doc.head.clone())
@@ -680,23 +776,138 @@ pub async fn push(
                 .find(|k| k.starts_with("refs/heads/"))
                 .cloned()
         });
+
+    // A private repo: seal the ref map first, which fixes the repo key (new
+    // on the first push and on a re-key), then seal every new pack with it.
+    let mut sealed_refs_blob: Option<Vec<u8>> = None;
+    let mut key: Option<DataKey> = None;
+    if let Some(sec) = &secret {
+        let mut readers: Vec<StoragePublic> = vec![sec.public()];
+        if let Some(old) = state.as_ref().and_then(|(v, _)| v.sealed_refs.as_deref()) {
+            for r in c0mpute_sealed::roster(old, sec).map_err(|e| anyhow!("reader list: {e}"))? {
+                if !readers.contains(&r) {
+                    readers.push(r);
+                }
+            }
+        }
+        for r in &opts.add_readers {
+            if !readers.contains(r) {
+                readers.push(*r);
+            }
+        }
+        readers.retain(|r| *r == sec.public() || !opts.remove_readers.contains(r));
+        let refs_json = serde_json::to_vec(&SealedRefs {
+            head: head.clone(),
+            refs: new_refs.clone(),
+        })?;
+        let name = sealed_name(sec, repo);
+        let params = SealParams {
+            kind: Kind::File,
+            name: &name,
+            owner: sec,
+            file_name: None,
+            content_type: None,
+            files: BTreeMap::new(),
+            parts: Vec::new(),
+            recipients: &readers,
+            created: now_ms() / 1000,
+            version: 0,
+        };
+        let existing = state.as_ref().and_then(|(v, _)| v.key.clone());
+        let sealed = match existing {
+            Some(k) if !rekey => c0mpute_sealed::seal_with_key(&refs_json, &params, k.duplicate()),
+            _ => c0mpute_sealed::seal(&refs_json, &params),
+        }
+        .map_err(|e| anyhow!("seal the ref map: {e}"))?;
+        sealed_refs_blob = Some(sealed.blob);
+        key = Some(sealed.dek);
+    }
+    let seal_file = |bytes: &[u8]| -> Result<Vec<u8>> {
+        let (Some(sec), Some(k)) = (&secret, &key) else {
+            return Ok(bytes.to_vec());
+        };
+        let name = sealed_name(sec, repo);
+        let params = SealParams {
+            kind: Kind::File,
+            name: &name,
+            owner: sec,
+            file_name: None,
+            content_type: None,
+            files: BTreeMap::new(),
+            parts: Vec::new(),
+            recipients: &[],
+            created: now_ms() / 1000,
+            version: 0,
+        };
+        Ok(c0mpute_sealed::seal_with_key(bytes, &params, k.duplicate())
+            .map_err(|e| anyhow!("seal a pack: {e}"))?
+            .blob)
+    };
+    let mut packs = old_packs.clone();
+    let mut new_files: Vec<(String, Vec<u8>)> = Vec::new();
+    // An old bundle-layout repo becomes one full pack (its bundle is dropped).
+    let legacy = state.as_ref().is_some_and(|(v, _)| is_legacy(&v.manifest));
+    // A re-key re-seals everything: one full pack under the new key.
+    let repack = legacy || rekey || old_packs.len() + 1 > REPACK_AFTER;
+    let made = if repack {
+        files.clear();
+        packs.clear();
+        local.pack(&wants, &[])?
+    } else if new_refs == remote_refs {
+        None // readers changed, objects did not
+    } else {
+        local.pack(&wants, &tips)?
+    };
+    if let Some((real, pack, idx)) = made {
+        let name = if private { random_pack_name() } else { real };
+        if !packs.contains(&name) {
+            new_files.push((pack_path(&name), seal_file(&pack)?));
+            new_files.push((idx_path(&name), seal_file(&idx)?));
+            packs.push(name);
+        }
+    }
+
+    let mut peeled = BTreeMap::new();
+    for (name, oid) in &new_refs {
+        if name.starts_with("refs/tags/") && local.object_type(oid).as_deref() == Some("tag") {
+            peeled.insert(oid.clone(), local.rev_parse(&format!("{oid}^{{}}"))?);
+        }
+    }
     let head_moved = head
         .as_ref()
         .and_then(|h| new_refs.get(h).filter(|n| remote_refs.get(h) != Some(*n)))
         .cloned();
-    let doc = RepoDoc {
-        v: 1,
-        repo: repo.to_string(),
-        head,
-        refs: new_refs,
-        packs,
-        prev,
-        force: forced || repack,
-        pushed_at: now_ms(),
+    let doc = if let Some(blob) = sealed_refs_blob {
+        // Gateways see pack names, `prev` and `force`; refs only sealed.
+        new_files.push((SEALED_REFS.into(), blob));
+        RepoDoc {
+            v: 2,
+            repo: repo.to_string(),
+            head: None,
+            refs: BTreeMap::new(),
+            packs,
+            prev,
+            force: forced || repack,
+            pushed_at: now_ms(),
+            sealed: true,
+        }
+    } else {
+        let doc = RepoDoc {
+            v: 1,
+            repo: repo.to_string(),
+            head,
+            refs: new_refs,
+            packs,
+            prev,
+            force: forced || repack,
+            pushed_at: now_ms(),
+            sealed: false,
+        };
+        new_files.push(("HEAD".into(), doc.head_file().into_bytes()));
+        new_files.push(("info/refs".into(), doc.info_refs(&peeled).into_bytes()));
+        new_files.push(("objects/info/packs".into(), doc.packs_file().into_bytes()));
+        doc
     };
-    new_files.push(("HEAD".into(), doc.head_file().into_bytes()));
-    new_files.push(("info/refs".into(), doc.info_refs(&peeled).into_bytes()));
-    new_files.push(("objects/info/packs".into(), doc.packs_file().into_bytes()));
     new_files.push((DOC_PATH.into(), doc.to_bytes()));
 
     let mut chunks = Vec::new();
@@ -772,6 +983,9 @@ pub async fn push(
         }
     }
     let why = errors.join("; ");
+    if results.is_empty() {
+        bail!("no gateway accepted the change: {why}");
+    }
     let results = results
         .into_iter()
         .map(|(d, r)| (d, r.and(Err(why.clone()))))
