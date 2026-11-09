@@ -15,7 +15,7 @@ pub mod live;
 pub mod dispatch;
 pub mod embed;
 pub mod gameserver;
-pub(crate) mod gateway_util;
+pub mod gateway_util;
 pub mod jobs_gateway;
 pub mod net_guard;
 pub mod ocr;
