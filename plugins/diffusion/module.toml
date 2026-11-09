@@ -11,7 +11,7 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.3.0"
+version     = "0.3.1"
 kind        = "workload"
 category    = "ai"
 status      = "available"
