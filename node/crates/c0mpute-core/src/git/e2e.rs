@@ -161,7 +161,9 @@ impl SealedRefs {
     }
 
     pub fn open(key: &RepoKey, owner: &str, repo: &str, sealed: &str) -> Result<Self> {
-        let raw = B64URL.decode(sealed.trim()).context("sealed ref map is not base64url")?;
+        let raw = B64URL
+            .decode(sealed.trim())
+            .context("sealed ref map is not base64url")?;
         let json = key.open(&aad(owner, repo, "refs"), &raw)?;
         serde_json::from_slice(&json).context("sealed ref map")
     }
@@ -200,10 +202,16 @@ mod tests {
         assert!(k.open("b", &s).is_err(), "aad binds the file");
         let other = RepoKey::from_text(&"cd".repeat(32)).unwrap();
         assert!(other.open("a", &s).is_err());
-        assert_eq!(RepoKey::from_text(&k.to_text()).unwrap().to_text(), k.to_text());
+        assert_eq!(
+            RepoKey::from_text(&k.to_text()).unwrap().to_text(),
+            k.to_text()
+        );
         let n = k.pack_name("pack-0000000000000000000000000000000000000000");
         assert!(crate::git::valid_pack_name(&n), "{n}");
-        assert_ne!(n, other.pack_name("pack-0000000000000000000000000000000000000000"));
+        assert_ne!(
+            n,
+            other.pack_name("pack-0000000000000000000000000000000000000000")
+        );
     }
 
     #[test]

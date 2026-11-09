@@ -24,8 +24,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 
 use super::Hosting;
-use super::site::{Manifest, SiteRecord};
 use super::TARGET_REPLICAS;
+use super::site::{Manifest, SiteRecord};
 use crate::git::pack::{self, Commit, Kind, PackSet, TreeEntry};
 use crate::git::{self, RepoDoc};
 
@@ -43,7 +43,9 @@ static CACHE: Mutex<Vec<(String, Arc<PackSet>)>> = Mutex::new(Vec::new());
 
 fn cached(manifest: &str) -> Option<Arc<PackSet>> {
     let c = CACHE.lock().ok()?;
-    c.iter().find(|(m, _)| m == manifest).map(|(_, p)| p.clone())
+    c.iter()
+        .find(|(m, _)| m == manifest)
+        .map(|(_, p)| p.clone())
 }
 
 fn remember(manifest: &str, p: Arc<PackSet>) {
@@ -72,7 +74,11 @@ struct Repo {
 impl Repo {
     fn url(&self, rest: &str) -> String {
         let r = format!("/git/{}/{}", self.owner, self.repo);
-        if rest.is_empty() { r } else { format!("{r}/{rest}") }
+        if rest.is_empty() {
+            r
+        } else {
+            format!("{r}/{rest}")
+        }
     }
 
     /// `(display name, commit id)` of HEAD.
@@ -96,17 +102,22 @@ fn base_url(headers: &HeaderMap) -> String {
         .get("x-forwarded-host")
         .or_else(|| headers.get(header::HOST))
         .and_then(|v| v.to_str().ok())
-        .filter(|h| h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)))
+        .filter(|h| {
+            h.chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
+        })
         .unwrap_or("127.0.0.1:7777");
     let proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .filter(|p| *p == "https" || *p == "http")
-        .unwrap_or(if host.starts_with("127.") || host.starts_with("localhost") {
-            "http"
-        } else {
-            "https"
-        });
+        .unwrap_or(
+            if host.starts_with("127.") || host.starts_with("localhost") {
+                "http"
+            } else {
+                "https"
+            },
+        );
     format!("{proto}://{host}")
 }
 
@@ -166,7 +177,11 @@ fn resolve(r: &Repo, segs: &[&str]) -> Option<(String, String, usize)> {
     }
     for i in (1..=segs.len()).rev() {
         let cand = segs[..i].join("/");
-        for full in [format!("refs/heads/{cand}"), format!("refs/tags/{cand}"), cand.clone()] {
+        for full in [
+            format!("refs/heads/{cand}"),
+            format!("refs/tags/{cand}"),
+            cand.clone(),
+        ] {
             if let Some(oid) = r.doc.refs.get(&full)
                 && let Ok((c, Kind::Commit, _)) = r.packs.peel(oid)
             {
@@ -188,7 +203,11 @@ async fn load(h: &Hosting, owner: &str, repo: &str, headers: &HeaderMap) -> Resu
     let owner = owner.to_ascii_lowercase();
     let repo = git::strip_dot_git(repo).to_string();
     if !git::valid_owner(&owner) || !git::valid_repo(&repo) {
-        return Err(message(StatusCode::NOT_FOUND, "Not found", "<p>Not a repo address.</p>"));
+        return Err(message(
+            StatusCode::NOT_FOUND,
+            "Not found",
+            "<p>Not a repo address.</p>",
+        ));
     }
     let site_id = git::site_id(&owner, &repo);
     let Some(rec) = h.record_for(&site_id).await else {
@@ -381,7 +400,8 @@ fn tree_page(r: &Repo, at: Option<(&str, &str)>, path: &str) -> Response {
         Err(e) => return not_found(r, &format!("{e:#}")),
     };
     let entries = match pack::walk(&r.packs, &c.tree, path) {
-        Ok((oid, Kind::Tree)) => match r.packs.object(&oid).and_then(|(_, d)| pack::parse_tree(&d)) {
+        Ok((oid, Kind::Tree)) => match r.packs.object(&oid).and_then(|(_, d)| pack::parse_tree(&d))
+        {
             Ok(e) => e,
             Err(e) => return not_found(r, &format!("{e:#}")),
         },
@@ -414,18 +434,37 @@ fn tree_page(r: &Repo, at: Option<(&str, &str)>, path: &str) -> Response {
         );
     }
     for e in &entries {
-        let full = if path.is_empty() { e.name.clone() } else { format!("{path}/{}", e.name) };
+        let full = if path.is_empty() {
+            e.name.clone()
+        } else {
+            format!("{path}/{}", e.name)
+        };
         let (ico, href) = if e.is_dir() {
-            ("📁", r.url(&format!("tree/{}/{}", enc_path(&name), enc_path(&full))))
+            (
+                "📁",
+                r.url(&format!("tree/{}/{}", enc_path(&name), enc_path(&full))),
+            )
         } else if e.is_submodule() {
             ("📦", String::new())
         } else {
-            (if e.is_symlink() { "🔗" } else { "📄" }, r.url(&format!("blob/{}/{}", enc_path(&name), enc_path(&full))))
+            (
+                if e.is_symlink() { "🔗" } else { "📄" },
+                r.url(&format!("blob/{}/{}", enc_path(&name), enc_path(&full))),
+            )
         };
         if href.is_empty() {
-            let _ = write!(body, r#"<tr><td class="ico">{ico}</td><td>{} <span class="dim">submodule @ {}</span></td></tr>"#, esc(&e.name), &e.oid[..10]);
+            let _ = write!(
+                body,
+                r#"<tr><td class="ico">{ico}</td><td>{} <span class="dim">submodule @ {}</span></td></tr>"#,
+                esc(&e.name),
+                &e.oid[..10]
+            );
         } else {
-            let _ = write!(body, r#"<tr><td class="ico">{ico}</td><td><a href="{href}">{}</a></td></tr>"#, esc(&e.name));
+            let _ = write!(
+                body,
+                r#"<tr><td class="ico">{ico}</td><td><a href="{href}">{}</a></td></tr>"#,
+                esc(&e.name)
+            );
         }
     }
     body.push_str("</table>");
@@ -441,7 +480,11 @@ fn tree_page(r: &Repo, at: Option<(&str, &str)>, path: &str) -> Response {
             esc(&String::from_utf8_lossy(&data))
         );
     }
-    let title = if path.is_empty() { r.repo.clone() } else { format!("{path} · {}", r.repo) };
+    let title = if path.is_empty() {
+        r.repo.clone()
+    } else {
+        format!("{path} · {}", r.repo)
+    };
     html(StatusCode::OK, &title, &body)
 }
 
@@ -478,7 +521,11 @@ fn blob_page(r: &Repo, name: &str, commit: &str, path: &str) -> Response {
     );
     if is_binary(&data) {
         if image_type(path).is_some() {
-            let _ = write!(body, r#"<p><img class="img" src="{raw}" alt="{}"></p>"#, esc(path));
+            let _ = write!(
+                body,
+                r#"<p><img class="img" src="{raw}" alt="{}"></p>"#,
+                esc(path)
+            );
         } else {
             body.push_str("<p>Binary file, not shown.</p>");
         }
@@ -490,7 +537,7 @@ fn blob_page(r: &Repo, name: &str, commit: &str, path: &str) -> Response {
             let n = i + 1;
             let _ = write!(
                 body,
-                r#"<tr id="L{n}"><td class="ln"><a href="#L{n}">{n}</a></td><td><pre>{}</pre></td></tr>"#,
+                r##"<tr id="L{n}"><td class="ln"><a href="#L{n}">{n}</a></td><td><pre>{}</pre></td></tr>"##,
                 esc(line)
             );
         }
@@ -533,10 +580,18 @@ fn raw_file(r: &Repo, commit: &str, path: &str) -> Response {
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"),
+        HeaderValue::from_static(
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+        ),
     );
-    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
     resp
 }
 
@@ -587,9 +642,18 @@ fn commit_page(r: &Repo, oid: &str) -> Response {
     if !rest.is_empty() {
         let _ = write!(body, r#"<pre class="wrap">{}</pre>"#, esc(rest));
     }
-    let _ = write!(body, r#"<p><a href="{}">Browse files at this commit</a>"#, r.url(&format!("tree/{oid}")));
+    let _ = write!(
+        body,
+        r#"<p><a href="{}">Browse files at this commit</a>"#,
+        r.url(&format!("tree/{oid}"))
+    );
     for p in &c.parents {
-        let _ = write!(body, r#" · parent <a class="sha" href="{}">{}</a>"#, r.url(&format!("commit/{p}")), &p[..10.min(p.len())]);
+        let _ = write!(
+            body,
+            r#" · parent <a class="sha" href="{}">{}</a>"#,
+            r.url(&format!("commit/{p}")),
+            &p[..10.min(p.len())]
+        );
     }
     body.push_str("</p>");
     // Changed paths against the first parent.
@@ -600,22 +664,53 @@ fn commit_page(r: &Repo, oid: &str) -> Response {
         .and_then(|(_, d)| Commit::parse(&d).ok())
         .map(|p| p.tree);
     let mut changes = Vec::new();
-    diff_trees(&r.packs, old_tree.as_deref(), Some(&c.tree), "", &mut changes);
-    let _ = write!(body, "<h3>{} changed</h3><ul class=\"changes\">", if changes.len() >= DIFF_LIMIT { format!("{DIFF_LIMIT}+ paths") } else { format!("{} path(s)", changes.len()) });
+    diff_trees(
+        &r.packs,
+        old_tree.as_deref(),
+        Some(&c.tree),
+        "",
+        &mut changes,
+    );
+    let _ = write!(
+        body,
+        "<h3>{} changed</h3><ul class=\"changes\">",
+        if changes.len() >= DIFF_LIMIT {
+            format!("{DIFF_LIMIT}+ paths")
+        } else {
+            format!("{} path(s)", changes.len())
+        }
+    );
     for (st, path) in &changes {
         let link = if *st == 'D' {
             esc(path)
         } else {
-            format!(r#"<a href="{}">{}</a>"#, r.url(&format!("blob/{oid}/{}", enc_path(path))), esc(path))
+            format!(
+                r#"<a href="{}">{}</a>"#,
+                r.url(&format!("blob/{oid}/{}", enc_path(path))),
+                esc(path)
+            )
         };
-        let _ = write!(body, r#"<li><span class="st st{st}">{st}</span> {link}</li>"#);
+        let _ = write!(
+            body,
+            r#"<li><span class="st st{st}">{st}</span> {link}</li>"#
+        );
     }
     body.push_str("</ul>");
-    html(StatusCode::OK, &format!("{} · {}", c.subject(), r.repo), &body)
+    html(
+        StatusCode::OK,
+        &format!("{} · {}", c.subject(), r.repo),
+        &body,
+    )
 }
 
 /// Paths added (A), modified (M) or deleted (D) between two trees.
-fn diff_trees(p: &PackSet, old: Option<&str>, new: Option<&str>, prefix: &str, out: &mut Vec<(char, String)>) {
+fn diff_trees(
+    p: &PackSet,
+    old: Option<&str>,
+    new: Option<&str>,
+    prefix: &str,
+    out: &mut Vec<(char, String)>,
+) {
     if out.len() >= DIFF_LIMIT || old == new {
         return;
     }
@@ -644,7 +739,11 @@ fn diff_trees(p: &PackSet, old: Option<&str>, new: Option<&str>, prefix: &str, o
                     if let Some(e) = e
                         && e.is_dir()
                     {
-                        let (o, n) = if st == 'D' { (Some(e.oid.as_str()), None) } else { (None, Some(e.oid.as_str())) };
+                        let (o, n) = if st == 'D' {
+                            (Some(e.oid.as_str()), None)
+                        } else {
+                            (None, Some(e.oid.as_str()))
+                        };
                         diff_trees(p, o, n, &format!("{path}/"), out);
                     }
                 }
@@ -679,11 +778,19 @@ fn e2e_page(owner: &str, repo: &str, rec: &SiteRecord, copies: usize) -> Respons
 
 fn not_found(r: &Repo, why: &str) -> Response {
     let body = format!("{}<p>{}</p>", header_html(r, None), esc(why));
-    html(StatusCode::NOT_FOUND, &format!("Not found · {}", r.repo), &body)
+    html(
+        StatusCode::NOT_FOUND,
+        &format!("Not found · {}", r.repo),
+        &body,
+    )
 }
 
 fn message(status: StatusCode, title: &str, body_html: &str) -> Response {
-    html(status, title, &format!("<h1>{}</h1>{body_html}", esc(title)))
+    html(
+        status,
+        title,
+        &format!("<h1>{}</h1>{body_html}", esc(title)),
+    )
 }
 
 const CSS: &str = r#"
@@ -716,13 +823,22 @@ fn html(status: StatusCode, title: &str, body: &str) -> Response {
     );
     let mut resp = (status, page).into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
     );
-    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     resp
 }
@@ -780,7 +896,11 @@ fn human_bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
 
 fn ago(unix: u64) -> String {
@@ -807,7 +927,10 @@ mod tests {
 
     #[test]
     fn escaping_and_encoding() {
-        assert_eq!(esc(r#"<a href="x">&'"#), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
+        assert_eq!(
+            esc(r#"<a href="x">&'"#),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;"
+        );
         assert_eq!(enc_path("src/a b#?.rs"), "src/a%20b%23%3F.rs");
         assert_eq!(human_bytes(1792), "1.8 KiB");
         assert_eq!(human_bytes(400), "400 B");
@@ -820,7 +943,10 @@ mod tests {
     #[test]
     fn base_url_from_headers() {
         let mut h = HeaderMap::new();
-        h.insert(header::HOST, HeaderValue::from_static("gateway.c0mpute.com"));
+        h.insert(
+            header::HOST,
+            HeaderValue::from_static("gateway.c0mpute.com"),
+        );
         h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
         assert_eq!(base_url(&h), "https://gateway.c0mpute.com");
         let mut h = HeaderMap::new();
@@ -828,6 +954,9 @@ mod tests {
         assert_eq!(base_url(&h), "http://127.0.0.1:7777");
         let mut h = HeaderMap::new();
         h.insert(header::HOST, HeaderValue::from_static("evil\"<x>"));
-        assert_eq!(base_url(&h), "https://127.0.0.1:7777".replace("https", "http"));
+        assert_eq!(
+            base_url(&h),
+            "https://127.0.0.1:7777".replace("https", "http")
+        );
     }
 }

@@ -66,7 +66,11 @@ impl Pack {
     /// Pack offset of `oid`, by binary search inside its fan-out bucket.
     fn find(&self, oid: &[u8; 20]) -> Option<u64> {
         let b = oid[0] as usize;
-        let lo = if b == 0 { 0 } else { be32(&self.idx, 8 + (b - 1) * 4).ok()? as usize };
+        let lo = if b == 0 {
+            0
+        } else {
+            be32(&self.idx, 8 + (b - 1) * 4).ok()? as usize
+        };
         let hi = be32(&self.idx, 8 + b * 4).ok()? as usize;
         let (mut lo, mut hi) = (lo, hi.min(self.count));
         while lo < hi {
@@ -218,7 +222,9 @@ fn entry_at(pack: &[u8], off: u64) -> Result<Entry> {
                 p += 1;
                 rel = ((rel + 1) << 7) | (c & 0x7f) as u64;
             }
-            let base = off.checked_sub(rel).context("delta base before the pack start")?;
+            let base = off
+                .checked_sub(rel)
+                .context("delta base before the pack start")?;
             if base >= off {
                 bail!("delta base does not precede its delta");
             }
@@ -242,7 +248,10 @@ fn inflate(data: &[u8], size: usize) -> Result<Vec<u8>> {
         .read_to_end(&mut out)
         .context("inflate pack object")?;
     if out.len() != size {
-        bail!("pack object inflates to {} bytes, header says {size}", out.len());
+        bail!(
+            "pack object inflates to {} bytes, header says {size}",
+            out.len()
+        );
     }
     Ok(out)
 }
@@ -352,8 +361,16 @@ pub fn parse_tree(d: &[u8]) -> Result<Vec<TreeEntry>> {
     let mut out = Vec::new();
     let mut p = 0;
     while p < d.len() {
-        let sp = d[p..].iter().position(|&c| c == b' ').context("bad tree entry")? + p;
-        let nul = d[sp..].iter().position(|&c| c == 0).context("bad tree entry")? + sp;
+        let sp = d[p..]
+            .iter()
+            .position(|&c| c == b' ')
+            .context("bad tree entry")?
+            + p;
+        let nul = d[sp..]
+            .iter()
+            .position(|&c| c == 0)
+            .context("bad tree entry")?
+            + sp;
         let oid = d.get(nul + 1..nul + 21).context("truncated tree entry")?;
         out.push(TreeEntry {
             mode: String::from_utf8_lossy(&d[p..sp]).into_owned(),
@@ -362,7 +379,11 @@ pub fn parse_tree(d: &[u8]) -> Result<Vec<TreeEntry>> {
         });
         p = nul + 21;
     }
-    out.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then_with(|| a.name.cmp(&b.name)));
+    out.sort_by(|a, b| {
+        b.is_dir()
+            .cmp(&a.is_dir())
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(out)
 }
 
@@ -521,7 +542,19 @@ mod tests {
     fn delta_copy_and_insert() {
         let base = b"hello world";
         // src 11, dst 11: copy 6 bytes from 0 ("hello "), insert "there".
-        let d = [11, 11, 0x80 | 0x01 | 0x10, 0, 6, 5, b't', b'h', b'e', b'r', b'e'];
+        let d = [
+            11,
+            11,
+            0x80 | 0x01 | 0x10,
+            0,
+            6,
+            5,
+            b't',
+            b'h',
+            b'e',
+            b'r',
+            b'e',
+        ];
         assert_eq!(apply_delta(base, &d).unwrap(), b"hello there");
         // Wrong base size is refused.
         assert!(apply_delta(b"x", &d).is_err());
@@ -565,15 +598,28 @@ mod tests {
         let git = |args: &[&str]| {
             let o = Command::new("git")
                 .current_dir(&dir)
-                .args(["-c", "user.name=T", "-c", "user.email=t@e", "-c", "commit.gpgsign=false"])
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            assert!(
+                o.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         };
         git(&["init", "-q", "-b", "main"]);
-        let big: String = (0..400).map(|i| format!("line {i} of a file that deltas well\n")).collect();
+        let big: String = (0..400)
+            .map(|i| format!("line {i} of a file that deltas well\n"))
+            .collect();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/lib.txt"), &big).unwrap();
         std::fs::write(dir.join("README.md"), "# hi\n").unwrap();
@@ -588,7 +634,10 @@ mod tests {
         for e in std::fs::read_dir(&packdir).unwrap() {
             let p = e.unwrap().path();
             if p.extension().is_some_and(|x| x == "pack") {
-                packs.push((std::fs::read(&p).unwrap(), std::fs::read(p.with_extension("idx")).unwrap()));
+                packs.push((
+                    std::fs::read(&p).unwrap(),
+                    std::fs::read(p.with_extension("idx")).unwrap(),
+                ));
             }
         }
         let set = PackSet::new(packs).unwrap();
@@ -602,7 +651,11 @@ mod tests {
         let (blob, k) = walk(&set, &commits[0].1.tree, "src/lib.txt").unwrap();
         assert_eq!(k, Kind::Blob);
         let (_, data) = set.object(&blob).unwrap();
-        assert!(String::from_utf8(data).unwrap().ends_with("one more line\n"));
+        assert!(
+            String::from_utf8(data)
+                .unwrap()
+                .ends_with("one more line\n")
+        );
         // The older version (likely stored as a delta) reads back too.
         let (old, _) = walk(&set, &commits[1].1.tree, "src/lib.txt").unwrap();
         assert_eq!(set.object(&old).unwrap().1, big.as_bytes());
