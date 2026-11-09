@@ -419,6 +419,32 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Captchas: same shape as embeddings (provision ddddocr in the
+            // background, subscribe once it loads).
+            if workload_type == crate::captcha::WORKLOAD {
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::captcha::ensure(&config.captcha).await {
+                        info!("captcha runtime not installed; not subscribing to captcha.solve");
+                        return;
+                    }
+                    let runner_tx =
+                        crate::captcha::spawn_captcha_runner(net.clone(), store, load.clone());
+                    info!(workload_type = crate::captcha::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::captcha::WORKLOAD.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // Video on a box with no usable GPU: CPU text-to-video (Wan 2.1
             // 1.3B on stable-diffusion.cpp) if the operator opted in. Same
             // shape as CPU images: provision in the background, subscribe
