@@ -10,6 +10,27 @@ use clap::{Parser, Subcommand};
 
 const HELPER: &str = "git-remote-c0mpute";
 
+/// This machine's storage identity, loaded (and its password asked) at most
+/// once per process, and only when a repo is private.
+fn secret() -> Result<std::sync::Arc<c0mpute_sealed::StorageSecret>> {
+    static ID: std::sync::OnceLock<std::sync::Arc<c0mpute_sealed::StorageSecret>> =
+        std::sync::OnceLock::new();
+    if let Some(s) = ID.get() {
+        return Ok(s.clone());
+    }
+    let s = std::sync::Arc::new(crate::private_storage::load_identity(false, None)?);
+    Ok(ID.get_or_init(|| s).clone())
+}
+
+fn readers_of(list: &[String]) -> Result<Vec<c0mpute_sealed::StoragePublic>> {
+    list.iter()
+        .map(|r| {
+            c0mpute_sealed::StoragePublic::from_share_string(r.trim())
+                .with_context(|| format!("{r:?} is not a storage identity (c0ps1...; `c0mpute storage key show`)"))
+        })
+        .collect()
+}
+
 const LONG_ABOUT: &str = "\
 Git repos kept by the c0mpute network. A repo is signed by this machine's key,
 the network keeps three self-healing copies, and anyone can clone it from any
@@ -25,13 +46,26 @@ QUICK START
 
   # anyone, anywhere, no account:
   git clone c0mpute://<owner-key>/my-project
-  git clone https://gateway.c0mpute.com/git/<owner-key>/my-project.git   # no c0mpute needed
+  git clone https://gateway.c0mpute.com/git/<owner-key>/my-project.git   # public repos only
 
 URLS
   c0mpute://<owner-key>/<repo>         anyone's repo (owner-key: 64 hex, see `c0mpute git key`)
   c0mpute://<repo>                     a repo of THIS machine's key (short form for your own)
   c0mpute://<20-hex site id>           old URLs from c0mpute < 0.3.11 still work
   Repo names: 1-59 of a-z, 0-9 and '-'.
+
+PRIVATE BY DEFAULT
+  New repos are end-to-end encrypted: code, branches and commits are sealed on
+  this machine (AES-256-GCM) before they leave it, so node operators and gateways
+  only hold ciphertext. Readers are you (this machine's identity, the one
+  `c0mpute storage`/`dm` use) and whoever you share with:
+    c0mpute git share my-project --with c0ps1....    # their `c0mpute storage key show`
+    c0mpute git unshare my-project --from c0ps1....  # re-keys and re-encrypts everything
+    c0mpute git readers my-project
+  Public repo instead (anyone can read, plain HTTPS clones work):
+    c0mpute git init my-project --public             # or: git config c0mpute.public true
+  Visible to the network either way: your owner key, the repo name and sizes.
+  A repo keeps its mode; to switch, push to a new repo.
 
 EVERYDAY GIT
   Everything is normal git: push branches and tags, pull, fetch, clone.
@@ -87,6 +121,42 @@ enum Sub {
         /// Remote name to add (skipped if it already exists).
         #[arg(long, default_value = "origin")]
         remote: String,
+        /// Make the repo public: anyone can read it. Default: private
+        /// (end-to-end encrypted, readable only by you and who you share with).
+        #[arg(long)]
+        public: bool,
+        /// First private repo on this machine: where to write the encrypted
+        /// backup of the new c0mpute identity (ideally another disk).
+        #[arg(long)]
+        backup_to: Option<PathBuf>,
+    },
+    /// Let another identity read a private repo (they send you their
+    /// `c0mpute storage key show`). Only the key header changes.
+    #[command(after_help = "Example:\n  c0mpute git share my-project --with c0ps1.Zb3...")]
+    Share {
+        repo: String,
+        /// Their storage identity (c0ps1...); repeatable.
+        #[arg(long = "with", required = true)]
+        with: Vec<String>,
+        #[arg(long)]
+        gateway: Option<String>,
+    },
+    /// Stop sharing a private repo. Run it inside a clone: the repo is re-keyed
+    /// and every pack re-encrypted, since they may already hold the old key.
+    #[command(after_help = "Example (inside a clone):\n  c0mpute git unshare my-project --from c0ps1.Zb3...")]
+    Unshare {
+        repo: String,
+        /// The storage identity (c0ps1...) to remove; repeatable.
+        #[arg(long = "from", required = true)]
+        from: Vec<String>,
+        #[arg(long)]
+        gateway: Option<String>,
+    },
+    /// Who can read a private repo of yours.
+    Readers {
+        repo: String,
+        #[arg(long)]
+        gateway: Option<String>,
     },
     /// `git clone <url> [dir]` with the remote helper on PATH (no install needed).
     #[command(
@@ -155,7 +225,7 @@ pub fn as_remote_helper() -> Option<i32> {
             return Some(2);
         }
     };
-    Some(match helper::run(&remote, &url) {
+    Some(match helper::run(&remote, &url, &secret) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{HELPER}: {e:#}");
@@ -209,6 +279,29 @@ fn run_git(args: &[String], gateway: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn gateways(gateway: Option<&str>) -> client::Gateways {
+    match gateway {
+        Some(g) => client::Gateways::new(g.split(',').map(String::from)),
+        None => client::Gateways::discover(None),
+    }
+}
+
+/// A push of no refs by this machine's key (reader changes).
+async fn owner_push(
+    local: &client::Local,
+    gateway: Option<&str>,
+    repo: &str,
+    opts: &client::PushOptions<'_>,
+) -> Result<client::PushReport> {
+    let kp = c0mpute_core::hosting::publisher_keypair()?;
+    let owner = my_key()?;
+    let r = client::push(local, &gateways(gateway), &kp, &owner, repo, &[], opts).await?;
+    if r.gateway.is_none() {
+        bail!("no gateway accepted the change");
+    }
+    Ok(r)
+}
+
 fn my_key() -> Result<String> {
     let kp = c0mpute_core::hosting::publisher_keypair()?;
     c0mpute_core::hosting::site::owner_hex(&kp).context("this machine's identity is not ed25519")
@@ -220,7 +313,12 @@ pub async fn run(args: &[String]) -> Result<()> {
     )
     .unwrap_or_else(|e| e.exit());
     match cli.cmd {
-        Sub::Init { repo, remote } => {
+        Sub::Init {
+            repo,
+            remote,
+            public,
+            backup_to,
+        } => {
             if !git::valid_repo(&repo) {
                 bail!(
                     "repo name must be 1-{} of a-z, 0-9 and '-'",
@@ -250,9 +348,91 @@ pub async fn run(args: &[String]) -> Result<()> {
                     eprintln!("added remote {remote:?}; push with: c0mpute git push {remote} main");
                 }
             }
+            if public {
+                if in_repo {
+                    run_git(
+                        &["config".into(), "c0mpute.public".into(), "true".into()],
+                        None,
+                    )?;
+                }
+                eprintln!("public repo: anyone can read it once pushed");
+                if !in_repo {
+                    eprintln!("inside the repo, run: git config c0mpute.public true");
+                }
+            } else {
+                // Private needs an identity to seal to; make it now, with its
+                // backup, rather than in the middle of the first push.
+                if !c0mpute_secure_chat::key_file_path()?.exists() {
+                    crate::private_storage::load_identity(true, backup_to.as_deref())?;
+                }
+                eprintln!(
+                    "private repo: end-to-end encrypted; readable by you and who you `c0mpute git share` it with"
+                );
+            }
             eprintln!(
                 "run `c0mpute git install-helper` once so plain `git push`/`git clone` work too"
             );
+            Ok(())
+        }
+        Sub::Share {
+            repo,
+            with,
+            gateway,
+        } => {
+            let opts = client::PushOptions {
+                secret: Some(&secret),
+                add_readers: readers_of(&with)?,
+                ..Default::default()
+            };
+            let local = client::Local::discover().unwrap_or(client::Local {
+                git_dir: PathBuf::from("."),
+            });
+            let r = owner_push(&local, gateway.as_deref(), &repo, &opts).await?;
+            eprintln!(
+                "shared {}: {} reader(s) added (version {})",
+                git::url_for(&my_key()?, &repo),
+                with.len(),
+                r.seq
+            );
+            Ok(())
+        }
+        Sub::Unshare {
+            repo,
+            from,
+            gateway,
+        } => {
+            let local = client::Local::discover()
+                .context("run `c0mpute git unshare` inside a clone of the repo: it re-encrypts every object")?;
+            let opts = client::PushOptions {
+                secret: Some(&secret),
+                remove_readers: readers_of(&from)?,
+                ..Default::default()
+            };
+            let r = owner_push(&local, gateway.as_deref(), &repo, &opts).await?;
+            eprintln!(
+                "unshared {}: re-keyed and re-encrypted (version {}); old copies age out of the network",
+                git::url_for(&my_key()?, &repo),
+                r.seq
+            );
+            Ok(())
+        }
+        Sub::Readers { repo, gateway } => {
+            let gws = gateways(gateway.as_deref());
+            let owner = my_key()?;
+            let Some(mut st) = client::fetch_state(&gws, &owner, &repo).await? else {
+                bail!("{} does not exist", git::url_for(&owner, &repo));
+            };
+            if !st.0.doc.sealed {
+                println!("public: anyone can read {}", git::url_for(&owner, &repo));
+                return Ok(());
+            }
+            let sec = secret()?;
+            client::unseal(&gws, &mut st, &owner, &repo, &sec).await?;
+            let blob = st.0.sealed_refs.as_deref().context("no sealed ref map")?;
+            for r in c0mpute_sealed::roster(blob, &sec).map_err(|e| anyhow::anyhow!("{e}"))? {
+                let me = if r == sec.public() { "  (you)" } else { "" };
+                println!("{}{me}", r.to_share_string());
+            }
             Ok(())
         }
         Sub::Clone { url, dir, gateway } => {
@@ -326,7 +506,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         // The helper runs its own runtime: off this one's threads.
-        Sub::RemoteHelper { remote, url } => std::thread::spawn(move || helper::run(&remote, &url))
+        Sub::RemoteHelper { remote, url } => std::thread::spawn(move || helper::run(&remote, &url, &secret))
             .join()
             .map_err(|_| anyhow::anyhow!("remote helper panicked"))?,
     }

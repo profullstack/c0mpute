@@ -138,7 +138,9 @@ The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 ### Git hosting
 
 Repos kept by the network: signed by your key, three self-healing copies, cloneable from
-any gateway with your machine offline, and a push can deploy an app.
+any gateway with your machine offline, and a push can deploy an app. Private by default:
+end-to-end encrypted, so node operators only hold ciphertext; `c0mpute git share` lets
+teammates in, `--public` makes a repo readable by anyone.
 
 ```sh
 c0mpute git install                  # once: git understands c0mpute:// URLs
