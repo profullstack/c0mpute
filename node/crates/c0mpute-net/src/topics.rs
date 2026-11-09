@@ -268,7 +268,7 @@ pub struct JobBid {
     /// Two processes running one identity (a copied identity dir, or a
     /// system and a user service on one box) bid under one peer id with
     /// different instance ids; buyers keep the newest and name the winner's
-    /// instance on the accept. `None` from workers older than 0.3.20.
+    /// instance on the accept. `None` from workers older than 0.3.21.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
 }
