@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>Private object · c0mpute</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --mute: #666; --line: #ddd; --accent: #0a7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --mute: #999; --line: #333; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header b { font-weight: 600; }
+  header .lock { color: var(--accent); }
+  header small { color: var(--mute); }
+  #status { padding: 24px 16px; color: var(--mute); }
+  #status.err { color: #c33; }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  iframe { flex: 1; border: 0; width: 100%; background: #fff; }
+  .file { padding: 16px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+  .file img, .file video { max-width: 100%; max-height: 75vh; }
+  .file pre { white-space: pre-wrap; word-break: break-word; max-width: 100%; border: 1px solid var(--line); padding: 12px; }
+  a.btn { display: inline-block; padding: 6px 14px; border: 1px solid var(--accent); border-radius: 6px; color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <span class="lock" aria-hidden="true">&#128274;</span>
+  <b id="title">Private object</b>
+  <small>Decrypted in this browser. The key after # in the link is never sent to the gateway.</small>
+</header>
+<main id="main"><div id="status">Fetching ciphertext...</div></main>
+<script>
+"use strict";
+(async () => {
+  const HEADER_LEN = 1881, CHUNK_CT = 65536 + 16, MAGIC = "C0PRIV\u0000\u0001";
+  const te = new TextEncoder(), subtle = crypto.subtle;
+  const $ = (id) => document.getElementById(id);
+  const fail = (msg) => { const s = $("status") || document.createElement("div"); s.id = "status"; s.className = "err"; s.textContent = msg; $("main").replaceChildren(s); };
+  const status = (msg) => { const s = $("status"); if (s) s.textContent = msg; };
+
+  // BLAKE3 (hash mode), for the site-id binding and the signed hashes.
+  const B3_IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
+  const B3_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+  const b3compress = (cv, m, ctr, len, flags) => {
+    const s = new Uint32Array(16);
+    s.set(cv, 0); s.set(B3_IV.slice(0, 4), 8);
+    s[12] = ctr >>> 0; s[13] = Math.floor(ctr / 4294967296) >>> 0; s[14] = len; s[15] = flags;
+    let w = Uint32Array.from(m);
+    const g = (a, b, c, d, x, y) => {
+      s[a] = s[a] + s[b] + x; s[d] = ((s[d] ^ s[a]) >>> 16) | ((s[d] ^ s[a]) << 16);
+      s[c] = s[c] + s[d]; s[b] = ((s[b] ^ s[c]) >>> 12) | ((s[b] ^ s[c]) << 20);
+      s[a] = s[a] + s[b] + y; s[d] = ((s[d] ^ s[a]) >>> 8) | ((s[d] ^ s[a]) << 24);
+      s[c] = s[c] + s[d]; s[b] = ((s[b] ^ s[c]) >>> 7) | ((s[b] ^ s[c]) << 25);
+    };
+    for (let r = 0; r < 7; r++) {
+      g(0, 4, 8, 12, w[0], w[1]); g(1, 5, 9, 13, w[2], w[3]); g(2, 6, 10, 14, w[4], w[5]); g(3, 7, 11, 15, w[6], w[7]);
+      g(0, 5, 10, 15, w[8], w[9]); g(1, 6, 11, 12, w[10], w[11]); g(2, 7, 8, 13, w[12], w[13]); g(3, 4, 9, 14, w[14], w[15]);
+      if (r < 6) w = Uint32Array.from(B3_PERM, (i) => w[i]);
+    }
+    const out = new Uint32Array(8);
+    for (let i = 0; i < 8; i++) out[i] = s[i] ^ s[i + 8];
+    return out;
+  };
+  const b3words = (bytes, off, len) => {
+    const blk = new Uint8Array(64); blk.set(bytes.subarray(off, off + len));
+    const dv = new DataView(blk.buffer); const w = new Uint32Array(16);
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(i * 4, true);
+    return w;
+  };
+  // Returns the chunk's final block, so the caller can add ROOT.
+  const b3chunk = (bytes, start, end, ctr) => {
+    let cv = Uint32Array.from(B3_IV);
+    const n = Math.max(1, Math.ceil((end - start) / 64));
+    for (let i = 0; i < n - 1; i++) cv = b3compress(cv, b3words(bytes, start + i * 64, 64), ctr, 64, i === 0 ? 1 : 0);
+    const off = start + (n - 1) * 64;
+    return { cv, m: b3words(bytes, off, end - off), ctr, len: end - off, flags: (n === 1 ? 1 : 0) | 2 };
+  };
+  const b3parent = (l, r) => { const m = new Uint32Array(16); m.set(l, 0); m.set(r, 8); return { cv: Uint32Array.from(B3_IV), m, ctr: 0, len: 64, flags: 4 }; };
+  const b3finish = (o, root) => b3compress(o.cv, o.m, o.ctr, o.len, o.flags | (root ? 8 : 0));
+  const blake3hex = (bytes) => {
+    const chunks = Math.max(1, Math.ceil(bytes.length / 1024));
+    const stack = [];
+    for (let t = 0; t < chunks - 1; t++) {
+      let cv = b3finish(b3chunk(bytes, t * 1024, (t + 1) * 1024, t), false);
+      let total = t + 1;
+      while ((total & 1) === 0) { cv = b3finish(b3parent(stack.pop(), cv), false); total >>= 1; }
+      stack.push(cv);
+    }
+    let out = b3chunk(bytes, (chunks - 1) * 1024, bytes.length, chunks - 1);
+    while (stack.length) out = b3parent(stack.pop(), b3finish(out, false));
+    const h = b3finish(out, true);
+    const dv = new DataView(new ArrayBuffer(32));
+    for (let i = 0; i < 8; i++) dv.setUint32(i * 4, h[i], true);
+    return hex(new Uint8Array(dv.buffer));
+  };
+  const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+
+  const m = location.pathname.match(/^\/p\/([0-9a-f]{20})\/?/);
+  if (!m) return fail("Not a private object link.");
+  const siteId = m[1];
+  const frag = new URLSearchParams(location.hash.slice(1));
+  const k = frag.get("k");
+  if (!k) return fail("This private object needs its key: open the full link, including the part after #k=.");
+
+  const b64u = (s) => { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); };
+  let dek;
+  try { dek = b64u(k); } catch (_) { return fail("The key in the link is malformed."); }
+  if (dek.length !== 32) return fail("The key in the link is malformed.");
+
+  let blob;
+  try {
+    const r = await fetch(`/s/${siteId}/o`, { cache: "no-store", referrerPolicy: "no-referrer", credentials: "omit" });
+    if (!r.ok) return fail(`The network could not serve this object right now (HTTP ${r.status}).`);
+    blob = new Uint8Array(await r.arrayBuffer());
+  } catch (e) { return fail("The network could not serve this object right now."); }
+  status("Decrypting...");
+
+  if (blob.length < HEADER_LEN + 17 || String.fromCharCode(...blob.slice(0, 8)) !== MAGIC) return fail("This is not a private object (or it was deleted).");
+  const streamId = blob.slice(8, 24), commit = blob.slice(24, 56);
+
+  const hkdf = async (ikm, salt, info) => {
+    const key = await subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+    return new Uint8Array(await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info: te.encode(info) }, key, 256));
+  };
+  const want = await hkdf(dek, streamId, "c0mpute-private-v1 commit");
+  if (want.some((b, i) => b !== commit[i])) return fail("This key does not open this object (wrong link, or the owner changed the key).");
+  const bodyKey = await subtle.importKey("raw", await hkdf(dek, streamId, "c0mpute-private-v1 body"), "AES-GCM", false, ["decrypt"]);
+  dek.fill(0);
+
+  const stream = blob.subarray(HEADER_LEN);
+  const n = Math.ceil(stream.length / CHUNK_CT);
+  const plain = new Uint8Array(stream.length - n * 16);
+  for (let i = 0; i < n; i++) {
+    const last = i === n - 1 ? 1 : 0;
+    const iv = new Uint8Array(12), aad = new Uint8Array(65);
+    const dv = new DataView(iv.buffer); dv.setBigUint64(3, BigInt(i)); iv[11] = last;
+    aad.set(te.encode(MAGIC), 0); aad.set(streamId, 8); aad.set(commit, 24);
+    new DataView(aad.buffer).setBigUint64(56, BigInt(i)); aad[64] = last;
+    let pt;
+    try {
+      pt = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad, tagLength: 128 }, bodyKey, stream.subarray(i * CHUNK_CT, Math.min((i + 1) * CHUNK_CT, stream.length)));
+    } catch (_) { return fail("The ciphertext failed authentication: it was tampered with or damaged. Nothing was shown."); }
+    plain.set(new Uint8Array(pt), i * 65536);
+  }
+  const metaLen = new DataView(plain.buffer).getUint32(0);
+  let meta;
+  try { meta = JSON.parse(new TextDecoder().decode(plain.subarray(4, 4 + metaLen))); } catch (_) { return fail("Object metadata is malformed."); }
+  if (meta.v !== 1 || meta.site_id !== siteId) return fail("The gateway served a different object than the link names.");
+  if (!Number.isSafeInteger(meta.size) || 4 + metaLen + 64 + meta.size > plain.length) return fail("Object metadata is malformed.");
+  const content = plain.subarray(4 + metaLen + 64, 4 + metaLen + 64 + meta.size);
+  // Verify the owner's signature and that the site id is derived from the
+  // owner key, as the CLI does. Without this, anyone else holding the link
+  // could re-encrypt different content under the same key.
+  status("Verifying...");
+  if (!/^[0-9a-f]{64}$/.test(meta.owner || "") || !meta.name || blake3hex(te.encode(`c0mpute-site\n${meta.owner}\n${meta.name}`)).slice(0, 20) !== siteId) return fail("The object is not signed by the owner this link names.");
+  try {
+    const pub = await subtle.importKey("raw", Uint8Array.from(meta.owner.match(/../g), (x) => parseInt(x, 16)), { name: "Ed25519" }, false, ["verify"]);
+    const msg = te.encode(`c0mpute-private-v1 object\n${siteId}\n${hex(streamId)}\n${hex(commit)}\n${blake3hex(plain.subarray(4, 4 + metaLen))}\n${blake3hex(content)}`);
+    const ok = await subtle.verify({ name: "Ed25519" }, pub, plain.subarray(4 + metaLen, 4 + metaLen + 64), msg);
+    if (!ok) return fail("The object's signature does not verify: it was forged. Nothing was shown.");
+  } catch (_) { return fail("This browser cannot verify Ed25519 signatures, so the object cannot be shown safely. Use a current browser, or: c0mpute storage get"); }
+  for (const f of Object.values(meta.files || {})) { if (f.offset + f.len > meta.size) return fail("Object metadata is malformed."); }
+
+  const title = meta.file_name || "Private object";
+  $("title").textContent = title;
+  document.title = `${title} · c0mpute`;
+  const blobUrl = (bytes, type) => URL.createObjectURL(new Blob([bytes], { type: type || "application/octet-stream" }));
+
+  if (meta.kind === "site") return renderSite(meta, content, blobUrl);
+  if (meta.kind === "multipart") return fail("This object is split into parts and is too large for the browser. Fetch it with: c0mpute storage get");
+  renderFile(meta, content, blobUrl);
+
+  function renderFile(meta, content, blobUrl) {
+    const type = meta.content_type || "application/octet-stream";
+    const box = document.createElement("div"); box.className = "file";
+    const info = document.createElement("div");
+    info.textContent = `${meta.file_name || "file"}, ${content.length.toLocaleString()} bytes`;
+    const a = document.createElement("a"); a.className = "btn"; a.textContent = "Download";
+    // Always application/octet-stream: a blob opened in a tab runs at this
+    // origin, so an attacker-chosen text/html type must never get there.
+    a.href = blobUrl(content, "application/octet-stream"); a.download = meta.file_name || "download";
+    box.append(info, a);
+    if (type.startsWith("image/") && !type.includes("svg")) { const img = document.createElement("img"); img.src = blobUrl(content, type); box.append(img); }
+    else if (type.startsWith("video/") || type.startsWith("audio/")) { const v = document.createElement(type.startsWith("video/") ? "video" : "audio"); v.controls = true; v.src = blobUrl(content, type); box.append(v); }
+    else if (type.startsWith("text/plain") || type === "application/json" || type.startsWith("text/markdown") || type.startsWith("text/csv")) { const pre = document.createElement("pre"); pre.textContent = new TextDecoder().decode(content.subarray(0, 2 * 1024 * 1024)); box.append(pre); }
+    $("main").replaceChildren(box);
+  }
+
+  function renderSite(meta, content, blobUrl) {
+    const files = meta.files || {};
+    const bytesOf = (p) => content.subarray(files[p].offset, files[p].offset + files[p].len);
+    const resolve = (req) => {
+      let p = (req || "").replace(/^\/+/, "").split(/[?#]/)[0];
+      try { p = decodeURIComponent(p); } catch (_) {}
+      const c = (p === "" || p.endsWith("/")) ? [p + "index.html"] : [p, ...(/\.[^/]*$/.test(p) ? [] : [p + ".html", p + "/index.html"])];
+      return c.find((x) => files[x]);
+    };
+    const join = (dir, ref) => {
+      const parts = (ref.startsWith("/") ? "" : dir).split("/").filter(Boolean);
+      for (const s of ref.split(/[?#]/)[0].split("/")) { if (s === "..") parts.pop(); else if (s && s !== ".") parts.push(s); }
+      return parts.join("/") + (ref.split(/[?#]/)[0].endsWith("/") ? "/" : "");
+    };
+    const isRelative = (v) => v && !/^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(v.trim());
+    const cache = {};
+    const assetUrl = (p) => {
+      if (cache[p]) return cache[p];
+      const type = files[p].content_type;
+      let bytes = bytesOf(p);
+      if (type.startsWith("text/css")) bytes = te.encode(rewriteCss(new TextDecoder().decode(bytes), dirOf(p)));
+      // data: URLs, not blob: ones: the frame has an opaque origin and may
+      // not load blob: URLs minted by this page's origin.
+      return (cache[p] = dataUrl(bytes, type));
+    };
+    const dataUrl = (bytes, type) => {
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 32768) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+      return `data:${type || "application/octet-stream"};base64,${btoa(bin)}`;
+    };
+    const dirOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+    const rewriteCss = (css, dir) => css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (all, q, ref) => {
+      if (!isRelative(ref)) return all;
+      const t = resolve(join(dir, ref));
+      return t ? `url("${assetUrl(t)}")` : all;
+    });
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-modals allow-downloads");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    $("main").replaceChildren(frame);
+    const show = (req) => {
+      const p = resolve(req);
+      if (!p) { frame.srcdoc = "<p style='font:14px system-ui;padding:16px'>Not found in this private site.</p>"; return; }
+      const type = files[p].content_type;
+      if (!type.startsWith("text/html")) { frame.src = assetUrl(p); return; }
+      const doc = new DOMParser().parseFromString(new TextDecoder().decode(bytesOf(p)), "text/html");
+      const dir = dirOf(p);
+      for (const el of doc.querySelectorAll("[src],[href],[poster],object[data]")) {
+        for (const attr of ["src", "href", "poster", "data"]) {
+          const v = el.getAttribute(attr);
+          if (!isRelative(v)) continue;
+          const t = resolve(join(dir, v));
+          if (!t) continue;
+          if (el.tagName === "A" && files[t].content_type.startsWith("text/html")) { el.setAttribute("href", "#"); el.setAttribute("data-c0p-nav", t); }
+          else el.setAttribute(attr, assetUrl(t));
+        }
+      }
+      for (const el of doc.querySelectorAll("style")) el.textContent = rewriteCss(el.textContent, dir);
+      for (const el of doc.querySelectorAll("[style]")) el.setAttribute("style", rewriteCss(el.getAttribute("style"), dir));
+      const nav = doc.createElement("script");
+      nav.textContent = "document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('[data-c0p-nav]');if(a){e.preventDefault();parent.postMessage({c0pNav:a.getAttribute('data-c0p-nav')},'*');}},true);";
+      (doc.head || doc.documentElement).prepend(nav);
+      frame.src = blobUrl("<!doctype html>" + doc.documentElement.outerHTML, "text/html");
+      const f = new URLSearchParams(location.hash.slice(1)); f.set("path", p);
+      history.replaceState(null, "", "#" + f.toString());
+    };
+    window.addEventListener("message", (e) => {
+      if (e.source === frame.contentWindow && e.data && typeof e.data.c0pNav === "string") show(e.data.c0pNav);
+    });
+    show(frag.get("path") || "");
+  }
+})();
+</script>
+</body>
+</html>

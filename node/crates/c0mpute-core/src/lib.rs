@@ -48,6 +48,7 @@ pub mod register;
 pub mod resources;
 pub mod routing;
 pub mod runner;
+pub mod sealed_store;
 pub mod speech;
 pub mod speech_gateway;
 pub mod speech_profiles;

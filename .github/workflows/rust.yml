@@ -69,7 +69,15 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
 
+      # `c0mpute storage mount` has a real FUSE round-trip test; it needs
+      # fusermount3. C0MPUTE_REQUIRE_FUSE turns its "no FUSE here" skip into a
+      # failure, so CI cannot pass by silently not testing the mount.
+      - name: Install FUSE
+        run: sudo apt-get update && sudo apt-get install -y fuse3
+
       - name: Test
+        env:
+          C0MPUTE_REQUIRE_FUSE: "1"
         run: cargo test --workspace --locked
 
       # Blocking, unlike the lint job: this invariant has no legacy debt to

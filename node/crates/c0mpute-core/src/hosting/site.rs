@@ -693,6 +693,15 @@ pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
     })
 }
 
+/// The files `build_from_dir` would publish from `dir`, as sorted
+/// (manifest path, absolute path) pairs. Private sites use the same walk.
+pub fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths = Vec::new();
+    walk(dir, dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
