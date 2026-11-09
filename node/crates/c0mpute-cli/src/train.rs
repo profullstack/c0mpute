@@ -99,6 +99,18 @@ enum Sub {
         retries: u32,
         #[arg(long, default_value_t = 8)]
         bid_window_s: u64,
+        /// Replicated verification: run the same job (same data, seed and
+        /// steps) on this many independent workers and keep the adapter a
+        /// majority agrees on; workers whose adapter disagrees are benched.
+        /// Each replica is a separate job, so it costs up to N times
+        /// --max-price. 1 = one worker (default); 3 is the usual choice.
+        #[arg(long, default_value_t = 1)]
+        replicas: u32,
+        /// With --replicas: how far apart (relative weight-delta distance)
+        /// two adapters may be and still agree. CPU and GPU workers never
+        /// produce identical weights, so this is a tolerance, not equality.
+        #[arg(long, default_value_t = c0mpute_core::train_verify::DEFAULT_TOLERANCE)]
+        replica_tolerance: f64,
         /// Consent: send the dataset to the winning worker. Without it, only check and preview.
         #[arg(long)]
         yes: bool,
@@ -138,6 +150,8 @@ pub async fn run(args: &[String]) -> Result<()> {
         timeout_s,
         retries,
         bid_window_s,
+        replicas,
+        replica_tolerance,
         yes,
         json: as_json,
         net,
@@ -175,6 +189,9 @@ pub async fn run(args: &[String]) -> Result<()> {
         timeout_s,
         retries,
         bid_window: Duration::from_secs(bid_window_s),
+        replicas,
+        replica_tolerance,
+        penalty_file: None,
     };
     let (_, _, preview) = text::load(&req)?;
     eprintln!(
@@ -183,14 +200,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     );
     if !yes {
         eprintln!(
-            "About to send the corpus to {} to fine-tune {} as {} (rank {}, {} epoch(s), lr {}; max ${}).\nRe-run with --yes to send it.",
+            "About to send the corpus to {} to fine-tune {} as {} (rank {}, {} epoch(s), lr {}; {}).\nRe-run with --yes to send it.",
             if preview.workers.is_empty() { "any eligible worker".to_string() } else { preview.workers.join(",") },
             opts.base_model,
             opts.name,
             opts.rank,
             opts.epochs,
             opts.lr,
-            max_price
+            price_note(max_price, replicas)
         );
         if as_json {
             println!("{}", json!({"preview": preview, "dataset": report, "job": job}));
@@ -249,6 +266,25 @@ pub async fn run(args: &[String]) -> Result<()> {
         result["receipt"]["worker_peer_id"].as_str().unwrap_or("?"),
         result["receipt"]["price_usd"]
     );
+    if let Some(r) = result.get("replicas") {
+        println!(
+            "replicas: {} of {} agreed (tolerance {}), {} dropped; ${} in total",
+            r["agreeing"].as_array().map_or(0, Vec::len),
+            r["requested"],
+            r["tolerance"],
+            r["outliers"].as_array().map_or(0, Vec::len),
+            r["price_usd_total"]
+        );
+    }
     println!("use it:  c0mpute infernet text chat --adapter {} \"your question\"", out.display());
     Ok(())
+}
+
+/// What the buyer is agreeing to pay: one cap, or one cap per replica.
+pub(crate) fn price_note(max_price: f64, replicas: u32) -> String {
+    if replicas > 1 {
+        format!("{replicas} replicas on separate workers, up to ${max_price} each, up to ${} in total", max_price * replicas as f64)
+    } else {
+        format!("max ${max_price}")
+    }
 }

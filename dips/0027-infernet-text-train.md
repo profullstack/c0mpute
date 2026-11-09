@@ -77,6 +77,34 @@ c0mpute infernet text chat --adapter ./adapter "How should I price my SaaS?"
   `answer.json`, and the receipt's `output_hash` is its sha256, which the buyer
   checks before printing the answer and its sources.
 
+## Replicated verification (opt in)
+
+`--replicas N` (2 to 5; job file `"replicas": N` for `infernet text train`)
+runs the same spec on N distinct workers, borrowed from CrowdGPT's pools of
+three. The buyer pins `hyperparams.seed` (0 unless set), so the shuffle,
+held-out split and LoRA init match; each replica gets its own `run_id` and
+only the bid phases are serialized, so each replica's winner is excluded from
+the next offer and the training itself runs in parallel.
+
+The buyer downloads every adapter and compares the weight deltas
+`dW = B @ A` per module: `d(i,j) = ||dW_i - dW_j||_F / max(||dW_i||, ||dW_j||)`,
+computed exactly from `tr((B_i^T B_j)(A_j A_i^T))` without building `dW`.
+Two replicas agree when `d <= --replica-tolerance` (default 0.30), their
+manifests report the same step count, and their final eval perplexities are
+within 10%. A strict majority of the requested replicas must agree pairwise;
+the medoid of that group is kept (LoRA factors are not averaged: the average
+of the factors is not the average of the deltas). Outliers' workers, and
+winners that never delivered, are struck in `<data dir>/train-penalties.json`
+and excluded from the buyer's later train auctions. No majority, including a
+two-way split, fails the job with the pairwise distances and strikes nobody.
+
+Determinism: replicas are never bit-identical. CPU and CUDA draw different
+dropout masks from one seed, and BLAS libraries and thread counts reduce in
+different orders, so this is a tolerance check. An untrained adapter is
+distance 1.0 from a trained one and an unrelated one about 1.4, well above the
+default. Pricing: each replica is a separate job at up to `--max-price`;
+default 1 replica keeps today's cost.
+
 ## Not yet
 
 - Multi-worker / sharded training.

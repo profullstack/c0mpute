@@ -785,6 +785,18 @@ pub struct TrainRequest {
     pub timeout_s: u64,
     pub retries: u32,
     pub bid_window: Duration,
+    /// Replicated verification: run the job on this many independent workers
+    /// with the same corpus, seed and step count, and keep a result a strict
+    /// majority agrees on (see [`crate::train_verify`]). 1 (the default) is
+    /// an ordinary single-worker job. Each replica is a separate job at up to
+    /// `max_price_usd`, so the cost is up to `replicas` times one job. 0
+    /// means "take it from the job file's `replicas`, else 1".
+    pub replicas: u32,
+    /// Relative weight-delta distance replicas may differ by and still agree.
+    pub replica_tolerance: f64,
+    /// Where the buyer remembers train workers that disagreed or did not
+    /// deliver; `None` = `<data dir>/train-penalties.json`.
+    pub penalty_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -797,6 +809,8 @@ pub struct Preview {
     pub bytes: usize,
     pub max_price_usd: f64,
     pub workers: Vec<String>,
+    /// Replicas the job will run (1 = one worker); each costs up to `max_price_usd`.
+    pub replicas: u32,
 }
 
 /// The job and corpus the buyer is about to send.
@@ -823,18 +837,31 @@ pub fn load(req: &TrainRequest) -> Result<(Value, Vec<u8>, Preview)> {
         bytes: bytes.len(),
         max_price_usd: req.max_price_usd,
         workers: req.workers.clone(),
+        replicas: replica_count(req, &mut job.clone()).unwrap_or(1),
     };
     Ok((job, bytes, p))
 }
 
 /// Live progress, one line rewritten in place.
 pub fn render(ev: &Value, total: &mut Option<u64>) -> Option<String> {
+    let line = render_one(ev, total)?;
+    Some(match ev["replica"].as_u64() {
+        Some(k) => format!("[replica {}] {line}", k + 1),
+        None => line,
+    })
+}
+
+fn render_one(ev: &Value, total: &mut Option<u64>) -> Option<String> {
     let bar = |step: u64, total: u64| {
         let w = 24usize;
         let filled = ((step.min(total) as f64 / total.max(1) as f64) * w as f64).round() as usize;
         format!("[{}{}]", "#".repeat(filled), "-".repeat(w - filled))
     };
     match ev["type"].as_str()? {
+        "replicas" => Some(format!(
+            "replicated verification: {} workers, up to ${} each (${} total)",
+            ev["replicas"], ev["max_price_usd_each"].as_f64().unwrap_or(0.0), ev["max_price_usd_total"].as_f64().unwrap_or(0.0)
+        )),
         "meta" => {
             *total = ev["total_steps"].as_u64();
             Some(format!("training {} on {} ({} docs, {} steps)", ev["base_model"].as_str().unwrap_or("?"), ev["device"].as_str().unwrap_or("cpu"), ev["documents"], total.map(|t| t.to_string()).unwrap_or("?".into())))
@@ -861,7 +888,11 @@ pub fn render(ev: &Value, total: &mut Option<u64>) -> Option<String> {
 /// that predates pieces can win; its adapter then arrives over HTTP and is
 /// checked against the receipt exactly as before.
 pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainRequest, mut on_event: impl FnMut(&Value) + Send) -> Result<Value> {
-    let (job, bytes, preview) = load(req)?;
+    let (mut job, bytes, preview) = load(req)?;
+    let replicas = replica_count(req, &mut job)?;
+    if replicas > 1 && req.legacy_http {
+        bail!("--replicas needs the peer-to-peer transport; drop --legacy-http");
+    }
     let stored = crate::pieces::put_bytes_pieces(&net, store, &bytes, crate::pieces::INPUT_PIECE_BYTES).await.context("store the corpus as pieces")?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let mut spec = TextTrainSpec {
@@ -896,6 +927,15 @@ pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainReque
     if let Some(min) = req.min_ram_gb {
         let b = crate::temporal::caps::RAM_BUCKETS_GB.iter().copied().find(|b| *b >= min).unwrap_or(128);
         tags.push(format!("c0mpute:ram:{b}gb+"));
+    }
+    if replicas > 1 {
+        let result = train_replicated(&net, req, &spec, &tags, replicas, &preview, &mut on_event).await;
+        for h in stored.pieces.iter().chain(std::iter::once(&stored.hash)) {
+            if let Ok(h) = c0mpute_proto::Hash::from_hex(h) {
+                let _ = store.delete(&h).await;
+            }
+        }
+        return result;
     }
     // Training events published on the job topic for this run.
     let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
@@ -986,6 +1026,242 @@ pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainReque
         }
     }
     result
+}
+
+/// How many replicas this job runs: the request's count, else the job file's
+/// `replicas` (removed from the job either way: the worker's runner does not
+/// read it), else 1. With more than one, the seed is pinned in the job so
+/// every replica draws the same shuffle, split and LoRA init.
+fn replica_count(req: &TrainRequest, job: &mut Value) -> Result<u32> {
+    let from_job = job.as_object_mut().and_then(|o| o.remove("replicas"));
+    let n = if req.replicas > 0 {
+        req.replicas
+    } else {
+        match from_job {
+            None => 1,
+            Some(v) => v.as_u64().filter(|n| *n <= u32::MAX as u64).context("job.replicas must be a whole number")? as u32,
+        }
+    };
+    if !(1..=crate::train_verify::MAX_REPLICAS).contains(&n) {
+        bail!("replicas must be 1..={}, got {n}", crate::train_verify::MAX_REPLICAS);
+    }
+    if n > 1 {
+        if !(req.replica_tolerance.is_finite() && req.replica_tolerance > 0.0 && req.replica_tolerance < 2.0) {
+            bail!("--replica-tolerance must be in (0, 2)");
+        }
+        if !job["hyperparams"].is_object() {
+            job["hyperparams"] = json!({});
+        }
+        if job["hyperparams"].get("seed").is_none() {
+            job["hyperparams"]["seed"] = json!(0);
+        }
+    }
+    Ok(n)
+}
+
+/// One replica's auction: bid phases run one at a time (`gate`), so each
+/// replica's winner is known before the next offer goes out and can be
+/// excluded from it; the training itself runs concurrently.
+async fn replica_attempt(net: &Arc<Libp2pNetwork>, spec_v: &Value, tags: &[String], req: &TrainRequest, excluded_base: &[String], taken: &std::sync::Mutex<Vec<String>>, gate: &Arc<Semaphore>) -> Result<crate::buyer::AuctionOutcome> {
+    let permit = gate.clone().acquire_owned().await?;
+    let excluded: Vec<String> = excluded_base.iter().cloned().chain(taken.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned()).collect();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(String, c0mpute_net::topics::JobBid)>();
+    let make = || {
+        JobAuction::new(TRAIN_WORKLOAD, spec_v.clone())
+            .with_required_capabilities(tags.to_vec())
+            .with_allowed_bidders(req.workers.clone())
+            .with_excluded_bidders(excluded.clone())
+            .with_max_price_usd(req.max_price_usd)
+            .with_bid_window(req.bid_window)
+            .with_deadline(Duration::from_secs(req.timeout_s + 600))
+            .with_receipt_timeout(Duration::from_secs(req.timeout_s + 300))
+            .with_accept_notify(tx.clone())
+    };
+    let take = |peer: &str| {
+        let mut t = taken.lock().unwrap_or_else(|e| e.into_inner());
+        if !t.iter().any(|p| p == peer) {
+            t.push(peer.to_string());
+        }
+    };
+    let auction = auction_with_mesh_retry(net.clone(), make);
+    tokio::pin!(auction);
+    let mut permit = Some(permit);
+    loop {
+        tokio::select! {
+            r = &mut auction => {
+                if let Ok(o) = &r {
+                    take(&o.accepted_bid.bidder_peer_id);
+                }
+                return r;
+            }
+            Some((_, bid)) = rx.recv(), if permit.is_some() => {
+                take(&bid.bidder_peer_id);
+                permit = None;
+            }
+        }
+    }
+}
+
+/// One replica slot, with the request's retries (never back to a worker that
+/// already won a replica of this job).
+async fn replica_slot(net: Arc<Libp2pNetwork>, spec_v: Value, tags: Vec<String>, req: TrainRequest, excluded: Vec<String>, taken: Arc<std::sync::Mutex<Vec<String>>>, gate: Arc<Semaphore>) -> Result<crate::buyer::AuctionOutcome> {
+    let mut last_err = None;
+    for attempt in 0..=req.retries.min(5) {
+        match replica_attempt(&net, &spec_v, &tags, &req, &excluded, &taken, &gate).await {
+            Ok(o) if o.receipt.status == JobStatus::Completed => return Ok(o),
+            Ok(o) => last_err = Some(anyhow::anyhow!("worker {} reported {:?} (attempt {})", o.accepted_bid.bidder_peer_id, o.receipt.status, attempt + 1)),
+            Err(e) => last_err = Some(e.context(format!("attempt {}", attempt + 1))),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("training failed")))
+}
+
+/// The buyer's memory of train workers that disagreed or did not deliver.
+fn train_penalties(file: Option<&Path>) -> crate::penalty_box::PenaltyBox {
+    if let Some(f) = file {
+        return crate::penalty_box::PenaltyBox::persistent(f.to_path_buf());
+    }
+    match crate::config::data_dir() {
+        Some(dir) if std::fs::create_dir_all(&dir).is_ok() => crate::penalty_box::PenaltyBox::persistent(dir.join("train-penalties.json")),
+        _ => crate::penalty_box::PenaltyBox::new(),
+    }
+}
+
+/// Run `replicas` copies of the job on distinct workers, fetch every adapter,
+/// and keep the one a strict majority agrees on ([`crate::train_verify`]).
+async fn train_replicated(net: &Arc<Libp2pNetwork>, req: &TrainRequest, spec: &TextTrainSpec, tags: &[String], replicas: u32, preview: &Preview, on_event: &mut (impl FnMut(&Value) + Send)) -> Result<Value> {
+    use crate::train_verify::{self, Replica};
+    let penalties = train_penalties(req.penalty_file.as_deref());
+    let benched = penalties.benched();
+    let taken = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let gate = Arc::new(Semaphore::new(1));
+    let run_ids: Vec<String> = (0..replicas).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+    let mut slots = Vec::new();
+    for run_id in &run_ids {
+        let mut s = spec.clone();
+        s.run_id = Some(run_id.clone());
+        s.validate()?;
+        slots.push(tokio::spawn(replica_slot(net.clone(), serde_json::to_value(&s)?, tags.to_vec(), req.clone(), benched.clone(), taken.clone(), gate.clone())));
+    }
+    on_event(&json!({"type": "replicas", "replicas": replicas, "max_price_usd_each": req.max_price_usd, "max_price_usd_total": req.max_price_usd * replicas as f64}));
+
+    // Relay every replica's events, tagged with its index; keep each one's
+    // last eval perplexity for the comparison.
+    let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
+    let mut gossip = net.messages();
+    let mut evals: HashMap<usize, (u64, f64)> = HashMap::new();
+    let mut relay = |m: &c0mpute_net::GossipMessage, on_event: &mut (dyn FnMut(&Value) + Send)| {
+        if m.topic != topic {
+            return;
+        }
+        let Ok(msg) = serde_json::from_slice::<EventMsg>(&m.data) else { return };
+        let Some(k) = run_ids.iter().position(|r| *r == msg.run_id).filter(|_| msg.t == EVENT_MSG) else { return };
+        let mut ev = msg.event;
+        if ev["type"] == "eval"
+            && let Some(p) = ev["metrics"]["perplexity"].as_f64()
+        {
+            let step = ev["step"].as_u64().unwrap_or(0);
+            if evals.get(&k).is_none_or(|(s, _)| step >= *s) {
+                evals.insert(k, (step, p));
+            }
+        }
+        ev["replica"] = json!(k);
+        on_event(&ev);
+    };
+    let all = async {
+        let mut out = Vec::with_capacity(slots.len());
+        for h in slots {
+            out.push(h.await.unwrap_or_else(|e| Err(anyhow::anyhow!("replica task failed: {e}"))));
+        }
+        out
+    };
+    tokio::pin!(all);
+    let outcomes = loop {
+        tokio::select! {
+            r = &mut all => break r,
+            m = gossip.recv() => match m {
+                Ok(m) => relay(&m, on_event),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => {}
+            },
+        }
+    };
+    while let Ok(m) = gossip.try_recv() {
+        relay(&m, on_event);
+    }
+
+    // Fetch each delivered adapter into its own directory.
+    let scratch = req.output.join(".replicas");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let mut got: Vec<(crate::buyer::AuctionOutcome, PathBuf, String, Replica)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for (k, outcome) in outcomes.into_iter().enumerate() {
+        let o = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                failures.push(format!("replica {k}: {e:#}"));
+                continue;
+            }
+        };
+        let worker = o.accepted_bid.bidder_peer_id.clone();
+        let dir = scratch.join(k.to_string());
+        let claimed = o.receipt.output_hash.clone().unwrap_or_default();
+        let fetched = async {
+            let hash = fetch_adapter_pieces(net, worker.parse::<PeerId>().ok(), &claimed, &dir).await?;
+            let r = Replica::from_dir(&worker, &dir, evals.get(&k).map(|(_, p)| *p))?;
+            Ok::<_, anyhow::Error>((hash, r))
+        }
+        .await;
+        match fetched {
+            Ok((hash, r)) => got.push((o, dir, hash, r)),
+            Err(e) => {
+                // Won, then could not hand over a usable adapter.
+                penalties.strike(&worker);
+                failures.push(format!("replica {k} ({worker}): {e:#}"));
+            }
+        }
+    }
+    let reps: Vec<Replica> = got.iter().map(|g| g.3.clone()).collect();
+    let decision = match train_verify::decide(&reps, replicas as usize, req.replica_tolerance, train_verify::DEFAULT_EVAL_TOLERANCE) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            if failures.is_empty() {
+                return Err(e);
+            }
+            return Err(e.context(format!("not delivered: {}", failures.join("; "))));
+        }
+    };
+    train_verify::apply_penalties(&penalties, &reps, &decision);
+    let (o, dir, hash, _) = &got[decision.accepted];
+    std::fs::create_dir_all(&req.output)?;
+    for name in ARTIFACTS {
+        let src = dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, req.output.join(name))?;
+        }
+    }
+    let total: f64 = got.iter().map(|g| g.0.accepted_bid.price_usd).sum();
+    let workers: Vec<&str> = got.iter().map(|g| g.0.receipt.worker_peer_id.as_str()).collect();
+    let report = json!({
+        "adapter_dir": req.output, "adapter_hash": hash, "base_model": preview.base_model, "dataset_hash": preview.dataset_hash,
+        "transport": "pieces",
+        "receipt": {"job_id": o.receipt.job_id, "worker_peer_id": o.receipt.worker_peer_id, "output_hash": o.receipt.output_hash, "price_usd": o.accepted_bid.price_usd},
+        "replicas": {
+            "requested": replicas,
+            "returned": got.len(),
+            "workers": workers,
+            "accepted": decision.accepted,
+            "agreeing": decision.agreeing,
+            "outliers": decision.outliers.iter().map(|&i| workers[i]).collect::<Vec<_>>(),
+            "distances": decision.distances,
+            "tolerance": req.replica_tolerance,
+            "not_delivered": failures,
+            "price_usd_total": total,
+        },
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(report)
 }
 
 /// Fetch the [`AdapterManifest`] a receipt names, then every file it lists,
