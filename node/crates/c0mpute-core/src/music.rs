@@ -45,8 +45,15 @@ pub const MODEL_TAG: &str = "c0mpute:music:model:ace-step-1.5";
 /// Largest song a worker returns or a buyer accepts. A 2-minute 128 kb/s MP3
 /// is ~2 MB; the FLAC fallback for the same song is up to ~20 MB.
 pub const MAX_RESULT_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_PROMPT_CHARS: usize = 1_000;
-pub const MAX_LYRICS_CHARS: usize = 4_000;
+/// What a buyer may send. Longer than the model reads on purpose: callers
+/// paste whole briefs and songs, and `clip_for_model` trims them.
+pub const MAX_PROMPT_CHARS: usize = 100_000;
+pub const MAX_LYRICS_CHARS: usize = 100_000;
+/// What reaches the worker: ACE-Step's tokenizer keeps 256 caption tokens
+/// (~1000 chars) and 2048 lyric tokens, and the spec rides in a gossiped
+/// offer capped at 64 KiB, so the gateway clips to these before auctioning.
+pub const MODEL_PROMPT_CHARS: usize = 1_000;
+pub const MODEL_LYRICS_CHARS: usize = 4_000;
 pub const MIN_SECONDS: u32 = 10;
 pub const MAX_SECONDS: u32 = 120;
 pub const DEFAULT_SECONDS: u32 = 30;
@@ -398,7 +405,27 @@ fn default_steps() -> u32 {
     8
 }
 
+/// Clip to `max` characters, preferring to end at a line break or space.
+pub fn clip_text(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let cut = head.rfind(['\n', ' ']).filter(|&i| i * 5 > head.len() * 4);
+    cut.map_or(head.as_str(), |i| &head[..i]).trim().to_string()
+}
+
 impl Txt2MusicSpec {
+    /// The same request trimmed to what the model reads (see `MODEL_*_CHARS`).
+    pub fn clip_for_model(&self) -> Self {
+        Self {
+            prompt: clip_text(&self.prompt, MODEL_PROMPT_CHARS),
+            lyrics: clip_text(&self.lyrics, MODEL_LYRICS_CHARS),
+            ..self.clone()
+        }
+    }
+
     /// Shared by the gateway (reject early) and the worker (never trust the buyer).
     pub fn validate(&self) -> std::result::Result<(), String> {
         let chars = self.prompt.trim().chars().count();
@@ -674,6 +701,23 @@ mod tests {
         let mut s = spec();
         s.steps = 0;
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn long_text_is_accepted_and_clipped_for_the_model() {
+        let long = "word ".repeat(19_999) + "word";
+        let mut s = spec();
+        s.prompt = long.clone();
+        s.lyrics = long;
+        assert!(s.validate().is_ok());
+        let c = s.clip_for_model();
+        assert!(c.prompt.chars().count() <= MODEL_PROMPT_CHARS && c.prompt.chars().count() > 800);
+        assert!(c.prompt.ends_with("word"));
+        assert!(c.lyrics.chars().count() <= MODEL_LYRICS_CHARS);
+        assert!(serde_json::to_vec(&c).unwrap().len() < 32 * 1024, "fits a gossip offer");
+        assert!(c.validate().is_ok());
+        assert_eq!(clip_text("  short ", 10), "short");
+        assert_eq!(clip_text(&"\u{e9}".repeat(5000), 1000).chars().count(), 1000);
     }
 
     #[test]

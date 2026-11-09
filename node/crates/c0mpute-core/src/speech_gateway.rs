@@ -35,7 +35,9 @@ const IMAGE_QUEUE_WAIT: Duration = Duration::from_secs(4 * 60);
 /// Songs in flight through one gateway; each holds a whole worker for minutes.
 const MAX_CONCURRENT_MUSIC_JOBS: usize = 4;
 /// How long to keep re-auctioning a song while every music worker is busy.
-const MUSIC_QUEUE_WAIT: Duration = Duration::from_secs(3 * 60);
+/// A song holds a worker ~2.5 min on CPU, so this waits behind two or three;
+/// Infernet gives the whole call 19 min.
+const MUSIC_QUEUE_WAIT: Duration = Duration::from_secs(8 * 60);
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
 
@@ -1000,7 +1002,8 @@ async fn generate_music(
         .acquire_owned()
         .await
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "music queue is unavailable".into()))?;
-    let spec = serde_json::to_value(&input).map_err(|error| gateway_failure(error.into()))?;
+    let spec = serde_json::to_value(input.clip_for_model())
+        .map_err(|error| gateway_failure(error.into()))?;
     let (outcome, bytes) = run_speech_job(
         &state,
         crate::music::WORKLOAD_TXT2MUSIC,

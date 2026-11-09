@@ -22,7 +22,7 @@
 [module]
 id          = "infernet"
 name        = "Infernet Protocol — AI inference"
-version     = "0.2.81"
+version     = "0.2.82"
 kind        = "workload"
 category    = "ai"
 status      = "available"

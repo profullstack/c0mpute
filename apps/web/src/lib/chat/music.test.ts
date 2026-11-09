@@ -17,6 +17,8 @@ describe("chat music", () => {
     expect(typeof parseMusicRequest({ prompt: "x", duration: 5 })).toBe("string");
     expect(typeof parseMusicRequest({ prompt: "x", duration: 200 })).toBe("string");
     expect(typeof parseMusicRequest({ prompt: "" })).toBe("string");
+    expect(parseMusicRequest({ prompt: "x".repeat(100_000), lyrics: "y".repeat(100_000) })).toMatchObject({ duration: 30 });
+    expect(typeof parseMusicRequest({ prompt: "x".repeat(100_001) })).toBe("string");
     expect(typeof parseMusicRequest(null)).toBe("string");
   });
   test("file extensions follow the content type", () => {
