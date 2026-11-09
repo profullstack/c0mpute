@@ -392,12 +392,10 @@ pub async fn generate(job: &VideoJobInline, job_dir: &Path) -> Result<PathBuf> {
         .args(sd_args(job, &diffusion::models_dir(), &pattern, threads, seed))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().context("start sd-cli")?;
-    let result = tokio::time::timeout(video::JOB_TIMEOUT, child.wait_with_output())
-        .await
-        .context("sd-cli timed out")??;
+        .stderr(std::process::Stdio::piped());
+    // Kills sd-cli's whole process group on a timeout or a cancel.
+    let result =
+        crate::job_process::run_with_timeout(&mut command, video::JOB_TIMEOUT, "sd-cli").await?;
     if !result.status.success() {
         bail!("sd-cli failed (exit {:?}): {}", result.status.code(), stderr_tail(&result.stderr));
     }

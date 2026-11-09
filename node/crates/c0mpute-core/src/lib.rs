@@ -16,6 +16,7 @@ pub mod diffusion;
 pub mod dm;
 pub mod music;
 pub mod job_progress;
+pub mod job_process;
 pub mod hosting;
 pub mod live;
 pub mod dispatch;
