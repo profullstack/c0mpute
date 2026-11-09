@@ -648,9 +648,22 @@ impl Hosting {
             return Ok(());
         };
         self.save_catalog().await;
-        self.collect_garbage(&rec, None).await;
-        info!(site = %site_id, "hosting: released a surplus copy");
+        // Tell the network first, and keep the chunks (still served to
+        // fetches and challenges) until peers have certainly seen that we no
+        // longer hold the site. Deleting first made challengers that still
+        // listed us record a failure against a copy we had just let go.
         self.announce_holding().await;
+        info!(site = %site_id, "hosting: released a surplus copy");
+        let h = self.clone();
+        let grace = self.0.timing.holder_ttl;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            // Taken back in the meantime: keep everything.
+            if h.0.catalog.read().await.sites.contains_key(&rec.site_id) {
+                return;
+            }
+            h.collect_garbage(&rec, None).await;
+        });
         Ok(())
     }
 
@@ -856,6 +869,11 @@ impl Hosting {
         let started = Instant::now();
         let got = tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await;
         let ok = matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash);
+        if !ok && !self.0.map.read().await.holders(&rec.site_id).iter().any(|p| p == holder) {
+            // The holder announced it let the copy go while we were asking:
+            // not a failed proof, just a stale target. No receipt.
+            bail!("{holder} no longer holds {}", rec.site_id);
+        }
         let rtt_ms = if ok { started.elapsed().as_millis().min(u32::MAX as u128) as u32 } else { 0 };
         let receipt = Receipt::sign(
             kp,
