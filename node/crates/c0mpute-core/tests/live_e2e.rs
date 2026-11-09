@@ -321,10 +321,10 @@ async fn real_ffmpeg_testsrc_through_a_relay() {
     std::fs::create_dir_all(work.join("r0")).unwrap();
     std::fs::create_dir_all(work.join("r1")).unwrap();
     let mut args = ffmpeg_args(&opts, &work);
-    // stop after 7 s of video
+    // stop after 7 s of video (an input option, so it ends every output)
     let i = args.iter().position(|a| a == "-i").unwrap();
-    args.insert(i + 2, "-t".into());
-    args.insert(i + 3, "7".into());
+    args.insert(i, "-t".into());
+    args.insert(i + 1, "7".into());
     let status = tokio::process::Command::new(&ffmpeg).args(&args).status().await.unwrap();
     assert!(status.success(), "ffmpeg {args:?}");
 
