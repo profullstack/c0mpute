@@ -92,8 +92,11 @@ $ c0mpute hosting ls          # sites a gateway knows, with live copy counts`}</
           can publish new versions: run the same command with the same{" "}
           <code>--name</code> to update it. Any gateway serves it at{" "}
           <code>/s/&lt;site_id&gt;/</code>, for example{" "}
-          <code>https://gateway.c0mpute.com/s/&lt;site_id&gt;/</code>. Limits:
-          256 MiB and 10,000 files per site.
+          <code>https://gateway.c0mpute.com/s/&lt;site_id&gt;/</code>, with
+          byte ranges so video seeks. Limits: 64 GiB per free site, 256 GiB
+          with <code>--disks auto</code>. Sites over 1 GiB are striped over the
+          network in 64 MiB groups; run the same command again to resume an
+          interrupted publish.
         </p>
 
         <p className="text-sm">point a Moshpit name at it (free to register):</p>

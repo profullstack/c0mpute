@@ -817,6 +817,10 @@ enum HostingCmd {
     /// The site is signed with this machine's identity, so only this machine
     /// can update it; publishing the same --name again ships a new version.
     /// Stays up until three hosting nodes hold copies, then exits.
+    /// Sites over 1 GiB (up to 64 GiB free, 256 GiB with --disks) are striped
+    /// over the network in 64 MiB groups; files are served from the folder
+    /// itself while the network copies them, so keep it running, and run the
+    /// same command again to resume if it stops.
     #[command(verbatim_doc_comment)]
     Publish {
         /// Directory to publish (hidden files are skipped, .well-known kept).
@@ -828,7 +832,8 @@ enum HostingCmd {
         /// add TXT `_c0mpute-hosting.<domain>` = `site=<site_id>`.
         #[arg(long = "domain")]
         domains: Vec<String>,
-        /// Give up waiting for network copies after this many seconds.
+        /// Give up waiting for network copies after this many seconds (for a
+        /// striped site: this many seconds without progress).
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
         /// Pay hosting nodes from the d1sks OpenDisk marketplace to hold the
@@ -866,6 +871,35 @@ enum HostingCmd {
         /// listed disks are announcing themselves as live hosts right now.
         #[arg(long)]
         live: bool,
+    },
+    /// Take a site down: publish an empty version of it. Holders switch to
+    /// it and delete the old files; gateways answer 404.
+    Rm {
+        /// Site name (as published from this machine).
+        #[arg(long)]
+        name: String,
+        /// Seconds to keep telling the network.
+        #[arg(long, default_value_t = 90)]
+        wait_secs: u64,
+    },
+    /// Download one file of a site from the network (as a gateway would),
+    /// showing the transfer rate.
+    Get {
+        /// Site id.
+        site: String,
+        /// Path in the site, e.g. `movies/a.mp4`.
+        path: String,
+        /// Where to write it (default: the file name).
+        #[arg(short, long)]
+        out: Option<std::path::PathBuf>,
+        /// One chunk at a time from one peer (how releases up to 0.3.2
+        /// fetched), to compare.
+        #[arg(long)]
+        sequential: bool,
+        /// Only fetch from these peers: peer ids or full multiaddrs
+        /// (repeatable). They are asked for every chunk.
+        #[arg(long)]
+        from: Vec<String>,
     },
     /// List the sites a gateway knows, with live copy counts.
     Ls {
@@ -4141,6 +4175,36 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             }
             Ok(())
         }
+        HostingCmd::Rm { name, wait_secs } => {
+            let rec = c0mpute_core::hosting::unpublish(&name, std::time::Duration::from_secs(wait_secs)).await?;
+            println!("site:    {} ({name}) is empty now, version {}", rec.site_id, rec.seq);
+            Ok(())
+        }
+        HostingCmd::Get {
+            site,
+            path,
+            out,
+            sequential,
+            from,
+        } => {
+            let out = out.unwrap_or_else(|| {
+                std::path::PathBuf::from(path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("index.html"))
+            });
+            let d = c0mpute_core::hosting::download(&site, &path, &out, sequential, from).await?;
+            let secs = d.took.as_secs_f64().max(0.001);
+            println!(
+                "{} bytes in {:.1} s = {:.1} MB/s ({}) -> {}",
+                d.bytes,
+                secs,
+                d.bytes as f64 / secs / 1e6,
+                if sequential { "sequential" } else { "parallel" },
+                out.display()
+            );
+            for (p, b) in d.by_peer {
+                println!("  {p}  {:.1} MiB", b as f64 / 1048576.0);
+            }
+            Ok(())
+        }
         HostingCmd::Ls { gateway } => {
             let url = format!("{}/hosting/v1/sites", gateway.trim_end_matches('/'));
             let v: serde_json::Value = reqwest::get(&url)
@@ -4153,13 +4217,23 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                 println!("no sites known to {gateway} yet");
             }
             for s in sites {
+                // Striped sites: copies = fewest copies of any group.
+                let striped = if s["striped"].as_bool() == Some(true) {
+                    format!(
+                        "  striped: {} groups, {} short, {} without a copy",
+                        s["groups"], s["short_groups"], s["missing_groups"]
+                    )
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{:<22} {:<24} copies {}/{}  {} bytes  {}",
+                    "{:<22} {:<24} copies {}/{}  {} bytes{}  {}",
                     s["site_id"].as_str().unwrap_or(""),
                     s["name"].as_str().unwrap_or(""),
                     s["copies"],
                     v["target_copies"],
                     s["size"],
+                    striped,
                     s["domains"]
                         .as_array()
                         .map(|d| d.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))

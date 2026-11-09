@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::dates;
-use crate::hosting::site::{self, MAX_SITE_BYTES, SiteRecord};
+use crate::hosting::site::{self, MAX_SMALL_SITE_BYTES as MAX_SITE_BYTES, SiteRecord};
 
 /// The Podcasting 2.0 namespace UUID for `podcast:guid` (uuid v5).
 pub const PODCAST_GUID_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0xead4c236_bf58_58c6_a2c6_a6b28d128cb6);

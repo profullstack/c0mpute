@@ -120,8 +120,8 @@ pub fn build_creative_dir(files: &[PathBuf], out: &Path, duration_override_ms: O
         let (kind, mime) = media_kind(f).context("not a creative")?;
         let bytes = std::fs::read(f).with_context(|| format!("read {}", f.display()))?;
         total += bytes.len() as u64;
-        if total > site::MAX_SITE_BYTES {
-            bail!("creatives add up to more than {} MiB", site::MAX_SITE_BYTES / (1024 * 1024));
+        if total > site::MAX_SMALL_SITE_BYTES {
+            bail!("creatives add up to more than {} MiB", site::MAX_SMALL_SITE_BYTES / (1024 * 1024));
         }
         let stem: String = f
             .file_name()

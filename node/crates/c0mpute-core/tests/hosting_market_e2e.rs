@@ -91,6 +91,8 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     // Five hosting nodes, each asking $0.004/GiB-month with a payout wallet.
     let host_opts = |dir: &std::path::Path, i: usize| Options {
         hosts: true,
+        // Plenty of (pretend) disk: the test box may be below the free-disk floor.
+        disk_override: Some((1 << 40, 2 << 40)),
         catalog_path: Some(dir.join("catalog.json")),
         timing: fast(),
         price: Some(4_000),

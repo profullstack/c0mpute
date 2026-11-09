@@ -982,7 +982,11 @@ pub struct StoreSource(pub ChunkStore);
 #[async_trait::async_trait]
 impl ChunkSource for StoreSource {
     async fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>> {
-        self.0.get(hash).await
+        match self.0.get(hash).await {
+            Ok(bytes) => Ok(bytes),
+            // A site being published is served straight from its files.
+            Err(e) => crate::hosting::seed::read_async(hash).await.ok_or(e),
+        }
     }
 }
 
