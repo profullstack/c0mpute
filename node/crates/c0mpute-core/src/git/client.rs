@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use c0mpute_proto::Hash;
 
+use super::e2e::{RepoKey, SealedRefs};
 use super::*;
 use crate::hosting::site::{SiteManifest, SiteRecord};
 
@@ -68,11 +69,13 @@ fn http() -> reqwest::Client {
 
 /// The newest verified version of `<owner>/<repo>` any gateway knows, with
 /// the gateway that served it. `Ok(None)` when every reachable gateway says
-/// the repo does not exist.
+/// the repo does not exist. An encrypted repo is opened with `key` (an
+/// error without it).
 pub async fn fetch_state(
     gws: &Gateways,
     owner: &str,
     repo: &str,
+    key: Option<&RepoKey>,
 ) -> Result<Option<(Verified, String)>> {
     let client = http();
     let mut best: Option<(Verified, String)> = None;
@@ -148,12 +151,17 @@ pub async fn fetch_state(
                 record: state.record,
                 manifest,
                 doc,
+                git_packs: BTreeMap::new(),
+                e2e: false,
             },
             gw.clone(),
         ));
     }
     if best.is_none() && !answered {
         bail!("no gateway reachable: {}", errors.join("; "));
+    }
+    if let Some((v, _)) = best.as_mut() {
+        v.open(owner, repo, key)?;
     }
     Ok(best)
 }
@@ -348,6 +356,13 @@ impl Local {
         self.quiet_ok(&args)
     }
 
+    /// `git config --get <name>` of this repo (and the global config).
+    pub fn config(&self, name: &str) -> Option<String> {
+        self.git(&["config", "--get", name])
+            .ok()
+            .filter(|v| !v.is_empty())
+    }
+
     pub fn has_pack(&self, base: &str) -> bool {
         self.git_dir
             .join("objects/pack")
@@ -454,6 +469,7 @@ pub async fn fetch_objects(
     owner: &str,
     repo: &str,
     wants: &[String],
+    key: Option<&RepoKey>,
 ) -> Result<usize> {
     let (v, gw) = state;
     let mut downloaded = 0;
@@ -461,16 +477,22 @@ pub async fn fetch_objects(
         return Ok(0);
     }
     for base in v.doc.packs.iter().rev() {
-        if local.has_pack(base) {
+        let git_name = v.git_packs.get(base).map(String::as_str).unwrap_or(base);
+        if local.has_pack(git_name) {
             continue;
         }
         let (pp, ip) = (pack_path(base), idx_path(base));
         let (Some(pe), Some(ie)) = (v.manifest.files.get(&pp), v.manifest.files.get(&ip)) else {
             bail!("ref map names {base} but the repo has no such pack");
         };
-        let pack = download_any(gws, gw, owner, repo, &pp, pe).await?;
-        let idx = download_any(gws, gw, owner, repo, &ip, ie).await?;
-        local.install_pack(base, &pack, &idx)?;
+        let mut pack = download_any(gws, gw, owner, repo, &pp, pe).await?;
+        let mut idx = download_any(gws, gw, owner, repo, &ip, ie).await?;
+        if v.e2e {
+            let key = key.context("encrypted repo: no key")?;
+            pack = key.open(&e2e::aad(owner, repo, &pp), &pack)?;
+            idx = key.open(&e2e::aad(owner, repo, &ip), &idx)?;
+        }
+        local.install_pack(git_name, &pack, &idx)?;
         downloaded += 1;
         if local.complete(wants) {
             return Ok(downloaded);
@@ -534,7 +556,10 @@ pub struct PushReport {
 }
 
 /// Push `specs` from `local` to `<owner>/<repo>`, signed with `keypair`
-/// (which must be the owner's).
+/// (which must be the owner's). An encrypted repo stays encrypted; `want_e2e`
+/// makes a new repo encrypted, or converts a plain one (a full repack: the
+/// old plain packs leave the repo, but holders may keep copies until their
+/// garbage collection runs).
 pub async fn push(
     local: &Local,
     gws: &Gateways,
@@ -542,6 +567,7 @@ pub async fn push(
     owner: &str,
     repo: &str,
     specs: &[PushSpec],
+    want_e2e: bool,
 ) -> Result<PushReport> {
     let me = crate::hosting::site::owner_hex(keypair)
         .context("an ed25519 identity is needed to push")?;
@@ -553,8 +579,13 @@ pub async fn push(
         );
     }
     let t0 = std::time::Instant::now();
-    let state = fetch_state(gws, owner, repo).await?;
+    let key = RepoKey::derive(keypair, repo)?;
+    let state = fetch_state(gws, owner, repo, Some(&key)).await?;
     trace(&format!("state fetched in {:?}", t0.elapsed()));
+    let was_e2e = state.as_ref().is_some_and(|(v, _)| v.e2e);
+    let e2e = want_e2e || was_e2e;
+    // Turning a plain repo into an encrypted one rewrites it as one pack.
+    let convert = e2e && !was_e2e && state.is_some();
     let remote_refs: BTreeMap<String, String> = state
         .as_ref()
         .map(|(v, _)| v.doc.refs.clone())
@@ -568,7 +599,7 @@ pub async fn push(
     if let Some(s) = &state
         && !local.complete(&tips)
     {
-        fetch_objects(local, gws, s, owner, repo, &tips).await?;
+        fetch_objects(local, gws, s, owner, repo, &tips, Some(&key)).await?;
     }
 
     let mut new_refs = remote_refs.clone();
@@ -611,7 +642,7 @@ pub async fn push(
         holders,
         head_moved: None,
     };
-    if new_refs == remote_refs && state.is_some() {
+    if new_refs == remote_refs && state.is_some() && !convert {
         let seq = state.as_ref().map(|(v, _)| v.record.seq).unwrap_or(0);
         return Ok(report(None, seq, 0, results));
     }
@@ -638,30 +669,55 @@ pub async fn push(
         w
     };
     let mut packs = old_packs.clone();
+    let mut git_packs: BTreeMap<String, String> = state
+        .as_ref()
+        .map(|(v, _)| v.git_packs.clone())
+        .unwrap_or_default();
     let mut new_files: Vec<(String, Vec<u8>)> = Vec::new();
+    // An encrypted repo stores each pack sealed, under a keyed name.
+    let mut add_pack = |name: String,
+                        pack: Vec<u8>,
+                        idx: Vec<u8>,
+                        packs: &mut Vec<String>,
+                        new_files: &mut Vec<(String, Vec<u8>)>| {
+        let stored = if e2e { key.pack_name(&name) } else { name.clone() };
+        if packs.contains(&stored) {
+            return;
+        }
+        let (pp, ip) = (pack_path(&stored), idx_path(&stored));
+        if e2e {
+            let pack = key.seal(&e2e::aad(owner, repo, &pp), &pack);
+            let idx = key.seal(&e2e::aad(owner, repo, &ip), &idx);
+            new_files.push((pp, pack));
+            new_files.push((ip, idx));
+        } else {
+            new_files.push((pp, pack));
+            new_files.push((ip, idx));
+        }
+        git_packs.insert(stored.clone(), name);
+        packs.push(stored);
+    };
     // An old bundle-layout repo becomes one full pack (its bundle is dropped).
     let legacy = state.as_ref().is_some_and(|(v, _)| is_legacy(&v.manifest));
-    let repack = legacy || old_packs.len() + 1 > REPACK_AFTER;
+    let repack = legacy || convert || old_packs.len() + 1 > REPACK_AFTER;
     if repack {
         files.clear();
         packs.clear();
         if let Some((name, pack, idx)) = local.pack(&wants, &[])? {
-            new_files.push((pack_path(&name), pack));
-            new_files.push((idx_path(&name), idx));
-            packs.push(name);
+            add_pack(name, pack, idx, &mut packs, &mut new_files);
         }
-    } else if let Some((name, pack, idx)) = local.pack(&wants, &tips)?
-        && !packs.contains(&name)
-    {
-        new_files.push((pack_path(&name), pack));
-        new_files.push((idx_path(&name), idx));
-        packs.push(name);
+    } else if let Some((name, pack, idx)) = local.pack(&wants, &tips)? {
+        add_pack(name, pack, idx, &mut packs, &mut new_files);
     }
+    git_packs.retain(|stored, _| packs.contains(stored));
 
     let mut peeled = BTreeMap::new();
-    for (name, oid) in &new_refs {
-        if name.starts_with("refs/tags/") && local.object_type(oid).as_deref() == Some("tag") {
-            peeled.insert(oid.clone(), local.rev_parse(&format!("{oid}^{{}}"))?);
+    if !e2e {
+        for (name, oid) in &new_refs {
+            if name.starts_with("refs/tags/") && local.object_type(oid).as_deref() == Some("tag")
+            {
+                peeled.insert(oid.clone(), local.rev_parse(&format!("{oid}^{{}}"))?);
+            }
         }
     }
     let head = state
@@ -684,7 +740,7 @@ pub async fn push(
         .as_ref()
         .and_then(|h| new_refs.get(h).filter(|n| remote_refs.get(h) != Some(*n)))
         .cloned();
-    let doc = RepoDoc {
+    let mut doc = RepoDoc {
         v: 1,
         repo: repo.to_string(),
         head,
@@ -693,10 +749,22 @@ pub async fn push(
         prev,
         force: forced || repack,
         pushed_at: now_ms(),
+        sealed: None,
     };
-    new_files.push(("HEAD".into(), doc.head_file().into_bytes()));
-    new_files.push(("info/refs".into(), doc.info_refs(&peeled).into_bytes()));
-    new_files.push(("objects/info/packs".into(), doc.packs_file().into_bytes()));
+    if e2e {
+        // Refs and pack names go sealed; no dumb-HTTP files (they would
+        // print the refs in the clear).
+        let secret = SealedRefs {
+            head: doc.head.take(),
+            refs: std::mem::take(&mut doc.refs),
+            packs: git_packs,
+        };
+        doc.sealed = Some(secret.seal(&key, owner, repo));
+    } else {
+        new_files.push(("HEAD".into(), doc.head_file().into_bytes()));
+        new_files.push(("info/refs".into(), doc.info_refs(&peeled).into_bytes()));
+        new_files.push(("objects/info/packs".into(), doc.packs_file().into_bytes()));
+    }
     new_files.push((DOC_PATH.into(), doc.to_bytes()));
 
     let mut chunks = Vec::new();

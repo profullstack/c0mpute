@@ -87,7 +87,16 @@ enum Sub {
         /// Remote name to add (skipped if it already exists).
         #[arg(long, default_value = "origin")]
         remote: String,
+        /// End-to-end encrypted: the network keeps and serves the repo but
+        /// no gateway or host can read it. Share read access with
+        /// `c0mpute git share <repo>`.
+        #[arg(long)]
+        e2e: bool,
     },
+    /// Print the URL that gives read access to one of your encrypted repos:
+    /// c0mpute://<you>/<repo>#key=<key>. Anyone holding it can clone and
+    /// read the repo, so send it like a password.
+    Share { repo: String },
     /// `git clone <url> [dir]` with the remote helper on PATH (no install needed).
     #[command(
         after_help = "Examples:\n  c0mpute git clone c0mpute://<owner-key>/my-project\n  c0mpute git clone c0mpute://<owner-key>/my-project ./src --gateway https://gateway.c0mpute.com"
@@ -209,6 +218,26 @@ fn run_git(args: &[String], gateway: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Where web links for a listing gateway should point: the gateway itself,
+/// unless it is this machine's loopback node (then the public gateway).
+fn web_base(gateway: &str) -> String {
+    let g = gateway.trim_end_matches('/');
+    let host = g.split("://").nth(1).unwrap_or(g);
+    if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
+        git::PUBLIC_GATEWAY.to_string()
+    } else {
+        g.to_string()
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KiB", n as f64 / 1024.0),
+        _ => format!("{:.1} MiB", n as f64 / 1_048_576.0),
+    }
+}
+
 fn my_key() -> Result<String> {
     let kp = c0mpute_core::hosting::publisher_keypair()?;
     c0mpute_core::hosting::site::owner_hex(&kp).context("this machine's identity is not ed25519")
@@ -220,7 +249,20 @@ pub async fn run(args: &[String]) -> Result<()> {
     )
     .unwrap_or_else(|e| e.exit());
     match cli.cmd {
-        Sub::Init { repo, remote } => {
+        Sub::Share { repo } => {
+            if !git::valid_repo(&repo) {
+                bail!("repo name must be 1-{} of a-z, 0-9 and '-'", git::max_repo_chars());
+            }
+            let kp = c0mpute_core::hosting::publisher_keypair()?;
+            let key = git::e2e::RepoKey::derive(&kp, &repo)?;
+            let url = format!("{}#key={}", git::url_for(&my_key()?, &repo), key.to_text());
+            println!("{url}");
+            eprintln!(
+                "anyone with this URL can read {repo}: c0mpute git clone '{url}'\n(the #key part never reaches a gateway; this only applies to repos pushed encrypted)"
+            );
+            Ok(())
+        }
+        Sub::Init { repo, remote, e2e } => {
             if !git::valid_repo(&repo) {
                 bail!(
                     "repo name must be 1-{} of a-z, 0-9 and '-'",
@@ -249,6 +291,19 @@ pub async fn run(args: &[String]) -> Result<()> {
                     )?;
                     eprintln!("added remote {remote:?}; push with: c0mpute git push {remote} main");
                 }
+                if e2e {
+                    run_git(
+                        &["config".into(), "c0mpute.e2e".into(), "true".into()],
+                        None,
+                    )?;
+                    eprintln!(
+                        "end-to-end encrypted: pushes are sealed with this repo's key; give others read access with `c0mpute git share {repo}`"
+                    );
+                }
+            } else if e2e {
+                eprintln!(
+                    "not inside a git work tree: run this again in the repo, or push to {url}#e2e"
+                );
             }
             eprintln!(
                 "run `c0mpute git install-helper` once so plain `git push`/`git clone` work too"
@@ -256,6 +311,13 @@ pub async fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         Sub::Clone { url, dir, gateway } => {
+            // git would name the directory after the last URL segment,
+            // `#key=...` included: default to the repo name instead.
+            let dir = dir.or_else(|| {
+                let (base, _, _) = git::e2e::split_fragment(&url).ok()?;
+                let u = git::RepoUrl::parse(base).ok()?;
+                (!u.repo.is_empty()).then_some(u.repo)
+            });
             let mut a = vec!["clone".to_string(), url];
             a.extend(dir);
             run_git(&a, gateway.as_deref())
@@ -287,14 +349,22 @@ pub async fn run(args: &[String]) -> Result<()> {
             if repos.is_empty() {
                 println!("no repos known to {gateway} yet");
             }
+            // Links on a loopback gateway only open on this machine: point
+            // them at the public gateway, which knows every repo by gossip.
+            let web = web_base(&gateway);
             for r in repos {
+                let path = r["clone_path"].as_str().unwrap_or("");
                 println!(
-                    "{:<70}  copies {}  {} bytes  {}{}",
+                    "{}\n  copies {}/3  {}{}\n  browse  {web}{}\n  clone   git clone {web}{path}",
                     r["url"].as_str().unwrap_or(""),
                     r["copies"],
-                    r["size"],
-                    gateway.trim_end_matches('/'),
-                    r["clone_path"].as_str().unwrap_or("")
+                    human_bytes(r["size"].as_u64().unwrap_or(0)),
+                    if r["copies"].as_u64() == Some(0) {
+                        "  (no live copy: unreadable until a holder comes back)"
+                    } else {
+                        ""
+                    },
+                    path.strip_suffix(".git").unwrap_or(path),
                 );
             }
             Ok(())

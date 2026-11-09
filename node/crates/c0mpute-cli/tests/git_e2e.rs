@@ -479,6 +479,147 @@ async fn git_push_and_clone_through_the_network() {
             .iter()
             .any(|r| r["repo"] == "demo" && r["owner"] == key)
     );
+
+    // 10. The web view on gateway B (which holds nothing): home page with
+    // README, a file, its raw bytes (never HTML), history, a commit, a tag.
+    let web = format!("{url_b}/git/{key}/demo");
+    let page = |u: String| async move {
+        let r = reqwest::get(&u).await.unwrap();
+        let status = r.status();
+        let ct = r
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let body = r.text().await.unwrap();
+        assert!(status.is_success(), "GET {u}: {status}\n{body}");
+        (ct, body)
+    };
+    let (ct, home) = page(web.clone()).await;
+    assert!(ct.starts_with("text/html"), "{ct}");
+    assert!(home.contains("README.md") && home.contains("hello from the network"), "{home}");
+    assert!(home.contains("diverge.txt"), "home shows HEAD's files: {home}");
+    // The clone URL in a browser redirects to the page.
+    let (_, via_dot_git) = page(format!("{url_b}/git/{key}/demo.git")).await;
+    assert!(via_dot_git.contains("hello from the network"));
+    let (_, blob) = page(format!("{web}/blob/main/diverge.txt")).await;
+    assert!(blob.contains("diverged"), "{blob}");
+    let (ct, raw) = page(format!("{web}/raw/main/README.md")).await;
+    assert_eq!(raw, "hello from the network\n");
+    assert!(ct.starts_with("text/plain"), "{ct}");
+    let (_, log) = page(format!("{web}/commits/main")).await;
+    assert!(log.contains("diverge") && log.contains("first"), "{log}");
+    let (_, commit) = page(format!("{web}/commit/{forced_sha}")).await;
+    assert!(commit.contains("diverge.txt"), "changed paths: {commit}");
+    let (_, at_tag) = page(format!("{web}/tree/v1.0.0")).await;
+    assert!(at_tag.contains("diverge.txt"));
+    // Dumb HTTP is untouched by the web routes.
+    let (_, info) = page(format!("{url_b}/git/{key}/demo.git/info/refs")).await;
+    assert!(info.contains("refs/heads/main"));
+
+    // 11. An end-to-end encrypted repo: gateways keep and serve it but see
+    // no refs and no readable pack; a reader needs the key from `share`.
+    let secret_remote = format!("c0mpute://{key}/secret#e2e");
+    let swork = root.join("swork");
+    std::fs::create_dir_all(&swork).unwrap();
+    {
+        let (o, w, r) = (owner.clone(), swork.clone(), secret_remote.clone());
+        blocking(move || {
+            o.git(&w, &["init", "-q", "-b", "main"]);
+            std::fs::write(w.join("plan.txt"), "top secret plan\n").unwrap();
+            o.git(&w, &["add", "."]);
+            o.git(&w, &["commit", "-q", "-m", "secret"]);
+            o.git(&w, &["remote", "add", "origin", &r]);
+            o.git(&w, &["push", "-q", "origin", "main"]);
+            // A second push stays encrypted (no #e2e needed any more).
+            std::fs::write(w.join("more.txt"), "more secrets\n").unwrap();
+            o.git(&w, &["add", "."]);
+            o.git(&w, &["commit", "-q", "-m", "more"]);
+            o.git(&w, &["remote", "set-url", "origin", r.trim_end_matches("#e2e")]);
+            o.git(&w, &["push", "-q", "origin", "main"]);
+        })
+        .await;
+    }
+    let secret_sha = owner.git(&swork, &["rev-parse", "HEAD"]).trim().to_string();
+    let ssite = c0mpute_core::git::site_id(&key, "secret");
+    wait_for("gateway B to learn the encrypted repo", 30, || {
+        let b = gw_b.clone();
+        let a = gw_a.clone();
+        let id = ssite.clone();
+        async move {
+            match (b.record_for(&id).await, a.record_for(&id).await) {
+                (Some(rb), Some(ra)) => rb.seq == ra.seq && !b.holders(&id).await.is_empty(),
+                _ => false,
+            }
+        }
+    })
+    .await;
+    // What a gateway sees: no refs, no dumb-HTTP files, sealed packs.
+    let st = gw_a.git_state(&key, "secret").await.unwrap();
+    assert!(!st.manifest.contains("info/refs"), "{}", st.manifest);
+    let rec = st.record.clone();
+    let (_, doc) = gw_a
+        .read_file(&rec, c0mpute_core::git::DOC_PATH)
+        .await
+        .unwrap()
+        .unwrap();
+    let doc_text = String::from_utf8_lossy(&doc).to_string();
+    assert!(doc_text.contains("\"sealed\""), "{doc_text}");
+    assert!(!doc_text.contains(&secret_sha), "refs leak: {doc_text}");
+    assert!(!doc_text.contains("refs/heads/main"), "ref names leak: {doc_text}");
+    let manifest: c0mpute_core::hosting::site::SiteManifest =
+        serde_json::from_str(&st.manifest).unwrap();
+    for (path, _) in manifest.files.iter().filter(|(p, _)| p.ends_with(".pack")) {
+        let (_, bytes) = gw_a.read_file(&rec, path).await.unwrap().unwrap();
+        assert!(!bytes.starts_with(b"PACK"), "{path} is not sealed");
+    }
+    let (_, spage) = page(format!("{url_b}/git/{key}/secret")).await;
+    assert!(spage.contains("end-to-end encrypted") && !spage.contains("plan.txt"));
+
+    // Without the key a reader gets a clear error; with it, the repo.
+    {
+        let (r, root2) = (reader.clone(), root.clone());
+        let plain = format!("c0mpute://{key}/secret");
+        blocking(move || {
+            let out = r.git_fails(&root2, &["clone", "-q", &plain, "nokey"]);
+            assert!(out.contains("end-to-end encrypted"), "{out}");
+        })
+        .await;
+    }
+    let share = owner
+        .cmd(env!("CARGO_BIN_EXE_c0mpute"), &owner.home)
+        .args(["git", "share", "secret"])
+        .output()
+        .unwrap();
+    assert!(share.status.success(), "{}", String::from_utf8_lossy(&share.stderr));
+    let share_url = String::from_utf8_lossy(&share.stdout).trim().to_string();
+    assert!(share_url.contains("#key="), "{share_url}");
+    let sclone = root.join("sclone");
+    {
+        let (r, root2, u, sc) = (reader.clone(), root.clone(), share_url.clone(), sclone.clone());
+        blocking(move || {
+            r.git(&root2, &["clone", "-q", &u, sc.to_str().unwrap()]);
+        })
+        .await;
+    }
+    assert_eq!(std::fs::read_to_string(sclone.join("plan.txt")).unwrap(), "top secret plan\n");
+    assert_eq!(reader.git(&sclone, &["rev-parse", "HEAD"]).trim(), secret_sha);
+    // A reader with the key still cannot push (only the owner signs).
+    {
+        let (r, sc) = (reader.clone(), sclone.clone());
+        let ra = User {
+            gateway: url_a.clone(),
+            ..r
+        };
+        blocking(move || {
+            std::fs::write(sc.join("evil.txt"), "nope\n").unwrap();
+            ra.git(&sc, &["add", "."]);
+            ra.git(&sc, &["commit", "-q", "-m", "evil"]);
+            let out = ra.git_fails(&sc, &["push", "origin", "HEAD:refs/heads/main"]);
+            assert!(out.contains("belongs to key"), "{out}");
+        })
+        .await;
+    }
     drop(hosts);
 }
 

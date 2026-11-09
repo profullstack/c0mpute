@@ -11,7 +11,7 @@ use std::io::{BufRead, Write};
 use anyhow::{Context, Result};
 
 use super::client::{self, Gateways, Local, PushSpec};
-use super::{RepoUrl, Verified};
+use super::{RepoUrl, Verified, e2e};
 
 /// Run the helper protocol until git closes stdin or sends a blank line.
 pub fn run(remote: &str, url: &str) -> Result<()> {
@@ -27,6 +27,7 @@ pub fn run(remote: &str, url: &str) -> Result<()> {
 }
 
 fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
+    let (url, url_key, url_e2e) = e2e::split_fragment(url)?;
     let target = RepoUrl::parse(url)?;
     let keypair = crate::hosting::publisher_keypair()?;
     let me = crate::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
@@ -36,6 +37,24 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
         Some(id) => rt.block_on(client::resolve_site(&gws, id))?,
         None => (target.owner_or(&me).to_string(), target.repo.clone()),
     };
+    // The key of an encrypted repo: the URL's #key=, C0MPUTE_GIT_KEY,
+    // `git config c0mpute.key`, else (the owner) derived from the identity.
+    let key = match url_key {
+        Some(k) => Some(k),
+        None => match std::env::var("C0MPUTE_GIT_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| local.config("c0mpute.key"))
+        {
+            Some(t) => Some(e2e::RepoKey::from_text(&t).context("C0MPUTE_GIT_KEY / c0mpute.key")?),
+            None if owner == me => Some(e2e::RepoKey::derive(&keypair, &repo)?),
+            None => None,
+        },
+    };
+    let want_e2e = url_e2e
+        || local
+            .config("c0mpute.e2e")
+            .is_some_and(|v| matches!(v.as_str(), "true" | "yes" | "on" | "1"));
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
@@ -53,7 +72,7 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
         } else if line.starts_with("option ") {
             out.write_all(b"unsupported\n")?;
         } else if line == "list" || line == "list for-push" {
-            let s = rt.block_on(client::fetch_state(&gws, &owner, &repo))?;
+            let s = rt.block_on(client::fetch_state(&gws, &owner, &repo, key.as_ref()))?;
             if let Some((v, _)) = &s {
                 for (name, oid) in &v.doc.refs {
                     writeln!(out, "{oid} {name}")?;
@@ -80,13 +99,19 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
             }
             let s = match state.take() {
                 Some(s) => s,
-                None => rt.block_on(client::fetch_state(&gws, &owner, &repo))?,
+                None => rt.block_on(client::fetch_state(&gws, &owner, &repo, key.as_ref()))?,
             };
             let Some(s) = s else {
                 anyhow::bail!("{} does not exist", super::url_for(&owner, &repo));
             };
             let n = rt.block_on(client::fetch_objects(
-                &local, &gws, &s, &owner, &repo, &wants,
+                &local,
+                &gws,
+                &s,
+                &owner,
+                &repo,
+                &wants,
+                key.as_ref(),
             ))?;
             if n > 0 {
                 eprintln!(
@@ -109,7 +134,9 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
                     specs.push(PushSpec::parse(rest)?);
                 }
             }
-            match rt.block_on(client::push(&local, &gws, &keypair, &owner, &repo, &specs)) {
+            match rt.block_on(client::push(
+                &local, &gws, &keypair, &owner, &repo, &specs, want_e2e,
+            )) {
                 Ok(report) => {
                     if let Some(gw) = &report.gateway {
                         eprintln!(

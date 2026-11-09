@@ -23,6 +23,7 @@ pub mod dns;
 mod edge_api;
 pub mod fetch;
 pub mod git;
+mod git_browse;
 pub mod market;
 pub mod meta;
 pub mod proof;

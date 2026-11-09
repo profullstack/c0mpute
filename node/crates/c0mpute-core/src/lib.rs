@@ -85,9 +85,16 @@ use tracing::info;
 
 /// Convenience: install a default `tracing-subscriber` for the binary.
 pub fn init_tracing() -> Result<()> {
+    init_tracing_with("info,c0mpute=debug")
+}
+
+/// [`init_tracing`] with another default filter (`RUST_LOG` still wins):
+/// short CLI commands such as `c0mpute git ls` use `"warn"`, so their output
+/// is not prefixed by node logs.
+pub fn init_tracing_with(default_filter: &str) -> Result<()> {
     use tracing_subscriber::{EnvFilter, fmt};
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,c0mpute=debug"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     // Diagnostics go to stderr so stdout stays a clean data channel: commands
     // like `c0mpute storage put` print only an object hash, which callers
     // capture with `$(...)`. With the default stdout writer the logs land in

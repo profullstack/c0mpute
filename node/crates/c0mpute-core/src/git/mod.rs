@@ -21,7 +21,9 @@
 
 pub mod client;
 pub mod deploy;
+pub mod e2e;
 pub mod helper;
+pub mod pack;
 
 use std::collections::BTreeMap;
 
@@ -205,6 +207,10 @@ pub struct RepoDoc {
     /// Milliseconds since the epoch.
     #[serde(default)]
     pub pushed_at: u64,
+    /// End-to-end encrypted repo ([`e2e`]): `head`, `refs` and the git name
+    /// of each pack, sealed with the repo key (`refs` is then empty here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
 }
 
 impl RepoDoc {
@@ -246,6 +252,7 @@ impl RepoDoc {
             prev: None,
             force: false,
             pushed_at: 0,
+            sealed: None,
         };
         // Same validation as a real doc.
         Self::from_bytes(&d.to_bytes())
@@ -372,7 +379,52 @@ pub struct RepoState {
 pub struct Verified {
     pub record: SiteRecord,
     pub manifest: SiteManifest,
+    /// The ref map; for an encrypted repo, with `head` and `refs` opened.
     pub doc: RepoDoc,
+    /// Stored pack name -> git's pack name (the same unless encrypted).
+    pub git_packs: BTreeMap<String, String>,
+    /// End-to-end encrypted ([`e2e`]).
+    pub e2e: bool,
+}
+
+impl Verified {
+    /// Open an encrypted repo's ref map with `key` (no-op for a plain one).
+    pub fn open(&mut self, owner: &str, repo: &str, key: Option<&e2e::RepoKey>) -> Result<()> {
+        let Some(sealed) = self.doc.sealed.clone() else {
+            self.git_packs = self.doc.packs.iter().map(|p| (p.clone(), p.clone())).collect();
+            return Ok(());
+        };
+        let key = key.with_context(|| {
+            format!(
+                "{} is end-to-end encrypted: read it with its key, {}#key=<key> (its owner prints that URL with `c0mpute git share {repo}`)",
+                url_for(owner, repo),
+                url_for(owner, repo)
+            )
+        })?;
+        let s = e2e::SealedRefs::open(key, owner, repo, &sealed)
+            .with_context(|| format!("open {}", url_for(owner, repo)))?;
+        for (name, oid) in &s.refs {
+            if !valid_ref_name(name) || !valid_oid(oid) {
+                bail!("bad ref {name:?} -> {oid:?}");
+            }
+        }
+        if let Some(h) = &s.head
+            && !valid_ref_name(h)
+        {
+            bail!("bad HEAD {h:?}");
+        }
+        for p in &self.doc.packs {
+            match s.packs.get(p) {
+                Some(g) if valid_pack_name(g) => {}
+                _ => bail!("encrypted ref map does not name pack {p}"),
+            }
+        }
+        self.doc.head = s.head;
+        self.doc.refs = s.refs;
+        self.git_packs = s.packs;
+        self.e2e = true;
+        Ok(())
+    }
 }
 
 impl RepoState {
