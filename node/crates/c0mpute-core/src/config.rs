@@ -338,7 +338,7 @@ impl DiffusionConfig {
     }
 }
 
-/// Music generation: ACE-Step 1.5, ~8 GB on disk and ~7-9 GB of RAM per
+/// Music generation: ACE-Step 1.5 (CPU, or CUDA on an NVIDIA GPU), ~8 GB on disk and ~7-9 GB of RAM per
 /// song (bf16 on CPU). On by default, installed only with `min_ram_gb` total
 /// RAM and `min_free_disk_gb` free disk; bids only while `min_free_ram_gb` is
 /// available. Opt out with `C0MPUTE_MUSIC_AUTO=0` or `auto_install = false`.
@@ -374,7 +374,8 @@ impl Default for MusicConfig {
 }
 
 fn default_music_min_ram_gb() -> u64 {
-    24
+    // A CPU song peaks at 8.5 GB RSS; 16 GB boxes qualify (most gaming PCs).
+    16
 }
 fn default_music_min_free_ram_gb() -> u64 {
     // A bf16 DiT-only song peaked at 8.5 GB RSS (measured 2026-11-09).
