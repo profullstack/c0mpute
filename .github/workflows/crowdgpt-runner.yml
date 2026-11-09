@@ -1,4 +1,4 @@
-# Build and publish the CrowdGPT runner image (plugins/crowdgpt/runner).
+# Build and publish the CrowdGPT runner image (node/crates/c0mpute-core/crowdgpt-runner).
 #
 # The image holds CrowdGPT's client (GPL-3.0, unmodified) at the commit pinned
 # by ARG CROWDGPT_COMMIT in the Dockerfile, which must equal CROWDGPT_COMMIT in
@@ -18,11 +18,11 @@ on:
   push:
     branches: [master]
     paths:
-      - "plugins/crowdgpt/runner/**"
+      - "node/crates/c0mpute-core/crowdgpt-runner/**"
       - ".github/workflows/crowdgpt-runner.yml"
   pull_request:
     paths:
-      - "plugins/crowdgpt/runner/**"
+      - "node/crates/c0mpute-core/crowdgpt-runner/**"
       - ".github/workflows/crowdgpt-runner.yml"
   workflow_dispatch:
 
@@ -38,9 +38,9 @@ jobs:
       - name: Watchdog parses and the pin is consistent
         run: |
           set -eu
-          sh -n plugins/crowdgpt/runner/c0mpute-crowdgpt-run
-          shellcheck -s sh plugins/crowdgpt/runner/c0mpute-crowdgpt-run || true
-          pin=$(sed -n 's/^ARG CROWDGPT_COMMIT=//p' plugins/crowdgpt/runner/Dockerfile)
+          sh -n node/crates/c0mpute-core/crowdgpt-runner/c0mpute-crowdgpt-run
+          shellcheck -s sh node/crates/c0mpute-core/crowdgpt-runner/c0mpute-crowdgpt-run || true
+          pin=$(sed -n 's/^ARG CROWDGPT_COMMIT=//p' node/crates/c0mpute-core/crowdgpt-runner/Dockerfile)
           grep -q "CROWDGPT_COMMIT: &str = \"$pin\"" node/crates/c0mpute-core/src/crowdgpt.rs
           grep -q "crowdgpt-$(echo "$pin" | cut -c1-12)" plugins/crowdgpt/module.toml
           echo "pinned CrowdGPT commit: $pin"
@@ -73,7 +73,7 @@ jobs:
         id: tags
         run: |
           set -eu
-          pin=$(sed -n 's/^ARG CROWDGPT_COMMIT=//p' plugins/crowdgpt/runner/Dockerfile)
+          pin=$(sed -n 's/^ARG CROWDGPT_COMMIT=//p' node/crates/c0mpute-core/crowdgpt-runner/Dockerfile)
           short=$(echo "$pin" | cut -c1-12)
           echo "pin=${pin}" >> "$GITHUB_OUTPUT"
           echo "tags=${IMAGE}:crowdgpt-${short},${IMAGE}:stable,${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
@@ -84,8 +84,8 @@ jobs:
         with:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          context: plugins/crowdgpt/runner
-          file: plugins/crowdgpt/runner/Dockerfile
+          context: node/crates/c0mpute-core/crowdgpt-runner
+          file: node/crates/c0mpute-core/crowdgpt-runner/Dockerfile
           load: ${{ github.event_name == 'pull_request' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.tags.outputs.tags }}
