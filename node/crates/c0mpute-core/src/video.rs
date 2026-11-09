@@ -249,6 +249,10 @@ pub struct VideoJobInline {
     /// Peer holding `image_hash`, when the buyer knows it.
     #[serde(default)]
     pub image_provider_peer_id: Option<String>,
+    /// Hex key the stored image is sealed under (DIP-0032); rides only inside
+    /// the sealed spec. Absent: the stored bytes are plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_key: Option<String>,
     #[serde(default = "default_image_format")]
     pub image_format: String,
     #[serde(default = "default_frames")]
@@ -295,7 +299,7 @@ impl VideoJobInline {
                 hash,
                 self.image_size,
                 self.image_pieces.as_deref(),
-                MAX_IMAGE_BYTES,
+                crate::pieces::input_limit(MAX_IMAGE_BYTES, self.image_key.is_some()),
             )
         })
     }
@@ -684,8 +688,9 @@ async fn run_video_job(
                 .map(str::parse)
                 .transpose()
                 .context("invalid image provider peer id")?;
+            let key = crate::pieces::input_key(inline.image_key.as_deref())?;
             let bytes = input
-                .fetch(net, provider, MAX_IMAGE_BYTES)
+                .fetch_opened(net, provider, MAX_IMAGE_BYTES, key.as_ref())
                 .await
                 .context("fetch the conditioning image (maximum 32 MiB)")?;
             let name = format!("input.{}", inline.image_format);
@@ -737,7 +742,7 @@ async fn run_video_job(
             bail!("video result is not an MP4");
         }
     }
-    crate::pieces::publish_result_file(net, store, &out_path, MAX_RESULT_BYTES as u64).await
+    crate::pieces::publish_result_file(net, store, &job.accept, &out_path, MAX_RESULT_BYTES as u64).await
 }
 
 /// `ftyp` at offset 4 is the ISO-BMFF marker. The runner already ffprobed the
@@ -803,6 +808,7 @@ mod tests {
 
     fn job() -> VideoJobInline {
         VideoJobInline {
+            image_key: None,
             model: "wan2.2-ti2v-5b".into(),
             prompt: "a neon alley in the rain".into(),
             negative_prompt: String::new(),

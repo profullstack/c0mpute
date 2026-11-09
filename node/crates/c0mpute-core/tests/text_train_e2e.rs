@@ -145,7 +145,7 @@ async fn trains_peer_to_peer_with_pieces_and_conversations() {
 
     // A tampered manifest hash is refused (nothing is written).
     let bogus = c0mpute_proto::Hash::of(b"not a manifest").to_hex();
-    let err = text::fetch_adapter_pieces(&buyer, Some(w.net.peer_id()), &bogus, &tmp.path().join("bad")).await;
+    let err = text::fetch_adapter_pieces(&buyer, Some(w.net.peer_id()), &bogus, &tmp.path().join("bad"), None).await;
     assert!(err.is_err());
     assert!(!tmp.path().join("bad").exists());
 

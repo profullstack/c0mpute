@@ -583,6 +583,7 @@ dependencies = [
  "url",
  "uuid",
  "x25519-dalek",
+ "zeroize",
  "zip",
 ]
 
@@ -658,6 +659,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

@@ -139,7 +139,65 @@ pub async fn put_bytes_pieces(
     })
 }
 
+/// Seal `bytes` under a fresh key ([`crate::job_e2e`]) and store the
+/// ciphertext as pieces. The key belongs in the sealed spec only
+/// ([`Pieces::sealed_spec_fields`]): every node that stores, relays or fetches
+/// the pieces sees ciphertext.
+pub async fn put_bytes_pieces_sealed(
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
+    bytes: &[u8],
+    piece_bytes: usize,
+) -> Result<(Pieces, c0mpute_net::topics::JobKey)> {
+    if bytes.is_empty() {
+        bail!("cannot store an empty input");
+    }
+    let key = crate::job_e2e::random_key();
+    let sealed = crate::job_e2e::seal_blob(&key, bytes)?;
+    Ok((put_bytes_pieces(net, store, &sealed, piece_bytes).await?, key))
+}
+
+/// [`put_bytes_pieces_sealed`] for a file on disk, streamed through a sealed
+/// copy next to it (removed afterwards).
+pub async fn put_file_pieces_sealed(
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
+    path: &Path,
+    max_bytes: u64,
+    piece_bytes: usize,
+) -> Result<(Pieces, c0mpute_net::topics::JobKey)> {
+    let size = tokio::fs::metadata(path).await.with_context(|| format!("read {}", path.display()))?.len();
+    if size == 0 || size > max_bytes {
+        bail!("{} is {size} bytes; the limit is {max_bytes}", path.display());
+    }
+    let key = crate::job_e2e::random_key();
+    let sealed = path.with_extension(format!("sealed-{}", uuid::Uuid::new_v4()));
+    crate::job_e2e::seal_file(&key, path, &sealed).await?;
+    let stored = put_file_pieces(net, store, &sealed, crate::job_e2e::sealed_len(max_bytes), piece_bytes).await;
+    let _ = tokio::fs::remove_file(&sealed).await;
+    Ok((stored?, key))
+}
+
+/// The byte limit to check a stored input against: its plaintext limit, or
+/// that limit once sealed when the spec names a key.
+pub fn input_limit(max_bytes: usize, sealed: bool) -> usize {
+    if sealed { crate::job_e2e::sealed_len(max_bytes as u64) as usize } else { max_bytes }
+}
+
+/// The key a spec's `<prefix>_key` field names, if any.
+pub fn input_key(hex_key: Option<&str>) -> Result<Option<c0mpute_net::topics::JobKey>> {
+    hex_key.map(crate::job_e2e::key_from_hex).transpose()
+}
+
 impl Pieces {
+    /// [`Self::spec_fields`] plus `<prefix>_key`, the key the stored input
+    /// is sealed under. Only ever inside a sealed spec.
+    pub fn sealed_spec_fields(&self, prefix: &str, key: &c0mpute_net::topics::JobKey) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = self.spec_fields(prefix);
+        map.insert(format!("{prefix}_key"), crate::job_e2e::key_to_hex(key).into());
+        map
+    }
+
     /// The spec fields that name this input, under `prefix` (`input`,
     /// `audio`, `image`): `<prefix>_hash` always, plus `<prefix>_size` and
     /// `<prefix>_pieces` when there is more than one piece. A one-piece
@@ -384,6 +442,55 @@ impl InputRef {
         }
     }
 
+    /// [`Self::fetch`], then open with `key` when the input is sealed. The
+    /// stored bytes are checked against the sealed size of `max_bytes`, the
+    /// opened bytes against `max_bytes`.
+    pub async fn fetch_opened(
+        &self,
+        net: &Arc<Libp2pNetwork>,
+        provider: Option<PeerId>,
+        max_bytes: usize,
+        key: Option<&c0mpute_net::topics::JobKey>,
+    ) -> Result<Vec<u8>> {
+        let Some(key) = key else {
+            return self.fetch(net, provider, max_bytes).await;
+        };
+        let sealed = self.fetch(net, provider, input_limit(max_bytes, true)).await?;
+        let plain = crate::job_e2e::open_blob(key, &sealed).context("the input does not open with its key")?;
+        if plain.is_empty() || plain.len() > max_bytes {
+            bail!("the input is empty or over the {max_bytes}-byte limit");
+        }
+        Ok(plain)
+    }
+
+    /// [`Self::fetch_to_file`], then open into `dest` with `key` when the
+    /// input is sealed (the sealed copy is removed).
+    pub async fn fetch_to_file_opened(
+        &self,
+        net: &Arc<Libp2pNetwork>,
+        provider: Option<PeerId>,
+        max_bytes: usize,
+        key: Option<&c0mpute_net::topics::JobKey>,
+        dest: &Path,
+    ) -> Result<()> {
+        let Some(key) = key else {
+            return self.fetch_to_file(net, provider, max_bytes, dest).await;
+        };
+        let sealed = dest.with_extension(format!("sealed-{}", uuid::Uuid::new_v4()));
+        let fetched = self.fetch_to_file(net, provider, input_limit(max_bytes, true), &sealed).await;
+        let opened = match fetched {
+            Ok(()) => crate::job_e2e::open_file(key, &sealed, dest).await.context("the input does not open with its key"),
+            Err(e) => Err(e),
+        };
+        let _ = tokio::fs::remove_file(&sealed).await;
+        let n = opened?;
+        if n as usize > max_bytes {
+            let _ = tokio::fs::remove_file(dest).await;
+            bail!("the input is over the {max_bytes}-byte limit");
+        }
+        Ok(())
+    }
+
     /// Fetch and verify the whole input into memory.
     pub async fn fetch(
         &self,
@@ -570,11 +677,27 @@ async fn store_manifest(
 /// receipt names. Up to [`RESULT_SINGLE_CHUNK_MAX`] it is the result's own
 /// hash (one chunk, readable by every buyer); above that it is a manifest
 /// over [`RESULT_PIECE_BYTES`] pieces.
+///
+/// An e2e job's result ([`crate::job_e2e`]) is sealed to the buyer first, so
+/// what is stored, announced and named by the receipt is ciphertext.
 pub async fn publish_result_bytes(
     net: &Libp2pNetwork,
     store: &ChunkStore,
+    accept: &c0mpute_net::topics::JobAccept,
     bytes: &[u8],
 ) -> Result<String> {
+    if bytes.is_empty() {
+        bail!("cannot publish an empty result");
+    }
+    match crate::job_e2e::seal_result(accept, bytes)? {
+        Some(sealed) => publish_stored_bytes(net, store, &sealed).await,
+        None => publish_stored_bytes(net, store, bytes).await,
+    }
+}
+
+/// Store and announce `bytes` exactly as given (no sealing). Runners use
+/// [`publish_result_bytes`], which seals e2e results first.
+pub async fn publish_stored_bytes(net: &Libp2pNetwork, store: &ChunkStore, bytes: &[u8]) -> Result<String> {
     if bytes.is_empty() {
         bail!("cannot publish an empty result");
     }
@@ -603,6 +726,7 @@ pub async fn publish_result_bytes(
 pub async fn publish_result_file(
     net: &Libp2pNetwork,
     store: &ChunkStore,
+    accept: &c0mpute_net::topics::JobAccept,
     path: &Path,
     max_bytes: u64,
 ) -> Result<String> {
@@ -616,9 +740,32 @@ pub async fn publish_result_file(
     if size > max_bytes {
         bail!("result is {size} bytes, over the {max_bytes}-byte result limit");
     }
+    if accept.e2e.is_none() {
+        return publish_stored_file(net, store, path, max_bytes).await;
+    }
+    let key = accept.result_key.as_ref().context("e2e job without a result key")?;
+    let sealed = path.with_extension("sealed");
+    crate::job_e2e::seal_file(key, path, &sealed).await?;
+    let out = publish_stored_file(net, store, &sealed, crate::job_e2e::sealed_len(max_bytes)).await;
+    let _ = tokio::fs::remove_file(&sealed).await;
+    out
+}
+
+/// [`publish_stored_bytes`] for a file on disk, streamed.
+pub async fn publish_stored_file(net: &Libp2pNetwork, store: &ChunkStore, path: &Path, max_bytes: u64) -> Result<String> {
+    let size = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("result file {} is missing", path.display()))?
+        .len();
+    if size == 0 {
+        bail!("result {} is empty", path.display());
+    }
+    if size > max_bytes {
+        bail!("result is {size} bytes, over the {max_bytes}-byte result limit");
+    }
     if size as usize <= RESULT_SINGLE_CHUNK_MAX {
         let bytes = tokio::fs::read(path).await?;
-        return publish_result_bytes(net, store, &bytes).await;
+        return publish_stored_bytes(net, store, &bytes).await;
     }
     let pieces = put_file_pieces(net, store, path, max_bytes, RESULT_PIECE_BYTES).await?;
     store_manifest(net, store, &pieces).await

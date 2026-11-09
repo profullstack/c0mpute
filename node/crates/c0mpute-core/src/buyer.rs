@@ -1,10 +1,11 @@
 //! Buyer side of the auction: publish a `JobOffer`, collect `JobBid`s,
 //! pick a winner, publish `JobAccept`, wait for `JobReceipt`.
 //!
-//! Phase 1: inline-spec auction. The full workload spec ships in
-//! `JobOffer.spec_inline` (and again in `JobAccept.spec_inline`) so
-//! workers never need a separate manifest fetch. Phase 2 swaps this for
-//! the chunk-store / request-response transfer keyed off `spec_hash`.
+//! Every auction is end-to-end encrypted ([`crate::job_e2e`], DIP-0032): the
+//! offer carries only a public spec and a fresh buyer X25519 key, bids carry
+//! signed worker keys, the accept carries no spec, and the winner alone
+//! fetches the spec sealed to its key over request-response. The outcome
+//! holds the key that opens the worker's sealed result.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,6 +62,10 @@ pub struct JobAuction {
     /// workloads that exchange more with the winner before its receipt
     /// (`webhook.deliver` seals its request to the winner's key).
     pub accept_notify: Option<tokio::sync::mpsc::UnboundedSender<(String, JobBid)>>,
+    /// Require an attested TEE ([`c0mpute_net::topics::CONFIDENTIAL_TAG`]):
+    /// only bids whose attestation verifies are considered, and the spec is
+    /// sealed to the attested key only.
+    pub confidential: bool,
 }
 
 impl JobAuction {
@@ -79,7 +84,13 @@ impl JobAuction {
             external_ref: None,
             policy: crate::routing::SelectionPolicy::default(),
             accept_notify: None,
+            confidential: false,
         }
+    }
+
+    pub fn with_confidential(mut self, confidential: bool) -> Self {
+        self.confidential = confidential;
+        self
     }
 
     pub fn with_accept_notify(
@@ -169,6 +180,37 @@ pub struct AuctionOutcome {
     /// The auction's `external_ref`, as the buyer set it. Use this rather
     /// than `receipt.external_ref`, which workers older than 0.2.49 omit.
     pub external_ref: Option<String>,
+    /// Opens the result the worker sealed to us (the chunk the receipt's
+    /// `output_hash` names is ciphertext). Never leaves this process.
+    pub result_key: c0mpute_net::topics::JobKey,
+}
+
+impl AuctionOutcome {
+    /// Open the sealed result bytes fetched by the receipt's hash.
+    pub fn open_result(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+        crate::job_e2e::open_blob(&self.result_key, sealed)
+    }
+
+    /// Open a sealed result fetched to a file, in place.
+    pub async fn open_result_file(&self, path: &std::path::Path) -> Result<u64> {
+        crate::job_e2e::open_file_in_place(&self.result_key, path).await
+    }
+}
+
+/// The offer's required tags: the caller's, plus the e2e tag (so pre-e2e
+/// workers never bid) and the TEE tag for confidential work.
+fn e2e_required_capabilities(caps: &[String], confidential: bool) -> Vec<String> {
+    let mut caps = caps.to_vec();
+    let mut want = vec![c0mpute_net::topics::JOB_E2E_TAG];
+    if confidential {
+        want.push(c0mpute_net::topics::CONFIDENTIAL_TAG);
+    }
+    for t in want {
+        if !caps.iter().any(|c| c == t) {
+            caps.push(t.to_string());
+        }
+    }
+    caps
 }
 
 /// Run the full buyer-side auction synchronously: subscribe → publish
@@ -194,14 +236,16 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
 
     let job_id = Uuid::new_v4().to_string();
     let now_ms = unix_ms();
+    let session = crate::job_e2e::BuyerSession::new(&auction.spec_inline, auction.confidential)?;
     let offer = JobOffer {
         job_id: job_id.clone(),
         workload_type: auction.workload_type.clone(),
         buyer_peer_id: net.peer_id().to_base58(),
         buyer_did: None,
-        spec_hash: blake3_hex(&auction.spec_inline.to_string()),
-        spec_inline: Some(auction.spec_inline.clone()),
-        required_capabilities: auction.required_capabilities.clone(),
+        // A salted commitment: says nothing about the spec to observers.
+        spec_hash: session.spec_hash(),
+        spec_inline: None,
+        required_capabilities: e2e_required_capabilities(&auction.required_capabilities, auction.confidential),
         max_price_usd: auction.max_price_usd,
         deadline_unix_ms: now_ms + auction.deadline.as_millis() as u64,
         published_at_ms: now_ms,
@@ -210,6 +254,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         // on the gossip mesh, which drops them while it re-forms.
         buyer_addrs: offer_buyer_addrs(&net).await,
         bid_window_ms: Some(auction.bid_window.as_millis() as u64),
+        e2e: Some(session.offer_part(&auction.workload_type, &auction.spec_inline)),
     };
 
     info!(
@@ -285,6 +330,12 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             fallback.push(bid);
                             continue;
                         }
+                        // Only a key the bidder signed for this job (and, for
+                        // confidential work, attested) may receive the spec.
+                        if let Err(e) = session.check_bid(&job_id, &auction.workload_type, &offer.buyer_peer_id, &bid) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, err = %e, "buyer: bid without a usable e2e key ignored");
+                            continue;
+                        }
                         debug!(
                             %job_id,
                             bidder = %bid.bidder_peer_id,
@@ -350,6 +401,18 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         "buyer: winner chosen"
     );
 
+    // ── seal the spec to the winner alone ───────────────────────────
+    let winner_peer: c0mpute_net::PeerId = winner
+        .bidder_peer_id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("winner peer id: {e}"))?;
+    let (sealed, result_key) =
+        session.seal_for(&job_id, &auction.workload_type, &offer.buyer_peer_id, &winner)?;
+    drop(session);
+    // Held until this function returns (receipt or timeout); served only to
+    // the winner over request-response, never on gossip.
+    let _payload = crate::job_e2e::hold_payload(&net, &job_id, winner_peer, sealed);
+
     // ── publish accept ──────────────────────────────────────────────
     let accept = JobAccept {
         job_id: job_id.clone(),
@@ -357,13 +420,15 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         winning_bidder_peer_id: winner.bidder_peer_id.clone(),
         agreed_price_usd: winner.price_usd,
         workload_type: auction.workload_type.clone(),
-        spec_inline: Some(auction.spec_inline.clone()),
+        spec_inline: None,
         published_at_ms: unix_ms(),
         external_ref: auction.external_ref.clone(),
         buyer_addrs: crate::reachability::buyer_external_addrs(
             std::env::var("C0MPUTE_P2P_EXTERNAL").ok().as_deref(),
             &offer.buyer_peer_id,
         ),
+        e2e: Some(c0mpute_net::topics::JOB_E2E_VERSION),
+        result_key: None,
     };
     // Tell the winner directly as well as on the topic: an accept lost on
     // the mesh used to leave the buyer waiting out the whole receipt timeout.
@@ -424,6 +489,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             accepted_bid: winner,
                             receipt,
                             external_ref: auction.external_ref.clone(),
+                            result_key,
                         });
                     }
                 }
@@ -460,20 +526,22 @@ pub async fn probe_auction(
     let mut rx = net.messages();
     let job_id = Uuid::new_v4().to_string();
     let now_ms = unix_ms();
+    let session = crate::job_e2e::BuyerSession::new(&spec_inline, false)?;
     let offer = JobOffer {
         job_id: job_id.clone(),
         workload_type: workload.to_string(),
         buyer_peer_id: net.peer_id().to_base58(),
         buyer_did: None,
-        spec_hash: blake3_hex(&spec_inline.to_string()),
-        spec_inline: Some(spec_inline),
-        required_capabilities,
+        spec_hash: session.spec_hash(),
+        spec_inline: None,
+        required_capabilities: e2e_required_capabilities(&required_capabilities, false),
         max_price_usd: 0.0,
         deadline_unix_ms: now_ms + 10 * 60 * 1000,
         published_at_ms: now_ms,
         external_ref: None,
         buyer_addrs: offer_buyer_addrs(&net).await,
         bid_window_ms: Some(window.as_millis() as u64),
+        e2e: Some(session.offer_part(workload, &spec_inline)),
     };
     publish_json(&net, &topic, &offer).await?;
     let deadline = Instant::now() + window;
@@ -579,11 +647,6 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn blake3_hex(s: &str) -> String {
-    let h = blake3::hash(s.as_bytes());
-    hex::encode(h.as_bytes())
-}
-
 // Dummy use to suppress "unused" if `JobStatus` isn't referenced elsewhere
 // in this module — it's part of the receipt we return.
 #[allow(dead_code)]
@@ -606,6 +669,7 @@ mod tests {
             expires_at_ms,
             bench_score: None,
             load: None,
+            e2e: None,
         }
     }
 

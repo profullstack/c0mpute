@@ -1138,7 +1138,21 @@ impl Worker {
     }
 
     pub fn accepts_start(&self, offer: &JobOffer) -> bool {
-        let Some(spec) = offer.spec_inline.as_ref().and_then(|v| serde_json::from_value::<StartSpec>(v.clone()).ok()) else {
+        // An e2e offer keeps its keys, stop hash and world sealed: stand-ins
+        // let the size and price checks run; the opened spec is checked again.
+        let spec = match crate::job_e2e::bid_spec(offer) {
+            Some(crate::job_e2e::BidSpec::Public(v)) => Some(crate::job_e2e::with_placeholders(
+                v,
+                &[
+                    ("stop_hash", serde_json::json!(format!("sha256:{}", "0".repeat(64)))),
+                    ("client_pubkey", serde_json::json!("1".repeat(64))),
+                    ("backup_pubkey", serde_json::json!("1".repeat(64))),
+                ],
+            )),
+            Some(crate::job_e2e::BidSpec::Full(v)) => Some(v.clone()),
+            None => None,
+        };
+        let Some(spec) = spec.and_then(|v| serde_json::from_value::<StartSpec>(v).ok()) else {
             return false;
         };
         if spec.validate().is_err() {
@@ -1157,6 +1171,13 @@ impl Worker {
     }
 
     pub fn accepts_stop(&self, offer: &JobOffer) -> bool {
+        // An e2e offer shows the token's hash, never the token.
+        if let Some(crate::job_e2e::BidSpec::Public(v)) = crate::job_e2e::bid_spec(offer) {
+            let (Some(id), Some(h)) = (v["id"].as_str(), v["token_hash"].as_str()) else {
+                return false;
+            };
+            return self.snapshot().get(id).is_some_and(|s| s.stop_hash == h);
+        }
         let Some(spec) = offer.spec_inline.as_ref().and_then(|v| serde_json::from_value::<StopSpec>(v.clone()).ok()) else {
             return false;
         };
@@ -1895,8 +1916,8 @@ async fn auction(
     if o.receipt.status != JobStatus::Completed {
         bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
     }
-    let hash = o.receipt.output_hash.clone().context("worker returned no result hash")?;
-    let bytes = crate::gateway_util::fetch_result(&net, &hash, &o.accepted_bid.bidder_peer_id, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow::anyhow!("fetch result: {e:?}"))?;
+    o.receipt.output_hash.as_ref().context("worker returned no result hash")?;
+    let bytes = crate::gateway_util::fetch_result(&net, &o, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow::anyhow!("fetch result: {e:?}"))?;
     let v: Value = serde_json::from_slice(&bytes)?;
     if v["ok"] != json!(true) {
         bail!("worker result: {v}");

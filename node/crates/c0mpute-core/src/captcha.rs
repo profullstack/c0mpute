@@ -788,7 +788,7 @@ async fn run_captcha_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("captcha result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes)
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes)
         .await
         .context("publish captcha result")
 }

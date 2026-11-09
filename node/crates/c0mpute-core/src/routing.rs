@@ -135,6 +135,7 @@ mod tests {
             expires_at_ms: None,
             bench_score: bench,
             load,
+            e2e: None,
         }
     }
 

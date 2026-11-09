@@ -102,7 +102,7 @@ async fn a_12_mib_result_reaches_the_buyer() {
     // Before: one chunk. The fetch fails on the codec's response cap.
     let whole = worker_store.put(&result).await.unwrap();
     worker.announce(&whole).await.unwrap();
-    let single = gateway_util::fetch_result(
+    let single = gateway_util::fetch_stored_result(
         &buyer,
         &whole.to_hex(),
         &provider,
@@ -116,11 +116,11 @@ async fn a_12_mib_result_reaches_the_buyer() {
     );
 
     // After: pieces plus a manifest; the receipt names the manifest.
-    let receipt_hash = pieces::publish_result_bytes(&worker, &worker_store, &result)
+    let receipt_hash = pieces::publish_stored_bytes(&worker, &worker_store, &result)
         .await
         .unwrap();
     assert_ne!(receipt_hash, Hash::of(&result).to_hex());
-    let got = gateway_util::fetch_result(
+    let got = gateway_util::fetch_stored_result(
         &buyer,
         &receipt_hash,
         &provider,
@@ -133,7 +133,7 @@ async fn a_12_mib_result_reaches_the_buyer() {
     assert!(got == result, "reassembled result differs");
 
     // The buyer's cap still holds for a pieced result.
-    let over = gateway_util::fetch_result(
+    let over = gateway_util::fetch_stored_result(
         &buyer,
         &receipt_hash,
         &provider,
@@ -169,7 +169,7 @@ async fn small_and_legacy_results_stay_single_chunk() {
 
     // At the threshold: one chunk, receipt hash = content hash.
     let small = noise(b"{\"text\":\"", pieces::RESULT_SINGLE_CHUNK_MAX);
-    let h = pieces::publish_result_bytes(&worker, &worker_store, &small)
+    let h = pieces::publish_stored_bytes(&worker, &worker_store, &small)
         .await
         .unwrap();
     assert_eq!(h, Hash::of(&small).to_hex());
@@ -179,24 +179,24 @@ async fn small_and_legacy_results_stay_single_chunk() {
             .unwrap();
     assert!(old_buyer == small);
     let new_buyer =
-        gateway_util::fetch_result(&buyer, &h, &provider, 10 * MIB, Duration::from_secs(20))
+        gateway_util::fetch_stored_result(&buyer, &h, &provider, 10 * MIB, Duration::from_secs(20))
             .await
             .unwrap();
     assert!(new_buyer == small);
     // A single chunk over the buyer's cap is refused.
     assert!(matches!(
-        gateway_util::fetch_result(&buyer, &h, &provider, 1024, Duration::from_secs(20)).await,
+        gateway_util::fetch_stored_result(&buyer, &h, &provider, 1024, Duration::from_secs(20)).await,
         Err(FetchError::Invalid(_))
     ));
 
     // One byte over: pieced.
     let two = noise(b"{", pieces::RESULT_SINGLE_CHUNK_MAX + 1);
-    let h = pieces::publish_result_bytes(&worker, &worker_store, &two)
+    let h = pieces::publish_stored_bytes(&worker, &worker_store, &two)
         .await
         .unwrap();
     assert_ne!(h, Hash::of(&two).to_hex());
     assert!(
-        gateway_util::fetch_result(&buyer, &h, &provider, 10 * MIB, Duration::from_secs(30))
+        gateway_util::fetch_stored_result(&buyer, &h, &provider, 10 * MIB, Duration::from_secs(30))
             .await
             .unwrap()
             == two
@@ -206,7 +206,7 @@ async fn small_and_legacy_results_stay_single_chunk() {
     let legacy = wav(4 * MIB);
     let lh = worker_store.put(&legacy).await.unwrap();
     worker.announce(&lh).await.unwrap();
-    let got = gateway_util::fetch_result(
+    let got = gateway_util::fetch_stored_result(
         &buyer,
         &lh.to_hex(),
         &provider,
@@ -242,7 +242,7 @@ async fn a_forged_manifest_is_refused() {
     };
     let mh = worker_store.put(&manifest.encode()).await.unwrap();
     worker.announce(&mh).await.unwrap();
-    let got = gateway_util::fetch_result(
+    let got = gateway_util::fetch_stored_result(
         &buyer,
         &mh.to_hex(),
         &provider,
@@ -277,18 +277,18 @@ async fn file_round_trip(len: usize) {
     }
     // Over the worker's cap is refused before anything is stored.
     assert!(
-        pieces::publish_result_file(&worker, &worker_store, &src, len as u64 - 1)
+        pieces::publish_stored_file(&worker, &worker_store, &src, len as u64 - 1)
             .await
             .is_err()
     );
     let started = Instant::now();
-    let h = pieces::publish_result_file(&worker, &worker_store, &src, len as u64)
+    let h = pieces::publish_stored_file(&worker, &worker_store, &src, len as u64)
         .await
         .unwrap();
     let stored = started.elapsed();
     let dest = tmp.path().join("got.mp4");
     let started = Instant::now();
-    let written = gateway_util::fetch_result_to_file(
+    let written = gateway_util::fetch_stored_result_to_file(
         &buyer,
         &h,
         &provider,

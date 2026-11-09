@@ -201,6 +201,10 @@ pub struct RenderSpec {
     /// worker looks each piece up on the DHT.
     #[serde(default)]
     pub input_provider_peer_id: Option<String>,
+    /// Hex key the stored `.blend` is sealed under (DIP-0032); rides only
+    /// inside the sealed spec. Absent: the stored bytes are plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
     pub frame_start: u32,
     pub frame_end: u32,
     #[serde(default = "default_engine")]
@@ -265,8 +269,13 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<Parsed, String> {
     }
     let input_hash = Hash::from_hex(&s.input_hash)
         .map_err(|_| "input_hash must be a hex content hash".to_string())?;
-    if s.input_size == 0 || s.input_size > MAX_INPUT_BYTES {
+    // A sealed .blend is a little bigger than the plaintext limit.
+    let max_input = if s.input_key.is_some() { crate::job_e2e::sealed_len(MAX_INPUT_BYTES) } else { MAX_INPUT_BYTES };
+    if s.input_size == 0 || s.input_size > max_input {
         return Err("input_size must be between 1 byte and 512 MiB".into());
+    }
+    if s.input_key.as_deref().is_some_and(|k| crate::job_e2e::key_from_hex(k).is_err()) {
+        return Err("input_key must be 32 bytes of hex".into());
     }
     let expected = piece_count(s.input_size);
     if s.input_pieces.len() != expected {
@@ -561,7 +570,8 @@ pub fn result_frames(parsed: &Parsed, value: &Value) -> Result<Vec<FrameMeta>> {
                 parsed.format.name()
             );
         }
-        if meta.size == 0 || meta.size > MAX_FRAME_BYTES || meta.width == 0 || meta.height == 0 {
+        // `size` is the sealed frame's: a little over the plaintext cap.
+        if meta.size == 0 || meta.size > crate::job_e2e::sealed_len(MAX_FRAME_BYTES) || meta.width == 0 || meta.height == 0 {
             bail!("frame {} has an invalid size or dimensions", meta.frame);
         }
         if meta.pieces.len() != piece_count(meta.size) {
@@ -590,6 +600,12 @@ pub fn verify_frame(meta: &FrameMeta, bytes: &[u8]) -> Result<ImageInfo> {
     if Hash::of(bytes).to_hex() != meta.hash {
         bail!("frame {} does not match its hash", meta.frame);
     }
+    check_frame_image(meta, bytes)
+}
+
+/// The image checks of [`verify_frame`]: a PNG, JPEG or EXR whose header
+/// matches the result's format and dimensions.
+pub fn check_frame_image(meta: &FrameMeta, bytes: &[u8]) -> Result<ImageInfo> {
     let info = inspect_image(bytes)
         .with_context(|| format!("frame {} is not a valid PNG, JPEG or EXR", meta.frame))?;
     if info.format.name() != meta.format || info.width != meta.width || info.height != meta.height {
@@ -631,8 +647,11 @@ impl Runtime {
         self.gpu_backends.first().map(String::as_str)
     }
     pub fn can_serve(&self, parsed: &Parsed) -> bool {
+        self.can_serve_engine(parsed.engine, parsed.device)
+    }
+    pub fn can_serve_engine(&self, engine: Engine, device: Device) -> bool {
         self.ready()
-            && match (parsed.engine.needs_gpu(), parsed.device) {
+            && match (engine.needs_gpu(), device) {
                 (true, _) | (false, Device::Gpu) => self.gpu().is_some(),
                 (false, _) => true,
             }
@@ -787,12 +806,17 @@ pub fn parse_gpu_probe(text: &str) -> Vec<String> {
 /// Bid filter: skip offers this box cannot render (a GPU engine or device
 /// without a GPU, or a spec it cannot read).
 pub fn offer_filter() -> crate::dispatch::OfferFilter {
-    Arc::new(|offer: &JobOffer| {
-        offer
-            .spec_inline
-            .as_ref()
-            .and_then(|spec| parse_spec(spec).ok())
-            .is_some_and(|parsed| runtime().can_serve(&parsed))
+    Arc::new(|offer: &JobOffer| match crate::job_e2e::bid_spec(offer) {
+        // The .blend file stays sealed: judge the engine and device.
+        Some(crate::job_e2e::BidSpec::Public(v)) => {
+            let field = |k: &str, d: &str| v.get(k).and_then(Value::as_str).unwrap_or(d).to_string();
+            match (Engine::parse(&field("engine", &default_engine())), Device::parse(&field("device", &default_device()))) {
+                (Some(engine), Some(device)) => runtime().can_serve_engine(engine, device),
+                _ => false,
+            }
+        }
+        Some(crate::job_e2e::BidSpec::Full(spec)) => parse_spec(spec).is_ok_and(|parsed| runtime().can_serve(&parsed)),
+        None => false,
     })
 }
 
@@ -1137,14 +1161,26 @@ async fn run_render_job(
 ) -> Result<String> {
     let spec = crate::workflow::resolve_spec(net, job).await?;
     let parsed = parse_spec(&spec).map_err(anyhow::Error::msg)?;
-    let blend = ensure_input(net, &cache_root.join("render-inputs"), &parsed).await?;
+    let cached = ensure_input(net, &cache_root.join("render-inputs"), &parsed).await?;
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     tokio::fs::create_dir_all(&job_dir).await?;
+    // A sealed .blend stays sealed in the cache; the plaintext lives only in
+    // this job's directory, removed when the job ends.
+    let blend = match crate::pieces::input_key(parsed.spec.input_key.as_deref())? {
+        Some(key) => {
+            let plain = job_dir.join("input.blend");
+            crate::job_e2e::open_file(&key, &cached, &plain).await.context("the .blend does not open with its key")?;
+            plain
+        }
+        None => cached,
+    };
     let frames = render(&blend, &parsed, &job_dir).await?;
     let rt = runtime();
     let mut metas = Vec::with_capacity(frames.len());
     for f in &frames {
-        let stored = put_file_pieces(net, store, &f.path, MAX_FRAME_BYTES).await?;
+        // An e2e job's frames are sealed to the buyer before they are stored.
+        let (file, limit) = crate::job_e2e::sealed_result_file(&job.accept, &f.path, MAX_FRAME_BYTES).await?;
+        let stored = put_file_pieces(net, store, &file.path, limit).await?;
         metas.push(FrameMeta {
             frame: f.frame,
             format: f.info.format.name().into(),
@@ -1169,7 +1205,7 @@ async fn run_render_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("render result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes)
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes)
         .await
         .context("publish render result")
 }
@@ -1182,6 +1218,7 @@ pub async fn fetch_frames(
     net: &Arc<Libp2pNetwork>,
     worker: &str,
     frames: &[FrameMeta],
+    key: &c0mpute_net::topics::JobKey,
     budget: Duration,
 ) -> Result<Vec<(FrameMeta, Vec<u8>)>> {
     let started = Instant::now();
@@ -1207,8 +1244,15 @@ pub async fn fetch_frames(
                 bail!("frame {} is bigger than its result says", meta.frame);
             }
         }
-        verify_frame(meta, &bytes)?;
-        out.push((meta.clone(), bytes));
+        // `size` and `hash` name the sealed frame; the image is checked once
+        // it is opened with the job's result key.
+        if bytes.len() as u64 != meta.size || Hash::of(&bytes).to_hex() != meta.hash {
+            bail!("frame {} does not match its size or hash", meta.frame);
+        }
+        let plain = crate::job_e2e::open_blob(key, &bytes)
+            .with_context(|| format!("frame {} does not open with this job's key", meta.frame))?;
+        check_frame_image(meta, &plain)?;
+        out.push((meta.clone(), plain));
     }
     Ok(out)
 }
@@ -1274,7 +1318,10 @@ pub async fn render_frames(
         bail!("no frames to render");
     }
     tokio::fs::create_dir_all(&job.out_dir).await?;
-    let input = put_file_pieces(&net, store, &job.blend, MAX_INPUT_BYTES).await?;
+    // Sealed under a fresh key that only the winning workers learn.
+    let (input, input_key) =
+        crate::pieces::put_file_pieces_sealed(&net, store, &job.blend, MAX_INPUT_BYTES, PIECE_BYTES).await?;
+    let input_key = crate::job_e2e::key_to_hex(&input_key);
     progress(&format!(
         "published {} ({} bytes, {} pieces, blake3 {})",
         job.blend.display(),
@@ -1296,6 +1343,7 @@ pub async fn render_frames(
             "input_size": input.size,
             "input_pieces": input.pieces,
             "input_provider_peer_id": provider,
+            "input_key": input_key,
             "frame_start": start,
             "frame_end": end,
             "engine": job.engine.name(),
@@ -1417,10 +1465,10 @@ async fn collect_batch(
         .output_hash
         .as_deref()
         .context("worker returned no output hash")?;
+    let _ = hash;
     let bytes = crate::gateway_util::fetch_result(
         net,
-        hash,
-        worker,
+        outcome,
         MAX_RESULT_BYTES,
         Duration::from_secs(30),
     )
@@ -1430,7 +1478,7 @@ async fn collect_batch(
     let metas = result_frames(parsed, &result)?;
     let budget =
         Duration::from_secs(120 + 30 * metas.iter().map(|m| m.pieces.len() as u64).sum::<u64>());
-    let frames = fetch_frames(net, worker, &metas, budget).await?;
+    let frames = fetch_frames(net, worker, &metas, &outcome.result_key, budget).await?;
     // Every frame of one render has the same size.
     {
         let mut known = dims.lock().unwrap_or_else(|e| e.into_inner());

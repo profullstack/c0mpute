@@ -22,10 +22,13 @@
 //! A worker that is draining for an update ([`c0mpute_update::draining`])
 //! does not bid at all.
 //!
-//! After winning bid (received as `JobAccept`), the worker fetches the
-//! manifest, runs the workload, publishes a `JobReceipt`. The receipt
-//! flow lives in a follow-up commit — this module ships the offer/bid
-//! plumbing.
+//! End-to-end encrypted offers ([`crate::job_e2e`], DIP-0032) carry only a
+//! public spec: filters judge that at bid time, and the bid carries a fresh
+//! X25519 key signed by this node's identity. On winning, the worker fetches
+//! the sealed spec from the buyer point to point, opens it, checks it
+//! against the offer's commitment and public spec, runs the workload's filter
+//! again on the whole spec, and only then hands the job to the runner (with
+//! the key its result is sealed back under).
 //!
 //! The buyer side (publishing offers + collecting bids + accepting one)
 //! lives in `c0mpute job submit` and is not part of the worker daemon.
@@ -185,6 +188,11 @@ pub fn run_worker_subscriber_with_load(
                 if offer.workload_type != workload_type {
                     continue;
                 }
+                // Plaintext offers are served for one release more (DIP-0032).
+                if offer.e2e.is_none() && !crate::job_e2e::serves_plaintext_offers() {
+                    debug!(job_id = %offer.job_id, "dispatch: plaintext offer refused (e2e only)");
+                    continue;
+                }
                 // Private mode: only trusted buyers (by signed publisher).
                 if !crate::private::current().admits(&msg, &offer, &our_peer_id) {
                     debug!(job_id = %offer.job_id, buyer = %offer.buyer_peer_id, "dispatch: private mode, buyer not trusted");
@@ -234,7 +242,7 @@ pub fn run_worker_subscriber_with_load(
                     capacity.total_slots,
                     load.as_ref().and_then(WorkerLoad::recent_job_duration),
                 );
-                if let Some((price, expires_at_ms, payload)) = handle_offer(
+                if let Some((price, expires_at_ms, payload, session)) = handle_offer(
                     &net,
                     &topic,
                     &offer,
@@ -264,6 +272,7 @@ pub fn run_worker_subscriber_with_load(
                             expires_at_ms,
                             reserve_until_ms: reserve_until(&offer, now, expires_at_ms),
                             payload: Some(payload),
+                            e2e: session.map(|s| (Arc::new(s), Arc::new(offer.clone()))),
                         },
                     );
                 }
@@ -321,6 +330,12 @@ pub fn run_worker_subscriber_with_load(
                     "dispatch: we won — forwarding to runner"
                 );
                 crate::activity::job_started(&accept.job_id);
+                if let Some((session, offer)) = bid.e2e {
+                    // Fetching the sealed spec takes a round trip to the
+                    // buyer: never in the loop that reads offers.
+                    spawn_open_e2e(net.clone(), tx.clone(), filter.clone(), session, offer, accept);
+                    continue;
+                }
                 if let Err(e) = tx.send(AcceptedJob { accept }).await {
                     warn!(err = %e, "dispatch: runner channel closed");
                 }
@@ -344,6 +359,8 @@ pub(crate) struct OpenBid {
     pub reserve_until_ms: u64,
     /// The serialized bid, re-sent if the buyer re-sends its offer.
     pub payload: Option<Vec<u8>>,
+    /// For a bid on an e2e offer: our X25519 secret for it and the offer.
+    pub e2e: Option<(Arc<crate::job_e2e::WorkerSession>, Arc<JobOffer>)>,
 }
 
 impl OpenBid {
@@ -364,7 +381,12 @@ impl OpenBid {
         if accept.buyer_peer_id != self.buyer_peer_id {
             return Err("buyer differs from the offer");
         }
-        if accept.spec_inline != self.spec_inline {
+        if self.e2e.is_some() {
+            // The spec comes sealed after the accept, never on it.
+            if accept.e2e != Some(c0mpute_net::topics::JOB_E2E_VERSION) || accept.spec_inline.is_some() {
+                return Err("e2e offer answered by a plaintext accept");
+            }
+        } else if accept.spec_inline != self.spec_inline {
             return Err("spec differs from the offer we bid on");
         }
         if accept.external_ref != self.external_ref {
@@ -553,7 +575,7 @@ async fn handle_offer(
     eta_seconds: u64,
     bench_score: Option<u32>,
     bid_load: f32,
-) -> Option<(f64, u64, Vec<u8>)> {
+) -> Option<(f64, u64, Vec<u8>, Option<crate::job_e2e::WorkerSession>)> {
     let now_ms = unix_ms();
     if now_ms.saturating_sub(offer.published_at_ms) > MAX_OFFER_AGE.as_millis() as u64 {
         debug!(job_id = %offer.job_id, "dispatch: ignoring stale offer");
@@ -575,7 +597,7 @@ async fn handle_offer(
     let missing: Vec<&String> = offer
         .required_capabilities
         .iter()
-        .filter(|c| !advertised_tags.iter().any(|a| a == *c))
+        .filter(|c| !crate::job_e2e::implicit_tag(c) && !advertised_tags.iter().any(|a| a == *c))
         .collect();
     if !missing.is_empty() {
         debug!(
@@ -598,6 +620,17 @@ async fn handle_offer(
         },
         None => offer.max_price_usd,
     };
+    // A fresh X25519 key for this one job, signed by our identity.
+    let (session, e2e) = match offer.e2e.as_ref() {
+        Some(_) => match crate::job_e2e::WorkerSession::for_offer(net, offer) {
+            Ok((s, e)) => (Some(s), Some(e)),
+            Err(e) => {
+                debug!(job_id = %offer.job_id, err = %e, "dispatch: cannot bid on this e2e offer");
+                return None;
+            }
+        },
+        None => (None, None),
+    };
     let expires_at_ms = now_ms + BID_TTL.as_millis() as u64;
     let bid = JobBid {
         job_id: offer.job_id.clone(),
@@ -609,6 +642,7 @@ async fn handle_offer(
         expires_at_ms: Some(expires_at_ms),
         bench_score,
         load: Some(bid_load),
+        e2e,
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,
@@ -624,7 +658,43 @@ async fn handle_offer(
         "dispatch: bid placed"
     );
     spawn_deliver_bid(net.clone(), topic.to_string(), offer, payload.clone());
-    Some((price_usd, expires_at_ms, payload))
+    Some((price_usd, expires_at_ms, payload, session))
+}
+
+/// Won an e2e job: fetch and open the sealed spec, check it, re-run the
+/// workload's filter on the whole spec, then hand the job to the runner with
+/// its result key. Any failure ends the job with a Failed receipt, so the
+/// buyer re-auctions at once instead of waiting out its timeout. Nothing
+/// about the spec's content is logged.
+fn spawn_open_e2e(
+    net: Arc<Libp2pNetwork>,
+    tx: mpsc::Sender<AcceptedJob>,
+    filter: Option<OfferFilter>,
+    session: Arc<crate::job_e2e::WorkerSession>,
+    offer: Arc<JobOffer>,
+    mut accept: JobAccept,
+) {
+    tokio::spawn(async move {
+        let opened = session.open_accept(&net, &offer, &accept).await;
+        drop(session);
+        let refused = match opened {
+            Ok((spec, key)) => {
+                let full = crate::job_e2e::opened_offer(&offer, spec);
+                if filter.as_ref().is_none_or(|f| f(&full)) {
+                    accept.spec_inline = full.spec_inline;
+                    accept.result_key = Some(key);
+                    if let Err(e) = tx.send(AcceptedJob { accept }).await {
+                        warn!(err = %e, "dispatch: runner channel closed");
+                    }
+                    return;
+                }
+                "the sealed spec does not pass this workload's checks".to_string()
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        warn!(job_id = %accept.job_id, reason = %refused, "dispatch: won e2e job refused");
+        crate::runner::publish_receipt(&net, &accept, None, c0mpute_net::topics::JobStatus::Failed).await;
+    });
 }
 
 /// Workload types this worker should listen for, derived from its
@@ -694,6 +764,7 @@ mod tests {
             expires_at_ms: NOW + 60_000,
             reserve_until_ms: NOW + 18_000,
             payload: None,
+            e2e: None,
         }
     }
 
@@ -710,6 +781,8 @@ mod tests {
             published_at_ms: 0,
             external_ref: Some("infernet:job_42".into()),
             buyer_addrs: Vec::new(),
+            e2e: None,
+            result_key: None,
         }
     }
 
@@ -730,6 +803,30 @@ mod tests {
         let mut a = accept();
         a.spec_inline = Some(serde_json::json!({"input_url": "http://169.254.169.254/"}));
         assert!(bid().matches(&a, NOW).is_err());
+    }
+
+    #[test]
+    fn e2e_bids_take_only_e2e_accepts_without_a_spec() {
+        let mut b = bid();
+        b.spec_inline = None;
+        let offer = offer_at(NOW, None);
+        // A session is only needed as a marker here.
+        let session = std::sync::Arc::new(test_session());
+        b.e2e = Some((session, std::sync::Arc::new(offer)));
+        let mut a = accept();
+        // A plaintext accept for an e2e bid (a downgrade) is refused.
+        assert!(b.matches(&a, NOW).is_err());
+        a.spec_inline = None;
+        assert!(b.matches(&a, NOW).is_err(), "missing e2e version");
+        a.e2e = Some(c0mpute_net::topics::JOB_E2E_VERSION);
+        assert!(b.matches(&a, NOW).is_ok());
+        // Any spec on an e2e accept is refused, even with the version set.
+        a.spec_inline = Some(serde_json::json!({"x": 1}));
+        assert!(b.matches(&a, NOW).is_err());
+    }
+
+    fn test_session() -> crate::job_e2e::WorkerSession {
+        crate::job_e2e::WorkerSession::for_tests()
     }
 
     #[test]
@@ -790,6 +887,7 @@ mod tests {
             external_ref: None,
             buyer_addrs: Vec::new(),
             bid_window_ms: window,
+            e2e: None,
         }
     }
 

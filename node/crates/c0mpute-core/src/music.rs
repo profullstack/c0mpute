@@ -701,7 +701,7 @@ async fn run_job(
         bail!("ACE-Step output is not MP3/FLAC audio under the 48 MiB result limit");
     }
     // Over 1 MiB goes back as pieces: one chunk fetch caps out near 5 MiB.
-    crate::pieces::publish_result_bytes(net, store, &bytes).await
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
 }
 
 #[cfg(test)]

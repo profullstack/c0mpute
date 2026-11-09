@@ -68,6 +68,10 @@ pub struct OcrSpec {
     /// looks the hash up on the DHT.
     #[serde(default)]
     pub input_provider_peer_id: Option<String>,
+    /// Hex key the stored document is sealed under (DIP-0032); rides only inside
+    /// the sealed spec. Absent: the stored bytes are plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
     /// One of [`FORMATS`]; the worker re-detects it from the bytes.
     pub format: String,
     /// Tesseract language(s), e.g. `eng` or `eng+deu`.
@@ -87,7 +91,7 @@ impl OcrSpec {
             &self.input_hash,
             self.input_size,
             self.input_pieces.as_deref(),
-            MAX_INPUT_BYTES,
+            crate::pieces::input_limit(MAX_INPUT_BYTES, self.input_key.is_some()),
         )
     }
 }
@@ -262,12 +266,14 @@ pub fn parse_lang_list(text: &str) -> Vec<String> {
 /// Bid filter: skip offers this box cannot complete (a language it lacks, a
 /// PDF without poppler, or a spec it cannot read).
 pub fn offer_filter() -> crate::dispatch::OfferFilter {
-    Arc::new(|offer: &JobOffer| {
-        offer
-            .spec_inline
-            .as_ref()
-            .and_then(|spec| parse_spec(spec).ok())
-            .is_some_and(|spec| runtime().can_serve(&spec))
+    Arc::new(|offer: &JobOffer| match crate::job_e2e::bid_spec(offer) {
+        Some(crate::job_e2e::BidSpec::Public(v)) => {
+            // The input stays sealed: judge the format and language.
+            let spec = crate::job_e2e::with_placeholders(v, &[("input_hash", serde_json::json!("0".repeat(64)))]);
+            parse_spec(&spec).is_ok_and(|spec| runtime().can_serve(&spec))
+        }
+        Some(crate::job_e2e::BidSpec::Full(v)) => parse_spec(v).is_ok_and(|spec| runtime().can_serve(&spec)),
+        None => false,
     })
 }
 
@@ -481,8 +487,9 @@ pub async fn fetch_input(net: &Arc<Libp2pNetwork>, spec: &OcrSpec) -> Result<Vec
         .map(str::parse)
         .transpose()
         .context("invalid input provider peer id")?;
+    let key = crate::pieces::input_key(spec.input_key.as_deref())?;
     input
-        .fetch(net, provider, MAX_INPUT_BYTES)
+        .fetch_opened(net, provider, MAX_INPUT_BYTES, key.as_ref())
         .await
         .context("fetch the OCR input (maximum 32 MiB)")
 }
@@ -505,7 +512,7 @@ async fn run_ocr_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("OCR result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes)
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes)
         .await
         .context("publish OCR result")
 }
@@ -624,6 +631,7 @@ mod tests {
             pdf: false,
         };
         let spec = |format: &str, lang: &str| OcrSpec {
+            input_key: None,
             v: 1,
             input_hash: hash(),
             input_size: None,

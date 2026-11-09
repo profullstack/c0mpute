@@ -2671,10 +2671,10 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 if let Some(path) = &output {
                     // Pieced outputs (anything over 1 MiB from a current
                     // worker) are written a piece at a time.
+                    // Sealed to this buyer; opened as it is written.
                     let written = c0mpute_core::gateway_util::fetch_result_to_file(
                         &net,
-                        h,
-                        &outcome.accepted_bid.bidder_peer_id,
+                        &outcome,
                         c0mpute_core::runner::MAX_OUTPUT_BYTES as usize,
                         std::time::Duration::from_secs(30),
                         path,

@@ -483,11 +483,18 @@ impl Supervisor {
                     );
                     let gate = config.video.clone();
                     let filter: dispatch::OfferFilter = std::sync::Arc::new(move |offer| {
-                        let fits = offer
-                            .spec_inline
-                            .as_ref()
+                        // An e2e offer's prompt stays sealed: a stand-in lets
+                        // the size checks run; the opened spec is checked again.
+                        let spec = match crate::job_e2e::bid_spec(offer) {
+                            Some(crate::job_e2e::BidSpec::Public(v)) => {
+                                Some(crate::job_e2e::with_placeholders(v, &[("prompt", serde_json::json!("x"))]))
+                            }
+                            Some(crate::job_e2e::BidSpec::Full(v)) => Some(v.clone()),
+                            None => None,
+                        };
+                        let fits = spec
                             .and_then(|spec| {
-                                serde_json::from_value::<crate::video::VideoJobInline>(spec.clone()).ok()
+                                serde_json::from_value::<crate::video::VideoJobInline>(spec).ok()
                             })
                             .is_some_and(|job| {
                                 crate::video_cpu::fits(&job, crate::video::WORKLOAD_TXT2VID).is_ok()

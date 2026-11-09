@@ -118,6 +118,15 @@ one host disappearing.
 `encryption` absent means plaintext. Appropriate for public inputs; not
 for private work.
 
+On the live network every job is end-to-end encrypted
+([DIP-0032](../../dips/0032-e2e-encrypted-jobs.md)): gossip offers carry only a
+public spec (model, engine, size buckets) and the buyer's fresh X25519 key; the
+spec is sealed to the winning worker alone and fetched point to point; inputs
+are stored sealed under per-input keys carried inside the sealed spec; results
+are sealed back to the buyer. The winning worker still sees the plaintext it
+computes on: use private mode or the `confidential` (attested TEE) requirement
+for sensitive work.
+
 ## Execution defaults are conservative
 
 ```json

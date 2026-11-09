@@ -483,7 +483,7 @@ async fn run_job(net: &Libp2pNetwork, store: &ChunkStore, cache_root: &Path, job
             bail!("video result is not an MP4");
         }
     }
-    crate::pieces::publish_result_file(net, store, &out, video::MAX_RESULT_BYTES as u64).await
+    crate::pieces::publish_result_file(net, store, &job.accept, &out, video::MAX_RESULT_BYTES as u64).await
 }
 
 #[cfg(test)]

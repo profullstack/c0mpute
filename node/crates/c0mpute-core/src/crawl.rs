@@ -280,7 +280,7 @@ async fn run_fetch_job(net: &Libp2pNetwork, store: &ChunkStore, job: &AcceptedJo
     let spec = workflow::resolve_spec(net, job).await?;
     let result = execute(&spec).await;
     let bytes = serde_json::to_vec(&result)?;
-    crate::pieces::publish_result_bytes(net, store, &bytes)
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes)
         .await
         .context("publish crawl result")
 }

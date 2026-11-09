@@ -85,11 +85,82 @@ pub fn valid_external_ref(s: &str) -> bool {
     !s.is_empty() && s.len() <= MAX_EXTERNAL_REF_LEN && s.bytes().all(|b| b.is_ascii_graphic())
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// End-to-end encrypted jobs (DIP-0032)
+// ────────────────────────────────────────────────────────────────────────
+//
+// Gossip topics are readable by every subscriber and relay. An e2e offer
+// carries no spec, only what bidding needs (`OfferE2e::public_spec`) and the
+// buyer's fresh X25519 key. A bid carries the worker's fresh X25519 key,
+// signed by the worker's libp2p identity. After the award the buyer seals
+// the spec to the winner alone and hands it over point to point
+// (request-response); the result comes back sealed to the buyer.
+
+/// Version of the e2e job envelope this build speaks.
+pub const JOB_E2E_VERSION: u8 = 1;
+
+/// Capability tag every e2e-capable worker satisfies. Buyers list it in
+/// `required_capabilities`, so a worker older than e2e (which checks that it
+/// advertises every required tag) never bids on an e2e offer.
+pub const JOB_E2E_TAG: &str = "c0mpute:e2e:v1";
+
+/// Capability tag for a worker running inside an attested TEE (AMD SEV-SNP,
+/// Intel TDX). An offer that requires it only matches workers that attach
+/// attestation evidence to their bid; see [`BidE2e::attestation`].
+pub const CONFIDENTIAL_TAG: &str = "c0mpute:confidential";
+
+/// The e2e part of a [`JobOffer`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OfferE2e {
+    /// [`JOB_E2E_VERSION`].
+    pub v: u8,
+    /// The buyer's X25519 public key for this one auction, lowercase hex.
+    pub buyer_key: String,
+    /// What a worker needs to decide whether to bid (model, engine, size
+    /// buckets...). Never prompts, inputs, URLs or file names.
+    #[serde(default)]
+    pub public_spec: serde_json::Value,
+    /// Present when the buyer requires an attested TEE: the challenge the
+    /// worker's attestation report must bind (with its X25519 key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attest_nonce: Option<String>,
+}
+
+/// The e2e part of a [`JobBid`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BidE2e {
+    /// The worker's X25519 public key for this one job, lowercase hex.
+    pub worker_key: String,
+    /// The worker's libp2p identity signature (base64) over the binding of
+    /// `worker_key` to this job, buyer and buyer key. The buyer checks it
+    /// against `bidder_peer_id` before sealing anything to the key.
+    pub sig: String,
+    /// Remote attestation evidence (format named inside), for offers that
+    /// require [`CONFIDENTIAL_TAG`]. Its report data binds `worker_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<serde_json::Value>,
+}
+
+/// A 32-byte job key held in memory only: never serialized, never printed,
+/// wiped on drop.
+#[derive(Clone, PartialEq, Eq)]
+pub struct JobKey(pub [u8; 32]);
+
+impl std::fmt::Debug for JobKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JobKey(<redacted>)")
+    }
+}
+
+impl Drop for JobKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
 /// Buyer publishes this to `c0mpute/jobs/<workload-type>` to start the
-/// auction. The actual job spec is opaque to the network — workers
-/// evaluate by `workload_type` + `spec_hash` + price/deadline. Inputs +
-/// secrets are referenced by URL or content hash inside `spec`,
-/// optionally end-to-end encrypted.
+/// auction. An e2e offer (`e2e` set, `spec_inline` empty) shows the network
+/// only what bidding needs; see the e2e section above.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JobOffer {
     /// UUID minted by the buyer.
@@ -147,6 +218,10 @@ pub struct JobOffer {
     /// Optional; old buyers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bid_window_ms: Option<u64>,
+    /// End-to-end encryption (DIP-0032). When set, `spec_inline` is empty
+    /// and `spec_hash` is a salted commitment to the spec, not its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e: Option<OfferE2e>,
 }
 
 /// Worker bid in response to a `JobOffer`. Sent on the same job topic;
@@ -177,6 +252,9 @@ pub struct JobBid {
     /// Buyers skip overloaded workers when a free one bids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<f32>,
+    /// The worker's signed X25519 key, on bids for e2e offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e: Option<BidE2e>,
 }
 
 impl JobBid {
@@ -213,6 +291,14 @@ pub struct JobAccept {
     /// buyer usually cannot dial a worker's random, firewalled port.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buyer_addrs: Vec<String>,
+    /// [`JOB_E2E_VERSION`] when the job is e2e: `spec_inline` is empty and
+    /// the winner fetches the sealed spec from the buyer point to point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e: Option<u8>,
+    /// Worker side only, set once the sealed spec is opened: the key the
+    /// result is sealed to the buyer with. Never serialized.
+    #[serde(skip)]
+    pub result_key: Option<JobKey>,
 }
 
 /// Worker's completion receipt. Includes the output hash so the buyer
@@ -273,6 +359,7 @@ mod tests {
             expires_at_ms: Some(1000),
             bench_score: None,
             load: None,
+            e2e: None,
         };
         let json = serde_json::to_value(&bid).unwrap();
         assert_eq!(json["expires_at_ms"], 1000);
@@ -317,6 +404,7 @@ mod tests {
             expires_at_ms: None,
             bench_score: None,
             load: None,
+            e2e: None,
         };
         assert!(bid.is_live(u64::MAX), "old bids never expire");
         bid.expires_at_ms = Some(100);
