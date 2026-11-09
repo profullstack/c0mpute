@@ -60,14 +60,18 @@ pub fn job_finished(job_id: &str) {
 
 /// Network jobs running now (receipt not yet sent, not older than [`MAX_JOB_HOLD`]).
 pub fn running_jobs() -> usize {
-    running_jobs_at(now_ms())
+    let now = now_ms();
+    // Forget jobs whose receipt never went out.
+    if let Some(m) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        m.retain(|_, started| now.saturating_sub(*started) < MAX_JOB_HOLD.as_millis() as u64);
+    }
+    running_jobs_at(now)
 }
 
 fn running_jobs_at(now: u64) -> usize {
-    let mut g = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(m) = g.as_mut() else { return 0 };
-    m.retain(|_, started| now.saturating_sub(*started) < MAX_JOB_HOLD.as_millis() as u64);
-    m.len()
+    let g = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = g.as_ref() else { return 0 };
+    m.values().filter(|started| now.saturating_sub(**started) < MAX_JOB_HOLD.as_millis() as u64).count()
 }
 
 /// A bid is standing right now.
@@ -99,6 +103,7 @@ mod tests {
         assert!(busy());
         assert!(running_jobs() >= 1);
         job_finished("activity-test-job");
+        job_finished("activity-test-lost-receipt-other");
         // A standing bid alone is busy; an expired one is not.
         note_bid(now_ms() + 60_000);
         assert!(bid_in_flight());
