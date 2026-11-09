@@ -34,7 +34,7 @@
 [module]
 id          = "live-stream"
 name        = "Live Stream — p2p HLS live streaming"
-version     = "0.2.76"
+version     = "0.2.77"
 kind        = "service"
 category    = "media"
 status      = "available"
@@ -46,7 +46,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["live", "streaming", "hls", "m3u8", "p2p", "bittorrent", "rtmp", "srt", "video"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.77"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 # ffmpeg is needed only to broadcast (RTMP/SRT/file/stdin ingest); relays

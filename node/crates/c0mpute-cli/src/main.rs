@@ -22,10 +22,12 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod ai_chat;
+mod gameserver;
 mod peers;
 mod storage;
 mod temporal;
 mod text;
+mod train;
 mod webhook;
 
 use std::path::PathBuf;
@@ -45,7 +47,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --yes\n  c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -184,6 +186,19 @@ enum Cmd {
     Hosting {
         #[command(subcommand)]
         cmd: HostingCmd,
+    },
+    /// Train plugin: fine-tune a LoRA adapter on a c0mpute worker from a
+    /// JSONL dataset (`c0mpute train lora --base <model> --dataset <jsonl>`;
+    /// runs as infernet.text.train).
+    Train {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Game server plugin: rent a Minecraft, Factorio or Valheim server for a
+    /// few hours (`c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula`).
+    Gameserver {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// OCR plugin: extract the text of an image (PNG, JPEG, TIFF, WebP) or a
     /// PDF on a c0mpute worker running Tesseract (`ocr.extract`).
@@ -1101,6 +1116,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Train { args } => train::run(&args).await,
+        Cmd::Gameserver { args } => gameserver::run(&args).await,
         Cmd::Stream { cmd } => run_stream(cmd).await,
         Cmd::Ocr {
             file,
@@ -3422,6 +3439,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),
         "embed" | "embeddings" => Some(Role::Embed),
+        "gameserver" | "gameservers" | "games" => Some(Role::Gameserver),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
         "render" | "blender" => Some(Role::Render),
         other => {

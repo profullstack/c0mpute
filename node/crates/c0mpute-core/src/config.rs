@@ -50,6 +50,46 @@ pub struct Config {
     /// CPU text embeddings (`embed.text`) provisioning.
     #[serde(default)]
     pub embed: EmbedConfig,
+    /// Game server rentals (`gameserver` role, opt-in).
+    #[serde(default)]
+    pub gameserver: GameserverConfig,
+}
+
+/// Game server rentals (`gameserver` role). Opt-in: a rented server holds a
+/// port and RAM for hours. Players connect to `public_host:<port>`, so the
+/// operator must open `port_min..=port_max` (TCP and UDP) in the firewall.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GameserverConfig {
+    /// Address players use (a public IP or DNS name). Default: the gateway's
+    /// announce host, else `C0MPUTE_P2P_EXTERNAL`. No public address, no role.
+    pub public_host: Option<String>,
+    pub port_min: u16,
+    pub port_max: u16,
+    /// Servers running at once.
+    pub max_servers: u32,
+    /// RAM all rented servers may reserve together; 0 = half the box.
+    pub max_total_ram_gb: u32,
+    /// Longest reservation this node takes (capped at 72).
+    pub max_hours: u32,
+    /// Lowest price per GB of RAM per hour; offers capped below it are skipped.
+    pub min_usd_per_gb_hour: f64,
+    pub games: Vec<crate::gameserver::Game>,
+}
+
+impl Default for GameserverConfig {
+    fn default() -> Self {
+        Self {
+            public_host: None,
+            port_min: 27500,
+            port_max: 27599,
+            max_servers: 2,
+            max_total_ram_gb: 0,
+            max_hours: 24,
+            min_usd_per_gb_hour: 0.0,
+            games: crate::gameserver::Game::ALL.to_vec(),
+        }
+    }
 }
 
 /// Static-site hosting (`hosting` role). A hosting node holds copies of
@@ -260,6 +300,7 @@ impl Default for Config {
             diffusion: DiffusionConfig::default(),
             hosting: HostingConfig::default(),
             embed: EmbedConfig::default(),
+            gameserver: GameserverConfig::default(),
         }
     }
 }
@@ -421,6 +462,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_servers_are_opt_in() {
+        let config = Config::default();
+        assert!(!config.roles.contains(&Role::Gameserver), "a rented server holds a port and RAM for hours");
+        let parsed: Config = toml::from_str("[gameserver]\npublic_host = \"play.example.com\"\ngames = [\"minecraft\"]\n").unwrap();
+        assert_eq!(parsed.gameserver.public_host.as_deref(), Some("play.example.com"));
+        assert_eq!(parsed.gameserver.games, vec![crate::gameserver::Game::Minecraft]);
+        assert_eq!(parsed.gameserver.port_min, 27500);
+    }
 
     #[test]
     fn every_node_serves_tts_by_default() {
