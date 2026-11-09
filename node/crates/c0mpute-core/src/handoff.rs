@@ -47,6 +47,9 @@ struct Ready {
     worker_peer_id: String,
     client_pubkey: String,
     worker_pubkey: String,
+    /// The worker's dialable addresses, so the buyer can connect directly.
+    #[serde(default)]
+    addrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +58,28 @@ struct Sealed {
     job_id: String,
     worker_peer_id: String,
     sealed: String,
+    /// The buyer's dialable addresses: a worker that must fetch from the
+    /// buyer (a world to restore) may share no connection with it yet.
+    #[serde(default)]
+    addrs: Vec<String>,
+}
+
+const MAX_ADDRS: usize = 8;
+
+async fn my_addrs(net: &Libp2pNetwork) -> Vec<String> {
+    net.advertised_addrs().await.into_iter().take(MAX_ADDRS).map(|a| a.to_string()).collect()
+}
+
+/// Learn `peer`'s addresses from a handoff message and open a direct
+/// connection (either side may be the one that can dial out).
+async fn link(net: &Libp2pNetwork, peer: &str, addrs: &[String]) {
+    let Ok(peer) = peer.parse::<c0mpute_net::PeerId>() else { return };
+    for a in addrs.iter().take(MAX_ADDRS).filter(|a| a.len() <= 256) {
+        if let Ok(addr) = a.parse::<c0mpute_net::Multiaddr>() {
+            net.add_peer_address(peer, addr).await;
+        }
+    }
+    let _ = net.connect(peer).await;
 }
 
 /// A fresh key pair for one handoff.
@@ -93,6 +118,7 @@ pub async fn receive(net: &Libp2pNetwork, workload: &str, accept: &JobAccept, cl
         worker_peer_id: me.clone(),
         client_pubkey: client_pubkey.to_string(),
         worker_pubkey: kp.public_hex.clone(),
+        addrs: my_addrs(net).await,
     })?;
     let deadline = Instant::now() + wait;
     let mut next = Instant::now();
@@ -118,7 +144,10 @@ pub async fn receive(net: &Libp2pNetwork, workload: &str, accept: &JobAccept, cl
             continue;
         }
         match crypto::open(&k, &s.sealed) {
-            Ok(plain) if plain.len() <= MAX_SECRET => return Ok(plain),
+            Ok(plain) if plain.len() <= MAX_SECRET => {
+                link(net, &accept.buyer_peer_id, &s.addrs).await;
+                return Ok(plain);
+            }
             Ok(_) => bail!("sealed secret too large"),
             Err(e) => debug!(job_id = %accept.job_id, err = %e, "handoff: unreadable secret ignored"),
         }
@@ -150,6 +179,7 @@ impl BuyerHandoff {
             // job_id → sealed message, republished until the task ends.
             let mut sent: HashMap<String, Vec<u8>> = HashMap::new();
             let mut tick = tokio::time::interval(REPUBLISH);
+            let addrs = my_addrs(&net).await;
             let seal = |r: &Ready| -> Result<Vec<u8>> {
                 let k = key(&kp.secret, &r.worker_pubkey, &workload, &r.job_id)?;
                 Ok(serde_json::to_vec(&Sealed {
@@ -157,6 +187,7 @@ impl BuyerHandoff {
                     job_id: r.job_id.clone(),
                     worker_peer_id: r.worker_peer_id.clone(),
                     sealed: crypto::seal(&k, &secret)?,
+                    addrs: addrs.clone(),
                 })?)
             };
             loop {
@@ -168,6 +199,7 @@ impl BuyerHandoff {
                         {
                             let _ = net.publish(&topic, m.clone()).await;
                             sent.insert(job_id.clone(), m);
+                            link(&net, &r.worker_peer_id, &r.addrs).await;
                         }
                         winners.insert(job_id, bid.bidder_peer_id);
                     }
@@ -191,6 +223,7 @@ impl BuyerHandoff {
                                     let _ = net.publish(&topic, m.clone()).await;
                                     sent.insert(r.job_id.clone(), m);
                                 }
+                                link(&net, &r.worker_peer_id, &r.addrs).await;
                             }
                             Some(_) => debug!(job_id = %r.job_id, "handoff: key from a worker we did not accept ignored"),
                             None if readies.len() < 64 => { readies.insert(r.job_id.clone(), r); }
