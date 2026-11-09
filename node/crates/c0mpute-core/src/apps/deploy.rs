@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use c0mpute_proto::Hash;
 use serde::{Deserialize, Serialize};
 
 use super::record::{AppRecord, AppSpec, ImageSource};
@@ -216,7 +215,7 @@ pub async fn deploy(opts: DeployOptions) -> Result<AppRecord> {
             let site_name = format!("app-{}", opts.name);
             let built = site::build_from_dir(&tmp, &site_name)?;
             let _ = std::fs::remove_dir_all(&tmp);
-            let manifest = Hash::of(&built.manifest.to_bytes());
+            let manifest = built.manifest_hash();
             let rec = site::SiteRecord::sign(
                 &keypair,
                 &site_name,

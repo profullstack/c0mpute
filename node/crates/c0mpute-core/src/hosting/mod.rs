@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 use crate::payments::{Micros, Payee};
 use proof::Receipt;
 use replicas::{Action, ReplicaMap};
-use site::{SiteManifest, SiteRecord};
+use site::{Manifest, ManifestPart, PartRef, SiteRecord};
 
 pub const TOPIC: &str = "c0mpute/hosting/v1";
 pub const ROLE_TAG: &str = "c0mpute:role:hosting";
@@ -157,7 +157,10 @@ struct Inner {
     catalog: RwLock<Catalog>,
     catalog_path: Option<PathBuf>,
     /// Parsed manifests by hash (small cache).
-    manifests: RwLock<HashMap<String, Arc<SiteManifest>>>,
+    manifests: RwLock<HashMap<String, Arc<Manifest>>>,
+    /// Parts of large sites' manifests, by hash (a small cache: a gateway
+    /// loads only the parts requests touch).
+    parts: RwLock<HashMap<String, Arc<ManifestPart>>>,
     replicating: RwLock<HashSet<String>>,
     turn: AtomicUsize,
     stopped: std::sync::atomic::AtomicBool,
@@ -305,6 +308,7 @@ impl Hosting {
             catalog: RwLock::new(Catalog::default()),
             catalog_path: opts.catalog_path,
             manifests: RwLock::new(HashMap::new()),
+            parts: RwLock::new(HashMap::new()),
             replicating: RwLock::new(HashSet::new()),
             turn: AtomicUsize::new(0),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -637,18 +641,27 @@ impl Hosting {
             bail!("over this node's per-owner hosting budget");
         }
         let manifest = self.manifest(rec).await?;
-        if manifest.total_bytes() != rec.size || manifest.name != rec.name {
+        if manifest.total_bytes() != rec.size || manifest.name() != rec.name {
             bail!("manifest does not match its record");
         }
         let holders = self.0.map.read().await.sources(&rec.site_id);
-        for h in manifest.chunk_hashes() {
-            let hash = Hash::from_hex(&h).context("bad chunk hash")?;
-            if !self.0.store.has(&hash).await {
-                let bytes = self.fetch_chunk(&hash, &holders).await?;
-                self.0.store.put(&bytes).await?;
+        // Files part by part (a large site's chunk list never sits in memory
+        // whole); the root goes in last, marking the copy complete.
+        let mut todo: Vec<String> = Vec::new();
+        match &*manifest {
+            Manifest::Inline(m) => todo.extend(m.chunk_hashes()),
+            Manifest::Parted(r) => {
+                for pr in &r.parts {
+                    let part = self.part(&rec.site_id, pr).await?;
+                    let hashes: Vec<String> = part.chunk_hashes().cloned().collect();
+                    self.store_chunks(&hashes, &holders).await?;
+                    self.0.store.put(&serde_json::to_vec(&*part)?).await?;
+                }
             }
         }
-        let mbytes = manifest.to_bytes();
+        self.store_chunks(&todo, &holders).await?;
+        let mh = Hash::from_hex(&rec.manifest).context("manifest hash")?;
+        let mbytes = self.fetch_chunk(&mh, &holders).await?;
         self.0.store.put(&mbytes).await?;
         {
             let mut cat = self.0.catalog.write().await;
@@ -693,19 +706,23 @@ impl Hosting {
     }
 
     /// Delete chunks of `old` that no held site (and not `keep`) still uses.
-    async fn collect_garbage(&self, old: &SiteRecord, keep: Option<&SiteManifest>) {
+    async fn collect_garbage(&self, old: &SiteRecord, keep: Option<&Manifest>) {
         let Ok(old_manifest) = self.manifest(old).await else {
             return;
         };
-        let mut live: HashSet<String> = keep.map(|m| m.chunk_hashes().into_iter().collect()).unwrap_or_default();
+        let mut live: HashSet<String> = HashSet::new();
+        if let Some(k) = keep {
+            live.extend(self.chunk_set(&old.site_id, k).await);
+        }
         let held: Vec<SiteRecord> = self.0.catalog.read().await.sites.values().cloned().collect();
         for r in held {
             live.insert(r.manifest.clone());
             if let Ok(m) = self.manifest(&r).await {
-                live.extend(m.chunk_hashes());
+                live.extend(self.chunk_set(&r.site_id, &m).await);
             }
         }
-        for h in old_manifest.chunk_hashes().into_iter().chain([old.manifest.clone()]) {
+        let doomed = self.chunk_set(&old.site_id, &old_manifest).await;
+        for h in doomed.into_iter().chain([old.manifest.clone()]) {
             if !live.contains(&h)
                 && let Ok(hash) = Hash::from_hex(&h)
             {
@@ -735,10 +752,27 @@ impl Hosting {
         let Ok(bytes) = self.0.store.get(&mh).await else {
             return false;
         };
-        let Ok(m) = SiteManifest::from_bytes(&bytes) else {
+        let Ok(m) = Manifest::from_bytes(&bytes) else {
             return false;
         };
-        for h in m.chunk_hashes() {
+        let mut hashes: Vec<String> = Vec::new();
+        match &m {
+            Manifest::Inline(m) => hashes.extend(m.chunk_hashes()),
+            Manifest::Parted(r) => {
+                for pr in &r.parts {
+                    let Ok(ph) = Hash::from_hex(&pr.hash) else { return false };
+                    let Ok(pb) = self.0.store.get(&ph).await else { return false };
+                    let Ok(part) = ManifestPart::from_bytes(&pb, pr) else { return false };
+                    for h in part.chunk_hashes() {
+                        match Hash::from_hex(h) {
+                            Ok(hash) if self.0.store.has(&hash).await => {}
+                            _ => return false,
+                        }
+                    }
+                }
+            }
+        }
+        for h in hashes {
             match Hash::from_hex(&h) {
                 Ok(hash) if self.0.store.has(&hash).await => {}
                 _ => return false,
@@ -755,8 +789,11 @@ impl Hosting {
         for c in &built.chunks {
             self.0.store.put(c).await?;
         }
-        let mbytes = built.manifest.to_bytes();
-        let mh = self.0.store.put(&mbytes).await?;
+        let stored = built.stored();
+        for p in &stored.parts {
+            self.0.store.put(p).await?;
+        }
+        let mh = self.0.store.put(&stored.root).await?;
         if mh.to_hex() != record.manifest {
             bail!("record does not point at this manifest");
         }
@@ -905,7 +942,21 @@ impl Hosting {
     ) -> Result<Receipt> {
         let manifest = self.manifest(rec).await?;
         let nonce: [u8; 32] = rand::random();
-        let chunk = proof::pick_chunk(&manifest, &nonce).context("site has no chunks")?;
+        let chunk = match &*manifest {
+            Manifest::Inline(m) => proof::pick_chunk(m, &nonce),
+            Manifest::Parted(r) => {
+                // A random part, then a random chunk of it (or the part itself).
+                let n = u64::from_le_bytes(Hash::of(&nonce).0[8..16].try_into().expect("8 bytes"));
+                let pr = &r.parts[(n % r.parts.len() as u64) as usize];
+                let part = self.part(&rec.site_id, pr).await?;
+                let mut all: Vec<String> = part.chunk_hashes().cloned().collect();
+                all.push(pr.hash.clone());
+                all.sort();
+                all.dedup();
+                proof::pick_from(&all, &nonce)
+            }
+        }
+        .context("site has no chunks")?;
         let hash = Hash::from_hex(&chunk).context("bad chunk hash")?;
         let pid: c0mpute_net::PeerId = holder.parse().context("holder is not a peer id")?;
         let req = ChunkRequest {
@@ -1061,14 +1112,80 @@ impl Hosting {
         }
     }
 
-    async fn manifest(&self, rec: &SiteRecord) -> Result<Arc<SiteManifest>> {
+    async fn store_chunks(&self, hashes: &[String], holders: &[String]) -> Result<()> {
+        for h in hashes {
+            let hash = Hash::from_hex(h).context("bad chunk hash")?;
+            if !self.0.store.has(&hash).await {
+                let bytes = self.fetch_chunk(&hash, holders).await?;
+                self.0.store.put(&bytes).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One part of a large site's manifest (local, cached, or fetched).
+    async fn part(&self, site_id: &str, r: &PartRef) -> Result<Arc<ManifestPart>> {
+        if let Some(p) = self.0.parts.read().await.get(&r.hash) {
+            return Ok(p.clone());
+        }
+        let hash = Hash::from_hex(&r.hash).context("part hash")?;
+        let holders = self.0.map.read().await.sources(site_id);
+        let bytes = self.fetch_chunk(&hash, &holders).await?;
+        let p = Arc::new(ManifestPart::from_bytes(&bytes, r)?);
+        let mut cache = self.0.parts.write().await;
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(r.hash.clone(), p.clone());
+        Ok(p)
+    }
+
+    /// Every chunk a site needs, its manifest parts included (not the root).
+    async fn chunk_set(&self, site_id: &str, m: &Manifest) -> HashSet<String> {
+        match m {
+            Manifest::Inline(m) => m.chunk_hashes().into_iter().collect(),
+            Manifest::Parted(r) => {
+                let mut out = HashSet::new();
+                for pr in &r.parts {
+                    out.insert(pr.hash.clone());
+                    if let Ok(p) = self.part(site_id, pr).await {
+                        out.extend(p.chunk_hashes().cloned());
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    /// The entry for an exact manifest path.
+    async fn lookup(&self, rec: &SiteRecord, m: &Manifest, path: &str) -> Result<Option<site::FileEntry>> {
+        match m {
+            Manifest::Inline(m) => Ok(m.files.get(path).cloned()),
+            Manifest::Parted(_) => match m.part_for(path) {
+                Some(pr) => Ok(self.part(&rec.site_id, pr).await?.files.get(path).cloned()),
+                None => Ok(None),
+            },
+        }
+    }
+
+    /// The entry a request path resolves to (`/` → index.html, etc.).
+    async fn resolve_entry(&self, rec: &SiteRecord, m: &Manifest, request: &str) -> Result<Option<site::FileEntry>> {
+        for c in site::candidates(request) {
+            if let Some(e) = self.lookup(rec, m, &c).await? {
+                return Ok(Some(e));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn manifest(&self, rec: &SiteRecord) -> Result<Arc<Manifest>> {
         if let Some(m) = self.0.manifests.read().await.get(&rec.manifest) {
             return Ok(m.clone());
         }
         let hash = Hash::from_hex(&rec.manifest).context("manifest hash")?;
         let holders = self.0.map.read().await.sources(&rec.site_id);
         let bytes = self.fetch_chunk(&hash, &holders).await?;
-        let m = Arc::new(SiteManifest::from_bytes(&bytes)?);
+        let m = Arc::new(Manifest::from_bytes(&bytes)?);
         let mut cache = self.0.manifests.write().await;
         if cache.len() > 256 {
             cache.clear();
@@ -1119,14 +1236,14 @@ impl Hosting {
     /// The file a request path resolves to, without its bytes.
     pub async fn resolve(&self, rec: &SiteRecord, path: &str) -> Result<Option<site::FileEntry>> {
         let manifest = self.manifest(rec).await?;
-        Ok(site::resolve_path(&manifest, path).map(|(_, e)| e.clone()))
+        self.resolve_entry(rec, &manifest, path).await
     }
 
     /// Read a whole file of a site (local chunks, else fetched from holders).
     /// `Ok(None)` when the site has no such file.
     pub async fn read_file(&self, rec: &SiteRecord, path: &str) -> Result<Option<(site::FileEntry, Vec<u8>)>> {
         let manifest = self.manifest(rec).await?;
-        let Some(entry) = manifest.files.get(path).cloned() else {
+        let Some(entry) = self.lookup(rec, &manifest, path).await? else {
             return Ok(None);
         };
         let body = self.read_entry(rec, &entry).await?;
@@ -1152,12 +1269,23 @@ impl Hosting {
                 return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
             }
         };
-        let (entry, status) = match site::resolve_path(&manifest, path) {
-            Some((_, e)) => (e.clone(), StatusCode::OK),
-            None => match manifest.files.get("404.html") {
-                Some(e) => (e.clone(), StatusCode::NOT_FOUND),
-                None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        let found = match self.resolve_entry(rec, &manifest, path).await {
+            Ok(Some(e)) => Some((e, StatusCode::OK)),
+            Ok(None) => match self.lookup(rec, &manifest, "404.html").await {
+                Ok(Some(e)) => Some((e, StatusCode::NOT_FOUND)),
+                Ok(None) => None,
+                Err(e) => {
+                    warn!(site = %rec.site_id, err = %e, "hosting: manifest part unavailable");
+                    return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
+                }
             },
+            Err(e) => {
+                warn!(site = %rec.site_id, err = %e, "hosting: manifest part unavailable");
+                return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
+            }
+        };
+        let Some((entry, status)) = found else {
+            return (StatusCode::NOT_FOUND, "not found").into_response();
         };
         let body = match self.read_entry(rec, &entry).await {
             Ok(b) => b,
@@ -1595,7 +1723,7 @@ pub async fn publish_dir_with(
     let built = site::build_from_dir(dir, name)?;
     let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
     let keypair = publisher_keypair()?;
-    let manifest_hash = Hash::of(&built.manifest.to_bytes());
+    let manifest_hash = built.manifest_hash();
     let seq = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

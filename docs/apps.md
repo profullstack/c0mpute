@@ -55,7 +55,7 @@ NODE_ENV = "production"
 | Piece | What happens |
 |---|---|
 | Record | The owner signs an app record: image, port, public env, state path, replicas, domains. The app id comes from the owner key + name; the highest `seq` wins. |
-| Image | `docker build`, then `docker save` and gzip, published as a hosting site signed by the owner (three copies, no registry). Or a digest-pinned registry image (`--pull`). Max 256 MiB gzipped. |
+| Image | `docker build`, then `docker save` and gzip, published as a hosting site signed by the owner (three copies, no registry). Or a digest-pinned registry image (`--pull`). Max 1 GiB gzipped. |
 | Placement | Every `apps` node gossips what it holds every 10 s on `c0mpute/apps/v1`. Every node computes the same holders by rendezvous hashing over the live nodes with room. Holders keep their copy, the shortfall is filled, and the surplus lowest-ranked standby lets go. |
 | Primary | One holder runs the container. A live holder claiming primary keeps it (sticky). When two claim it, the higher `(epoch, rank)` wins and the other stops. With no claimant for 35 s, the ready holder with the newest snapshot promotes itself at `epoch + 1`. |
 | State | Every `snapshot_secs` the primary pauses the container, copies the state directory out (crash-consistent), unpauses, and stores it as AES-256-GCM pieces of 1 MiB under the app key. Pieces are convergent, so unchanged pieces are the same chunks and standbys pull only what changed. On failover the new primary restores the newest snapshot. **Recovery point = one snapshot interval.** |

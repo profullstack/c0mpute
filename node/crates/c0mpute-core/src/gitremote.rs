@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use c0mpute_proto::Hash;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -342,7 +341,7 @@ impl Remote {
         let built = site::build_from_dir(&dir, &site_name)?;
         let _ = std::fs::remove_dir_all(&dir);
         let keypair = hosting::publisher_keypair()?;
-        let manifest = Hash::of(&built.manifest.to_bytes());
+        let manifest = built.manifest_hash();
         let seq = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

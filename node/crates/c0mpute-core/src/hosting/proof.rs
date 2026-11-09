@@ -118,7 +118,11 @@ impl Receipt {
 /// The chunk to ask for, picked by `nonce` (the challenger passes fresh
 /// randomness, so a holder cannot keep only the chunks it expects).
 pub fn pick_chunk(manifest: &SiteManifest, nonce: &[u8]) -> Option<String> {
-    let all = manifest.chunk_hashes();
+    pick_from(&manifest.chunk_hashes(), nonce)
+}
+
+/// [`pick_chunk`] over an explicit list (one part of a large site).
+pub fn pick_from(all: &[String], nonce: &[u8]) -> Option<String> {
     if all.is_empty() {
         return None;
     }
