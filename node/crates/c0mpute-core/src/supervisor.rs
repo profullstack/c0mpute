@@ -269,6 +269,20 @@ impl Supervisor {
                 );
                 continue;
             }
+            // Game servers: pull the pinned images, then subscribe to both
+            // start and stop offers and run the expiry reaper.
+            if workload_type == crate::gameserver::WORKLOAD_START {
+                tokio::spawn(crate::gameserver::run_worker(
+                    net.clone(),
+                    self.store.clone(),
+                    self.config.clone(),
+                    cache_root.join("gameserver"),
+                ));
+                continue;
+            }
+            if workload_type == crate::gameserver::WORKLOAD_STOP {
+                continue;
+            }
             // Embeddings: provision fastembed in the background (never blocks
             // the worker), subscribe once a model answers. Same shape as TTS.
             if workload_type == crate::embed::WORKLOAD {
