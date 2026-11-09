@@ -1,8 +1,9 @@
 //! Striped placement for large sites.
 //!
 //! A site at or below [`STRIPE_ABOVE`] is replicated whole, as it always was.
-//! Above it, the site's chunks are bucketed by hash into one group per 64 MiB
-//! ([`group_count`] of the signed size) and every group is placed on its own: the hosting nodes that rank
+//! Above it, the site's chunks are bucketed by hash into one group per 64 MiB,
+//! at most [`MAX_GROUPS`] ([`group_count`] of the signed size; a site over
+//! 512 GiB gets bigger groups, 512 MiB each at the 4 TiB cap) and every group is placed on its own: the hosting nodes that rank
 //! highest for `(site, group)` (rendezvous hashing, the same answer on every
 //! node) take that group. No node needs the whole site, a 50 GiB folder spreads
 //! over the whole network, and healing, copy counting, garbage collection,
@@ -22,9 +23,9 @@ use super::site::{FILE_CHUNK_BYTES, FileEntry, STRIPE_ABOVE, SiteManifest};
 
 /// Chunks per group: 64 MiB of a site.
 pub const GROUP_CHUNKS: usize = 64;
-/// Most groups any site can have (256 GiB of 1 MiB chunks, plus one partial
-/// chunk per file, in 64-chunk groups, with room to spare). Bounds the size
-/// of a group bitmap read off the gossip.
+/// Most groups any site can have: 512 GiB of 64 MiB groups. Larger sites (up
+/// to the 4 TiB cap) keep this many groups and make each one bigger, so a
+/// group bitmap read off the gossip stays at most 1 KiB.
 pub const MAX_GROUPS: usize = 8192;
 
 static THRESHOLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(STRIPE_ABOVE);
@@ -51,7 +52,8 @@ pub fn is_striped(size: u64) -> bool {
 /// Bytes of a site per group, on average.
 pub const GROUP_BYTES: u64 = (GROUP_CHUNKS * FILE_CHUNK_BYTES) as u64;
 
-/// How many groups a striped site of `size` bytes has: one per 64 MiB. The
+/// How many groups a striped site of `size` bytes has: one per 64 MiB, at
+/// most [`MAX_GROUPS`]. The
 /// size is in the signed record, so every node agrees without the manifest.
 pub fn group_count(size: u64) -> usize {
     (size.div_ceil(GROUP_BYTES).max(1) as usize).min(MAX_GROUPS)
@@ -354,7 +356,11 @@ mod tests {
         // Buckets are roughly even (64 chunks on average).
         assert!((0..a.len() as u32).all(|g| (20..=110).contains(&a.group(g).len())));
         assert_eq!(group_count(1), 1);
-        assert_eq!(group_count(super::super::site::MAX_SITE_BYTES), 4096);
+        assert_eq!(group_count(256 * 1024 * 1024 * 1024), 4096);
+        assert_eq!(group_count(512 * 1024 * 1024 * 1024), MAX_GROUPS);
+        // The 4 TiB cap: the group count stops at MAX_GROUPS, groups grow to 512 MiB.
+        assert_eq!(group_count(super::super::site::MAX_SITE_BYTES), MAX_GROUPS);
+        assert_eq!(super::super::site::MAX_SITE_BYTES / MAX_GROUPS as u64, 512 * 1024 * 1024);
     }
 
     #[test]
