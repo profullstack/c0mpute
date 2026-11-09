@@ -93,6 +93,8 @@ async fn a_published_show_is_read_and_downloaded_through_any_gateway() {
     let hub_addr = listen_addr(&hub_net).await;
     let opts = |dir: &std::path::Path| Options {
         hosts: true,
+        // Plenty of (pretend) disk: the test box may be below the free-disk floor.
+        disk_override: Some((1 << 40, 2 << 40)),
         catalog_path: Some(dir.join("catalog.json")),
         timing: fast(),
         ..Default::default()

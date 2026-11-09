@@ -33,6 +33,11 @@ use crate::{ChunkSource, Network, identity as id_mod};
 
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/kad/1.0.0");
 const FETCH_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/chunk-fetch/1.0.0");
+/// Same request, but the chunk travels as a CBOR byte string. Version 1 sends
+/// it as an array of integers: about 1.9x the bytes on the wire and slow to
+/// decode, which halved every chunk transfer. Peers that do not speak 2 are
+/// asked over 1.
+const FETCH2_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/chunk-fetch/2.0.0");
 const RPC_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/rpc/1.0.0");
 /// Largest RPC request body accepted.
 pub const RPC_MAX_REQUEST: u64 = 1024 * 1024;
@@ -159,6 +164,14 @@ enum Cmd {
     RpcRespond {
         channel: request_response::ResponseChannel<RpcResponse>,
         resp: RpcResponse,
+    },
+    FetchRespond {
+        channel: request_response::ResponseChannel<FetchResponse>,
+        resp: FetchResponse,
+    },
+    Fetch2Respond {
+        channel: request_response::ResponseChannel<FetchResponse2>,
+        resp: FetchResponse2,
     },
     ConnectedPeers {
         reply: oneshot::Sender<Vec<PeerId>>,
@@ -533,6 +546,7 @@ struct C0mputeBehaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     fetch: request_response::cbor::Behaviour<FetchRequest, FetchResponse>,
+    fetch2: request_response::cbor::Behaviour<FetchRequest, FetchResponse2>,
     rpc: request_response::Behaviour<request_response::cbor::codec::Codec<RpcRequest, RpcResponse>>,
     gossipsub: gossipsub::Behaviour,
     mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
@@ -546,6 +560,15 @@ struct FetchRequest {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum FetchResponse {
     Ok { bytes: Vec<u8> },
+    NotFound,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+enum FetchResponse2 {
+    Ok {
+        #[serde(with = "cbor_bytes")]
+        bytes: Vec<u8>,
+    },
     NotFound,
 }
 
@@ -617,6 +640,11 @@ struct SwarmTask {
     /// Track which chunk a fetch is for, so we can re-issue against another
     /// provider if the first one says NotFound.
     fetch_targets: HashMap<request_response::OutboundRequestId, Hash>,
+    /// Version-2 fetches in flight: who was asked, so a peer that does not
+    /// speak version 2 can be asked again over version 1.
+    pending_fetches2: HashMap<request_response::OutboundRequestId, (PeerId, Hash, oneshot::Sender<Result<Vec<u8>>>)>,
+    /// Peers that answered "unsupported protocol" to version 2.
+    fetch_v1_only: std::collections::HashSet<PeerId>,
     /// Pending outbound RPC calls.
     pending_rpcs: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
     rpc_handlers: RpcHandlers,
@@ -660,6 +688,10 @@ impl SwarmTask {
                     [(FETCH_PROTOCOL, request_response::ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );
+                let fetch2 = request_response::cbor::Behaviour::<FetchRequest, FetchResponse2>::new(
+                    [(FETCH2_PROTOCOL, request_response::ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
                 let rpc = request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::<RpcRequest, RpcResponse>::default()
                         .set_request_size_maximum(RPC_MAX_REQUEST)
@@ -695,6 +727,7 @@ impl SwarmTask {
                     identify,
                     ping,
                     fetch,
+                    fetch2,
                     rpc,
                     gossipsub,
                     mdns,
@@ -710,6 +743,8 @@ impl SwarmTask {
             pending_kad_lookups: HashMap::new(),
             pending_fetches: HashMap::new(),
             fetch_targets: HashMap::new(),
+            pending_fetches2: HashMap::new(),
+            fetch_v1_only: std::collections::HashSet::new(),
             pending_rpcs: HashMap::new(),
             rpc_handlers,
             cmd_weak,
@@ -817,6 +852,16 @@ impl SwarmTask {
                 self.pending_kad_lookups.insert(qid, reply);
                 debug!(chunk = %req.chunk_hash, "kad get_providers issued");
             }
+            Cmd::FetchFrom { peer, req, reply } if !self.fetch_v1_only.contains(&peer) => {
+                let request_id = self.swarm.lock().await.behaviour_mut().fetch2.send_request(
+                    &peer,
+                    FetchRequest {
+                        chunk_hash: req.chunk_hash,
+                    },
+                );
+                self.pending_fetches2.insert(request_id, (peer, req.chunk_hash, reply));
+                debug!(%peer, chunk = %req.chunk_hash, "direct chunk fetch issued (v2)");
+            }
             Cmd::FetchFrom { peer, req, reply } => {
                 let request_id = self.swarm.lock().await.behaviour_mut().fetch.send_request(
                     &peer,
@@ -845,6 +890,12 @@ impl SwarmTask {
             }
             Cmd::RpcRespond { channel, resp } => {
                 let _ = self.swarm.lock().await.behaviour_mut().rpc.send_response(channel, resp);
+            }
+            Cmd::FetchRespond { channel, resp } => {
+                let _ = self.swarm.lock().await.behaviour_mut().fetch.send_response(channel, resp);
+            }
+            Cmd::Fetch2Respond { channel, resp } => {
+                let _ = self.swarm.lock().await.behaviour_mut().fetch2.send_response(channel, resp);
             }
             Cmd::ConnectedPeers { reply } => {
                 let peers = self.swarm.lock().await.connected_peers().copied().collect();
@@ -930,6 +981,62 @@ impl SwarmTask {
                 if let Some(reply) = self.pending_fetches.remove(&request_id) {
                     self.fetch_targets.remove(&request_id);
                     let _ = reply.send(Err(anyhow!("fetch failed: {error}")));
+                }
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Fetch2(request_response::Event::Message {
+                message, ..
+            })) => match message {
+                request_response::Message::Request { request, channel, .. } => {
+                    // Read off the event loop: a disk read per chunk inline
+                    // here stalled every other peer's traffic behind it.
+                    let src = self.local_source.clone();
+                    let weak = self.cmd_weak.clone();
+                    tokio::spawn(async move {
+                        let resp = match src {
+                            Some(src) => match src.read_chunk(&request.chunk_hash).await {
+                                Ok(bytes) => FetchResponse2::Ok { bytes },
+                                Err(_) => FetchResponse2::NotFound,
+                            },
+                            None => FetchResponse2::NotFound,
+                        };
+                        if let Some(tx) = weak.upgrade() {
+                            let _ = tx.send(Cmd::Fetch2Respond { channel, resp }).await;
+                        }
+                    });
+                }
+                request_response::Message::Response {
+                    request_id, response, ..
+                } => {
+                    if let Some((_, _, reply)) = self.pending_fetches2.remove(&request_id) {
+                        let _ = reply.send(match response {
+                            FetchResponse2::Ok { bytes } => Ok(bytes),
+                            FetchResponse2::NotFound => Err(anyhow!("provider returned NotFound for chunk")),
+                        });
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Fetch2(request_response::Event::OutboundFailure {
+                request_id,
+                error,
+                ..
+            })) => {
+                if let Some((peer, hash, reply)) = self.pending_fetches2.remove(&request_id) {
+                    if matches!(error, request_response::OutboundFailure::UnsupportedProtocols) {
+                        // An older peer: ask again over version 1, and
+                        // remember not to try version 2 with it.
+                        self.fetch_v1_only.insert(peer);
+                        let id = self
+                            .swarm
+                            .lock()
+                            .await
+                            .behaviour_mut()
+                            .fetch
+                            .send_request(&peer, FetchRequest { chunk_hash: hash });
+                        self.pending_fetches.insert(id, reply);
+                        self.fetch_targets.insert(id, hash);
+                    } else {
+                        let _ = reply.send(Err(anyhow!("fetch failed: {error}")));
+                    }
                 }
             }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Rpc(request_response::Event::Message {
@@ -1094,15 +1201,20 @@ impl SwarmTask {
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let resp = match &self.local_source {
-                    Some(src) => match src.read_chunk(&request.chunk_hash).await {
-                        Ok(bytes) => FetchResponse::Ok { bytes },
-                        Err(_) => FetchResponse::NotFound,
-                    },
-                    None => FetchResponse::NotFound,
-                };
-                let mut sw = self.swarm.lock().await;
-                let _ = sw.behaviour_mut().fetch.send_response(channel, resp);
+                let src = self.local_source.clone();
+                let weak = self.cmd_weak.clone();
+                tokio::spawn(async move {
+                    let resp = match src {
+                        Some(src) => match src.read_chunk(&request.chunk_hash).await {
+                            Ok(bytes) => FetchResponse::Ok { bytes },
+                            Err(_) => FetchResponse::NotFound,
+                        },
+                        None => FetchResponse::NotFound,
+                    };
+                    if let Some(tx) = weak.upgrade() {
+                        let _ = tx.send(Cmd::FetchRespond { channel, resp }).await;
+                    }
+                });
             }
             request_response::Message::Response {
                 request_id,

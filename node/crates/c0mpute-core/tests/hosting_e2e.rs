@@ -87,6 +87,8 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     let mut hosts: Vec<Hosting> = Vec::new();
     let opts = |dir: &std::path::Path| Options {
         hosts: true,
+        // Plenty of (pretend) disk: the test box may be below the free-disk floor.
+        disk_override: Some((1 << 40, 2 << 40)),
         catalog_path: Some(dir.join("catalog.json")),
         timing: fast(),
         ..Default::default()

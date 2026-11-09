@@ -568,6 +568,7 @@ dependencies = [
  "c0mpute-verify",
  "directories",
  "flate2",
+ "futures",
  "hex",
  "hkdf",
  "hmac",
