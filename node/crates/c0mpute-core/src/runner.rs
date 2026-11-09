@@ -621,8 +621,24 @@ pub(crate) async fn publish_receipt(
     }
     let topic = job_topic(&accept.workload_type);
     if let Ok(payload) = serde_json::to_vec(&receipt) {
-        if let Err(e) = net.publish(&topic, payload).await {
-            warn!(err = %e, "publish receipt");
+        // Straight to the buyer as well as on the topic (the aggregator and
+        // old buyers read it there): a receipt lost on the mesh left the
+        // buyer waiting out its whole receipt timeout for a finished job.
+        let direct = async {
+            match accept.buyer_peer_id.parse::<c0mpute_net::PeerId>() {
+                Ok(buyer) => {
+                    net.send_direct(buyer, &topic, &payload, std::time::Duration::from_secs(10))
+                        .await
+                }
+                Err(e) => Err(anyhow::anyhow!("buyer peer id: {e}")),
+            }
+        };
+        let (direct, gossip) = tokio::join!(direct, net.publish(&topic, payload.clone()));
+        match (direct, gossip) {
+            (Ok(()), _) | (_, Ok(())) => {}
+            (Err(d), Err(g)) => {
+                warn!(job_id = %accept.job_id, direct_err = %d, gossip_err = %g, "receipt not delivered on either path")
+            }
         }
     }
 }

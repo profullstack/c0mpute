@@ -134,6 +134,19 @@ pub struct JobOffer {
     /// buyers and workers omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// Public multiaddrs the buyer can be dialed on, each ending in
+    /// `/p2p/<buyer_peer_id>`. A worker delivers its bid straight to the
+    /// buyer over one of them (`Libp2pNetwork::send_direct`) as well as on
+    /// the gossip mesh, which drops bids while it re-forms. Optional; old
+    /// buyers omit it and workers then dial the buyer by peer id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buyer_addrs: Vec<String>,
+    /// How long the buyer collects bids. A worker reserves capacity for a
+    /// bid about this long (not the full bid TTL), so losing an auction it
+    /// never hears the result of does not stop it bidding on the next one.
+    /// Optional; old buyers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bid_window_ms: Option<u64>,
 }
 
 /// Worker bid in response to a `JobOffer`. Sent on the same job topic;

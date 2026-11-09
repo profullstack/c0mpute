@@ -6,7 +6,9 @@
 
 pub mod activity;
 pub mod ads;
+pub mod auction_stats;
 pub mod buyer;
+pub mod canary;
 pub mod capabilities;
 pub mod config;
 pub mod container;

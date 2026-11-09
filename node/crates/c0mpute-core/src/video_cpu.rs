@@ -581,8 +581,9 @@ mod tests {
         assert!(has_headroom_with(&config, idle));
         assert!(!has_headroom_with(&config, busy));
         assert!(!has_headroom_with(&config, small_box));
-        assert!(fast_enough_with(&config, 16));
-        assert!(!fast_enough_with(&config, 8));
+        // Half of a 16-core box is enough (the per-job budget is half).
+        assert!(fast_enough_with(&config, 8));
+        assert!(!fast_enough_with(&config, 4));
     }
 
     #[test]

@@ -102,7 +102,10 @@ async fn auction_round_trip_publishes_receipt() {
         .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
         .with_max_price_usd(0.05)
         .with_bid_window(Duration::from_secs(5))
-        .with_external_ref(Some("infernet:job_e2e".into()));
+        .with_external_ref(Some("infernet:job_e2e".into()))
+        // Only our worker: on a box beside live workers their bids (now
+        // delivered straight to the buyer) would otherwise win the test job.
+        .with_allowed_bidders(vec![worker.peer_id().to_base58()]);
 
     let outcome = run_auction(buyer.clone(), auction)
         .await

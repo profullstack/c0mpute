@@ -241,7 +241,10 @@ impl Supervisor {
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::diffusion::WORKLOAD_TXT2IMG.to_string(),
-                        capabilities::tags_from_config(&config),
+                        with_workload_tags(
+                            capabilities::tags_from_config(&config),
+                            &[crate::diffusion::ROLE_TAG, crate::diffusion::MODEL_TAG],
+                        ),
                         Some(runner_tx),
                         Some(filter),
                         Some(config.pricing.clone()),
@@ -282,7 +285,10 @@ impl Supervisor {
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::music::WORKLOAD_TXT2MUSIC.to_string(),
-                        capabilities::tags_from_config(&config),
+                        with_workload_tags(
+                            capabilities::tags_from_config(&config),
+                            &[crate::music::ROLE_TAG, crate::music::MODEL_TAG],
+                        ),
                         Some(runner_tx),
                         Some(filter),
                         Some(config.pricing.clone()),
@@ -464,12 +470,10 @@ impl Supervisor {
                     });
                     // The tag set is fixed at subscribe time and the box may
                     // have been busy then; the filter is the live gate.
-                    let mut tags = capabilities::tags_from_config(&config);
-                    for tag in crate::video_cpu::tags() {
-                        if !tags.contains(&tag) {
-                            tags.push(tag);
-                        }
-                    }
+                    let video_tags = crate::video_cpu::tags();
+                    let video_tags: Vec<&str> = video_tags.iter().map(String::as_str).collect();
+                    let tags =
+                        with_workload_tags(capabilities::tags_from_config(&config), &video_tags);
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::video::WORKLOAD_TXT2VID.to_string(),
@@ -657,6 +661,9 @@ impl Supervisor {
                 feed = %feed,
                 "auto-upgrade poller starting"
             );
+            // Never re-exec under a job we won: the poller drains (and the
+            // dispatch loops stop bidding) until every receipt has gone out.
+            c0mpute_update::set_busy_probe(crate::activity::running_jobs);
             tokio::spawn(c0mpute_update::poll_loop(current, feed, interval));
         }
 
@@ -897,5 +904,42 @@ pub struct StoreSource(pub ChunkStore);
 impl ChunkSource for StoreSource {
     async fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>> {
         self.0.get(hash).await
+    }
+}
+
+/// `tags` plus a workload's own role and model tags. Diffusion, music and
+/// CPU video advertise those only while the box is idle right now, so a
+/// subscriber that copied the live tag set while busy (a worker restarting
+/// into an update mid-render, every few minutes on release days) refused
+/// every offer as "missing capabilities" until its next restart: dev2's image
+/// worker did for 50 minutes on 2026-11-09. The capability check is about
+/// what the node can do; the subscriber's filter is the live gate.
+pub(crate) fn with_workload_tags(mut tags: Vec<String>, workload: &[&str]) -> Vec<String> {
+    for tag in workload {
+        if !tags.iter().any(|t| t == tag) {
+            tags.push((*tag).to_string());
+        }
+    }
+    tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_tags_are_added_once() {
+        let tags = with_workload_tags(
+            vec!["c0mpute:cpu".into(), crate::diffusion::ROLE_TAG.into()],
+            &[crate::diffusion::ROLE_TAG, crate::diffusion::MODEL_TAG],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "c0mpute:cpu".to_string(),
+                crate::diffusion::ROLE_TAG.to_string(),
+                crate::diffusion::MODEL_TAG.to_string(),
+            ]
+        );
     }
 }

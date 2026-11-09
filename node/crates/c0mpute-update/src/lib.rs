@@ -424,10 +424,39 @@ impl Drop for LongJob {
     }
 }
 
-/// How many long jobs this process is running now.
+/// How many long jobs this process is running now: [`LongJob`] guards plus
+/// whatever the registered [`set_busy_probe`] reports (a worker's won jobs
+/// whose receipt has not gone out yet).
 pub fn long_jobs_running() -> usize {
-    LONG_JOBS.load(std::sync::atomic::Ordering::SeqCst)
+    let probe = BUSY_PROBE.get().map(|f| f()).unwrap_or(0);
+    LONG_JOBS.load(std::sync::atomic::Ordering::SeqCst) + probe
 }
+
+static BUSY_PROBE: std::sync::OnceLock<fn() -> usize> = std::sync::OnceLock::new();
+
+/// Tell the poller how to count this process's running jobs, so it never
+/// re-executes under one. First registration wins.
+pub fn set_busy_probe(probe: fn() -> usize) {
+    let _ = BUSY_PROBE.set(probe);
+}
+
+static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while an installed update waits for running jobs to finish. Workers
+/// stop bidding then, so the drain ends and no won job dies in the re-exec.
+pub fn draining() -> bool {
+    DRAINING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn set_draining(on: bool) {
+    DRAINING.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Longest an installed update waits, at random, before draining. Releases
+/// land every few minutes on busy days and every node polls the same feed:
+/// without a spread the whole network restarts within one poll interval and
+/// every gossip mesh re-forms at once.
+pub const MAX_UPGRADE_STAGGER: Duration = Duration::from_secs(120);
 
 /// Longest the poller waits for running jobs before re-executing anyway.
 pub const MAX_DRAIN: Duration = Duration::from_secs(30 * 60);
@@ -478,13 +507,20 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
                 info!(%from, %to, "auto-upgrade: installed new binary");
                 #[cfg(unix)]
                 if let Some(exe) = &exe {
-                    let still = drain(MAX_DRAIN, Duration::from_secs(10)).await;
+                    // Spread restarts across the network, keep working
+                    // meanwhile, then stop taking work and let it finish.
+                    let stagger = stagger_secs(MAX_UPGRADE_STAGGER.as_secs());
+                    info!(secs = stagger, "auto-upgrade: restarting after a random stagger");
+                    tokio::time::sleep(Duration::from_secs(stagger)).await;
+                    set_draining(true);
+                    let still = drain(MAX_DRAIN, Duration::from_secs(5)).await;
                     if still > 0 {
                         warn!(still, "auto-upgrade: jobs still running after the drain limit; re-executing anyway");
                     }
                     info!("auto-upgrade: re-executing into the new binary");
                     // reexec only returns on failure (success replaces us).
                     let e = reexec(exe);
+                    set_draining(false);
                     warn!(err = %e, "auto-upgrade: re-exec failed; staged update applies on next restart");
                 }
                 // Update installed (and, on Unix, re-exec was attempted). Stop
@@ -534,6 +570,18 @@ fn reexec(exe: &std::path::Path) -> anyhow::Error {
         .collect();
     let err = std::process::Command::new(exe).args(args).exec();
     anyhow::anyhow!("exec {}: {err}", exe.display())
+}
+
+/// A pseudo-random 0..max seconds, different per process and per call.
+fn stagger_secs(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    (nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) % max
 }
 
 fn fastish_jitter_secs() -> u64 {
@@ -638,6 +686,14 @@ Blqf7m00l6vWH+cZyF7MfEWS3yzPB72bD9SD4FKBHNxraBa9P0juzgFm7uK6VFEpq3Fn0wr21tqB4o9l
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../minisign.pub");
         let file = std::fs::read_to_string(path).expect("read minisign.pub at repo root");
         assert_eq!(file.lines().nth(1).map(str::trim), Some(RELEASE_PUBKEY));
+    }
+
+    #[test]
+    fn stagger_in_range() {
+        for _ in 0..100 {
+            assert!(stagger_secs(120) < 120);
+        }
+        assert_eq!(stagger_secs(0), 0);
     }
 
     #[test]
