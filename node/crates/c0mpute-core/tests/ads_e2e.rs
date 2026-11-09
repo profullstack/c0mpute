@@ -78,6 +78,7 @@ fn ads_fast() -> ads::Timing {
         flush_every: Duration::from_millis(500),
         stitch_ttl: Duration::from_secs(60),
         stitch_timeout: Duration::from_secs(60),
+        claim_every: Duration::from_secs(3600),
     }
 }
 
@@ -182,6 +183,8 @@ async fn campaign_to_stitched_episode_vast_and_report() {
             ffmpeg: ffmpeg.clone(),
             ffprobe: ffprobe.clone(),
             public_origin: None,
+            payout: None,
+            min_claim_micros: 0,
             timing: ads_fast(),
         },
     )

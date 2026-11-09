@@ -2,6 +2,7 @@
 //! creative site, sign campaigns, keep a local copy, publish, and count
 //! receipts.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use c0mpute_proto::Hash;
 use serde::Deserialize;
 
+use super::billing::{self, Claim, ClaimError, Ledger, Publisher, Settlement, Verified};
 use super::campaign::{self, CampaignRecord, Creative, CreativeKind, FreqCap, Placement, Schedule, Targeting};
 use super::receipt::{ReceiptBatch, Report};
 use super::{Ads, Options};
@@ -179,6 +181,7 @@ pub struct CampaignSpec {
     pub freq_cap: Option<FreqCap>,
     pub max_cpm_micros: u64,
     pub landing_url: String,
+    pub budget: Option<super::billing::Budget>,
 }
 
 /// Build (unsigned) a campaign record from a spec and its creatives.
@@ -205,6 +208,7 @@ pub fn record_from_spec(spec: &CampaignSpec, owner_hex: &str, creatives: Vec<Cre
         freq_cap: spec.freq_cap,
         max_cpm_micros: spec.max_cpm_micros,
         landing_url: spec.landing_url.clone(),
+        budget: spec.budget.clone(),
         sig: String::new(),
     }
 }
@@ -243,7 +247,36 @@ pub fn save_local(rec: &CampaignRecord) -> Result<()> {
     let d = campaign_dir(&rec.name);
     std::fs::create_dir_all(&d)?;
     std::fs::write(d.join("campaign.json"), serde_json::to_vec_pretty(rec)?)?;
+    // Every version's bid, so settlement pays receipts at the bid they were
+    // served under.
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(d.join("history.jsonl"))?;
+    writeln!(f, "{}", serde_json::json!({"seq": rec.seq, "max_cpm_micros": rec.max_cpm_micros}))?;
     Ok(())
+}
+
+/// seq -> max CPM for every version of a local campaign (plus `current`).
+pub fn bids_local(current: &CampaignRecord) -> BTreeMap<u64, u64> {
+    let mut out = BTreeMap::new();
+    if let Ok(text) = std::fs::read_to_string(campaign_dir(&current.name).join("history.jsonl")) {
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                && let (Some(seq), Some(bid)) = (v["seq"].as_u64(), v["max_cpm_micros"].as_u64())
+            {
+                out.insert(seq, bid);
+            }
+        }
+    }
+    out.insert(current.seq, current.max_cpm_micros);
+    out
+}
+
+/// The advertiser's ledger for a local campaign.
+pub fn ledger_path(name: &str) -> PathBuf {
+    campaign_dir(name).join("ledger.json")
 }
 
 pub fn load_local(name_or_id: &str) -> Result<CampaignRecord> {
@@ -388,6 +421,155 @@ pub async fn report(campaign_id: &str, gateways: &[String], wait: Duration) -> R
     let ads = Ads::start(supervisor.libp2p.clone(), h, Options::default()).await?;
     tokio::time::sleep(Duration::from_secs(5)).await;
     Ok(collect_report(&ads, campaign_id, gateways, wait).await)
+}
+
+// ── settlement ───────────────────────────────────────────────────────────
+
+/// One settlement round's outcome.
+#[derive(Debug, Default)]
+pub struct SettleRound {
+    pub settled: Vec<(Settlement, Verified)>,
+    pub refused: Vec<(Claim, ClaimError)>,
+    /// Claims heard (newest per gateway).
+    pub claims: usize,
+    pub batches: usize,
+}
+
+/// The shows named by these batches that opted in to ads: owner key from
+/// the signed site record, payout from its signed `c0mpute-ads.json`. A
+/// site that did not opt in is left out, so its impressions are not paid.
+pub async fn resolve_publishers(hosting: &Hosting, ads: &Ads, batches: &[ReceiptBatch]) -> HashMap<String, Publisher> {
+    let sites: BTreeSet<String> = batches
+        .iter()
+        .flat_map(|b| b.receipts.iter())
+        .filter_map(|r| r.site.clone())
+        .collect();
+    let mut out = HashMap::new();
+    for site in sites {
+        let Some(rec) = hosting.record_for(&site).await else {
+            continue;
+        };
+        let Some(opt) = ads.show_opt_in(hosting, &rec).await else {
+            continue;
+        };
+        out.insert(
+            site,
+            Publisher {
+                owner: rec.owner.clone(),
+                payout: opt.payout.clone(),
+            },
+        );
+    }
+    out
+}
+
+/// Gather claims and receipts for a campaign over gossip for `wait`, then
+/// verify each claim against the ledger, in gateway-key order (so two nodes
+/// with the same inputs agree). With `owner` (the campaign key), accepted
+/// claims become signed settlements in `ledger`; without it, nothing
+/// changes (a dry run: the result says what would be paid). Paying is
+/// separate: [`Ledger::pay`].
+#[allow(clippy::too_many_arguments)]
+pub async fn settle_round(
+    ads: &Ads,
+    hosting: &Hosting,
+    campaign: &CampaignRecord,
+    bids: &BTreeMap<u64, u64>,
+    ledger: &mut Ledger,
+    owner: Option<&c0mpute_net::libp2p::identity::Keypair>,
+    fee_payout: &str,
+    wait: Duration,
+) -> SettleRound {
+    let cid = campaign.campaign_id.clone();
+    ads.request_claims(&cid).await;
+    ads.request_report(&cid).await;
+    let started = Instant::now();
+    let mut asked = Instant::now();
+    while started.elapsed() < wait {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if asked.elapsed() > Duration::from_secs(3) {
+            ads.request_claims(&cid).await;
+            ads.request_report(&cid).await;
+            asked = Instant::now();
+        }
+    }
+    let batches = ads.collected(&cid);
+    let claims = ads.heard_claims(&cid);
+    let publishers = resolve_publishers(hosting, ads, &batches).await;
+    let mut round = SettleRound {
+        claims: claims.len(),
+        batches: batches.len(),
+        ..Default::default()
+    };
+    let mut scratch = ledger.clone();
+    let book: &mut Ledger = if owner.is_some() { ledger } else { &mut scratch };
+    let now = super::now_unix();
+    for claim in claims {
+        match billing::verify_claim(campaign, bids, book, &claim, &batches, &publishers, fee_payout, now) {
+            Ok(v) => {
+                // A dry run settles unsigned on a scratch copy, so later
+                // claims still see the budget this one would use.
+                match book.settle(campaign, v.clone(), owner, now) {
+                    Ok(s) => round.settled.push((s, v)),
+                    Err(e) => tracing::warn!(err = %e, "ads: could not settle a verified claim"),
+                }
+            }
+            Err(e) => round.refused.push((claim, e)),
+        }
+    }
+    round
+}
+
+/// Gossip a campaign's settlements so gateways learn the budget left and
+/// where their next claim starts: the newest per gateway, which carries the
+/// highest running total.
+pub async fn announce_settlements(ads: &Ads, ledger: &Ledger) {
+    let mut latest: BTreeMap<&str, &Settlement> = BTreeMap::new();
+    for s in &ledger.settlements {
+        latest.insert(s.gateway.as_str(), s);
+    }
+    if let Some(last) = ledger.settlements.last() {
+        latest.insert(last.gateway.as_str(), last);
+    }
+    for s in latest.values() {
+        ads.publish_settlement(s).await;
+    }
+}
+
+/// `c0mpute ads settle`: boot a buyer node, collect claims and receipts,
+/// verify, and (with `pay`) settle and pay through `rail`.
+pub async fn settle(
+    record: &CampaignRecord,
+    fee_payout: &str,
+    rail: Option<&dyn billing::PaymentRail>,
+    wait: Duration,
+) -> Result<(SettleRound, Ledger)> {
+    let budget = record
+        .budget
+        .clone()
+        .context("this campaign has no budget: c0mpute ads campaign update <name> --budget <usd>")?;
+    let path = ledger_path(&record.name);
+    let mut ledger = Ledger::load(&path, &record.campaign_id)?;
+    let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
+    let h = Hosting::start(supervisor.libp2p.clone(), supervisor.store.clone(), hosting::Options::default()).await?;
+    let ads = Ads::start(supervisor.libp2p.clone(), h.clone(), Options::default()).await?;
+    // The index has to hold the campaign for settlements to be applied.
+    ads.apply(record.clone()).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let bids = bids_local(record);
+    let keypair = hosting::publisher_keypair()?;
+    let owner = rail.is_some().then_some(&keypair);
+    let round = settle_round(&ads, &h, record, &bids, &mut ledger, owner, fee_payout, wait).await;
+    if let Some(rail) = rail {
+        ledger.save(&path)?;
+        ledger.pay(rail, budget.payer.as_deref());
+        ledger.save(&path)?;
+        for _ in 0..3 {
+            announce_settlements(&ads, &ledger).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+    Ok((round, ledger))
 }
 
 #[cfg(test)]

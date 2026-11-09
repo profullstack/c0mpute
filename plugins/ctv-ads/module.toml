@@ -18,8 +18,12 @@
 #       play and event; tokens are HMAC'd by the gateway that served the ad.
 #   Also at /ads/vast and /ads/vmap. CORS open, so web players can call them.
 #
+# Billing: impression receipts carry the cleared second price; the serving
+# gateway claims 95% of it (no show on a direct VAST request), paid by the
+# advertiser through ads-manager billing.
+#
 # Not built: OpenRTB bidding, SCTE-35 / live-stream SSAI, beacon timing
-# checks, and billing (see ads-manager).
+# checks.
 
 [module]
 id          = "ctv-ads"
@@ -28,7 +32,7 @@ version     = "0.2.81"
 kind        = "service"
 category    = "applications"
 status      = "partial"
-status_note = "VAST 4.2 / VMAP ad serving with signed impression and quartile receipts works on every gateway; there is no billing, OpenRTB bidding or live-stream (SCTE-35) insertion yet."
+status_note = "VAST 4.2 / VMAP serving with signed, priced receipts works on every gateway, and gateways are paid per verified impression through ads-manager billing (tested end to end on a fake rail). Not built: OpenRTB bidding and live-stream (SCTE-35) insertion. Remaining switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
 builtin     = true
 description = "Video ads for connected TV and web players: every c0mpute gateway answers VAST 4.2 and VMAP requests from the gossiped campaign index, serves the video creative from hosting copies, and turns impression, quartile and click beacons into signed receipts."
 author      = "Profullstack"
@@ -37,7 +41,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["ctv", "connected-tv", "advertising", "vast", "vmap", "video", "streaming", "p2p"]
 
 [module.requirements]
-c0mpute      = ">=0.2.78"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:ingress"]

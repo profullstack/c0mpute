@@ -4,8 +4,10 @@
 //! 1. Filters, each with a named reason: paused, outside its schedule, wrong
 //!    placement, no creative for the placement, category / keyword / country
 //!    mismatch, bid under the publisher's floor, frequency cap reached.
-//! 2. The highest `max_cpm` wins (first price; there is no auction and no
-//!    settlement yet).
+//! 2. The highest `max_cpm` wins. It pays the second price: the best losing
+//!    bid or the publisher's floor, whichever is higher, never more than its
+//!    own bid ([`super::billing::cleared_cpm`]). That price goes on the
+//!    impression receipt and is what settlement pays.
 //! 3. Equal bids: rendezvous hashing of (campaign id, slot key), so every
 //!    gateway asked about the same slot gives the same answer, and different
 //!    slots spread across tied campaigns.
@@ -41,6 +43,8 @@ pub struct AdContext {
     pub exclude: Vec<String>,
     /// Longest creative the slot takes (podcast shows set this).
     pub max_duration_ms: Option<u64>,
+    /// Campaigns whose budget this gateway knows is spent.
+    pub exhausted: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -58,6 +62,8 @@ pub enum Reject {
     GeoUnknown,
     BelowFloor,
     FrequencyCap,
+    /// The campaign's budget is spent (settled plus this gateway's unsettled).
+    BudgetExhausted,
     Excluded,
     /// Lost on price (or the tie-break) to the winner.
     Outbid,
@@ -68,6 +74,8 @@ pub struct Decision {
     pub campaign: CampaignRecord,
     pub creative: Creative,
     pub bid_micros: u64,
+    /// What the winner pays (second price), USD millionths per thousand.
+    pub cleared_cpm_micros: u64,
     /// The tie-break score (hex), for explanations.
     pub rank: String,
 }
@@ -171,6 +179,9 @@ fn why_not(c: &CampaignRecord, ctx: &AdContext, placement: Placement, freq: &Fre
             _ => {}
         }
     }
+    if ctx.exhausted.contains(&c.campaign_id) {
+        return Some(Reject::BudgetExhausted);
+    }
     if c.max_cpm_micros < ctx.floor_micros {
         return Some(Reject::BelowFloor);
     }
@@ -205,6 +216,7 @@ where
             .then_with(|| rb.cmp(ra))
             .then_with(|| a.campaign_id.cmp(&b.campaign_id))
     });
+    let runner_up = eligible.get(1).map(|(c, _)| c.max_cpm_micros);
     let mut it = eligible.into_iter();
     let winner = it.next().and_then(|(c, r)| {
         let creative = creative_for(c, placement, &ctx.slot_key, ctx.max_duration_ms)?.clone();
@@ -212,6 +224,7 @@ where
             campaign: c.clone(),
             creative,
             bid_micros: c.max_cpm_micros,
+            cleared_cpm_micros: super::billing::cleared_cpm(c.max_cpm_micros, runner_up, ctx.floor_micros),
             rank: r,
         })
     });
@@ -264,6 +277,13 @@ mod tests {
         assert_eq!(w.creative.kind, crate::ads::campaign::CreativeKind::Audio);
         assert_eq!(e.rejected.len(), 4);
         assert!(e.rejected.iter().all(|r| r.2 == Reject::Outbid));
+        // Second price: $5 beats four $2 bids and pays $2.
+        assert_eq!(w.cleared_cpm_micros, 2 * MICROS);
+        let mut floored = ctx(Placement::PodcastPre);
+        floored.floor_micros = 3 * MICROS;
+        let w = select(&cs, &floored, &freq).winner.unwrap();
+        assert_eq!(w.cleared_cpm_micros, 3 * MICROS, "the floor beats the runner-up");
+        assert_eq!(select([&rich], &ctx(Placement::PodcastPre), &freq).winner.unwrap().cleared_cpm_micros, 5 * MICROS);
 
         // Without the rich one: a tie among four, decided by rendezvous. The
         // same answer whatever order the campaigns arrive in.
@@ -339,6 +359,10 @@ mod tests {
         let mut cx = ctx(Placement::PodcastPre);
         cx.exclude = vec![signed.campaign_id.clone()];
         check(base.clone(), cx, Reject::Excluded);
+
+        let mut cx = ctx(Placement::PodcastPre);
+        cx.exhausted = vec![signed.campaign_id.clone()];
+        check(base.clone(), cx, Reject::BudgetExhausted);
 
         // No placement: nothing selected.
         let mut cx = ctx(Placement::PodcastPre);

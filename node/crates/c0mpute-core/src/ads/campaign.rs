@@ -214,6 +214,10 @@ pub struct CampaignRecord {
     /// Highest price per thousand impressions, USD millionths.
     pub max_cpm_micros: u64,
     pub landing_url: String,
+    /// What the advertiser pays in total ([`super::billing`]). Without one
+    /// the campaign runs unpaid: receipts are counted, nothing is claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<super::billing::Budget>,
     /// ed25519 signature (hex) over [`CampaignRecord::signing_bytes`].
     #[serde(default)]
     pub sig: String,
@@ -354,6 +358,9 @@ impl CampaignRecord {
         if self.max_cpm_micros == 0 {
             bail!("max CPM must be above zero");
         }
+        if let Some(b) = &self.budget {
+            b.check()?;
+        }
         let u = url::Url::parse(&self.landing_url).context("landing URL")?;
         if !matches!(u.scheme(), "http" | "https") || self.landing_url.len() > 2048 {
             bail!("landing URL must be http(s)");
@@ -428,6 +435,7 @@ pub(crate) mod tests {
             freq_cap: None,
             max_cpm_micros: 2 * MICROS,
             landing_url: "https://example.org/".into(),
+            budget: None,
             sig: String::new(),
         }
     }

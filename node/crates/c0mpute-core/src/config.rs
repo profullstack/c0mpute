@@ -72,6 +72,26 @@ pub struct AdsConfig {
     /// Splice ads into opted-in podcast episodes (needs ffmpeg + ffprobe).
     #[serde(default = "default_true")]
     pub podcast_insertion: bool,
+    /// Gateway: where this gateway is paid for ads it serves on billed
+    /// campaigns, `<CHAIN>:<address>` (e.g. "SOL:9xQe..."). Without it the
+    /// gateway serves and signs receipts but never claims payment.
+    #[serde(default)]
+    pub payout: Option<String>,
+    /// Gateway: smallest claim worth making, USD.
+    #[serde(default = "default_min_claim_usd")]
+    pub min_claim_usd: String,
+    /// Advertiser: let `c0mpute ads settle --pay` send real money from your
+    /// CoinPay wallet. Off by default: settle only reports what it would pay.
+    #[serde(default)]
+    pub payouts: bool,
+    /// Advertiser: where the 5% network fee is sent, `<CHAIN>:<address>`.
+    /// Without it the fee is recorded as owed and not sent.
+    #[serde(default)]
+    pub fee_payout: Option<String>,
+}
+
+fn default_min_claim_usd() -> String {
+    "1.00".into()
 }
 
 impl Default for AdsConfig {
@@ -79,6 +99,10 @@ impl Default for AdsConfig {
         Self {
             serve: true,
             podcast_insertion: true,
+            payout: None,
+            min_claim_usd: default_min_claim_usd(),
+            payouts: false,
+            fee_payout: None,
         }
     }
 }
