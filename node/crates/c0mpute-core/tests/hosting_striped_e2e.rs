@@ -232,10 +232,10 @@ async fn a_large_site_stripes_serves_ranges_and_heals() {
             *per_host.entry(p.clone()).or_default() += 1;
         }
     }
-    assert!(
-        per_host.values().all(|n| *n < 5),
-        "a host holds every group: {per_host:?}"
-    );
+    // Spread over the network (with only 5 groups one host may still rank
+    // top-3 for all of them; the unit test checks that over 40 groups).
+    assert!(per_host.len() >= 4, "groups spread over the hosts: {per_host:?}");
+    assert_eq!(per_host.values().sum::<usize>(), 15);
 
     // The gateway serves ranges from the holders.
     let gw_router = gateway.router();
