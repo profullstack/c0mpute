@@ -105,6 +105,13 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.extend(models.into_iter().map(crate::embed::model_tag));
                 }
             }
+            Role::Render => {
+                // Only where `blender` runs. The probe (a few seconds) runs
+                // once at worker start; until it finishes, nothing is shown.
+                if let Some(rt) = crate::render::probed() {
+                    tags.extend(rt.tags());
+                }
+            }
             Role::Video => {
                 // Same rule as TTS: advertise only what this box can do now.
                 // A node without the GPU, the runtime or the image would win

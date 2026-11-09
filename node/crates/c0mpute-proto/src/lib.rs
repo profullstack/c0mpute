@@ -205,6 +205,10 @@ pub enum Role {
     /// default; the node provisions the runtime in the background and
     /// advertises the role once it works.
     Embed,
+    /// `blender.render-frame`: render `.blend` frames with the box's own
+    /// Blender (Cycles on CPU, or on a GPU Blender finds). On by default;
+    /// advertised only where `blender --version` works.
+    Render,
 }
 
 #[cfg(test)]
