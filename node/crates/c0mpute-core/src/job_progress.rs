@@ -296,6 +296,9 @@ impl PendingStore {
                 }
             }
         }
+        // Oldest first: resumed requests take their workload's slots in the
+        // order they were queued (directory order is arbitrary).
+        out.sort_by_key(|(_, job)| job.started_at_ms);
         out
     }
 }
@@ -468,6 +471,29 @@ mod tests {
         board.update("q", |p| p.stage = "done");
         board.start("third");
         assert!(board.snapshot("q").is_none(), "finished long ago, dropped");
+    }
+
+
+    #[test]
+    fn resumed_requests_come_back_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PendingStore::persistent(dir.path().to_path_buf());
+        let now = now_ms();
+        for (key, age) in [("b-newer", 1_000u64), ("a-oldest", 3_000), ("c-middle", 2_000)] {
+            store.save(
+                key,
+                &PendingJob {
+                    workload: "diffusion.txt2img".into(),
+                    spec: serde_json::json!({}),
+                    required: vec![],
+                    max_bytes: 1,
+                    started_at_ms: now - age,
+                    max_wait_ms: None,
+                },
+            );
+        }
+        let keys: Vec<String> = store.take_resumable().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec!["a-oldest", "c-middle", "b-newer"]);
     }
 
 }
