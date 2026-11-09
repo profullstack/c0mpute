@@ -481,3 +481,150 @@ async fn git_push_and_clone_through_the_network() {
     );
     drop(hosts);
 }
+
+/// A repo in the first helper's layout (`refs.json` + one `repo.bundle`)
+/// still clones, by its old `c0mpute://<site id>` URL too, and the owner's
+/// next push rewrites it in the pack layout without losing history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_bundle_repo_clones_and_migrates_on_push() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let tmp = tempfile::Builder::new()
+        .prefix("git-legacy")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let root = tmp.path().to_path_buf();
+    let opts = |dir: &Path| Options {
+        hosts: true,
+        catalog_path: Some(dir.join("catalog.json")),
+        timing: fast(),
+        ..Default::default()
+    };
+    let (hub_net, hub_store) = node(&root.join("h0"), vec![]).await;
+    let hub_addr = listen_addr(&hub_net).await;
+    let mut hosts = vec![
+        Hosting::start(hub_net, hub_store, opts(&root.join("h0")))
+            .await
+            .unwrap(),
+    ];
+    for i in 1..4 {
+        let d = root.join(format!("h{i}"));
+        let (n, s) = node(&d, vec![hub_addr.clone()]).await;
+        hosts.push(Hosting::start(n, s, opts(&d)).await.unwrap());
+    }
+    let (an, as_) = node(&root.join("gwa"), vec![hub_addr.clone()]).await;
+    let gw = Hosting::start(an, as_, opts(&root.join("gwa")))
+        .await
+        .unwrap();
+    let url = serve(&gw).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_c0mpute"),
+        bin.join("git-remote-c0mpute"),
+    )
+    .unwrap();
+    let owner = User::new(&root, "owner", &bin, &url);
+    let key = owner.key();
+    let kp = c0mpute_net::identity::load_or_create(&owner.home.join("data/c0mpute/buyer")).unwrap();
+
+    // The owner's repo, published the way the first helper did.
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    owner.git(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("README.md"), "from the bundle days\n").unwrap();
+    owner.git(&work, &["add", "."]);
+    owner.git(&work, &["commit", "-q", "-m", "old"]);
+    let old_sha = owner.git(&work, &["rev-parse", "HEAD"]).trim().to_string();
+    let site_dir = root.join("legacy-site");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    let bundle = site_dir.join("repo.bundle").to_string_lossy().to_string();
+    owner.git(&work, &["update-ref", "refs/c0mpute-push/0", &old_sha]);
+    owner.git(&work, &["bundle", "create", &bundle, "refs/c0mpute-push/0"]);
+    owner.git(&work, &["update-ref", "-d", "refs/c0mpute-push/0"]);
+    std::fs::write(
+        site_dir.join("refs.json"),
+        serde_json::json!({"head": "refs/heads/main", "refs": {"refs/heads/main": old_sha}})
+            .to_string(),
+    )
+    .unwrap();
+    let name = c0mpute_core::git::site_name("legacy");
+    let built = c0mpute_core::hosting::site::build_from_dir(&site_dir, &name).unwrap();
+    let rec = c0mpute_core::hosting::site::SiteRecord::sign(
+        &kp,
+        &name,
+        &built.manifest_hash(),
+        1,
+        built.manifest.total_bytes(),
+        vec![],
+    )
+    .unwrap();
+    let site_id = rec.site_id.clone();
+    assert_eq!(site_id, c0mpute_core::git::site_id(&key, "legacy"));
+    gw.publish_site(&built, rec).await.unwrap();
+    wait_for("3 copies of the legacy repo", 60, || {
+        let g = gw.clone();
+        let id = site_id.clone();
+        async move { g.holders(&id).await.len() >= 3 }
+    })
+    .await;
+
+    // A reader clones it by the old site-id URL.
+    let reader = User::new(&root, "reader", &bin, &url);
+    let c1 = root.join("c1");
+    {
+        let (r, u, d, at) = (
+            reader.clone(),
+            format!("c0mpute://{site_id}"),
+            c1.to_string_lossy().to_string(),
+            root.clone(),
+        );
+        blocking(move || r.git(&at, &["clone", &u, &d])).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(c1.join("README.md")).unwrap(),
+        "from the bundle days\n"
+    );
+
+    // The owner pushes a new commit by the short own-key URL.
+    owner.git(&work, &["remote", "add", "origin", "c0mpute://legacy"]);
+    std::fs::write(work.join("new.txt"), "packs now\n").unwrap();
+    owner.git(&work, &["add", "."]);
+    owner.git(&work, &["commit", "-q", "-m", "new"]);
+    let new_sha = owner.git(&work, &["rev-parse", "HEAD"]).trim().to_string();
+    {
+        let (o, w) = (owner.clone(), work.clone());
+        let out = blocking(move || o.git(&w, &["push", "origin", "main"])).await;
+        assert!(out.contains("main -> main"), "{out}");
+    }
+    let state = gw.git_state(&key, "legacy").await.expect("repo state");
+    assert!(
+        state.manifest.contains(c0mpute_core::git::DOC_PATH),
+        "{}",
+        state.manifest
+    );
+    assert!(
+        !state.manifest.contains("repo.bundle"),
+        "bundle dropped: {}",
+        state.manifest
+    );
+
+    // A fresh clone has the whole history from the pack layout.
+    let c2 = root.join("c2");
+    {
+        let (r, u, d, at) = (
+            reader.clone(),
+            format!("c0mpute://{key}/legacy"),
+            c2.to_string_lossy().to_string(),
+            root.clone(),
+        );
+        blocking(move || r.git(&at, &["clone", &u, &d])).await;
+    }
+    assert_eq!(reader.git(&c2, &["rev-parse", "HEAD"]).trim(), new_sha);
+    assert_eq!(reader.git(&c2, &["rev-parse", "HEAD~1"]).trim(), old_sha);
+    drop(hosts);
+}

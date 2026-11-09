@@ -86,6 +86,22 @@ export default async function StatusPage() {
           : `${stats.avg_latency_seconds.toFixed(1)}s`,
     }));
 
+  const pct = (r: number | null | undefined) =>
+    r === null || r === undefined ? "\u2014" : `${Math.round(r * 100)}%`;
+  const canaryRows = Object.entries(network.auction_canary ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([type, c]) => ({
+      id: type,
+      type,
+      probes: c.auctions,
+      bid_rate: pct(c.success_rate),
+      capable_rate:
+        c.with_capable && c.with_capable > 0
+          ? `${pct(c.capable_success_rate)} of ${c.with_capable}`
+          : "no capable node",
+      last: c.last_bids === null ? "\u2014" : `${c.last_bids} bids`,
+    }));
+
   return (
     <DashboardShell>
       {/* An aggregator is an optional hosted service, and saying so is not a
@@ -140,6 +156,20 @@ export default async function StatusPage() {
           emptyMessage="No workload activity."
         />
       </div>
+
+      <ResourceTable
+        title="[ auction canary ]"
+        description="One tiny offer per workload every 10 minutes, bids counted, nothing accepted (last hour). 'With a capable node' counts only probes sent while a node advertised the workload: that is the rate that should stay near 100%."
+        columns={[
+          { key: "type", label: "Workload" },
+          { key: "probes", label: "Probes" },
+          { key: "bid_rate", label: "Got a bid" },
+          { key: "capable_rate", label: "With a capable node" },
+          { key: "last", label: "Last probe" },
+        ]}
+        rows={canaryRows}
+        emptyMessage="No canary probes yet (the aggregator probes every 10 minutes)."
+      />
 
       <ResourceTable
         title="[ capability tags ]"

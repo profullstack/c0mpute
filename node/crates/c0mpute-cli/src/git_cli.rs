@@ -53,8 +53,11 @@ enum Sub {
     },
     /// This machine's owner key (the <owner> in c0mpute://<owner>/<repo>).
     Key,
+    /// The clone URL of a repo under this machine's key.
+    Url { repo: String },
     /// Put `git-remote-c0mpute` (a link to this binary) in a directory on
     /// PATH, so plain `git clone/push c0mpute://...` works.
+    #[command(alias = "install")]
     InstallHelper {
         /// Default: the directory this binary is in.
         #[arg(long)]
@@ -212,6 +215,14 @@ pub async fn run(args: &[String]) -> Result<()> {
         }
         Sub::Key => {
             println!("{}", my_key()?);
+            Ok(())
+        }
+        Sub::Url { repo } => {
+            let u = git::RepoUrl::parse(&repo)?;
+            if u.site.is_some() {
+                bail!("give a repo name, not a site id");
+            }
+            println!("{}", git::url_for(u.owner_or(&my_key()?), &u.repo));
             Ok(())
         }
         Sub::InstallHelper { dir } => {

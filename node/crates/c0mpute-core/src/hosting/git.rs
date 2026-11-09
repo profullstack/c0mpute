@@ -22,7 +22,7 @@ use axum::routing::get;
 use c0mpute_proto::Hash;
 use tracing::info;
 
-use super::site::{BuiltSite, MAX_SITE_BYTES, SiteManifest};
+use super::site::{BuiltSite, MAX_SITE_BYTES, Manifest, SiteManifest};
 use super::{Hosting, MAX_BYTES_PER_OWNER, TARGET_REPLICAS};
 use crate::git::{self, RepoDoc, RepoState};
 
@@ -75,7 +75,23 @@ impl Hosting {
         if rec.owner != owner || rec.name != git::site_name(repo) {
             return None;
         }
+        self.git_state_of(rec).await
+    }
+
+    /// A repo's state by site id (old `c0mpute://<site id>` URLs): the
+    /// record names its owner and repo, and the client checks the id.
+    pub async fn git_state_by_site(&self, site_id: &str) -> Option<RepoState> {
+        let rec = self.record_for(site_id).await?;
+        git::repo_of_site(&rec.name)?;
+        self.git_state_of(rec).await
+    }
+
+    async fn git_state_of(&self, rec: super::site::SiteRecord) -> Option<RepoState> {
         let m = self.manifest(&rec).await.ok()?;
+        // A repo is a handful of files: always a one-chunk (v1) manifest.
+        let Manifest::Inline(m) = &*m else {
+            return None;
+        };
         let manifest = String::from_utf8(m.to_bytes()).ok()?;
         let holders = self.holders(&rec.site_id).await;
         Some(RepoState {
@@ -149,16 +165,44 @@ impl Hosting {
         let current = self.record_for(&rec.site_id).await;
         let old = match &current {
             Some(cur) => {
-                let m = self.manifest(cur).await.map_err(|e| {
+                let stored = self.manifest(cur).await.map_err(|e| {
                     Refused(
                         StatusCode::BAD_GATEWAY,
                         format!("current version unavailable: {e}"),
                     )
                 })?;
+                let Manifest::Inline(m) = &*stored else {
+                    return Err(Refused(
+                        StatusCode::CONFLICT,
+                        "a non-git site already has this name".into(),
+                    ));
+                };
+                let m = m.clone();
                 let d = match self.read_file(cur, git::DOC_PATH).await {
                     Ok(Some((_, b))) => RepoDoc::from_bytes(&b).map_err(|e| {
                         Refused(StatusCode::CONFLICT, format!("current version: {e}"))
                     })?,
+                    // The old bundle layout: the push replaces it (a full
+                    // pack, checked by the client); refs.json is the ref map.
+                    Ok(None) if git::is_legacy(&m) => {
+                        match self.read_file(cur, git::LEGACY_REFS).await {
+                            Ok(Some((_, b))) => RepoDoc::from_legacy(repo, &b).map_err(|e| {
+                                Refused(StatusCode::CONFLICT, format!("current version: {e}"))
+                            })?,
+                            Ok(None) => {
+                                return Err(Refused(
+                                    StatusCode::CONFLICT,
+                                    "current version has no refs.json".into(),
+                                ));
+                            }
+                            Err(e) => {
+                                return Err(Refused(
+                                    StatusCode::BAD_GATEWAY,
+                                    format!("current ref map unavailable: {e}"),
+                                ));
+                            }
+                        }
+                    }
                     Ok(None) => {
                         return Err(Refused(
                             StatusCode::CONFLICT,
@@ -177,7 +221,7 @@ impl Hosting {
             None => None,
         };
         git::check_update(
-            old.as_ref().map(|(r, m, d)| (r, &**m, d)),
+            old.as_ref().map(|(r, m, d)| (r, m, d)),
             &rec,
             &manifest,
             &doc,
@@ -232,7 +276,8 @@ impl Hosting {
             .await
             .map_err(|e| Refused(StatusCode::CONFLICT, format!("{e:#}")))?;
         if let Some((old_rec, _, _)) = &old {
-            self.collect_garbage(old_rec, Some(&built.manifest)).await;
+            let keep = Manifest::Inline(built.manifest.clone());
+            self.collect_garbage(old_rec, Some(&keep)).await;
         }
         info!(site = %rec.site_id, repo = %repo, seq = rec.seq, refs = doc.refs.len(), packs = doc.packs.len(), "git: accepted a push");
         let holders = self.holders(&rec.site_id).await.len();
@@ -278,7 +323,23 @@ pub fn router() -> Router<Hosting> {
                 MAX_SITE_BYTES as usize + 64 * 1024 * 1024,
             )),
         )
+        .route("/git/v1/sites/{site_id}", get(get_repo_by_site))
         .route("/git/{owner}/{repo}/{*path}", get(get_file))
+}
+
+async fn get_repo_by_site(State(h): State<Hosting>, AxPath(site_id): AxPath<String>) -> Response {
+    let site_id = site_id.to_ascii_lowercase();
+    if !git::valid_site_id(&site_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "expected /git/v1/sites/<20-hex site id>",
+        )
+            .into_response();
+    }
+    match h.git_state_by_site(&site_id).await {
+        Some(s) => axum::Json(s).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such repo on the network (yet)").into_response(),
+    }
 }
 
 fn parse(owner: &str, repo: &str) -> Option<(String, String)> {

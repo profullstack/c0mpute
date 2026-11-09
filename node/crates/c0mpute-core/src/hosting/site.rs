@@ -18,10 +18,20 @@ use serde::{Deserialize, Serialize};
 /// as a CBOR integer array (about 2x on the wire and slow to decode), so
 /// small chunks keep each fetch quick and well under the 10 MiB response cap.
 pub const FILE_CHUNK_BYTES: usize = 1024 * 1024;
-/// Largest site a node will publish or replicate.
-pub const MAX_SITE_BYTES: u64 = 256 * 1024 * 1024;
-/// Most files in one site.
-pub const MAX_FILES: usize = 10_000;
+/// Largest site a node will publish or replicate (equal to the per-owner
+/// hosting budget, so one site always fits it).
+pub const MAX_SITE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Most files in one site. Above [`INLINE_FILES`] the manifest is split into
+/// parts of [`PART_FILES`], so a gateway loads only the part a request needs.
+pub const MAX_FILES: usize = 10_000_000;
+/// Sites up to this many files keep the single-chunk (v1) manifest every
+/// node understands.
+pub const INLINE_FILES: usize = 5_000;
+/// Files per manifest part (a part stays a few hundred KiB, well under the
+/// chunk protocol's response cap).
+pub const PART_FILES: usize = 4_000;
+/// Most files a v1 (single-chunk) manifest may list when read.
+const MAX_INLINE_FILES: usize = 10_000;
 /// Longest site name.
 pub const MAX_NAME_CHARS: usize = 63;
 /// Most custom domains on one site.
@@ -78,8 +88,8 @@ impl SiteManifest {
         if m.v != 1 {
             bail!("unsupported site manifest version {}", m.v);
         }
-        if m.files.len() > MAX_FILES {
-            bail!("site has more than {MAX_FILES} files");
+        if m.files.len() > MAX_INLINE_FILES {
+            bail!("a single-chunk manifest lists more than {MAX_INLINE_FILES} files");
         }
         if m.total_bytes() > MAX_SITE_BYTES {
             bail!("site is over {MAX_SITE_BYTES} bytes");
@@ -95,6 +105,164 @@ impl SiteManifest {
         }
         Ok(m)
     }
+}
+
+fn check_entries<'a>(files: impl Iterator<Item = (&'a String, &'a FileEntry)>) -> Result<()> {
+    for (path, f) in files {
+        if !valid_path(path) {
+            bail!("invalid path in manifest: {path:?}");
+        }
+        let expected = f.size.div_ceil(FILE_CHUNK_BYTES as u64).max(1) as usize;
+        if f.chunks.len() != expected || f.chunks.iter().any(|h| Hash::from_hex(h).is_err()) {
+            bail!("file {path:?} has a bad chunk list");
+        }
+    }
+    Ok(())
+}
+
+/// One part of a large site's manifest, named in the root by its first path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartRef {
+    /// The first (smallest) path in the part.
+    pub first: String,
+    /// blake3 (hex) of the part chunk.
+    pub hash: String,
+    pub files: u32,
+    pub bytes: u64,
+}
+
+/// The root of a large site's manifest (v2): its parts in path order. The
+/// record pins this chunk by hash, and it pins every part by hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestRoot {
+    pub v: u8,
+    pub name: String,
+    pub files: u64,
+    pub bytes: u64,
+    pub parts: Vec<PartRef>,
+}
+
+/// A run of files of a large site, contiguous in path order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestPart {
+    pub v: u8,
+    pub files: BTreeMap<String, FileEntry>,
+}
+
+impl ManifestPart {
+    /// Parse a part and check it is the one `r` names.
+    pub fn from_bytes(bytes: &[u8], r: &PartRef) -> Result<Self> {
+        if Hash::of(bytes).to_hex() != r.hash {
+            bail!("manifest part does not match its hash");
+        }
+        let p: ManifestPart = serde_json::from_slice(bytes).context("manifest part is not JSON")?;
+        if p.v != 2 || p.files.len() != r.files as usize || p.files.len() > PART_FILES {
+            bail!("manifest part does not match the root");
+        }
+        if p.files.keys().next().map(String::as_str) != Some(r.first.as_str()) {
+            bail!("manifest part starts at the wrong path");
+        }
+        if p.files.values().map(|f| f.size).sum::<u64>() != r.bytes {
+            bail!("manifest part size does not match the root");
+        }
+        check_entries(p.files.iter())?;
+        Ok(p)
+    }
+
+    pub fn chunk_hashes(&self) -> impl Iterator<Item = &String> {
+        self.files.values().flat_map(|f| f.chunks.iter())
+    }
+}
+
+/// A site manifest as stored: one chunk (v1), or a root plus parts (v2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Manifest {
+    Inline(SiteManifest),
+    Parted(ManifestRoot),
+}
+
+impl Manifest {
+    /// Parse the chunk a record names (either version).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct V {
+            v: u8,
+        }
+        let v: V = serde_json::from_slice(bytes).context("site manifest is not JSON")?;
+        match v.v {
+            1 => Ok(Manifest::Inline(SiteManifest::from_bytes(bytes)?)),
+            2 => {
+                let r: ManifestRoot = serde_json::from_slice(bytes).context("site manifest root")?;
+                if r.files as usize > MAX_FILES || r.bytes > MAX_SITE_BYTES || r.parts.is_empty() {
+                    bail!("site manifest root out of bounds");
+                }
+                if r.parts.len() > MAX_FILES.div_ceil(PART_FILES) {
+                    bail!("site manifest has too many parts");
+                }
+                if r.parts.iter().map(|p| p.files as u64).sum::<u64>() != r.files
+                    || r.parts.iter().map(|p| p.bytes).sum::<u64>() != r.bytes
+                {
+                    bail!("site manifest parts do not add up");
+                }
+                if !r.parts.windows(2).all(|w| w[0].first < w[1].first)
+                    || r.parts.iter().any(|p| Hash::from_hex(&p.hash).is_err() || !valid_path(&p.first))
+                {
+                    bail!("site manifest parts are malformed");
+                }
+                Ok(Manifest::Parted(r))
+            }
+            n => bail!("unsupported site manifest version {n}"),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Manifest::Inline(m) => &m.name,
+            Manifest::Parted(r) => &r.name,
+        }
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        match self {
+            Manifest::Inline(m) => m.total_bytes(),
+            Manifest::Parted(r) => r.bytes,
+        }
+    }
+
+    pub fn file_count(&self) -> u64 {
+        match self {
+            Manifest::Inline(m) => m.files.len() as u64,
+            Manifest::Parted(r) => r.files,
+        }
+    }
+
+    /// The part that would hold `path` (the last whose first path <= it).
+    pub fn part_for(&self, path: &str) -> Option<&PartRef> {
+        let Manifest::Parted(r) = self else { return None };
+        let i = r.parts.partition_point(|p| p.first.as_str() <= path);
+        i.checked_sub(1).map(|i| &r.parts[i])
+    }
+}
+
+/// The manifest paths a request path may map to, in order: `/` and
+/// directories get `index.html`; an extensionless path also tries `.html` and
+/// `/index.html`.
+pub fn candidates(request: &str) -> Vec<String> {
+    let p = request.trim_start_matches('/');
+    let p = p.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode(p);
+    let mut out = Vec::new();
+    if decoded.is_empty() || decoded.ends_with('/') {
+        out.push(format!("{decoded}index.html"));
+    } else {
+        out.push(decoded.clone());
+        let last = decoded.rsplit('/').next().unwrap_or("");
+        if !last.contains('.') {
+            out.push(format!("{decoded}.html"));
+            out.push(format!("{decoded}/index.html"));
+        }
+    }
+    out
 }
 
 /// The owner's signed statement "site `name` is now at manifest `manifest`".
@@ -140,7 +308,7 @@ pub struct HostingTerms {
     pub payer: Option<String>,
 }
 
-fn valid_peer_id(p: &str) -> bool {
+pub fn valid_peer_id(p: &str) -> bool {
     p.len() <= 64 && p.parse::<c0mpute_net::PeerId>().is_ok()
 }
 
@@ -415,6 +583,66 @@ pub struct BuiltSite {
 
 /// Walk `dir` and cut every file into chunks. Hidden files and directories
 /// are skipped, except `.well-known`.
+/// A built site's manifest as chunks: the root (what the record pins) and,
+/// for a large site, its parts.
+pub struct StoredManifest {
+    pub root: Vec<u8>,
+    pub parts: Vec<Vec<u8>>,
+}
+
+impl StoredManifest {
+    pub fn hash(&self) -> Hash {
+        Hash::of(&self.root)
+    }
+}
+
+impl BuiltSite {
+    /// Encode the manifest: one chunk up to [`INLINE_FILES`] files, else a
+    /// root plus parts of [`PART_FILES`].
+    pub fn stored(&self) -> StoredManifest {
+        let m = &self.manifest;
+        if m.files.len() <= INLINE_FILES {
+            return StoredManifest {
+                root: m.to_bytes(),
+                parts: Vec::new(),
+            };
+        }
+        let entries: Vec<(&String, &FileEntry)> = m.files.iter().collect();
+        let mut parts = Vec::new();
+        let mut refs = Vec::new();
+        for run in entries.chunks(PART_FILES) {
+            let part = ManifestPart {
+                v: 2,
+                files: run.iter().map(|(k, v)| ((*k).clone(), (*v).clone())).collect(),
+            };
+            let bytes = serde_json::to_vec(&part).expect("part serializes");
+            refs.push(PartRef {
+                first: run[0].0.clone(),
+                hash: Hash::of(&bytes).to_hex(),
+                files: run.len() as u32,
+                bytes: run.iter().map(|(_, f)| f.size).sum(),
+            });
+            parts.push(bytes);
+        }
+        let root = ManifestRoot {
+            v: 2,
+            name: m.name.clone(),
+            files: m.files.len() as u64,
+            bytes: m.total_bytes(),
+            parts: refs,
+        };
+        StoredManifest {
+            root: serde_json::to_vec(&root).expect("root serializes"),
+            parts,
+        }
+    }
+
+    /// The hash a record pins.
+    pub fn manifest_hash(&self) -> Hash {
+        self.stored().hash()
+    }
+}
+
 pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
     if !valid_name(name) {
         bail!("site name must be 1-63 of a-z, 0-9 and '-'");
@@ -465,6 +693,15 @@ pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
     })
 }
 
+/// The files `build_from_dir` would publish from `dir`, as sorted
+/// (manifest path, absolute path) pairs. Private sites use the same walk.
+pub fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths = Vec::new();
+    walk(dir, dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
@@ -498,21 +735,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()>
 /// The manifest path a request path maps to: `/` and directories get
 /// `index.html`; an extensionless path also tries `.html` and `/index.html`.
 pub fn resolve_path<'a>(manifest: &'a SiteManifest, request: &str) -> Option<(&'a str, &'a FileEntry)> {
-    let p = request.trim_start_matches('/');
-    let p = p.split(['?', '#']).next().unwrap_or("");
-    let decoded = percent_decode(p);
-    let mut candidates = Vec::new();
-    if decoded.is_empty() || decoded.ends_with('/') {
-        candidates.push(format!("{decoded}index.html"));
-    } else {
-        candidates.push(decoded.clone());
-        let last = decoded.rsplit('/').next().unwrap_or("");
-        if !last.contains('.') {
-            candidates.push(format!("{decoded}.html"));
-            candidates.push(format!("{decoded}/index.html"));
-        }
-    }
-    for c in candidates {
+    for c in candidates(request) {
         if let Some((k, v)) = manifest.files.get_key_value(c.as_str()) {
             return Some((k.as_str(), v));
         }
@@ -546,6 +769,86 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic(n: usize) -> BuiltSite {
+        let files = (0..n)
+            .map(|i| {
+                (
+                    format!("d{}/f{i:07}.txt", i % 17),
+                    FileEntry {
+                        size: 3,
+                        content_type: "text/plain".into(),
+                        chunks: vec![Hash::of(format!("{i}").as_bytes()).to_hex()],
+                    },
+                )
+            })
+            .collect();
+        BuiltSite {
+            manifest: SiteManifest {
+                v: 1,
+                name: "big".into(),
+                files,
+            },
+            chunks: vec![],
+        }
+    }
+
+    #[test]
+    fn small_sites_keep_the_single_chunk_manifest() {
+        let b = synthetic(INLINE_FILES);
+        let st = b.stored();
+        assert!(st.parts.is_empty());
+        assert!(matches!(Manifest::from_bytes(&st.root).unwrap(), Manifest::Inline(_)));
+        assert_eq!(st.root, b.manifest.to_bytes(), "byte-identical to what older nodes expect");
+    }
+
+    #[test]
+    fn large_sites_split_into_parts_every_path_can_find() {
+        let b = synthetic(12_345);
+        let st = b.stored();
+        assert_eq!(st.parts.len(), 12_345usize.div_ceil(PART_FILES));
+        let m = Manifest::from_bytes(&st.root).unwrap();
+        let Manifest::Parted(r) = &m else { panic!("expected parts") };
+        assert_eq!((r.files, r.bytes), (12_345, 3 * 12_345));
+        assert_eq!(m.total_bytes(), 3 * 12_345);
+        let parts: Vec<ManifestPart> = r.parts.iter().zip(&st.parts).map(|(pr, b)| ManifestPart::from_bytes(b, pr).unwrap()).collect();
+        for path in b.manifest.files.keys() {
+            let pr = m.part_for(path).unwrap();
+            let i = r.parts.iter().position(|x| x == pr).unwrap();
+            assert!(parts[i].files.contains_key(path), "{path} routes to the part that holds it");
+        }
+        assert!(m.part_for("a-before-everything").is_none());
+        // A part swapped for another fails its hash check.
+        assert!(ManifestPart::from_bytes(&st.parts[1], &r.parts[0]).is_err());
+        // A root that lies about its totals is refused.
+        let mut bad = r.clone();
+        bad.files += 1;
+        assert!(Manifest::from_bytes(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+
+    #[test]
+    fn ten_million_files_fit_the_root() {
+        // The root for MAX_FILES lists MAX_FILES / PART_FILES parts; it must
+        // stay one fetchable chunk (the chunk protocol caps a response at
+        // 10 MiB and roughly doubles bytes on the wire).
+        let parts = MAX_FILES.div_ceil(PART_FILES);
+        let r = ManifestRoot {
+            v: 2,
+            name: "x".repeat(63),
+            files: MAX_FILES as u64,
+            bytes: MAX_SITE_BYTES,
+            parts: (0..parts)
+                .map(|i| PartRef {
+                    first: format!("some/fairly/long/directory/name/file-{i:09}.html"),
+                    hash: "f".repeat(64),
+                    files: PART_FILES as u32,
+                    bytes: 0,
+                })
+                .collect(),
+        };
+        let n = serde_json::to_vec(&r).unwrap().len();
+        assert!(n < 4 * 1024 * 1024, "root is {n} bytes");
+    }
 
     #[test]
     fn records_verify_only_when_signed_by_the_owner() {

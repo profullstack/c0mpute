@@ -33,6 +33,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return json({ error: { message: "the c0mpute network is restarting; try again in a minute", code: 503 } }, 503);
   }
   const body = (await upstream.json().catch(() => ({}))) as Record<string, unknown>;
-  if (upstream.status === 202) return json({ id, status: "pending", seconds: body.seconds ?? null }, 202, { "cache-control": "no-store" });
+  if (upstream.status === 202) {
+    // While queued for a free worker the network says so (stage "queued",
+    // position, one-line detail); pass that through for the chat to show.
+    const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : undefined);
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+    return json(
+      { id, status: "pending", seconds: body.seconds ?? null, stage: str(body.stage), detail: str(body.detail), queue_position: num(body.queue_position) },
+      202,
+      { "cache-control": "no-store" },
+    );
+  }
   return json({ error: { message: typeof body.error === "string" ? body.error : "image failed", code: upstream.status } }, upstream.status);
 }

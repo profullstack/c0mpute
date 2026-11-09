@@ -48,7 +48,10 @@ impl Supervisor {
         Self::boot_with_identity(config, identity_dir).await
     }
 
-    async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
+    /// Boot with a libp2p identity kept in `identity_dir` (created if
+    /// missing). Private storage uses a fresh throwaway directory per
+    /// session, so its publishes are not tied to this machine's usual peer id.
+    pub async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&config.storage.root)?;
         let store = ChunkStore::open(&config.storage.root).await?;
 
@@ -241,7 +244,10 @@ impl Supervisor {
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::diffusion::WORKLOAD_TXT2IMG.to_string(),
-                        capabilities::tags_from_config(&config),
+                        with_workload_tags(
+                            capabilities::tags_from_config(&config),
+                            &[crate::diffusion::ROLE_TAG, crate::diffusion::MODEL_TAG],
+                        ),
                         Some(runner_tx),
                         Some(filter),
                         Some(config.pricing.clone()),
@@ -282,7 +288,10 @@ impl Supervisor {
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::music::WORKLOAD_TXT2MUSIC.to_string(),
-                        capabilities::tags_from_config(&config),
+                        with_workload_tags(
+                            capabilities::tags_from_config(&config),
+                            &[crate::music::ROLE_TAG, crate::music::MODEL_TAG],
+                        ),
                         Some(runner_tx),
                         Some(filter),
                         Some(config.pricing.clone()),
@@ -419,6 +428,32 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Captchas: same shape as embeddings (provision ddddocr in the
+            // background, subscribe once it loads).
+            if workload_type == crate::captcha::WORKLOAD {
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::captcha::ensure(&config.captcha).await {
+                        info!("captcha runtime not installed; not subscribing to captcha.solve");
+                        return;
+                    }
+                    let runner_tx =
+                        crate::captcha::spawn_captcha_runner(net.clone(), store, load.clone());
+                    info!(workload_type = crate::captcha::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::captcha::WORKLOAD.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // Video on a box with no usable GPU: CPU text-to-video (Wan 2.1
             // 1.3B on stable-diffusion.cpp) if the operator opted in. Same
             // shape as CPU images: provision in the background, subscribe
@@ -451,11 +486,18 @@ impl Supervisor {
                     );
                     let gate = config.video.clone();
                     let filter: dispatch::OfferFilter = std::sync::Arc::new(move |offer| {
-                        let fits = offer
-                            .spec_inline
-                            .as_ref()
+                        // An e2e offer's prompt stays sealed: a stand-in lets
+                        // the size checks run; the opened spec is checked again.
+                        let spec = match crate::job_e2e::bid_spec(offer) {
+                            Some(crate::job_e2e::BidSpec::Public(v)) => {
+                                Some(crate::job_e2e::with_placeholders(v, &[("prompt", serde_json::json!("x"))]))
+                            }
+                            Some(crate::job_e2e::BidSpec::Full(v)) => Some(v.clone()),
+                            None => None,
+                        };
+                        let fits = spec
                             .and_then(|spec| {
-                                serde_json::from_value::<crate::video::VideoJobInline>(spec.clone()).ok()
+                                serde_json::from_value::<crate::video::VideoJobInline>(spec).ok()
                             })
                             .is_some_and(|job| {
                                 crate::video_cpu::fits(&job, crate::video::WORKLOAD_TXT2VID).is_ok()
@@ -464,12 +506,10 @@ impl Supervisor {
                     });
                     // The tag set is fixed at subscribe time and the box may
                     // have been busy then; the filter is the live gate.
-                    let mut tags = capabilities::tags_from_config(&config);
-                    for tag in crate::video_cpu::tags() {
-                        if !tags.contains(&tag) {
-                            tags.push(tag);
-                        }
-                    }
+                    let video_tags = crate::video_cpu::tags();
+                    let video_tags: Vec<&str> = video_tags.iter().map(String::as_str).collect();
+                    let tags =
+                        with_workload_tags(capabilities::tags_from_config(&config), &video_tags);
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::video::WORKLOAD_TXT2VID.to_string(),
@@ -618,6 +658,31 @@ impl Supervisor {
             None
         };
 
+        // Apps: `apps` nodes run backends for the network; every gateway
+        // routes to them (and serves their custom domains before sites).
+        let apps = if self.config.roles.contains(&c0mpute_proto::Role::Apps)
+            || self.config.roles.contains(&c0mpute_proto::Role::Gateway)
+        {
+            match self.start_apps(hosting.clone()).await {
+                Ok(a) => {
+                    if let Some(h) = &hosting {
+                        h.set_host_hook(std::sync::Arc::new(a.clone()));
+                    }
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "apps: not started");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Every storage node lists its disk on d1sks with a signed heartbeat,
+        // gateway or not, NAT or not (opt-outs in `Config::lists_on_d1sks`).
+        crate::opendisk::spawn_listing(&self.config, self.libp2p.clone());
+
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;
             let state = c0mpute_gateway::GatewayState {
@@ -632,6 +697,9 @@ impl Supervisor {
                 app = app.merge(l.router());
             }
             if let Some(a) = &ads {
+                app = app.merge(a.router());
+            }
+            if let Some(a) = &apps {
                 app = app.merge(a.router());
             }
             if let Some(h) = &hosting {
@@ -657,6 +725,9 @@ impl Supervisor {
                 feed = %feed,
                 "auto-upgrade poller starting"
             );
+            // Never re-exec under a job we won: the poller drains (and the
+            // dispatch loops stop bidding) until every receipt has gone out.
+            c0mpute_update::set_busy_probe(crate::activity::running_jobs);
             tokio::spawn(c0mpute_update::poll_loop(current, feed, interval));
         }
 
@@ -664,6 +735,32 @@ impl Supervisor {
         tokio::signal::ctrl_c().await?;
         info!("ctrl-c received; shutting down");
         Ok(())
+    }
+
+    /// Start the apps service. It runs apps only with the `apps` role and a
+    /// working docker; otherwise it only routes (a gateway).
+    pub async fn start_apps(&self, hosting: Option<crate::hosting::Hosting>) -> Result<crate::apps::Apps> {
+        let wants = self.config.roles.contains(&c0mpute_proto::Role::Apps) && !self.config.private.enabled;
+        let hosts = wants && crate::apps::runtime::available().await;
+        if wants && !hosts {
+            tracing::warn!("apps: role set but docker is not answering; routing only");
+        }
+        let cfg = &self.config.apps;
+        crate::apps::Apps::start(
+            self.libp2p.clone(),
+            self.store.clone(),
+            crate::apps::Options {
+                hosts,
+                max_apps: cfg.max_apps,
+                max_memory_mb: cfg.max_memory_mb,
+                owners: cfg.owners.clone(),
+                dir: Some(self.config.storage.root.join("apps")),
+                hosting,
+                registry: Some(self.registry.clone()),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Start the hosting service: gossip, replica map, self-healing copies.
@@ -881,7 +978,6 @@ impl Supervisor {
                     }
                 }),
             );
-            crate::opendisk::spawn_self_listing(&self.config);
         }
         app
     }
@@ -907,5 +1003,42 @@ pub struct StoreSource(pub ChunkStore);
 impl ChunkSource for StoreSource {
     async fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>> {
         self.0.get(hash).await
+    }
+}
+
+/// `tags` plus a workload's own role and model tags. Diffusion, music and
+/// CPU video advertise those only while the box is idle right now, so a
+/// subscriber that copied the live tag set while busy (a worker restarting
+/// into an update mid-render, every few minutes on release days) refused
+/// every offer as "missing capabilities" until its next restart: dev2's image
+/// worker did for 50 minutes on 2026-11-09. The capability check is about
+/// what the node can do; the subscriber's filter is the live gate.
+pub(crate) fn with_workload_tags(mut tags: Vec<String>, workload: &[&str]) -> Vec<String> {
+    for tag in workload {
+        if !tags.iter().any(|t| t == tag) {
+            tags.push((*tag).to_string());
+        }
+    }
+    tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_tags_are_added_once() {
+        let tags = with_workload_tags(
+            vec!["c0mpute:cpu".into(), crate::diffusion::ROLE_TAG.into()],
+            &[crate::diffusion::ROLE_TAG, crate::diffusion::MODEL_TAG],
+        );
+        assert_eq!(
+            tags,
+            vec![
+                "c0mpute:cpu".to_string(),
+                crate::diffusion::ROLE_TAG.to_string(),
+                crate::diffusion::MODEL_TAG.to_string(),
+            ]
+        );
     }
 }

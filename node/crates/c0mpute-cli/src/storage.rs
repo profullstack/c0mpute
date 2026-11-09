@@ -4,10 +4,13 @@
 //! specified in `docs/prds/009-mount-cli.md`. This is the CIP-002 slice of
 //! that surface: objects, shards and the local node's storage service.
 //!
-//! Volume, mount and provider commands arrive with their CIPs — see
-//! [`unimplemented_note`] for what maps to what. They are deliberately absent
-//! rather than stubbed, so `--help` never advertises something that does not
-//! work.
+//! Objects are private by default: `put` encrypts on this machine before
+//! anything leaves it and publishes only ciphertext (DIP-0012 `private`
+//! tier, see `private_storage.rs`). `--public` stores plaintext, as before.
+//!
+//! Provider commands arrive with their CIPs; see [`unimplemented_note`].
+//! They are deliberately absent rather than stubbed, so `--help` never
+//! advertises something that does not work.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,19 +26,41 @@ use clap::Subcommand;
 use tokio::sync::RwLock;
 
 use crate::peers;
+use crate::private_storage;
+use std::time::Duration;
 
 #[derive(Subcommand, Debug)]
 pub enum StorageCmd {
-    /// Store a file and print its object hash.
+    /// Store a file. Private by default: encrypted on this machine, then
+    /// published to the network as ciphertext (three self-healing copies).
+    /// Prints a `c0p1:` reference that only you can open.
     ///
-    /// Placed across the network when storage peers are configured
-    /// (`c0mpute storage peer add`), otherwise stored on this node alone.
+    /// --public stores plaintext instead (content-addressed, readable by
+    /// anyone with the hash): placed across storage peers when configured
+    /// (`c0mpute storage peer add`), otherwise on this node alone.
     Put {
         file: PathBuf,
+        /// Store plaintext: anyone with the hash can read it. Only for data
+        /// that is meant to be public.
+        #[arg(long)]
+        public: bool,
+        /// Also let these storage identities (`c0ps1...`) open it. Repeatable.
+        #[arg(long = "share-with")]
+        share_with: Vec<String>,
+        /// First use only: where to write your encrypted key backup.
+        #[arg(long)]
+        backup_to: Option<PathBuf>,
+        /// Gateway used to read objects back.
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
+        /// Give up waiting for network copies after this many seconds.
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
         /// Redundancy tier: hot, standard (default) or critical.
         #[arg(long, default_value = "standard")]
         tier: String,
-        /// Keep every shard on this node even when peers are configured.
+        /// Keep it on this node: a private object's ciphertext, or with
+        /// --public every shard, even when peers are configured.
         #[arg(long)]
         local: bool,
         /// Place without requiring failure-domain diversity.
@@ -52,21 +77,80 @@ pub enum StorageCmd {
         #[command(subcommand)]
         cmd: PeerCmd,
     },
-    /// Fetch an object by hash.
+    /// Fetch an object: `c0p1:...` (private, decrypted here), a private
+    /// link (`...#k=...`), or `blake3:...` (on this node or its peers).
     Get {
+        #[arg(value_name = "REF")]
         hash: String,
-        /// Write to this path instead of stdout.
+        /// Write to this path (a directory for a private site) instead of stdout.
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
-        /// Read only this byte range, e.g. `1000-2047`.
+        /// Read only this byte range, e.g. `1000-2047` (blake3 objects).
         #[arg(long)]
         range: Option<String>,
+        /// Write the ciphertext exactly as operators hold it; do not decrypt.
+        #[arg(long)]
+        raw: bool,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
+    },
+    /// Let more storage identities open a private object (you must own it).
+    Share {
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Their storage identity (`c0ps1...`, from `c0mpute storage key show`). Repeatable.
+        #[arg(long = "with", required = true)]
+        with: Vec<String>,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
+        #[arg(long, default_value_t = 180)]
+        wait_secs: u64,
+    },
+    /// Stop identities reading a private object: re-encrypts it under a new
+    /// key, which also kills every link given out so far.
+    Revoke {
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Storage identities to remove (`c0ps1...`). Omit to just rotate the key.
+        #[arg(long = "from")]
+        from: Vec<String>,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
+    },
+    /// Print a link that opens a private object for anyone who has it (in a
+    /// browser, or with `storage get`). The key rides in the # fragment.
+    Link {
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
+    },
+    /// Your c0mpute identity: create it, show your storage identity, back it up.
+    Key {
+        #[command(subcommand)]
+        cmd: crate::private_storage::KeyCmd,
+    },
+    /// Mount an encrypted volume: files written here are stored as private
+    /// objects (Linux, FUSE).
+    #[cfg(all(target_os = "linux", feature = "fuse"))]
+    Mount {
+        dir: PathBuf,
+        /// Volume name (each name is a separate volume).
+        #[arg(long, default_value = "default")]
+        volume: String,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
     },
     /// List objects held on this node.
     Ls {
         /// Print one hash per line with no header.
         #[arg(long)]
         quiet: bool,
+        /// List your private objects (from this machine's encrypted index).
+        #[arg(long)]
+        private: bool,
     },
     /// Show an object's block and shard layout.
     Info { hash: String },
@@ -85,11 +169,15 @@ pub enum StorageCmd {
         #[arg(long)]
         now: bool,
     },
-    /// Delete an object and its shards.
+    /// Delete an object: `blake3:...` from this node, or `c0p1:...` from
+    /// the network (its holders drop the ciphertext).
     Rm {
+        #[arg(value_name = "REF")]
         hash: String,
         #[arg(long)]
         yes: bool,
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
     },
     /// Disk usage, budget, and per-tier redundancy.
     Status,
@@ -167,19 +255,66 @@ pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
         StorageCmd::Put {
             file,
+            public,
+            share_with,
+            backup_to,
+            gateway,
+            wait_secs,
             tier,
             local,
             insecure_ignore_diversity,
-        } => put(config_path, file, &tier, local, insecure_ignore_diversity).await,
+        } => {
+            if public {
+                if !share_with.is_empty() {
+                    bail!("--share-with is for private objects; a --public object is readable by anyone");
+                }
+                put(config_path, file, &tier, local, insecure_ignore_diversity, None).await
+            } else if local {
+                put(config_path, file, &tier, true, insecure_ignore_diversity, Some(backup_to)).await
+            } else {
+                private_storage::put(&file, &share_with, &gateway, Duration::from_secs(wait_secs), backup_to.as_deref()).await
+            }
+        }
         StorageCmd::Peer { cmd } => peer(config_path, cmd).await,
-        StorageCmd::Get { hash, out, range } => get(config_path, &hash, out, range).await,
-        StorageCmd::Ls { quiet } => ls(config_path, quiet).await,
+        StorageCmd::Get { hash, out, range, raw, gateway } => {
+            if is_private_ref(&hash) {
+                if range.is_some() {
+                    bail!("--range reads plaintext objects; private objects are fetched whole and decrypted");
+                }
+                private_storage::get(&hash, out.as_deref(), raw, &gateway).await
+            } else {
+                get(config_path, &hash, out, range, raw).await
+            }
+        }
+        StorageCmd::Share { reference, with, gateway, wait_secs } => {
+            private_storage::share(&reference, &with, &gateway, Duration::from_secs(wait_secs)).await
+        }
+        StorageCmd::Revoke { reference, from, gateway, wait_secs } => {
+            private_storage::revoke(&reference, &from, &gateway, Duration::from_secs(wait_secs)).await
+        }
+        StorageCmd::Link { reference, gateway } => private_storage::link(&reference, &gateway).await,
+        StorageCmd::Key { cmd } => private_storage::key(cmd),
+        #[cfg(all(target_os = "linux", feature = "fuse"))]
+        StorageCmd::Mount { dir, volume, gateway } => crate::mount::run(&dir, &volume, &gateway).await,
+        StorageCmd::Ls { quiet, private } => {
+            if private {
+                private_storage::ls()
+            } else {
+                ls(config_path, quiet).await
+            }
+        }
         StorageCmd::Info { hash } => info(config_path, &hash).await,
         StorageCmd::Verify { hash } => verify(config_path, &hash).await,
         StorageCmd::Repair { hash, dry_run, now } => {
             repair(config_path, hash.as_deref(), dry_run, now).await
         }
-        StorageCmd::Rm { hash, yes } => rm(config_path, &hash, yes).await,
+        StorageCmd::Rm { hash, yes, gateway } => {
+            if is_private_ref(&hash) {
+                private_storage::rm(&hash, yes, &gateway).await
+            } else {
+                rm(config_path, &hash, yes).await
+            }
+        }
         StorageCmd::Status => status(config_path).await,
         StorageCmd::Tiers => {
             tiers();
@@ -223,17 +358,33 @@ async fn open_distributed(
     Ok(Some((storage, peer_count, domains)))
 }
 
+/// `c0p1:...`, a private link, or a bare 20-hex site id (a blake3 hash is
+/// 64 hex, so the two never collide).
+fn is_private_ref(raw: &str) -> bool {
+    let raw = raw.trim();
+    raw.starts_with(c0mpute_core::sealed_store::REF_PREFIX)
+        || raw.contains("/p/")
+        || (raw.len() == 20 && raw.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Store a file in this node's own engine. `seal` is `Some(backup_to)` for a
+/// private `--local` object: the file is encrypted first and only the
+/// ciphertext is stored.
 async fn put(
     config_path: &std::path::Path,
     file: PathBuf,
     tier: &str,
     force_local: bool,
     ignore_diversity: bool,
+    seal: Option<Option<PathBuf>>,
 ) -> Result<()> {
     let tier: Tier = tier.parse()?;
-    let bytes = tokio::fs::read(&file)
+    let mut bytes = tokio::fs::read(&file)
         .await
         .with_context(|| format!("read {}", file.display()))?;
+    if let Some(backup_to) = &seal {
+        bytes = private_storage::seal_local(&bytes, &file, backup_to.as_deref())?;
+    }
     let len = bytes.len() as u64;
 
     if ignore_diversity {
@@ -258,6 +409,9 @@ async fn put(
     };
 
     println!("blake3:{}", manifest.object_hash.to_hex());
+    if seal.is_some() {
+        eprintln!("  private: this node holds only ciphertext; `storage get` decrypts it with your identity");
+    }
     eprintln!(
         "  {} in {} block(s), {} shards, tier {} ({:.1}x expansion, {} raw)",
         human(len),
@@ -387,6 +541,7 @@ async fn get(
     hash: &str,
     out: Option<PathBuf>,
     range: Option<String>,
+    raw: bool,
 ) -> Result<()> {
     let hash = parse_hash(hash)?;
     let storage = open(config_path).await?;
@@ -394,6 +549,7 @@ async fn get(
         bail!("no object {hash} on this node");
     }
 
+    let ranged = range.is_some();
     let bytes = match range {
         Some(spec) => {
             let (start, end) = spec
@@ -420,6 +576,14 @@ async fn get(
                 None => storage.get(&hash).await?,
             }
         }
+    };
+
+    // A private object stored with `put --local` decrypts here, on this
+    // machine, unless the raw ciphertext was asked for.
+    let bytes = if !raw && !ranged && private_storage::is_sealed(&bytes) {
+        private_storage::open_local(&bytes)?.to_vec()
+    } else {
+        bytes
     };
 
     match out {
@@ -715,11 +879,12 @@ async fn serve(config_path: &std::path::Path, bind: &str, allow_anon: bool) -> R
 /// Which CIP delivers each command that is not here yet. Referenced from the
 /// long help so the gap is discoverable without reading `docs/prds/`.
 pub fn unimplemented_note() -> &'static str {
-    "Not yet available:\n  \
+    "Private by default: `put` encrypts on this machine and publishes only\n\
+     ciphertext; `--public` stores plaintext. See docs/private-storage.md.\n\
+     \nNot yet available:\n  \
      volume create|list|destroy   CIP-004\n  \
-     mount | umount               CIP-009 (needs CIP-007 and CIP-008)\n  \
      provide | earnings | retire  CIP-006\n  \
-     repair | recover             CIP-005\n\
+     recover                      CIP-005\n\
      \nSee docs/prds/README.md for the delivery order."
 }
 
@@ -747,7 +912,7 @@ mod tests {
     #[test]
     fn unimplemented_note_points_at_real_cips() {
         let note = unimplemented_note();
-        for cip in ["CIP-004", "CIP-005", "CIP-006", "CIP-007", "CIP-009"] {
+        for cip in ["CIP-004", "CIP-005", "CIP-006"] {
             assert!(note.contains(cip), "note should mention {cip}");
         }
     }

@@ -5,9 +5,15 @@
 //! for each role.
 
 pub mod activity;
+pub mod apps;
 pub mod ads;
+pub mod auction_stats;
+pub mod backoff;
 pub mod buyer;
+pub mod buyer_queue;
+pub mod canary;
 pub mod capabilities;
+pub mod captcha;
 pub mod config;
 pub mod container;
 pub mod crawl;
@@ -15,6 +21,7 @@ pub mod crowdgpt;
 pub mod diffusion;
 pub mod dm;
 pub mod music;
+pub mod job_e2e;
 pub mod job_progress;
 pub mod job_process;
 pub mod hosting;
@@ -42,6 +49,7 @@ pub mod register;
 pub mod resources;
 pub mod routing;
 pub mod runner;
+pub mod sealed_store;
 pub mod speech;
 pub mod speech_gateway;
 pub mod speech_profiles;
@@ -83,9 +91,15 @@ pub fn init_tracing() -> Result<()> {
     //
     // Daemon mode is unaffected: daemonize_worker points stdout and stderr at
     // the same log file.
+    //
+    // log_internal_errors(false): when a log line cannot be written (stderr is
+    // a pipe whose reader went away), tracing-subscriber would report it with
+    // eprintln!, to that same broken stderr, which panics and kills a
+    // long-running node. A lost log line must never take the node down.
     fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .log_internal_errors(false)
         .try_init()
         .ok();
     info!("tracing initialised");

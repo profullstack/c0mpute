@@ -8,7 +8,7 @@
 [module]
 id          = "crawl"
 name        = "Crawl — distributed web fetching"
-version     = "0.2.94"
+version     = "0.3.4"
 kind        = "workload"
 category    = "data"
 status      = "available"

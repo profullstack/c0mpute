@@ -65,6 +65,8 @@ like any site it holds. In private mode a node accepts pushes only from its own 
 | Gateway checks | Owner signature; record and manifest agree; the ref map's `prev` is the version the gateway knows (no lost updates when the owner pushes from two places); a non-forced push keeps every existing pack byte for byte; budgets; every chunk present (sent, local, or fetched from the current holders). Then the gateway holds the repo and gossips the record, and the hosting fill brings it to three copies. |
 | Fetch | The helper lists refs from the verified ref map and downloads packs newest first until git has every object it asked for. Packs are named by content, so an incremental fetch downloads only new packs. |
 | Dumb HTTP | `GET /git/<owner>/<repo>.git/<path>` serves the repo's files exactly; git's dumb protocol needs nothing else. Packs are `immutable`-cached, refs `no-cache`. |
+| Push to deploy | When a push moves HEAD's branch and that commit has a `c0mpute.toml` with an `[app]` table, the helper deploys it as an app (see [apps](apps.md)). `git config c0mpute.deploy false` turns it off. |
+| Old layout | The first helper (v0.2.99 to v0.3.x) stored a repo as `refs.json` plus one `repo.bundle`, under the same site name. Those repos still clone (the helper unpacks the bundle), also by the old `c0mpute://<20-hex site id>` URL, which a gateway resolves through `GET /git/v1/sites/<id>`. The owner's next push rewrites the repo as one full pack and drops the bundle; nothing to do by hand. |
 
 ### HTTP API (every gateway)
 
@@ -73,6 +75,7 @@ like any site it holds. In private mode a node accepts pushes only from its own 
 | `GET /git/v1/repos` | repos this gateway knows: owner, repo, `c0mpute://` URL, clone path, seq, size, live copies |
 | `GET /git/v1/repos/<owner>/<repo>` | `{record, manifest, holders}`: the signed record and the manifest JSON it pins |
 | `POST /git/v1/repos/<owner>/<repo>` | push: `C0GIT1\n`, u32-BE header length, header JSON `{record, manifest}`, then chunks as u32-BE length + bytes. 200 `{site_id, seq, holders}`; 400 malformed; 403 bad signature or pushes off; 409 stale or rule broken; 502 a needed chunk unreachable; 507 over budget |
+| `GET /git/v1/sites/<site_id>` | the same `{record, manifest, holders}` by hosting site id (old `c0mpute://<site id>` URLs); the client checks the id against the record |
 | `GET /git/<owner>/<repo>.git/<path>` | repo files for git's dumb HTTP protocol |
 
 ### Limits

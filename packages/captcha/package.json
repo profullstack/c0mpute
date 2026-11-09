@@ -1,0 +1,44 @@
+{
+  "name": "@profullstack/c0mpute-captcha",
+  "version": "0.3.4",
+  "description": "Solve image, slider, gap, click-text, audio and math captchas on the c0mpute network: library (fetch().then(solveCaptcha)), CLI and stdio MCP server.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Profullstack",
+  "homepage": "https://c0mpute.com/plugins/captcha",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/profullstack/c0mpute.git",
+    "directory": "packages/captcha"
+  },
+  "keywords": [
+    "captcha",
+    "ocr",
+    "ddddocr",
+    "c0mpute",
+    "mcp",
+    "solver"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./mcp": "./src/mcp.js"
+  },
+  "types": "./src/index.d.ts",
+  "bin": {
+    "c0mpute-captcha": "./bin/c0mpute-captcha.js"
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "test": "node --test test/index.test.js"
+  }
+}

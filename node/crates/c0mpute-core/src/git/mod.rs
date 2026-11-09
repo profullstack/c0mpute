@@ -20,6 +20,7 @@
 //!   owner signature and every chunk hash itself, so gateways are untrusted.
 
 pub mod client;
+pub mod deploy;
 pub mod helper;
 
 use std::collections::BTreeMap;
@@ -43,6 +44,29 @@ pub const REPACK_AFTER: usize = 16;
 pub const PUSH_MAGIC: &[u8] = b"C0GIT1\n";
 /// Default gateway when nothing is configured: the local node.
 pub const DEFAULT_GATEWAY: &str = "http://127.0.0.1:7777";
+/// Tried after the local node when no gateway is configured, so a machine
+/// that runs no node can still push and clone.
+pub const PUBLIC_GATEWAY: &str = "https://gateway.c0mpute.com";
+
+/// The first git helper (v0.2.99 to v0.3.x) stored a repo as these two files:
+/// a ref map and one `git bundle` of everything. Such repos still clone, and
+/// the first push to one rewrites it in the pack layout (one full pack).
+pub const LEGACY_REFS: &str = "refs.json";
+pub const LEGACY_BUNDLE: &str = "repo.bundle";
+
+#[derive(Deserialize)]
+struct LegacyRefs {
+    #[serde(default)]
+    head: Option<String>,
+    refs: BTreeMap<String, String>,
+}
+
+/// True when a repo version is in the old bundle layout.
+pub fn is_legacy(m: &SiteManifest) -> bool {
+    !m.files.contains_key(DOC_PATH)
+        && m.files.contains_key(LEGACY_REFS)
+        && m.files.contains_key(LEGACY_BUNDLE)
+}
 
 /// Longest repo name (the site name limit minus [`SITE_PREFIX`]).
 pub fn max_repo_chars() -> usize {
@@ -82,11 +106,21 @@ pub fn strip_dot_git(s: &str) -> &str {
 }
 
 /// `c0mpute://<owner>/<repo>[.git]`, or `c0mpute://<repo>` for a repo of
-/// this machine's own key (`owner = None`).
+/// this machine's own key (`owner = None`), or `c0mpute://<20-hex site id>`
+/// (the URL form of the first, bundle-based helper: `site` is set, `owner`
+/// and `repo` are learned from the signed record, see [`client::resolve_site`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoUrl {
     pub owner: Option<String>,
     pub repo: String,
+    pub site: Option<String>,
+}
+
+/// A hosting site id: 20 lowercase hex characters.
+pub fn valid_site_id(s: &str) -> bool {
+    s.len() == 20
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 impl RepoUrl {
@@ -94,11 +128,30 @@ impl RepoUrl {
         let rest = url
             .strip_prefix(&format!("{SCHEME}://"))
             .or_else(|| url.strip_prefix(&format!("{SCHEME}::")))
+            .or_else(|| url.strip_prefix(&format!("{SCHEME}:")))
             .unwrap_or(url)
             .trim_end_matches('/');
         let parts: Vec<&str> = rest.split('/').collect();
+        if let [one] = parts.as_slice()
+            && valid_site_id(strip_dot_git(one))
+        {
+            return Ok(Self {
+                owner: None,
+                repo: String::new(),
+                site: Some(strip_dot_git(one).to_string()),
+            });
+        }
         let (owner, repo) = match parts.as_slice() {
-            [repo] => (None, strip_dot_git(repo)),
+            // `c0mpute://git-<name>` was accepted for `<name>` before.
+            [repo] => {
+                let r = strip_dot_git(repo);
+                (
+                    None,
+                    r.strip_prefix(SITE_PREFIX)
+                        .filter(|r| valid_repo(r))
+                        .unwrap_or(r),
+                )
+            }
             [owner, repo] => (Some(owner.to_ascii_lowercase()), strip_dot_git(repo)),
             _ => bail!("expected {SCHEME}://<owner-key>/<repo>, got {url:?}"),
         };
@@ -116,6 +169,7 @@ impl RepoUrl {
         Ok(Self {
             owner,
             repo: repo.to_string(),
+            site: None,
         })
     }
 
@@ -174,6 +228,24 @@ impl RepoDoc {
             bail!("bad pack name");
         }
         Ok(d)
+    }
+
+    /// The ref map of an old bundle-layout repo (its `refs.json`), as a doc
+    /// with no packs: every object is in [`LEGACY_BUNDLE`].
+    pub fn from_legacy(repo: &str, refs_json: &[u8]) -> Result<Self> {
+        let l: LegacyRefs = serde_json::from_slice(refs_json).context("refs.json")?;
+        let d = RepoDoc {
+            v: 1,
+            repo: repo.to_string(),
+            head: l.head,
+            refs: l.refs,
+            packs: Vec::new(),
+            prev: None,
+            force: false,
+            pushed_at: 0,
+        };
+        // Same validation as a real doc.
+        Self::from_bytes(&d.to_bytes())
     }
 
     /// `info/refs` for git's dumb HTTP protocol. `peeled` maps an annotated
@@ -445,6 +517,35 @@ mod tests {
         assert!(RepoUrl::parse(&format!("c0mpute://{o}/a/b")).is_err());
         assert_eq!(repo_of_site("git-x"), Some("x"));
         assert_eq!(repo_of_site("blog"), None);
+        // The first helper's URL forms.
+        let u = RepoUrl::parse("c0mpute://0123456789abcdef0123").unwrap();
+        assert_eq!(u.site.as_deref(), Some("0123456789abcdef0123"));
+        assert_eq!(
+            RepoUrl::parse("c0mpute://git-my-api.git").unwrap().repo,
+            "my-api"
+        );
+        assert_eq!(RepoUrl::parse("c0mpute:my-api").unwrap().repo, "my-api");
+    }
+
+    #[test]
+    fn legacy_layout() {
+        let sha = "a".repeat(40);
+        let json = format!(r#"{{"head":"refs/heads/main","refs":{{"refs/heads/main":"{sha}"}}}}"#);
+        let d = RepoDoc::from_legacy("r", json.as_bytes()).unwrap();
+        assert_eq!(d.head.as_deref(), Some("refs/heads/main"));
+        assert_eq!(d.refs.get("refs/heads/main"), Some(&sha));
+        assert!(d.packs.is_empty() && d.prev.is_none());
+        assert!(RepoDoc::from_legacy("r", br#"{"refs":{"HEAD":"zz"}}"#).is_err());
+        let mut m = manifest_with(&[]);
+        assert!(!is_legacy(&m));
+        m.files
+            .insert(LEGACY_REFS.into(), file_entry(LEGACY_REFS, b"{}").0);
+        m.files
+            .insert(LEGACY_BUNDLE.into(), file_entry(LEGACY_BUNDLE, b"x").0);
+        assert!(is_legacy(&m));
+        m.files
+            .insert(DOC_PATH.into(), file_entry(DOC_PATH, b"{}").0);
+        assert!(!is_legacy(&m));
     }
 
     #[test]

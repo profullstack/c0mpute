@@ -483,7 +483,7 @@ async fn run_job(net: &Libp2pNetwork, store: &ChunkStore, cache_root: &Path, job
             bail!("video result is not an MP4");
         }
     }
-    crate::pieces::publish_result_file(net, store, &out, video::MAX_RESULT_BYTES as u64).await
+    crate::pieces::publish_result_file(net, store, &job.accept, &out, video::MAX_RESULT_BYTES as u64).await
 }
 
 #[cfg(test)]
@@ -581,8 +581,9 @@ mod tests {
         assert!(has_headroom_with(&config, idle));
         assert!(!has_headroom_with(&config, busy));
         assert!(!has_headroom_with(&config, small_box));
-        assert!(fast_enough_with(&config, 16));
-        assert!(!fast_enough_with(&config, 8));
+        // Half of a 16-core box is enough (the per-job budget is half).
+        assert!(fast_enough_with(&config, 8));
+        assert!(!fast_enough_with(&config, 4));
     }
 
     #[test]

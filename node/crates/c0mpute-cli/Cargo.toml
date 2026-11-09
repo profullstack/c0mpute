@@ -16,6 +16,8 @@ c0mpute-bench = { workspace = true }
 c0mpute-proto = { workspace = true }
 c0mpute-update = { workspace = true }
 c0mpute-secure-chat = { workspace = true }
+c0mpute-sealed = { workspace = true }
+zeroize = { workspace = true }
 c0mpute-store = { workspace = true }
 c0mpute-placement = { workspace = true }
 reqwest = { workspace = true }
@@ -36,6 +38,16 @@ dialoguer = "0.11"
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 libc = "0.2"
+
+# `c0mpute storage mount` (encrypted FUSE volume), Linux only. No libfuse:
+# fuser mounts through the `fusermount3` binary, so the static musl release
+# build has nothing extra to link. Build without it: --no-default-features.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18.0", default-features = false, optional = true }
+
+[features]
+default = ["fuse"]
+fuse = ["dep:fuser"]
 
 [dev-dependencies]
 c0mpute-net = { workspace = true }

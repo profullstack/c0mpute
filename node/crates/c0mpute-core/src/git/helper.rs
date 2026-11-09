@@ -14,18 +14,28 @@ use super::client::{self, Gateways, Local, PushSpec};
 use super::{RepoUrl, Verified};
 
 /// Run the helper protocol until git closes stdin or sends a blank line.
-pub fn run(_remote: &str, url: &str) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+pub fn run(remote: &str, url: &str) -> Result<()> {
+    // Multi-threaded: a push-to-deploy boots a libp2p node.
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("tokio runtime")?;
+    let res = serve(&rt, remote, url);
+    // A deploy's swarm keeps tasks alive; do not wait for them.
+    rt.shutdown_timeout(std::time::Duration::from_millis(200));
+    res
+}
+
+fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
     let target = RepoUrl::parse(url)?;
     let keypair = crate::hosting::publisher_keypair()?;
     let me = crate::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
-    let owner = target.owner_or(&me).to_string();
-    let repo = target.repo.clone();
     let local = Local::discover()?;
     let gws = Gateways::discover(Some(&local.git_dir));
+    let (owner, repo) = match &target.site {
+        Some(id) => rt.block_on(client::resolve_site(&gws, id))?,
+        None => (target.owner_or(&me).to_string(), target.repo.clone()),
+    };
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
@@ -109,11 +119,18 @@ pub fn run(_remote: &str, url: &str) -> Result<()> {
                             report.site_id
                         );
                     }
-                    for (dst, r) in report.results {
+                    for (dst, r) in &report.results {
                         match r {
                             Ok(()) => writeln!(out, "ok {dst}")?,
                             Err(e) => writeln!(out, "error {dst} {}", e.replace('\n', " "))?,
                         }
+                    }
+                    if report.gateway.is_some()
+                        && let Some(sha) = &report.head_moved
+                        && super::deploy::enabled(&local)
+                        && let Err(e) = rt.block_on(super::deploy::deploy_commit(&local, sha))
+                    {
+                        eprintln!("c0mpute: deploy failed: {e:#}");
                     }
                 }
                 Err(e) => {

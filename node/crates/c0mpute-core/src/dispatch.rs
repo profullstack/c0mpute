@@ -12,13 +12,23 @@
 //!      capacity (each open bid is a job we could be handed).
 //!   5. Private mode ([`crate::private`]): reject unless the signed
 //!      publisher is the offer's buyer and that buyer is trusted.
-//!   6. Otherwise: publish a `JobBid` on the same topic, with an ETA from
-//!      queue depth x recent job time and an `expires_at_ms`.
+//!   6. Otherwise: send a `JobBid` straight to the buyer
+//!      ([`Libp2pNetwork::send_direct`]) and publish it on the same topic,
+//!      with an ETA from queue depth x recent job time and an `expires_at_ms`.
+//!      Either path reaching the buyer is enough; the gossip mesh alone lost
+//!      every bid from NAT'd workers while it re-formed (bonita, 2026-11-09:
+//!      57 of 57 bids published, 0 received).
 //!
-//! After winning bid (received as `JobAccept`), the worker fetches the
-//! manifest, runs the workload, publishes a `JobReceipt`. The receipt
-//! flow lives in a follow-up commit — this module ships the offer/bid
-//! plumbing.
+//! A worker that is draining for an update ([`c0mpute_update::draining`])
+//! does not bid at all.
+//!
+//! End-to-end encrypted offers ([`crate::job_e2e`], DIP-0032) carry only a
+//! public spec: filters judge that at bid time, and the bid carries a fresh
+//! X25519 key signed by this node's identity. On winning, the worker fetches
+//! the sealed spec from the buyer point to point, opens it, checks it
+//! against the offer's commitment and public spec, runs the workload's filter
+//! again on the whole spec, and only then hands the job to the runner (with
+//! the key its result is sealed back under).
 //!
 //! The buyer side (publishing offers + collecting bids + accepting one)
 //! lives in `c0mpute job submit` and is not part of the worker daemon.
@@ -49,8 +59,24 @@ pub const BID_TTL: Duration = Duration::from_secs(60);
 
 /// Clock-skew allowance: an accept that names us up to this long after our
 /// bid expired is still honoured (the buyer judged expiry on its clock).
-/// Capacity is held for the same span, so honouring it never overbooks.
 const ACCEPT_GRACE_MS: u64 = 10_000;
+
+/// How long past the buyer's bid window a bid keeps reserving capacity. The
+/// buyer picks its winner when the window closes; after that a bid we never
+/// heard back on is almost certainly lost, and holding the slot for the full
+/// [`BID_TTL`] stopped nodes bidding at all ("at capacity" with every slot
+/// free). A late accept is still honoured; the runner queues it.
+const RESERVE_GRACE_MS: u64 = 10_000;
+
+/// Bid window assumed for offers from buyers that do not state one.
+const DEFAULT_OFFER_WINDOW_MS: u64 = 8_000;
+
+/// Longest a bid waits on its direct delivery to the buyer.
+const DIRECT_BID_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Accepts already handed to the runner, remembered so the same accept
+/// arriving twice (direct and over gossip) runs once.
+const MAX_SEEN_ACCEPTS: usize = 256;
 
 /// ETA quoted before this workload has completed any job.
 pub const DEFAULT_ETA_SECS: u64 = 60;
@@ -141,6 +167,8 @@ pub fn run_worker_subscriber_with_load(
         let mut market = MarketLearner::default();
         let mut open_bids: std::collections::HashMap<String, OpenBid> =
             std::collections::HashMap::new();
+        let mut seen_accepts: std::collections::VecDeque<String> =
+            std::collections::VecDeque::new();
         loop {
             let msg: GossipMessage = match rx.recv().await {
                 Ok(m) => m,
@@ -160,6 +188,11 @@ pub fn run_worker_subscriber_with_load(
                 if offer.workload_type != workload_type {
                     continue;
                 }
+                // Plaintext offers are served for one release more (DIP-0032).
+                if offer.e2e.is_none() && !crate::job_e2e::serves_plaintext_offers() {
+                    debug!(job_id = %offer.job_id, "dispatch: plaintext offer refused (e2e only)");
+                    continue;
+                }
                 // Private mode: only trusted buyers (by signed publisher).
                 if !crate::private::current().admits(&msg, &offer, &our_peer_id) {
                     debug!(job_id = %offer.job_id, buyer = %offer.buyer_peer_id, "dispatch: private mode, buyer not trusted");
@@ -176,13 +209,29 @@ pub fn run_worker_subscriber_with_load(
                     debug!(job_id = %offer.job_id, "dispatch: no runner wired, not bidding");
                     continue;
                 };
+                // Restarting into an update: finish what we hold, take nothing new.
+                if c0mpute_update::draining() {
+                    debug!(job_id = %offer.job_id, "dispatch: draining for an update, not bidding");
+                    continue;
+                }
                 let now = unix_ms();
-                open_bids.retain(|_, b| b.holds_capacity(now));
+                open_bids.retain(|_, b| b.honourable(now));
+                // The buyer re-sent an offer we already bid on (it heard
+                // nothing): re-send the same bid, without reserving more.
+                if let Some(bid) = open_bids.get(&offer.job_id) {
+                    if bid.reserves(now) {
+                        if let Some(payload) = bid.payload.clone() {
+                            spawn_deliver_bid(net.clone(), topic.clone(), &offer, payload);
+                        }
+                        continue;
+                    }
+                }
+                let reserving = open_bids.values().filter(|b| b.reserves(now)).count();
                 let capacity = Capacity::of(tx, load.as_ref());
-                if !capacity.can_bid(open_bids.len()) {
+                if !capacity.can_bid(reserving) {
                     debug!(
                         job_id = %offer.job_id,
-                        open_bids = open_bids.len(),
+                        open_bids = reserving,
                         ?capacity,
                         "dispatch: at capacity, not bidding"
                     );
@@ -193,7 +242,7 @@ pub fn run_worker_subscriber_with_load(
                     capacity.total_slots,
                     load.as_ref().and_then(WorkerLoad::recent_job_duration),
                 );
-                if let Some((price, expires_at_ms)) = handle_offer(
+                if let Some((price, expires_at_ms, payload, session)) = handle_offer(
                     &net,
                     &topic,
                     &offer,
@@ -221,6 +270,9 @@ pub fn run_worker_subscriber_with_load(
                             spec_inline: offer.spec_inline.clone(),
                             external_ref: offer.external_ref.clone(),
                             expires_at_ms,
+                            reserve_until_ms: reserve_until(&offer, now, expires_at_ms),
+                            payload: Some(payload),
+                            e2e: session.map(|s| (Arc::new(s), Arc::new(offer.clone()))),
                         },
                     );
                 }
@@ -238,6 +290,10 @@ pub fn run_worker_subscriber_with_load(
                     continue;
                 }
                 let won = accept.winning_bidder_peer_id == our_peer_id;
+                // The same accept arrives directly and over gossip.
+                if seen_accepts.contains(&accept.job_id) {
+                    continue;
+                }
                 let Some(bid) = open_bids.remove(&accept.job_id) else {
                     if won {
                         warn!(job_id = %accept.job_id, "dispatch: discarding accept for a job we never bid on");
@@ -248,6 +304,10 @@ pub fn run_worker_subscriber_with_load(
                     warn!(job_id = %accept.job_id, reason, "dispatch: discarding accept that does not match our bid");
                     continue;
                 }
+                if seen_accepts.len() >= MAX_SEEN_ACCEPTS {
+                    seen_accepts.pop_front();
+                }
+                seen_accepts.push_back(accept.job_id.clone());
                 market.observe(bid.cap, bid.price, accept.agreed_price_usd, won);
                 debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
                 if !won {
@@ -270,6 +330,12 @@ pub fn run_worker_subscriber_with_load(
                     "dispatch: we won — forwarding to runner"
                 );
                 crate::activity::job_started(&accept.job_id);
+                if let Some((session, offer)) = bid.e2e {
+                    // Fetching the sealed spec takes a round trip to the
+                    // buyer: never in the loop that reads offers.
+                    spawn_open_e2e(net.clone(), tx.clone(), filter.clone(), session, offer, accept);
+                    continue;
+                }
                 if let Err(e) = tx.send(AcceptedJob { accept }).await {
                     warn!(err = %e, "dispatch: runner channel closed");
                 }
@@ -288,12 +354,24 @@ pub(crate) struct OpenBid {
     pub spec_inline: Option<serde_json::Value>,
     pub external_ref: Option<String>,
     pub expires_at_ms: u64,
+    /// Until when this bid counts against our capacity (see
+    /// [`RESERVE_GRACE_MS`]); never past `expires_at_ms + ACCEPT_GRACE_MS`.
+    pub reserve_until_ms: u64,
+    /// The serialized bid, re-sent if the buyer re-sends its offer.
+    pub payload: Option<Vec<u8>>,
+    /// For a bid on an e2e offer: our X25519 secret for it and the offer.
+    pub e2e: Option<(Arc<crate::job_e2e::WorkerSession>, Arc<JobOffer>)>,
 }
 
 impl OpenBid {
-    /// Whether this bid still reserves capacity (and can still be won).
-    pub(crate) fn holds_capacity(&self, now_ms: u64) -> bool {
+    /// Whether an accept for this bid would still be honoured.
+    pub(crate) fn honourable(&self, now_ms: u64) -> bool {
         now_ms <= self.expires_at_ms.saturating_add(ACCEPT_GRACE_MS)
+    }
+
+    /// Whether this bid still counts against our capacity.
+    pub(crate) fn reserves(&self, now_ms: u64) -> bool {
+        now_ms <= self.reserve_until_ms && self.honourable(now_ms)
     }
 
     /// An accept is only honoured when it comes from the offer's buyer,
@@ -303,13 +381,18 @@ impl OpenBid {
         if accept.buyer_peer_id != self.buyer_peer_id {
             return Err("buyer differs from the offer");
         }
-        if accept.spec_inline != self.spec_inline {
+        if self.e2e.is_some() {
+            // The spec comes sealed after the accept, never on it.
+            if accept.e2e != Some(c0mpute_net::topics::JOB_E2E_VERSION) || accept.spec_inline.is_some() {
+                return Err("e2e offer answered by a plaintext accept");
+            }
+        } else if accept.spec_inline != self.spec_inline {
             return Err("spec differs from the offer we bid on");
         }
         if accept.external_ref != self.external_ref {
             return Err("external_ref differs from the offer we bid on");
         }
-        if !self.holds_capacity(now_ms) {
+        if !self.honourable(now_ms) {
             return Err("our bid expired before the accept arrived");
         }
         if !accept.agreed_price_usd.is_finite()
@@ -417,6 +500,63 @@ pub(crate) fn eta_seconds(queued: usize, total_slots: usize, recent: Option<Dura
     ((per_job * waves).ceil() as u64).clamp(1, MAX_ETA_SECS)
 }
 
+/// Until when a bid placed at `now_ms` on `offer` reserves capacity: the
+/// buyer's bid window (as stated on the offer, else the default) plus
+/// [`RESERVE_GRACE_MS`], never past the bid's own honour period.
+pub(crate) fn reserve_until(offer: &JobOffer, now_ms: u64, expires_at_ms: u64) -> u64 {
+    let window = offer
+        .bid_window_ms
+        .unwrap_or(DEFAULT_OFFER_WINDOW_MS)
+        .min(BID_TTL.as_millis() as u64);
+    // The window runs from when the buyer published, not from when we saw it.
+    let window_end = offer.published_at_ms.max(now_ms.saturating_sub(window)) + window;
+    (window_end + RESERVE_GRACE_MS).min(expires_at_ms.saturating_add(ACCEPT_GRACE_MS))
+}
+
+/// Send a bid to the buyer over both paths, in the background so the offer
+/// loop never waits on a slow dial: straight to the buyer (dialing one of the
+/// public addresses it put on the offer, else by peer id), and on the gossip
+/// topic. Logs which path worked.
+fn spawn_deliver_bid(net: Arc<Libp2pNetwork>, topic: String, offer: &JobOffer, payload: Vec<u8>) {
+    let job_id = offer.job_id.clone();
+    let buyer = offer.buyer_peer_id.parse::<c0mpute_net::PeerId>().ok();
+    let addrs = crate::reachability::dialable_buyer_addrs(&offer.buyer_addrs, &offer.buyer_peer_id);
+    tokio::spawn(async move {
+        let gossip = net.publish(&topic, payload.clone()).await;
+        let mut direct = Err(anyhow::anyhow!("buyer peer id does not parse"));
+        if let Some(buyer) = buyer {
+            for addr in addrs {
+                net.add_peer_address(buyer, without_p2p(addr)).await;
+            }
+            for attempt in 0..2 {
+                let started = std::time::Instant::now();
+                direct = net
+                    .send_direct(buyer, &topic, &payload, DIRECT_BID_TIMEOUT)
+                    .await;
+                // A quick failure (dial refused, no route yet) is worth one
+                // more try inside the buyer's window; a timeout is not.
+                if direct.is_ok() || attempt == 1 || started.elapsed() > Duration::from_secs(1) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+        match (&gossip, &direct) {
+            (_, Ok(())) => info!(%job_id, gossip = gossip.is_ok(), "dispatch: bid delivered to the buyer"),
+            (Ok(()), Err(e)) => info!(%job_id, direct_err = %e, "dispatch: bid published on gossip only"),
+            (Err(g), Err(d)) => warn!(%job_id, gossip_err = %g, direct_err = %d, "dispatch: bid not delivered on either path"),
+        }
+    });
+}
+
+/// A multiaddr without its trailing `/p2p/<id>` (Kad keys addresses by peer).
+fn without_p2p(mut addr: c0mpute_net::Multiaddr) -> c0mpute_net::Multiaddr {
+    if matches!(addr.iter().last(), Some(c0mpute_net::Protocol::P2p(_))) {
+        addr.pop();
+    }
+    addr
+}
+
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -425,7 +565,7 @@ fn unix_ms() -> u64 {
 }
 
 async fn handle_offer(
-    net: &Libp2pNetwork,
+    net: &Arc<Libp2pNetwork>,
     topic: &str,
     offer: &JobOffer,
     advertised_tags: &[String],
@@ -435,7 +575,7 @@ async fn handle_offer(
     eta_seconds: u64,
     bench_score: Option<u32>,
     bid_load: f32,
-) -> Option<(f64, u64)> {
+) -> Option<(f64, u64, Vec<u8>, Option<crate::job_e2e::WorkerSession>)> {
     let now_ms = unix_ms();
     if now_ms.saturating_sub(offer.published_at_ms) > MAX_OFFER_AGE.as_millis() as u64 {
         debug!(job_id = %offer.job_id, "dispatch: ignoring stale offer");
@@ -457,7 +597,7 @@ async fn handle_offer(
     let missing: Vec<&String> = offer
         .required_capabilities
         .iter()
-        .filter(|c| !advertised_tags.iter().any(|a| a == *c))
+        .filter(|c| !crate::job_e2e::implicit_tag(c) && !advertised_tags.iter().any(|a| a == *c))
         .collect();
     if !missing.is_empty() {
         debug!(
@@ -480,6 +620,17 @@ async fn handle_offer(
         },
         None => offer.max_price_usd,
     };
+    // A fresh X25519 key for this one job, signed by our identity.
+    let (session, e2e) = match offer.e2e.as_ref() {
+        Some(_) => match crate::job_e2e::WorkerSession::for_offer(net, offer) {
+            Ok((s, e)) => (Some(s), Some(e)),
+            Err(e) => {
+                debug!(job_id = %offer.job_id, err = %e, "dispatch: cannot bid on this e2e offer");
+                return None;
+            }
+        },
+        None => (None, None),
+    };
     let expires_at_ms = now_ms + BID_TTL.as_millis() as u64;
     let bid = JobBid {
         job_id: offer.job_id.clone(),
@@ -491,6 +642,7 @@ async fn handle_offer(
         expires_at_ms: Some(expires_at_ms),
         bench_score,
         load: Some(bid_load),
+        e2e,
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,
@@ -499,25 +651,50 @@ async fn handle_offer(
             return None;
         }
     };
-    match net.publish(topic, payload).await {
-        Ok(()) => {
-            info!(
-                job_id = %offer.job_id,
-                price = bid.price_usd,
-                eta_s = bid.eta_seconds,
-                "dispatch: bid published"
-            );
-            Some((price_usd, expires_at_ms))
-        }
-        Err(e) => {
-            debug!(
-                job_id = %offer.job_id,
-                err = %e,
-                "dispatch: bid publish failed (mesh forming?)"
-            );
-            None
-        }
-    }
+    info!(
+        job_id = %offer.job_id,
+        price = bid.price_usd,
+        eta_s = bid.eta_seconds,
+        "dispatch: bid placed"
+    );
+    spawn_deliver_bid(net.clone(), topic.to_string(), offer, payload.clone());
+    Some((price_usd, expires_at_ms, payload, session))
+}
+
+/// Won an e2e job: fetch and open the sealed spec, check it, re-run the
+/// workload's filter on the whole spec, then hand the job to the runner with
+/// its result key. Any failure ends the job with a Failed receipt, so the
+/// buyer re-auctions at once instead of waiting out its timeout. Nothing
+/// about the spec's content is logged.
+fn spawn_open_e2e(
+    net: Arc<Libp2pNetwork>,
+    tx: mpsc::Sender<AcceptedJob>,
+    filter: Option<OfferFilter>,
+    session: Arc<crate::job_e2e::WorkerSession>,
+    offer: Arc<JobOffer>,
+    mut accept: JobAccept,
+) {
+    tokio::spawn(async move {
+        let opened = session.open_accept(&net, &offer, &accept).await;
+        drop(session);
+        let refused = match opened {
+            Ok((spec, key)) => {
+                let full = crate::job_e2e::opened_offer(&offer, spec);
+                if filter.as_ref().is_none_or(|f| f(&full)) {
+                    accept.spec_inline = full.spec_inline;
+                    accept.result_key = Some(key);
+                    if let Err(e) = tx.send(AcceptedJob { accept }).await {
+                        warn!(err = %e, "dispatch: runner channel closed");
+                    }
+                    return;
+                }
+                "the sealed spec does not pass this workload's checks".to_string()
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        warn!(job_id = %accept.job_id, reason = %refused, "dispatch: won e2e job refused");
+        crate::runner::publish_receipt(&net, &accept, None, c0mpute_net::topics::JobStatus::Failed).await;
+    });
 }
 
 /// Workload types this worker should listen for, derived from its
@@ -561,6 +738,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::Embed) {
         types.push(crate::embed::WORKLOAD.to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::Captcha) {
+        types.push(crate::captcha::WORKLOAD.to_string());
+    }
     if roles.contains(&c0mpute_proto::Role::Inference) {
         types.push(crate::inference::WORKLOAD.to_string());
     }
@@ -582,6 +762,9 @@ mod tests {
             spec_inline: Some(serde_json::json!({"input_url": "https://example.com/a.mp4"})),
             external_ref: Some("infernet:job_42".into()),
             expires_at_ms: NOW + 60_000,
+            reserve_until_ms: NOW + 18_000,
+            payload: None,
+            e2e: None,
         }
     }
 
@@ -598,6 +781,8 @@ mod tests {
             published_at_ms: 0,
             external_ref: Some("infernet:job_42".into()),
             buyer_addrs: Vec::new(),
+            e2e: None,
+            result_key: None,
         }
     }
 
@@ -618,6 +803,30 @@ mod tests {
         let mut a = accept();
         a.spec_inline = Some(serde_json::json!({"input_url": "http://169.254.169.254/"}));
         assert!(bid().matches(&a, NOW).is_err());
+    }
+
+    #[test]
+    fn e2e_bids_take_only_e2e_accepts_without_a_spec() {
+        let mut b = bid();
+        b.spec_inline = None;
+        let offer = offer_at(NOW, None);
+        // A session is only needed as a marker here.
+        let session = std::sync::Arc::new(test_session());
+        b.e2e = Some((session, std::sync::Arc::new(offer)));
+        let mut a = accept();
+        // A plaintext accept for an e2e bid (a downgrade) is refused.
+        assert!(b.matches(&a, NOW).is_err());
+        a.spec_inline = None;
+        assert!(b.matches(&a, NOW).is_err(), "missing e2e version");
+        a.e2e = Some(c0mpute_net::topics::JOB_E2E_VERSION);
+        assert!(b.matches(&a, NOW).is_ok());
+        // Any spec on an e2e accept is refused, even with the version set.
+        a.spec_inline = Some(serde_json::json!({"x": 1}));
+        assert!(b.matches(&a, NOW).is_err());
+    }
+
+    fn test_session() -> crate::job_e2e::WorkerSession {
+        crate::job_e2e::WorkerSession::for_tests()
     }
 
     #[test]
@@ -649,7 +858,73 @@ mod tests {
             b.matches(&accept(), b.expires_at_ms + ACCEPT_GRACE_MS + 1)
                 .is_err()
         );
-        assert!(!b.holds_capacity(b.expires_at_ms + ACCEPT_GRACE_MS + 1));
+        assert!(!b.honourable(b.expires_at_ms + ACCEPT_GRACE_MS + 1));
+    }
+
+    #[test]
+    fn a_bid_stops_reserving_capacity_after_the_buyers_window() {
+        let b = bid();
+        assert!(b.reserves(NOW));
+        assert!(b.reserves(b.reserve_until_ms));
+        assert!(!b.reserves(b.reserve_until_ms + 1));
+        // ...but an accept arriving later is still honoured (the runner
+        // queues it).
+        assert!(b.matches(&accept(), b.reserve_until_ms + 1).is_ok());
+    }
+
+    fn offer_at(published_at_ms: u64, window: Option<u64>) -> JobOffer {
+        JobOffer {
+            job_id: "j".into(),
+            workload_type: "diffusion.txt2img".into(),
+            buyer_peer_id: "buyer".into(),
+            buyer_did: None,
+            spec_hash: String::new(),
+            spec_inline: None,
+            required_capabilities: vec![],
+            max_price_usd: 1.0,
+            deadline_unix_ms: u64::MAX,
+            published_at_ms,
+            external_ref: None,
+            buyer_addrs: Vec::new(),
+            bid_window_ms: window,
+            e2e: None,
+        }
+    }
+
+    #[test]
+    fn reservation_follows_the_offers_bid_window() {
+        let expires = NOW + BID_TTL.as_millis() as u64;
+        // Stated 4 s window, seen 1 s after publishing: reserved until the
+        // window closes plus the grace.
+        assert_eq!(
+            reserve_until(&offer_at(NOW - 1_000, Some(4_000)), NOW, expires),
+            NOW + 3_000 + RESERVE_GRACE_MS
+        );
+        // Old buyers state none: the default window.
+        assert_eq!(
+            reserve_until(&offer_at(NOW, None), NOW, expires),
+            NOW + DEFAULT_OFFER_WINDOW_MS + RESERVE_GRACE_MS
+        );
+        // An absurd window or a future publish time never reserves past the
+        // bid's own honour period.
+        assert_eq!(
+            reserve_until(&offer_at(NOW, Some(u64::MAX)), NOW, expires),
+            expires + ACCEPT_GRACE_MS
+        );
+        assert_eq!(
+            reserve_until(&offer_at(u64::MAX / 2, Some(4_000)), NOW, expires),
+            expires + ACCEPT_GRACE_MS
+        );
+    }
+
+    #[test]
+    fn p2p_suffix_is_stripped_for_kad() {
+        let a: c0mpute_net::Multiaddr = "/ip4/1.2.3.4/tcp/5/p2p/12D3KooWS79f5QBjruwxK97TpSBiwTZ9gG7LoVUAeybDT9ic7cgu"
+            .parse()
+            .unwrap();
+        assert_eq!(without_p2p(a).to_string(), "/ip4/1.2.3.4/tcp/5");
+        let b: c0mpute_net::Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
+        assert_eq!(without_p2p(b.clone()), b);
     }
 
     fn cap(queued: usize, queue_free: usize, free_slots: Option<usize>) -> Capacity {

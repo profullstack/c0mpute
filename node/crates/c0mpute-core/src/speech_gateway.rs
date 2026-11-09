@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -30,16 +30,13 @@ const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
 /// A healthy CPU worker draws an image in ~2 minutes. One that has not
 /// answered in 6 is benched and the job goes to the next worker.
 const IMAGE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(6 * 60);
-/// How long an image request waits for a busy worker to free up.
-const IMAGE_QUEUE_WAIT: Duration = Duration::from_secs(4 * 60);
 /// Songs in flight through one gateway; each holds a whole worker for minutes.
 const MAX_CONCURRENT_MUSIC_JOBS: usize = 4;
-/// How long to keep re-auctioning a song while every music worker is busy.
-/// A song holds a worker ~2.5 min on CPU, so this waits behind two or three;
-/// Infernet gives the whole call 19 min.
-const MUSIC_QUEUE_WAIT: Duration = Duration::from_secs(8 * 60);
+/// Clips in flight through one gateway (their own queue, not the images').
+const MAX_CONCURRENT_VIDEO_JOBS: usize = 2;
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
+const MAX_CONCURRENT_CAPTCHA_JOBS: usize = 16;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -52,10 +49,17 @@ struct GatewayState {
     /// Image jobs in flight from this gateway (each holds a worker ~2 min).
     image_slots: Arc<Semaphore>,
     music_slots: Arc<Semaphore>,
+    video_slots: Arc<Semaphore>,
+    /// Queue limits (see `buyer_queue`).
+    queue: Arc<crate::buyer_queue::QueueConfig>,
+    /// Queued and running tracked requests, FIFO per workload.
+    board: crate::buyer_queue::QueueBoard,
     /// OCR jobs in flight (each holds an input of up to 32 MiB here).
     ocr_slots: Arc<Semaphore>,
     /// Embedding jobs in flight.
     embed_slots: Arc<Semaphore>,
+    /// Captcha jobs in flight (each a few KiB and a second or two of CPU).
+    captcha_slots: Arc<Semaphore>,
     /// Warm, pinned sessions this node is holding (see `speech_session`).
     sessions: crate::speech_session::SessionStore,
     /// Workers that won and did not deliver, benched for a while.
@@ -145,6 +149,10 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
     }
 
     let supervisor = Supervisor::boot_buyer(Config::default()).await?;
+    // Queued jobs wake when a node advertising their tags shows up.
+    if let Err(e) = supervisor.libp2p.subscribe(c0mpute_net::topics::CAPABILITY_TOPIC).await {
+        tracing::warn!(err = %e, "gateway: capability topic subscribe failed");
+    }
     let penalties = crate::penalty_box::PenaltyBox::persistent(
         crate::config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
@@ -201,8 +209,12 @@ pub fn router_with(
         stt_slots: Arc::new(Semaphore::new(2)),
         image_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_JOBS)),
         music_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_MUSIC_JOBS)),
+        video_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VIDEO_JOBS)),
+        queue: Arc::new(crate::buyer_queue::QueueConfig::from_env()),
+        board: crate::buyer_queue::QueueBoard::default(),
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
+        captcha_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_CAPTCHA_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
         progress: crate::job_progress::ProgressBoard::default(),
         results,
@@ -212,6 +224,8 @@ pub fn router_with(
     resume_pending(&state);
     Router::new()
         .route("/healthz", get(healthz))
+        // Per-workload auction outcomes over the last hour (no secrets).
+        .route("/v1/auctions", get(auction_stats))
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
@@ -226,6 +240,7 @@ pub fn router_with(
             post(ocr_extract).layer(DefaultBodyLimit::max(crate::ocr::MAX_INPUT_BYTES)),
         )
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/captcha", post(captcha_solve))
         // Warm, pinned sessions: open once per call, then say a sentence at a
         // time with no auction and no model reload in the way.
         .route("/v1/sessions", post(open_session).get(list_sessions))
@@ -234,6 +249,24 @@ pub fn router_with(
         .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn auction_stats() -> Json<serde_json::Value> {
+    Json(crate::auction_stats::snapshot_json())
+}
+
+/// How long a bid window an auction for `workload` gets. Speech answers in
+/// seconds and sits in front of a caller; images, songs and clips take
+/// minutes, so a slightly longer window that catches a slow bid is cheap.
+fn bid_window_for(workload: &str) -> Duration {
+    if is_video(workload)
+        || workload == crate::diffusion::WORKLOAD_TXT2IMG
+        || workload == crate::music::WORKLOAD_TXT2MUSIC
+    {
+        Duration::from_secs(6)
+    } else {
+        Duration::from_secs(4)
+    }
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -475,7 +508,8 @@ async fn transcribe(
         )
     })?;
     // One network message carries ~5 MiB at most: store the audio in pieces.
-    let audio = crate::pieces::put_bytes_pieces(
+    // Sealed under a fresh key that only the winning worker learns.
+    let (audio, audio_key) = crate::pieces::put_bytes_pieces_sealed(
         &state.net,
         &state.store,
         &body,
@@ -491,7 +525,7 @@ async fn transcribe(
     });
     spec.as_object_mut()
         .expect("spec is an object")
-        .extend(audio.spec_fields("audio"));
+        .extend(audio.sealed_spec_fields("audio", &audio_key));
     let (outcome, bytes) = run_speech_job(
         &state,
         "stt.transcribe",
@@ -527,6 +561,7 @@ async fn run_speech_auction(
     spec: serde_json::Value,
     required: Vec<String>,
     excluded_bidders: &[String],
+    fallback_bidders: &[String],
 ) -> Result<crate::AuctionOutcome, (ApiError, Option<String>)> {
     // Learn the winner as soon as it is chosen, so a winner that then goes
     // silent can be benched and the job re-auctioned.
@@ -535,8 +570,9 @@ async fn run_speech_auction(
         .with_accept_notify(winner_tx)
         .with_required_capabilities(required)
         .with_excluded_bidders(excluded_bidders.to_vec())
+        .with_fallback_bidders(fallback_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
-        .with_bid_window(Duration::from_secs(4))
+        .with_bid_window(bid_window_for(workload))
         .with_deadline(if is_video(workload) {
             crate::video::JOB_TIMEOUT + Duration::from_secs(5 * 60)
         } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
@@ -618,10 +654,23 @@ async fn run_checked_job(
     valid: &(dyn Fn(&[u8]) -> bool + Send + Sync),
 ) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
     // Workers benched for not delivering earlier stay out of the auction.
-    let mut excluded_bidders = state.penalties.benched();
+    // Workers that failed this request are out; workers benched for earlier
+    // failures are only a fallback when nobody else bids.
+    let mut excluded_bidders: Vec<String> = Vec::new();
     let mut last_error = None;
-    let started = std::time::Instant::now();
+    // The queue limit and when this request was first queued: from the
+    // tracked request (kept across a restart), else from now.
+    let ctx = crate::job_progress::queue_ctx();
+    let max_wait = ctx.map(|c| c.max_wait).unwrap_or_else(|| state.queue.max_wait_for(workload, None));
+    let queued_at_ms = ctx.map(|c| c.queued_at_ms).unwrap_or_else(crate::job_progress::now_ms_pub);
+    let waited = || Duration::from_millis(crate::job_progress::now_ms_pub().saturating_sub(queued_at_ms));
+    crate::job_progress::report(|p| p.max_wait_s = Some(max_wait.as_secs()));
     let mut attempt = 0;
+    let mut no_bid_rounds = 0u32;
+    // An update waits for this request instead of killing it mid-flight.
+    // Tracked requests are on disk and resume after a restart, so they never
+    // pin an update; an untracked one dies with the process, so it does.
+    let _long_job = crate::job_progress::queue_ctx().is_none().then(c0mpute_update::LongJob::start);
 
     while attempt < MAX_SPEECH_WORKER_ATTEMPTS {
         attempt += 1;
@@ -641,6 +690,12 @@ async fn run_checked_job(
             spec.clone(),
             required.clone(),
             &excluded_bidders,
+            &state
+                .penalties
+                .benched()
+                .into_iter()
+                .filter(|p| !excluded_bidders.contains(p))
+                .collect::<Vec<_>>(),
         )
         .await
         {
@@ -655,19 +710,28 @@ async fn run_checked_job(
                 last_error = Some(error);
                 continue;
             }
-            // Nobody bid. For images that usually means every worker is busy
-            // with one (~2 min each): wait and re-auction instead of failing,
-            // without spending one of the real attempts.
-            Err((error, None))
-                if (workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT)
-                    || (workload == crate::music::WORKLOAD_TXT2MUSIC && started.elapsed() < MUSIC_QUEUE_WAIT) =>
-            {
-                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free worker yet; waiting");
+            // Nobody bid: every worker busy (an image holds one ~2 min), one
+            // restarting into an update, or a bid lost in transit. Re-auction
+            // with backoff instead of failing, without spending one of the
+            // real attempts, for as long as this workload is worth waiting.
+            Err((error, None)) if waited() < max_wait => {
+                let pause = state.queue.backoff(no_bid_rounds, max_wait.saturating_sub(waited()));
+                no_bid_rounds += 1;
+                tracing::info!(workload, waited_secs = waited().as_secs(), max_wait_secs = max_wait.as_secs(),
+                    round = no_bid_rounds, "no free worker yet; queued");
                 crate::job_progress::set_stage("queued");
                 attempt -= 1;
                 last_error.get_or_insert(error);
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                wait_for_capable(&state.net, &required, pause, state.queue.min_pause).await;
                 continue;
+            }
+            // Waited the whole limit without a single bid.
+            Err((_, None)) if last_error.as_ref().is_none_or(|e| e.0 == StatusCode::SERVICE_UNAVAILABLE) => {
+                let model = crate::buyer_queue::model_of(&spec, &required);
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    crate::buyer_queue::expired_message(workload, model.as_deref(), max_wait),
+                ));
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
         };
@@ -678,8 +742,8 @@ async fn run_checked_job(
                 StatusCode::BAD_GATEWAY,
                 format!("c0mpute worker failed the {workload} job"),
             ))
-        } else if let Some(output_hash) = outcome.receipt.output_hash.as_deref() {
-            match fetch_result(state, output_hash, &worker, max_bytes).await {
+        } else if outcome.receipt.output_hash.is_some() {
+            match fetch_result(state, &outcome, max_bytes).await {
                 Ok(bytes) if valid(&bytes) => Ok(bytes),
                 Ok(_) => Err(ApiError(
                     StatusCode::BAD_GATEWAY,
@@ -725,6 +789,22 @@ async fn run_checked_job(
     }))
 }
 
+/// The small Wan model is served on CPU, whose workers take at most
+/// `video_cpu::MAX_FRAMES` frames, `MAX_STEPS` steps and 480x272. A request
+/// with the GPU-sized defaults (81 frames, 30 steps, 1280x704) was refused by
+/// every CPU node's offer filter, so it never got a bid. Clip it to what they
+/// take, keeping the orientation, as songs are clipped to their model.
+fn clip_for_cpu_video(job: &mut crate::video::VideoJobInline, workload: &str) {
+    if workload != crate::video::WORKLOAD_TXT2VID || job.model != crate::video_cpu::MODEL_ID {
+        return;
+    }
+    job.frames = job.frames.min(crate::video_cpu::MAX_FRAMES);
+    job.steps = job.steps.min(crate::video_cpu::MAX_STEPS);
+    if job.width.saturating_mul(job.height) > crate::video_cpu::MAX_PIXELS {
+        (job.width, job.height) = if job.height > job.width { (272, 480) } else { (480, 272) };
+    }
+}
+
 fn is_video(workload: &str) -> bool {
     workload == crate::video::WORKLOAD_TXT2VID || workload == crate::video::WORKLOAD_IMG2VID
 }
@@ -755,15 +835,13 @@ fn result_fetch_budget(max_bytes: usize) -> Duration {
 
 async fn fetch_result(
     state: &GatewayState,
-    hash: &str,
-    provider_peer_id: &str,
+    outcome: &crate::AuctionOutcome,
     max_bytes: usize,
 ) -> ApiResult<Vec<u8>> {
     use crate::gateway_util::FetchError;
     match crate::gateway_util::fetch_result(
         &state.net,
-        hash,
-        provider_peer_id,
+        outcome,
         max_bytes,
         result_fetch_budget(max_bytes),
     )
@@ -980,6 +1058,7 @@ struct VideoRequest {
 async fn generate_video(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    Query(query): Query<QueueQuery>,
     Json(mut raw): Json<serde_json::Value>,
 ) -> ApiResult<Response> {
     use base64::Engine;
@@ -1008,7 +1087,7 @@ async fn generate_video(
                     "image must be 1 byte to 32 MiB".into(),
                 ));
             }
-            let image = crate::pieces::put_bytes_pieces(
+            let (image, image_key) = crate::pieces::put_bytes_pieces_sealed(
                 &state.net,
                 &state.store,
                 &bytes,
@@ -1016,6 +1095,7 @@ async fn generate_video(
             )
             .await
             .map_err(gateway_failure)?;
+            job.image_key = Some(crate::job_e2e::key_to_hex(&image_key));
             job.image_hash = Some(image.hash.clone());
             if image.pieces.len() > 1 {
                 job.image_size = Some(image.size);
@@ -1026,43 +1106,24 @@ async fn generate_video(
         }
         None => crate::video::WORKLOAD_TXT2VID,
     };
+    clip_for_cpu_video(&mut job, workload);
     job.validate(workload)
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
-    let _slot = state
-        .image_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "video queue is unavailable".into(),
-            )
-        })?;
     let spec = serde_json::to_value(&job).map_err(|error| gateway_failure(error.into()))?;
-    let (outcome, bytes) = run_speech_job(
+    run_tracked(
         &state,
+        &headers,
+        &query,
+        state.video_slots.clone(),
         workload,
         spec,
         // The model tag: only a node that can run this model (a big enough
         // card, or CPU video for the small one) is eligible.
         vec![crate::video::ROLE_TAG.to_string(), crate::video::model_tag(&job.model)],
         crate::video::MAX_RESULT_BYTES,
+        |_| "video/mp4",
     )
-    .await?;
-    let mut response = (StatusCode::OK, bytes).into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    set_job_headers(
-        response.headers_mut(),
-        &outcome.job_id,
-        &outcome.accepted_bid.bidder_peer_id,
-    );
-    Ok(response)
+    .await
 }
 
 /// `POST /v1/music`: a song on a c0mpute worker (`music.txt2music`, ACE-Step
@@ -1072,24 +1133,20 @@ async fn generate_video(
 async fn generate_music(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    Query(query): Query<QueueQuery>,
     Json(input): Json<crate::music::Txt2MusicSpec>,
 ) -> ApiResult<Response> {
     authenticate(&state, &headers)?;
     input
         .validate()
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
-    let slot = state
-        .music_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "music queue is unavailable".into()))?;
     let spec = serde_json::to_value(input.clip_for_model())
         .map_err(|error| gateway_failure(error.into()))?;
-    let done = run_tracked(
+    run_tracked(
         &state,
-        request_id(&headers),
-        slot,
+        &headers,
+        &query,
+        state.music_slots.clone(),
         crate::music::WORKLOAD_TXT2MUSIC,
         spec,
         vec![
@@ -1099,8 +1156,7 @@ async fn generate_music(
         crate::music::MAX_RESULT_BYTES,
         |bytes| crate::music::audio_content_type(bytes).unwrap_or("audio/mpeg"),
     )
-    .await?;
-    Ok(stored_response(done))
+    .await
 }
 
 /// The caller's `x-request-id`, when it is short and URL-safe.
@@ -1112,35 +1168,56 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Run a long job (song, image). With a request id it runs DETACHED from the
-/// HTTP request: if the caller's connection drops (Infernet redeploying
-/// mid-song cut every song in flight, 2026-11-09), the job carries on, holds
-/// its queue slot to the end, and its result waits at GET /v1/result/{id}.
-/// Progress is recorded under the same id (see `job_progress`).
+/// `?max_wait=<secs>` on the long-job endpoints.
+#[derive(Debug, Default, Deserialize)]
+struct QueueQuery {
+    max_wait: Option<String>,
+}
+
+/// Run a long job (song, image, clip) as a tracked, queued request.
+///
+/// It runs DETACHED from the HTTP request under the caller's `x-request-id`
+/// (one is minted when absent), is on disk until it finishes (a gateway
+/// restart or auto-update resumes it), and waits in its workload's FIFO queue
+/// for a worker for up to its max wait (`buyer_queue`). The caller gets the
+/// result if it is ready within the sync window (`Prefer: wait=N`,
+/// `Prefer: respond-async`, default 5 min), else `202` with the request id
+/// and where to poll: `GET /v1/progress/{id}` and `GET /v1/result/{id}`.
 #[allow(clippy::too_many_arguments)]
 async fn run_tracked(
     state: &GatewayState,
-    request_id: Option<String>,
-    slot: tokio::sync::OwnedSemaphorePermit,
+    headers: &HeaderMap,
+    query: &QueueQuery,
+    slots: Arc<Semaphore>,
     workload: &'static str,
     spec: serde_json::Value,
     required: Vec<String>,
     max_bytes: usize,
     content_type: fn(&[u8]) -> &'static str,
-) -> ApiResult<crate::job_progress::Stored> {
+) -> ApiResult<Response> {
+    use crate::buyer_queue::{requested_max_wait, sync_wait_from_prefer};
     use crate::job_progress::Stored;
-    let Some(key) = request_id else {
-        let (outcome, bytes) = run_speech_job(state, workload, spec, required, max_bytes).await?;
-        drop(slot);
-        return Ok(Stored::Done {
-            content_type: content_type(&bytes),
-            bytes: Arc::new(bytes),
-            job_id: outcome.job_id,
-            worker: outcome.accepted_bid.bidder_peer_id,
-        });
-    };
+    let key = request_id(headers).unwrap_or_else(|| format!("q-{}", uuid::Uuid::new_v4().simple()));
+    // The same request posted again while it waits: report, do not queue twice.
+    if state.board.position(&key).is_some() {
+        return Ok(accepted_response(state, &key));
+    }
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let max_wait = state
+        .queue
+        .max_wait_for(workload, requested_max_wait(header("x-max-wait"), query.max_wait.as_deref()));
+    let sync_wait = sync_wait_from_prefer(header("prefer"), state.queue.sync_wait);
+    let now = crate::job_progress::now_ms_pub();
+    if !state.board.enter(workload, &key, now, state.queue.max_jobs) {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "the {workload} queue is full ({} waiting); try again later",
+                state.board.len(workload)
+            ),
+        ));
+    }
     state.progress.start(&key);
-    // On disk until it finishes, so a gateway restart can run it again.
     state.pending.save(
         &key,
         &crate::job_progress::PendingJob {
@@ -1148,19 +1225,63 @@ async fn run_tracked(
             spec: spec.clone(),
             required: required.clone(),
             max_bytes,
-            started_at_ms: crate::job_progress::now_ms_pub(),
+            started_at_ms: now,
+            max_wait_ms: Some(max_wait.as_millis() as u64),
         },
     );
-    let st = state.clone();
-    let task_key = key.clone();
-    let task = tokio::spawn(crate::job_progress::CURRENT.scope(
-        (state.progress.clone(), key.clone()),
-        async move {
-            let _slot = slot;
-            // A gateway auto-update waits for tracked jobs (a caller is
-            // waiting on them) instead of cutting them off.
-            let _long = c0mpute_update::LongJob::start();
-            let result = run_speech_job(&st, workload, spec, required, max_bytes).await;
+    let task = spawn_tracked(
+        state.clone(),
+        key.clone(),
+        slots,
+        workload,
+        spec,
+        required,
+        max_bytes,
+        content_type,
+        crate::job_progress::QueueCtx { max_wait, queued_at_ms: now },
+    );
+    match tokio::time::timeout(sync_wait, task).await {
+        Ok(Ok(Stored::Failed { status, message })) => Err(ApiError(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        )),
+        Ok(Ok(done)) => Ok(stored_response(done)),
+        Ok(Err(error)) => Err(ApiError(StatusCode::BAD_GATEWAY, format!("job task failed: {error}"))),
+        // Still queued or rendering: answer now, keep working.
+        Err(_) => Ok(accepted_response(state, &key)),
+    }
+}
+
+/// Run one tracked request to its end on its own task: wait for a slot in
+/// its workload's queue, auction (re-offering while nobody bids, up to its
+/// max wait), fetch the result, store it for `GET /v1/result/{id}`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_tracked(
+    st: GatewayState,
+    key: String,
+    slots: Arc<Semaphore>,
+    workload: &'static str,
+    spec: serde_json::Value,
+    required: Vec<String>,
+    max_bytes: usize,
+    content_type: fn(&[u8]) -> &'static str,
+    ctx: crate::job_progress::QueueCtx,
+) -> tokio::task::JoinHandle<crate::job_progress::Stored> {
+    use crate::job_progress::Stored;
+    st.board.enter(workload, &key, ctx.queued_at_ms, usize::MAX);
+    st.progress.update(&key, |p| {
+        p.max_wait_s = Some(ctx.max_wait.as_secs());
+        p.started_at_ms = ctx.queued_at_ms;
+    });
+    let scope = (st.progress.clone(), key.clone());
+    tokio::spawn(crate::job_progress::CURRENT.scope(
+        scope,
+        crate::job_progress::QUEUE.scope(ctx, async move {
+            crate::job_progress::set_stage("queued");
+            let result = match slots.acquire_owned().await {
+                Ok(_slot) => run_speech_job(&st, workload, spec, required, max_bytes).await,
+                Err(_) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "queue closed".into())),
+            };
             crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
             let stored = match result {
                 Ok((outcome, bytes)) => Stored::Done {
@@ -1171,65 +1292,132 @@ async fn run_tracked(
                 },
                 Err(ApiError(status, message)) => Stored::Failed { status: status.as_u16(), message },
             };
-            st.results.put(&task_key, stored.clone());
-            st.pending.remove(&task_key);
+            st.results.put(&key, stored.clone());
+            st.pending.remove(&key);
+            st.board.leave(workload, &key);
             stored
-        },
-    ));
-    match task.await {
-        Ok(Stored::Failed { status, message }) => Err(ApiError(
-            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            message,
-        )),
-        Ok(done) => Ok(done),
-        Err(error) => Err(ApiError(StatusCode::BAD_GATEWAY, format!("job task failed: {error}"))),
+        }),
+    ))
+}
+
+/// `202 Accepted` for a request still queued or running: its id, stage,
+/// queue position and where to poll.
+fn accepted_response(state: &GatewayState, key: &str) -> Response {
+    let mut body = state
+        .progress
+        .snapshot(key)
+        .unwrap_or_else(|| serde_json::json!({ "stage": "queued" }));
+    enrich_progress(state, key, &mut body);
+    body["request_id"] = key.into();
+    body["status_url"] = format!("/v1/progress/{key}").into();
+    body["result_url"] = format!("/v1/result/{key}").into();
+    let mut response = (StatusCode::ACCEPTED, Json(body)).into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!("/v1/result/{key}")) {
+        response.headers_mut().insert(header::LOCATION, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(key) {
+        response.headers_mut().insert("x-request-id", v);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Add queue position, length and a one-line status to a progress snapshot.
+fn enrich_progress(state: &GatewayState, key: &str, body: &mut serde_json::Value) {
+    let waited = body.get("elapsed_s").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Some((workload, position, length)) = state.board.position(key) {
+        body["workload"] = workload.into();
+        body["queue_position"] = position.into();
+        body["queue_length"] = length.into();
+    }
+    if body.get("stage").and_then(|v| v.as_str()) == Some("queued") {
+        body["detail"] = format!(
+            "queued, waiting for a worker ({})",
+            crate::buyer_queue::human(Duration::from_secs(waited))
+        )
+        .into();
     }
 }
 
 /// After a restart: run again every tracked request that had not finished,
-/// under the same request id, so `GET /v1/result/{id}` still delivers it.
+/// under the same request id and queue clock, so `GET /v1/result/{id}` still
+/// delivers it and its max wait counts from when it was first queued.
+fn resume_pending(state: &GatewayState) {
+    for (key, job) in state.pending.take_resumable() {
+        let (workload, slots, content_type): ResumeTarget = match job.workload.as_str() {
+            crate::music::WORKLOAD_TXT2MUSIC => (
+                crate::music::WORKLOAD_TXT2MUSIC,
+                state.music_slots.clone(),
+                |b| crate::music::audio_content_type(b).unwrap_or("audio/mpeg"),
+            ),
+            crate::diffusion::WORKLOAD_TXT2IMG => {
+                (crate::diffusion::WORKLOAD_TXT2IMG, state.image_slots.clone(), |_| "image/png")
+            }
+            crate::video::WORKLOAD_TXT2VID => {
+                (crate::video::WORKLOAD_TXT2VID, state.video_slots.clone(), |_| "video/mp4")
+            }
+            crate::video::WORKLOAD_IMG2VID => {
+                (crate::video::WORKLOAD_IMG2VID, state.video_slots.clone(), |_| "video/mp4")
+            }
+            _ => {
+                state.pending.remove(&key);
+                continue;
+            }
+        };
+        let max_wait = job
+            .max_wait_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| state.queue.max_wait_for(workload, None));
+        tracing::info!(%key, workload, queued_secs = crate::job_progress::now_ms_pub().saturating_sub(job.started_at_ms) / 1000,
+            "resuming a tracked request after a restart");
+        state.progress.start(&key);
+        drop(spawn_tracked(
+            state.clone(),
+            key,
+            slots,
+            workload,
+            job.spec,
+            job.required,
+            job.max_bytes,
+            content_type,
+            crate::job_progress::QueueCtx { max_wait, queued_at_ms: job.started_at_ms },
+        ));
+    }
+}
+
 /// What a resumed request needs: its workload, its queue and its content type.
 type ResumeTarget = (&'static str, Arc<Semaphore>, fn(&[u8]) -> &'static str);
 
-fn resume_pending(state: &GatewayState) {
-    use crate::job_progress::Stored;
-    for (key, job) in state.pending.take_resumable() {
-        let (workload, slots, content_type): ResumeTarget =
-            match job.workload.as_str() {
-                crate::music::WORKLOAD_TXT2MUSIC => (
-                    crate::music::WORKLOAD_TXT2MUSIC,
-                    state.music_slots.clone(),
-                    |b| crate::music::audio_content_type(b).unwrap_or("audio/mpeg"),
-                ),
-                crate::diffusion::WORKLOAD_TXT2IMG => {
-                    (crate::diffusion::WORKLOAD_TXT2IMG, state.image_slots.clone(), |_| "image/png")
-                }
-                _ => {
-                    state.pending.remove(&key);
+/// Sleep up to `pause` (at least `min`), waking early when a node advertising
+/// every one of `required` shows up: a worker that just freed up (busy image
+/// and song workers withdraw their role tags) or a new one joining.
+async fn wait_for_capable(net: &Libp2pNetwork, required: &[String], pause: Duration, min: Duration) {
+    let start = tokio::time::Instant::now();
+    let deadline = start + pause;
+    let earliest = start + min.min(pause);
+    let mut rx = net.messages();
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => return,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => {
+                tokio::time::sleep_until(deadline).await;
+                return;
+            }
+            Ok(Ok(msg)) => {
+                if msg.topic != c0mpute_net::topics::CAPABILITY_TOPIC {
                     continue;
                 }
-            };
-        tracing::info!(%key, workload, "resuming a tracked request after a restart");
-        state.progress.start(&key);
-        let st = state.clone();
-        let task_key = key.clone();
-        tokio::spawn(crate::job_progress::CURRENT.scope((state.progress.clone(), key), async move {
-            let Ok(_slot) = slots.acquire_owned().await else { return };
-            let _long = c0mpute_update::LongJob::start();
-            let result = run_speech_job(&st, workload, job.spec, job.required, job.max_bytes).await;
-            crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
-            let stored = match result {
-                Ok((outcome, bytes)) => Stored::Done {
-                    content_type: content_type(&bytes),
-                    bytes: Arc::new(bytes),
-                    job_id: outcome.job_id,
-                    worker: outcome.accepted_bid.bidder_peer_id,
-                },
-                Err(ApiError(status, message)) => Stored::Failed { status: status.as_u16(), message },
-            };
-            st.results.put(&task_key, stored);
-            st.pending.remove(&task_key);
-        }));
+                let capable = serde_json::from_slice::<c0mpute_net::topics::CapabilityAd>(&msg.data)
+                    .is_ok_and(|ad| required.iter().all(|t| ad.tags.contains(t)));
+                if capable {
+                    tokio::time::sleep_until(earliest).await;
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -1268,15 +1456,10 @@ async fn job_result(
         )),
         Some(done) => Ok(stored_response(done)),
         None => {
-            let snapshot = state
-                .progress
-                .snapshot(&request)
-                .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such request".into()))?;
-            let mut response = (StatusCode::ACCEPTED, Json(snapshot)).into_response();
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            Ok(response)
+            if state.progress.snapshot(&request).is_none() {
+                return Err(ApiError(StatusCode::NOT_FOUND, "no such request".into()));
+            }
+            Ok(accepted_response(&state, &request))
         }
     }
 }
@@ -1292,10 +1475,11 @@ async fn job_progress(
     if !crate::job_progress::valid_key(&request) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad request id".into()));
     }
-    let snapshot = state
+    let mut snapshot = state
         .progress
         .snapshot(&request)
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such request".into()))?;
+    enrich_progress(&state, &request, &mut snapshot);
     let mut response = Json(snapshot).into_response();
     response
         .headers_mut()
@@ -1306,28 +1490,19 @@ async fn job_progress(
 async fn generate_image(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    Query(query): Query<QueueQuery>,
     Json(input): Json<crate::diffusion::Txt2ImgSpec>,
 ) -> ApiResult<Response> {
     authenticate(&state, &headers)?;
     input
         .validate()
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
-    let slot = state
-        .image_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "image queue is unavailable".into(),
-            )
-        })?;
     let spec = serde_json::to_value(&input).map_err(|error| gateway_failure(error.into()))?;
-    let done = run_tracked(
+    run_tracked(
         &state,
-        request_id(&headers),
-        slot,
+        &headers,
+        &query,
+        state.image_slots.clone(),
         crate::diffusion::WORKLOAD_TXT2IMG,
         spec,
         vec![
@@ -1337,8 +1512,7 @@ async fn generate_image(
         crate::diffusion::MAX_IMAGE_BYTES,
         |_| "image/png",
     )
-    .await?;
-    Ok(stored_response(done))
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1383,7 +1557,7 @@ async fn ocr_extract(
         ApiError(StatusCode::SERVICE_UNAVAILABLE, "OCR queue is unavailable".into())
     })?;
     // One network message carries ~5 MiB at most: store the document in pieces.
-    let input = crate::pieces::put_bytes_pieces(
+    let (input, input_key) = crate::pieces::put_bytes_pieces_sealed(
         &state.net,
         &state.store,
         &body,
@@ -1399,7 +1573,7 @@ async fn ocr_extract(
     });
     spec.as_object_mut()
         .expect("spec is an object")
-        .extend(input.spec_fields("input"));
+        .extend(input.sealed_spec_fields("input", &input_key));
     let (outcome, bytes) = run_speech_job(
         &state,
         crate::ocr::WORKLOAD,
@@ -1409,6 +1583,237 @@ async fn ocr_extract(
     )
     .await?;
     json_job_response(&bytes, &outcome)
+}
+
+/// `POST /v1/captcha`: solve one captcha.
+///
+/// Body: `{type, image?, background?, charset?, case?, length?, audio?,
+/// audio_format?, question?}` where `type` is `image` (default), `slider`,
+/// `gap`, `detect` (ddddocr on a worker), `audio` (whisper on a worker, then
+/// spoken digits/letters normalized) or `math` (answered here). Images and
+/// audio are base64 or `data:` URLs. Answers `{v, ok, kind, text | x,y |
+/// boxes, confidence?, ...}` plus `job_id` and `worker_peer_id` when a worker
+/// ran it. Token captchas (reCAPTCHA, hCaptcha, Turnstile) get a 501.
+async fn captcha_solve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<CaptchaRequest>,
+) -> ApiResult<Response> {
+    use crate::captcha;
+    authenticate(&state, &headers)?;
+    let kind = match req.kind.as_deref() {
+        Some(k) => k.trim().to_ascii_lowercase(),
+        None if req.audio.is_some() => "audio".into(),
+        None if req.question.is_some() => "math".into(),
+        None => "image".into(),
+    };
+    let case = req.case.as_deref();
+    if case.is_some_and(|c| !matches!(c, "lower" | "upper" | "any")) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "case must be lower, upper or any".into(),
+        ));
+    }
+    let finish = |mut payload: serde_json::Value| -> serde_json::Value {
+        if let Some(text) = payload.get("text").and_then(|t| t.as_str()) {
+            let text = captcha::apply_case(text, case);
+            if let Some(len) = req.length {
+                payload["length_ok"] = serde_json::json!(text.chars().count() == len);
+            }
+            payload["text"] = serde_json::json!(text);
+        }
+        payload
+    };
+    match kind.as_str() {
+        "math" => {
+            let question = req.question.as_deref().unwrap_or("");
+            if question.is_empty() || question.chars().count() > captcha::MAX_QUESTION_CHARS {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "math needs a question of 1 to 256 characters".into(),
+                ));
+            }
+            let Some(answer) = captcha::solve_math(question) else {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no arithmetic found in the question".into(),
+                ));
+            };
+            Ok(Json(finish(serde_json::json!({
+                "v": 1, "ok": true, "kind": "math", "text": answer, "engine": "local",
+            })))
+            .into_response())
+        }
+        "audio" => {
+            use base64::Engine as _;
+            let raw = req.audio.as_deref().unwrap_or("");
+            let audio = base64::engine::general_purpose::STANDARD
+                .decode(captcha::strip_data_url(raw))
+                .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "audio is not valid base64".into()))?;
+            if audio.is_empty() || audio.len() > captcha::MAX_AUDIO_BYTES {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "audio must be between 1 byte and 2 MiB".into(),
+                ));
+            }
+            let format = req
+                .audio_format
+                .as_deref()
+                .and_then(|f| ["wav", "mp3", "ogg", "webm", "m4a"].into_iter().find(|k| *k == f))
+                .or_else(|| sniff_audio(&audio))
+                .ok_or_else(|| {
+                    ApiError(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "send WAV, MP3, Ogg, WebM or M4A audio".into(),
+                    )
+                })?;
+            let _slot = state.stt_slots.clone().acquire_owned().await.map_err(|_| {
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech queue is unavailable".into())
+            })?;
+            let (pieces, audio_key) = crate::pieces::put_bytes_pieces_sealed(
+                &state.net,
+                &state.store,
+                &audio,
+                crate::pieces::INPUT_PIECE_BYTES,
+            )
+            .await
+            .map_err(gateway_failure)?;
+            let mut spec = serde_json::json!({
+                "audio_provider_peer_id": state.net.peer_id().to_string(),
+                "audio_format": format,
+                "model": "base",
+                "language": "en",
+            });
+            spec.as_object_mut()
+                .expect("spec is an object")
+                .extend(pieces.sealed_spec_fields("audio", &audio_key));
+            let (outcome, bytes) = run_speech_job(
+                &state,
+                "stt.transcribe",
+                spec,
+                vec![
+                    "c0mpute:role:stt".to_string(),
+                    "c0mpute:stt:engine:faster-whisper".to_string(),
+                ],
+                10 * 1024 * 1024,
+            )
+            .await?;
+            let transcript: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid transcript JSON".into())
+            })?;
+            let heard = transcript
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let payload = finish(serde_json::json!({
+                "v": 1,
+                "ok": true,
+                "kind": "audio",
+                "text": captcha::normalize_spoken(&heard),
+                "transcript": heard,
+                "engine": "faster-whisper",
+                "job_id": outcome.job_id,
+                "worker_peer_id": outcome.accepted_bid.bidder_peer_id,
+            }));
+            let mut response = Json(payload).into_response();
+            set_job_headers(
+                response.headers_mut(),
+                &outcome.job_id,
+                &outcome.accepted_bid.bidder_peer_id,
+            );
+            Ok(response)
+        }
+        k if captcha::WORKER_KINDS.contains(&k) => {
+            let mut spec = serde_json::json!({
+                "v": 1,
+                "kind": k,
+                "image": captcha::strip_data_url(req.image.as_deref().unwrap_or("")),
+            });
+            if let Some(bg) = req.background.as_deref() {
+                spec["background"] = serde_json::json!(captcha::strip_data_url(bg));
+            }
+            if let Some(cs) = req.charset.as_deref() {
+                spec["charset"] = serde_json::json!(cs);
+            }
+            let parsed =
+                captcha::parse_spec(&spec).map_err(|m| ApiError(StatusCode::BAD_REQUEST, m))?;
+            // Hand workers the resolved charset, not the preset name.
+            if let Some(cs) = parsed.charset.as_deref() {
+                spec["charset"] = serde_json::json!(cs);
+            }
+            let _slot = state.captcha_slots.clone().acquire_owned().await.map_err(|_| {
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "captcha queue is unavailable".into())
+            })?;
+            // The spec (up to two 256 KiB images) never rides the gossip
+            // offer: it is sealed to the winner and fetched point to point
+            // (DIP-0032), so it is never stored here as a plaintext chunk.
+            let offer_spec = spec;
+            let expected = parsed.kind.clone();
+            let (outcome, bytes) = run_checked_job(
+                &state,
+                captcha::WORKLOAD,
+                offer_spec,
+                vec![captcha::ROLE_TAG.to_string()],
+                captcha::MAX_RESULT_BYTES,
+                &move |bytes| {
+                    serde_json::from_slice::<serde_json::Value>(bytes)
+                        .is_ok_and(|v| captcha::valid_result(&expected, &v))
+                },
+            )
+            .await?;
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid JSON".into())
+            })?;
+            let rewritten =
+                serde_json::to_vec(&finish(payload)).map_err(|error| gateway_failure(error.into()))?;
+            json_job_response(&rewritten, &outcome)
+        }
+        other => Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            captcha::unsupported_kind_message(other),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptchaRequest {
+    #[serde(default, alias = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    background: Option<String>,
+    #[serde(default)]
+    charset: Option<String>,
+    #[serde(default)]
+    case: Option<String>,
+    #[serde(default)]
+    length: Option<usize>,
+    #[serde(default)]
+    audio: Option<String>,
+    #[serde(default)]
+    audio_format: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+}
+
+/// Audio container by magic bytes.
+fn sniff_audio(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        Some("wav")
+    } else if bytes.starts_with(b"ID3") || (bytes.len() > 1 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0) {
+        Some("mp3")
+    } else if bytes.starts_with(b"OggS") {
+        Some("ogg")
+    } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("webm")
+    } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        Some("m4a")
+    } else {
+        None
+    }
 }
 
 /// OpenAI-style embeddings request: `input` is one string or a list.
@@ -1446,16 +1851,9 @@ async fn embeddings(
     let _slot = state.embed_slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(StatusCode::SERVICE_UNAVAILABLE, "embeddings queue is unavailable".into())
     })?;
-    // Up to 1 MiB of text: too big for the gossip offer, so the worker
-    // fetches it from this node by hash.
-    let spec_bytes = serde_json::to_vec(&spec).map_err(|error| gateway_failure(error.into()))?;
-    let offer_spec = if spec_bytes.len() <= crate::workflow::MAX_INLINE_SPEC_BYTES {
-        spec
-    } else {
-        let hash = state.store.put(&spec_bytes).await.map_err(gateway_failure)?;
-        state.net.announce(&hash).await.map_err(gateway_failure)?;
-        crate::workflow::spec_ref(&hash, spec_bytes.len())
-    };
+    // Up to 1 MiB of text, sealed to the winner and fetched point to point
+    // (DIP-0032): never on gossip, never stored here as a plaintext chunk.
+    let offer_spec = spec;
     let (outcome, bytes) = run_checked_job(
         &state,
         crate::embed::WORKLOAD,
@@ -1562,6 +1960,37 @@ fn default_stt_model() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_video_requests_are_clipped_to_what_cpu_nodes_take() {
+        let mut job: crate::video::VideoJobInline = serde_json::from_value(serde_json::json!({
+            "model": crate::video_cpu::MODEL_ID,
+            "prompt": "a cat",
+        }))
+        .unwrap();
+        clip_for_cpu_video(&mut job, crate::video::WORKLOAD_TXT2VID);
+        crate::video_cpu::fits(&job, crate::video::WORKLOAD_TXT2VID).unwrap();
+        assert_eq!((job.width, job.height), (480, 272));
+        // Portrait stays portrait; other models are left alone.
+        let mut tall = job.clone();
+        (tall.width, tall.height) = (704, 1280);
+        clip_for_cpu_video(&mut tall, crate::video::WORKLOAD_TXT2VID);
+        assert_eq!((tall.width, tall.height), (272, 480));
+        let mut big: crate::video::VideoJobInline = serde_json::from_value(serde_json::json!({
+            "model": "wan2.1-t2v-14b",
+            "prompt": "a cat",
+        }))
+        .unwrap();
+        let before = (big.frames, big.steps, big.width);
+        clip_for_cpu_video(&mut big, crate::video::WORKLOAD_TXT2VID);
+        assert_eq!((big.frames, big.steps, big.width), before);
+    }
+
+    #[test]
+    fn slow_workloads_get_longer_windows() {
+        assert_eq!(bid_window_for("tts.synthesize"), Duration::from_secs(4));
+        assert_eq!(bid_window_for(crate::diffusion::WORKLOAD_TXT2IMG), Duration::from_secs(6));
+    }
 
     #[test]
     fn ocr_results_are_checked() {

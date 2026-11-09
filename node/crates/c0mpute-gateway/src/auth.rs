@@ -1,8 +1,10 @@
 //! Signed-request auth for storage writes (CIP-002, DIP-0007).
 //!
-//! Reads of public objects need no auth — knowing a blake3 hash is itself the
-//! capability, and `private`-tier objects are ciphertext (CIP-011), so
-//! confidentiality comes from the key rather than an ACL. Writes are
+//! Reads need no auth: knowing a blake3 hash is itself the capability, and
+//! `private`-tier objects are sealed by their owner before upload
+//! (`c0mpute-sealed`, docs/private-storage.md), so this node only ever holds
+//! their ciphertext and confidentiality comes from the owner's key rather
+//! than an ACL. Writes are
 //! authenticated so a stranger cannot fill an operator's disk.
 //!
 //! The envelope is an ed25519 signature over a canonical string. Identity is

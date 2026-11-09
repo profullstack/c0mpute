@@ -21,6 +21,7 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod apps_mcp;
 mod ai_chat;
 mod crowdgpt;
 mod dm_cli;
@@ -28,8 +29,11 @@ use dm_cli::run_chat;
 mod gameserver;
 mod git_cli;
 mod peers;
+mod private_storage;
 mod promo;
 mod storage;
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+mod mount;
 mod temporal;
 mod text;
 mod train;
@@ -40,7 +44,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use c0mpute_core::{
-    Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing, run_auction,
+    Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing,
     run_register,
 };
 use c0mpute_proto::Role;
@@ -51,7 +55,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  inference  (chat from your Ollama/llama-server, p2p)\n  infernet   (temporal + LoRA runtimes, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat --p2p \"hello\"     (peer to peer, no account)\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --yes\n  c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  captcha    (ddddocr image/slider/gap/detect, CPU; audio + math via speech serve)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  inference  (chat from your Ollama/llama-server, p2p)\n  infernet   (temporal + LoRA runtimes, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute captcha code.png --charset alnum --plain\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat --p2p \"hello\"     (peer to peer, no account)\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --yes\n  c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -131,10 +135,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: JobCmd,
     },
-    /// Erasure-coded object storage on this node (DIP-0012).
+    /// Object storage (DIP-0012), private by default.
     ///
-    /// Objects are content-addressed and split into Reed-Solomon shards. Run
-    /// `c0mpute storage tiers` for the redundancy and price table.
+    /// `put` encrypts on this machine and the network only ever holds
+    /// ciphertext; `--public` stores plaintext. Run `c0mpute storage tiers`
+    /// for the redundancy and price table.
     #[command(after_long_help = storage::unimplemented_note())]
     Storage {
         #[command(subcommand)]
@@ -200,6 +205,14 @@ enum Cmd {
     Hosting {
         #[command(subcommand)]
         cmd: HostingCmd,
+    },
+    /// Apps plugin: run a backend (API, MCP server, worker, database app) on
+    /// the network from a container image. Three copies, one primary,
+    /// state snapshotted to the standbys, failover with no coordinator;
+    /// every gateway serves it at /a/<app_id>/ and on custom domains.
+    Apps {
+        #[command(subcommand)]
+        cmd: AppsCmd,
     },
     /// Train plugin: fine-tune a LoRA adapter on a c0mpute worker from a
     /// JSONL dataset (`c0mpute train lora --base <model> --dataset <jsonl>`;
@@ -308,6 +321,45 @@ enum Cmd {
         max_price: f64,
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
+    /// Captcha plugin: read a captcha on a c0mpute worker (`captcha.solve`,
+    /// ddddocr on CPU). Image text by default; `--type slider|gap` with
+    /// `--background`, `--type detect` for click-the-text boxes, or
+    /// `--question "3 + 4?"` for math (answered locally). Audio captchas go
+    /// through `POST /v1/captcha` on `c0mpute speech serve`.
+    /// `c0mpute captcha setup` provisions the solver on this machine.
+    #[command(args_conflicts_with_subcommands = true)]
+    Captcha {
+        #[command(subcommand)]
+        cmd: Option<CaptchaCmd>,
+        /// The captcha image (PNG, JPEG, GIF, WebP, BMP); the puzzle piece
+        /// for `slider`, the backdrop with the gap for `gap`.
+        file: Option<std::path::PathBuf>,
+        /// image (default), slider, gap, detect or math.
+        #[arg(long = "type", default_value = "image")]
+        kind: String,
+        /// Background image for slider / gap.
+        #[arg(long)]
+        background: Option<std::path::PathBuf>,
+        /// Limit image answers to a charset: digits, lower, upper, letters,
+        /// alnum, lower_digits, upper_digits, or the literal characters.
+        #[arg(long)]
+        charset: Option<String>,
+        /// Force the answer's case: lower or upper.
+        #[arg(long)]
+        case: Option<String>,
+        /// A math question to answer locally ("What is 3 + 4?").
+        #[arg(long)]
+        question: Option<String>,
+        /// Print only the answer (text, or "x,y" for slider/gap).
+        #[arg(long)]
+        plain: bool,
+        /// Highest price in USD you will pay for the job.
+        #[arg(long, default_value_t = 0.001)]
+        max_price: f64,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
     },
     /// Podcasting plugin: publish a podcast (RSS 2.0 + Podcasting 2.0 feed,
@@ -453,11 +505,21 @@ enum WorkerCmd {
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
         /// verifier, workflow-step, video, diffusion, music. Default: the config's
-        /// roles plus tts, stt, workflow-step, diffusion and music.
+        /// roles plus tts, stt, workflow-step, diffusion and music. Every node
+        /// is also a disk provider (storage + hosting, listed on d1sks) on top
+        /// of whatever is listed here, unless turned off below or in config.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
         storage: Option<String>,
+        /// Do not be a disk provider: no storage role, not listed on d1sks
+        /// (same as `[storage] enabled = false` or `C0MPUTE_STORAGE=0`).
+        #[arg(long)]
+        no_storage: bool,
+        /// Do not hold other people's sites (same as `[hosting] enabled =
+        /// false` or `C0MPUTE_HOSTING=0`).
+        #[arg(long)]
+        no_hosting: bool,
         #[arg(long)]
         gpu: bool,
         /// Private mode for this run: only your own buyers, not advertised.
@@ -538,6 +600,11 @@ enum TranscodeCmd {
         /// checked against the receipt). Without it only the hash is printed.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// How long to wait in the queue for a free worker before giving up,
+        /// in seconds (default 2 h). While waiting it prints
+        /// "queued, waiting for a worker (12 min)".
+        #[arg(long, default_value_t = 7200)]
+        max_wait: u64,
     },
     /// Manage transcode presets.
     Preset {
@@ -629,6 +696,117 @@ struct DmCli {
 }
 
 #[derive(Subcommand, Debug)]
+enum AppsCmd {
+    /// Deploy (or redeploy) an app.
+    ///
+    /// The image is built here (`docker build`), saved, and published to the
+    /// network as a hosting site signed by this machine, so no registry is
+    /// involved; or pass --pull with a digest-pinned registry image. Waits
+    /// until a primary answers on the new version.
+    ///
+    ///   c0mpute apps deploy ./api --name api --port 8080 --state /data
+    ///   c0mpute apps deploy --pull ghcr.io/me/api@sha256:... --name api
+    ///   c0mpute apps deploy ./api        # settings from ./api/c0mpute.toml
+    #[command(verbatim_doc_comment)]
+    Deploy {
+        /// Directory with a Dockerfile (and optionally c0mpute.toml).
+        dir: Option<std::path::PathBuf>,
+        /// App name: 1-59 of a-z, 0-9 and '-'. Same name again = new version.
+        #[arg(long)]
+        name: Option<String>,
+        /// Deploy an image already in the local docker instead of building.
+        #[arg(long, conflicts_with = "pull")]
+        image: Option<String>,
+        /// A registry image pinned by digest (name@sha256:...); holders pull it.
+        #[arg(long)]
+        pull: Option<String>,
+        /// Port the container serves HTTP on.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Health check path (any answer below 500 is healthy).
+        #[arg(long)]
+        health: Option<String>,
+        /// Directory inside the container that holds state (snapshotted to
+        /// the standbys, restored on failover). Encrypted with the app key.
+        #[arg(long)]
+        state: Option<String>,
+        /// Seconds between state snapshots (10-3600). Recovery point on failover.
+        #[arg(long)]
+        snapshot_secs: Option<u32>,
+        /// Public environment variable KEY=VALUE (repeatable). Secrets go
+        /// through `c0mpute apps secrets set`, never here.
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long)]
+        memory_mb: Option<u32>,
+        /// CPU cores (0.1-8).
+        #[arg(long)]
+        cpus: Option<f64>,
+        /// Copies the network keeps (2-5): one primary, the rest standbys.
+        #[arg(long)]
+        replicas: Option<u8>,
+        /// Custom domain (repeatable): point it at gateways and add TXT
+        /// `_c0mpute-app.<domain>` = `app=<app_id>`.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Peer id allowed to hold and run the app (repeatable). Without it
+        /// any apps node may, and every holder receives the app's secrets.
+        #[arg(long = "host")]
+        hosts: Vec<String>,
+        /// Give up waiting for a healthy primary after this many seconds.
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
+    },
+    /// List the apps a gateway knows, with holders, primary and health.
+    Ls {
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One app's state on a gateway: holders, primary, epoch, last snapshot.
+    Status {
+        /// App name (deployed from here) or app id.
+        app: String,
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
+    /// The primary's container logs (owner only; asked over libp2p).
+    Logs {
+        app: String,
+        #[arg(long, default_value_t = 200)]
+        tail: u32,
+    },
+    /// Secret environment variables, sealed to each holder at the next deploy.
+    Secrets {
+        #[command(subcommand)]
+        cmd: AppsSecretsCmd,
+    },
+    /// MCP server on stdio for agents (`claude mcp add c0mpute-apps -- c0mpute apps mcp`).
+    Mcp {
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
+    /// Delete an app: holders stop it and drop its copies and snapshots.
+    Destroy {
+        name: String,
+        /// Required: this cannot be undone (the state goes with it).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AppsSecretsCmd {
+    /// Set KEY=VALUE for an app (takes effect on the next deploy).
+    Set { app: String, pairs: Vec<String> },
+    /// Remove secrets by name.
+    Unset { app: String, keys: Vec<String> },
+    /// Show secret names (never values).
+    Ls { app: String },
+}
+
+#[derive(Subcommand, Debug)]
 enum HostingCmd {
     /// Publish (or update) a site from a directory of static files.
     ///
@@ -667,6 +845,17 @@ enum HostingCmd {
         /// The OpenDisk marketplace to pick hosts from (discovery only).
         #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
         d1sks: String,
+        /// Publish a private site: encrypted on this machine, served only to
+        /// people with its link (the browser decrypts; gateways see only
+        /// ciphertext). Sites are public by default.
+        #[arg(long)]
+        private: bool,
+        /// With --private: draw a new key, killing every link given out so far.
+        #[arg(long, requires = "private")]
+        rekey: bool,
+        /// With --private: the gateway the printed link points at.
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
     },
     /// Show the c0mpute hosting nodes d1sks lists, ranked the way
     /// `publish --disks` would pick them.
@@ -680,6 +869,10 @@ enum HostingCmd {
         country: Option<String>,
         #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
         d1sks: String,
+        /// Also join the hosting gossip (about a minute) and mark which
+        /// listed disks are announcing themselves as live hosts right now.
+        #[arg(long)]
+        live: bool,
     },
     /// List the sites a gateway knows, with live copy counts.
     Ls {
@@ -687,6 +880,15 @@ enum HostingCmd {
         #[arg(long, default_value = "http://127.0.0.1:7777")]
         gateway: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptchaCmd {
+    /// Install ddddocr so this node serves `captcha.solve` (a worker does
+    /// this by itself in the background).
+    Setup,
+    /// Show whether this machine can serve captcha jobs.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1219,14 +1421,52 @@ fn maybe_self_update(cli: &Cli) {
 #[cfg(not(unix))]
 fn maybe_self_update(_cli: &Cli) {}
 
+/// A server or worker (`... serve`, `worker start`, `status-aggregator`): a
+/// process that must survive a peer closing a pipe on it, so it keeps Rust's
+/// ignored SIGPIPE (writes fail with EPIPE instead of killing it).
+fn long_running(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|a| a.as_str() != "--")
+        .any(|a| matches!(a.as_str(), "serve" | "start" | "status-aggregator"))
+}
+
+#[cfg(test)]
+mod sigpipe_tests {
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn daemons_keep_sigpipe_ignored() {
+        assert!(super::long_running(&argv("c0mpute worker start")));
+        assert!(super::long_running(&argv("c0mpute worker start --roles tts,stt")));
+        assert!(super::long_running(&argv("c0mpute speech serve --bind 0.0.0.0:8787")));
+        assert!(super::long_running(&argv("c0mpute jobs serve")));
+        assert!(super::long_running(&argv("c0mpute status-aggregator --bind 127.0.0.1:8091")));
+        assert!(!super::long_running(&argv("c0mpute storage ls")));
+        assert!(!super::long_running(&argv("c0mpute captcha code.png --plain")));
+        assert!(!super::long_running(&argv("c0mpute embed -- start")));
+    }
+}
+
 fn main() -> Result<()> {
     // Rust ignores SIGPIPE, so writing to a closed pipe returns EPIPE and the
     // stdlib panics on it. For a CLI that prints lists that is a crash on
     // `c0mpute storage ls | head`, which is ordinary shell usage. Restore the
     // default disposition so the process exits quietly instead.
+    //
+    // Not for daemons, though: with the default disposition one write to a
+    // closed pipe kills `worker start` / `speech serve` outright, and systemd
+    // counts death by SIGPIPE as a clean exit, so `Restart=on-failure` never
+    // brings the node back. That took down dev2's gateway (and every Moshpit
+    // name behind edge.c0mpute.com) during the 0.2.100 self-update restart.
     #[cfg(unix)]
     unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let args: Vec<String> = std::env::args().collect();
+        if !long_running(&args) {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
     }
 
     // Run as `git-remote-c0mpute` (a link to this binary): the git remote helper.
@@ -1256,6 +1496,8 @@ fn main() -> Result<()> {
                 attach: true,
                 roles,
                 storage,
+                no_storage,
+                no_hosting,
                 gpu,
                 private,
                 daemon: _,
@@ -1265,6 +1507,12 @@ fn main() -> Result<()> {
         let mut passthrough = Vec::new();
         if *private {
             passthrough.push("--private".to_string());
+        }
+        if *no_storage {
+            passthrough.push("--no-storage".to_string());
+        }
+        if *no_hosting {
+            passthrough.push("--no-hosting".to_string());
         }
         if let Some(rs) = roles {
             passthrough.push("--roles".to_string());
@@ -1382,6 +1630,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Apps { cmd } => run_apps(cmd).await,
         Cmd::Train { args } => train::run(&args).await,
         Cmd::Gameserver { args } => gameserver::run(&args).await,
         Cmd::Git { args } => git_cli::run(&args).await,
@@ -1436,6 +1685,32 @@ async fn run_app(cli: Cli) -> Result<()> {
             max_price,
             timeout_secs,
         } => run_embed(cmd, texts, model, max_price, timeout_secs).await,
+        Cmd::Captcha {
+            cmd,
+            file,
+            kind,
+            background,
+            charset,
+            case,
+            question,
+            plain,
+            max_price,
+            timeout_secs,
+        } => {
+            run_captcha(CaptchaArgs {
+                cmd,
+                file,
+                kind,
+                background,
+                charset,
+                case,
+                question,
+                plain,
+                max_price,
+                timeout_secs,
+            })
+            .await
+        }
         Cmd::Podcasting { cmd } => run_podcasting(cmd).await,
         Cmd::Podcasts { cmd } => run_podcasts(cmd).await,
         Cmd::Ads { cmd } => run_ads(cmd).await,
@@ -1666,6 +1941,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
         WorkerCmd::Start {
             roles,
             storage: _,
+            no_storage,
+            no_hosting,
             gpu,
             private,
             // Both handled in `main` before the runtime started; at this point
@@ -1702,6 +1979,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Hosting,
                     Role::Ocr,
                     Role::Embed,
+                    Role::Captcha,
                     Role::LiveStream,
                     Role::Render,
                     Role::Inference,
@@ -1721,6 +1999,23 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
+            }
+            if no_storage {
+                cfg.storage.enabled = false;
+            }
+            if no_hosting {
+                cfg.hosting.enabled = false;
+            }
+            // Every node is a disk provider unless it opted out: storage and
+            // hosting join even an explicit --roles list.
+            cfg.apply_disk_provider_defaults();
+            if cfg.lists_on_d1sks() {
+                eprintln!(
+                    "disk provider: storing shards and holding sites for the network, listed on {} \
+                     (opt out: --no-storage / --no-hosting, [storage] enabled = false, \
+                     [storage] list_on_d1sks = false, C0MPUTE_D1SKS=0)",
+                    cfg.storage.d1sks_url
+                );
             }
             // Speech is a nice-to-have, not a precondition for joining: a box
             // that cannot build a TTS runtime should still serve storage,
@@ -2367,6 +2662,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             external_ref,
             policy,
             output,
+            max_wait,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -2394,12 +2690,26 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             // Tiny grace period so peer discovery (mDNS) sees us.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let auction = JobAuction::new("ffmpeg.transcode", spec_inline)
-                .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
-                .with_max_price_usd(max_price.unwrap_or(1.0))
-                .with_external_ref(external_ref)
-                .with_policy(policy);
-            let outcome = run_auction(net.clone(), auction).await?;
+            // No worker free right now: wait in the queue (up to --max-wait)
+            // instead of failing.
+            let outcome = c0mpute_core::buyer::run_auction_queued(
+                net.clone(),
+                || {
+                    JobAuction::new("ffmpeg.transcode", spec_inline.clone())
+                        .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
+                        .with_max_price_usd(max_price.unwrap_or(1.0))
+                        .with_external_ref(external_ref.clone())
+                        .with_policy(policy)
+                },
+                std::time::Duration::from_secs(max_wait),
+                |waited| {
+                    eprintln!(
+                        "queued, waiting for a worker ({})",
+                        c0mpute_core::buyer_queue::human(waited)
+                    )
+                },
+            )
+            .await?;
             println!("job_id        : {}", outcome.job_id);
             if let Some(r) = &outcome.external_ref {
                 println!("external_ref  : {r}");
@@ -2414,10 +2724,10 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 if let Some(path) = &output {
                     // Pieced outputs (anything over 1 MiB from a current
                     // worker) are written a piece at a time.
+                    // Sealed to this buyer; opened as it is written.
                     let written = c0mpute_core::gateway_util::fetch_result_to_file(
                         &net,
-                        h,
-                        &outcome.accepted_bid.bidder_peer_id,
+                        &outcome,
                         c0mpute_core::runner::MAX_OUTPUT_BYTES as usize,
                         std::time::Duration::from_secs(30),
                         path,
@@ -3496,6 +3806,187 @@ fn disk_query(
     Ok(q)
 }
 
+fn parse_kv(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut m = std::collections::BTreeMap::new();
+    for p in pairs {
+        let (k, v) = p.split_once('=').with_context(|| format!("{p:?} is not KEY=VALUE"))?;
+        m.insert(k.trim().to_string(), v.to_string());
+    }
+    Ok(m)
+}
+
+fn app_id_from(app: &str) -> String {
+    match c0mpute_core::apps::deploy::load_owner(app).record {
+        Some(r) => r.app_id,
+        None => app.to_string(),
+    }
+}
+
+async fn run_apps(cmd: AppsCmd) -> Result<()> {
+    use c0mpute_core::apps::deploy;
+    match cmd {
+        AppsCmd::Deploy {
+            dir,
+            name,
+            image,
+            pull,
+            port,
+            health,
+            state,
+            snapshot_secs,
+            env,
+            memory_mb,
+            cpus,
+            replicas,
+            domains,
+            hosts,
+            wait_secs,
+        } => {
+            let wait = std::time::Duration::from_secs(wait_secs);
+            let manifest = match &dir {
+                Some(d) => deploy::read_manifest(d)?,
+                None => None,
+            };
+            let mut opts = match (&manifest, &dir) {
+                (Some(m), Some(d)) => m.options(d, wait),
+                _ => deploy::DeployOptions {
+                    name: String::new(),
+                    source: match &dir {
+                        Some(d) => deploy::Source::Build(d.clone()),
+                        None => deploy::Source::Local(String::new()),
+                    },
+                    port: 8080,
+                    health_path: "/".into(),
+                    env: Default::default(),
+                    state_path: None,
+                    snapshot_secs: c0mpute_core::apps::record::DEFAULT_SNAPSHOT_SECS,
+                    memory_mb: 256,
+                    millicpus: 500,
+                    replicas: c0mpute_core::apps::record::DEFAULT_REPLICAS,
+                    domains: vec![],
+                    hosts: vec![],
+                    wait,
+                },
+            };
+            if let Some(n) = name {
+                opts.name = n;
+            }
+            if opts.name.is_empty() {
+                anyhow::bail!("--name is required (or a c0mpute.toml with [app] name)");
+            }
+            if let Some(i) = image {
+                opts.source = deploy::Source::Local(i);
+            }
+            if let Some(p) = pull {
+                opts.source = deploy::Source::Pull(p);
+            }
+            if matches!(&opts.source, deploy::Source::Local(i) if i.is_empty()) {
+                anyhow::bail!("give a directory to build, --image, or --pull");
+            }
+            if let Some(p) = port {
+                opts.port = p;
+            }
+            if let Some(h) = health {
+                opts.health_path = h;
+            }
+            if state.is_some() {
+                opts.state_path = state;
+            }
+            if let Some(s) = snapshot_secs {
+                opts.snapshot_secs = s;
+            }
+            opts.env.extend(parse_kv(&env)?);
+            if let Some(m) = memory_mb {
+                opts.memory_mb = m;
+            }
+            if let Some(c) = cpus {
+                opts.millicpus = (c * 1000.0).round() as u32;
+            }
+            if let Some(r) = replicas {
+                opts.replicas = r;
+            }
+            opts.domains.extend(domains);
+            opts.hosts.extend(hosts);
+            opts.wait = wait;
+            let rec = deploy::deploy(opts).await?;
+            println!("{}", rec.app_id);
+            for d in &rec.domains {
+                eprintln!("  domain {d}: TXT _c0mpute-app.{d} = \"app={}\"", rec.app_id);
+            }
+            Ok(())
+        }
+        AppsCmd::Ls { gateway, json } => {
+            let url = format!("{}/apps/v1/apps", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url).await.with_context(|| format!("GET {url}"))?.json().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let apps = v["apps"].as_array().cloned().unwrap_or_default();
+            if apps.is_empty() {
+                println!("no apps known to {gateway} yet");
+            }
+            for a in apps {
+                let holders = a["holders"].as_array().map(|h| h.len()).unwrap_or(0);
+                println!(
+                    "{:<22} {:<24} {}/{} copies  primary {}  epoch {}  {}",
+                    a["app_id"].as_str().unwrap_or(""),
+                    a["name"].as_str().unwrap_or(""),
+                    holders,
+                    a["replicas"],
+                    a["primary"].as_str().map(|p| &p[p.len().saturating_sub(8)..]).unwrap_or("none"),
+                    a["epoch"],
+                    if a["healthy"].as_bool() == Some(true) { "healthy" } else { "down" }
+                );
+            }
+            Ok(())
+        }
+        AppsCmd::Status { app, gateway } => {
+            let id = app_id_from(&app);
+            let url = format!("{}/apps/v1/apps/{id}", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url).await.with_context(|| format!("GET {url}"))?.json().await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
+        AppsCmd::Logs { app, tail } => {
+            print!("{}", deploy::logs(&app, tail).await?);
+            Ok(())
+        }
+        AppsCmd::Secrets { cmd } => match cmd {
+            AppsSecretsCmd::Set { app, pairs } => {
+                for (k, v) in parse_kv(&pairs)? {
+                    deploy::set_secret(&app, &k, Some(&v))?;
+                }
+                eprintln!("saved; run `c0mpute apps deploy` to hand them to the holders");
+                Ok(())
+            }
+            AppsSecretsCmd::Unset { app, keys } => {
+                for k in keys {
+                    deploy::set_secret(&app, &k, None)?;
+                }
+                Ok(())
+            }
+            AppsSecretsCmd::Ls { app } => {
+                if let Some(s) = deploy::load_owner(&app).secrets {
+                    for k in s.env.keys() {
+                        println!("{k}");
+                    }
+                }
+                Ok(())
+            }
+        },
+        AppsCmd::Mcp { gateway } => apps_mcp::serve(gateway).await,
+        AppsCmd::Destroy { name, yes } => {
+            if !yes {
+                anyhow::bail!("this deletes {name} and its state everywhere; pass --yes to confirm");
+            }
+            let id = deploy::destroy(&name).await?;
+            println!("deleted {name} ({id})");
+            Ok(())
+        }
+    }
+}
+
 async fn run_hosting(cmd: HostingCmd) -> Result<()> {
     match cmd {
         HostingCmd::Publish {
@@ -3508,7 +3999,16 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             country,
             copies,
             d1sks,
+            private,
+            rekey,
+            gateway,
         } => {
+            if private {
+                if !domains.is_empty() || disks.is_some() {
+                    anyhow::bail!("--private sites are reached by their link only: drop --domain and --disks");
+                }
+                return private_storage::publish_site(&dir, &name, rekey, &gateway, std::time::Duration::from_secs(wait_secs)).await;
+            }
             let domains: Vec<String> = domains.into_iter().map(|d| d.to_ascii_lowercase()).collect();
             let market = match disks {
                 Some(spec) => Some(c0mpute_core::hosting::MarketOptions {
@@ -3562,6 +4062,15 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                     c0mpute_core::hosting::TARGET_REPLICAS
                 );
             }
+            // Some copies held = published (the network heals the rest);
+            // none held = nothing is serving the site yet, so fail loudly.
+            if copies == 0 {
+                eprintln!(
+                    "status:  not yet held by any hosting node after {wait_secs}s (exit 1); \
+                     re-run publish with the same --name"
+                );
+                std::process::exit(1);
+            }
             Ok(())
         }
         HostingCmd::Disks {
@@ -3569,21 +4078,55 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             max_price,
             country,
             d1sks,
+            live,
         } => {
             let q = disk_query(&query, max_price.as_deref(), country.as_deref())?;
-            let disks = c0mpute_core::hosting::market::query(&d1sks, &q).await?;
+            let m = c0mpute_core::hosting::MarketOptions {
+                query: q.clone(),
+                copies: 1,
+                d1sks_url: d1sks.clone(),
+            };
+            let disks = if live {
+                eprintln!(
+                    "listening to the hosting gossip for up to {}s ...",
+                    c0mpute_core::hosting::GOSSIP_CHECK.as_secs()
+                );
+                let sup = c0mpute_core::Supervisor::boot_buyer(c0mpute_core::Config::default()).await?;
+                let h = c0mpute_core::hosting::Hosting::start(
+                    sup.libp2p.clone(),
+                    sup.store.clone(),
+                    c0mpute_core::hosting::Options::default(),
+                )
+                .await?;
+                c0mpute_core::hosting::market_disks(&m, Some(&h)).await?
+            } else {
+                c0mpute_core::hosting::market_disks(&m, None).await?
+            };
             let ranked = c0mpute_core::hosting::market::rank(&disks, &q, 0);
             if ranked.is_empty() {
                 println!("no c0mpute hosting disks on {d1sks} match ({} listed)", disks.len());
+            } else {
+                println!(
+                    "{:<54} {:<10} {:>10}  {:<8} {:<8} {:<8} {:<6} NAME",
+                    "PEER", "$/GiB-MO", "FREE", "REACH", "SEEN", "GOSSIP", "WHERE"
+                );
             }
             for d in ranked {
+                let seen = match d.heartbeat_age_secs {
+                    Some(s) if s < 120 => format!("{s}s"),
+                    Some(s) => format!("{}m", s / 60),
+                    None => "-".into(),
+                };
+                let gossip = if d.live { "live" } else if live { "silent" } else { "-" };
                 println!(
-                    "{:<54} ${:<9} {:>8.1} GiB  standing {:<5} {:<8} {}",
+                    "{:<54} {:<10} {:>6.1} GiB  {:<8} {:<8} {:<8} {:<6} {}",
                     d.peer_id,
                     c0mpute_core::payments::format_usd(d.price),
                     d.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                    d.standing.map(|s| format!("{s:.0}")).unwrap_or_else(|| "-".into()),
-                    d.countries.join(","),
+                    d.reachable.as_deref().unwrap_or("-"),
+                    seen,
+                    gossip,
+                    if d.countries.is_empty() { "-".to_string() } else { d.countries.join(",") },
                     d.name
                 );
             }
@@ -3875,6 +4418,118 @@ async fn run_embed(
     }
 }
 
+struct CaptchaArgs {
+    cmd: Option<CaptchaCmd>,
+    file: Option<std::path::PathBuf>,
+    kind: String,
+    background: Option<std::path::PathBuf>,
+    charset: Option<String>,
+    case: Option<String>,
+    question: Option<String>,
+    plain: bool,
+    max_price: f64,
+    timeout_secs: u64,
+}
+
+/// The jobs bridge answers `{job_id, worker, price, output_hash, result}`;
+/// print the answer itself (as `POST /v1/captcha` does) with the job fields
+/// beside it.
+fn flatten_job_result(envelope: serde_json::Value) -> serde_json::Value {
+    let mut answer = match envelope.get("result") {
+        Some(serde_json::Value::Object(o)) => serde_json::Value::Object(o.clone()),
+        _ => return envelope,
+    };
+    for (from, to) in [("job_id", "job_id"), ("worker", "worker_peer_id"), ("price", "price")] {
+        if let Some(v) = envelope.get(from) {
+            answer[to] = v.clone();
+        }
+    }
+    answer
+}
+
+#[cfg(test)]
+mod captcha_cli_tests {
+    #[test]
+    fn job_envelope_is_flattened() {
+        let env = serde_json::json!({
+            "job_id": "j", "worker": "w", "price": 0.0006, "output_hash": "h",
+            "result": {"v": 1, "ok": true, "kind": "image", "text": "4831"}
+        });
+        let out = super::flatten_job_result(env);
+        assert_eq!(out["text"], "4831");
+        assert_eq!(out["worker_peer_id"], "w");
+        assert_eq!(out["job_id"], "j");
+        assert!(out.get("result").is_none());
+        let bare = serde_json::json!({"text": "7"});
+        assert_eq!(super::flatten_job_result(bare.clone()), bare);
+    }
+}
+
+async fn run_captcha(a: CaptchaArgs) -> Result<()> {
+    use base64::Engine as _;
+    use c0mpute_core::captcha;
+    match a.cmd {
+        Some(CaptchaCmd::Setup) => {
+            let version = captcha::setup().await?;
+            println!("ready: ddddocr {version} ({})", captcha::captcha_root().display());
+            return Ok(());
+        }
+        Some(CaptchaCmd::Status) => {
+            println!("runtime: {}", captcha::captcha_root().display());
+            println!("captcha.solve: {}", if captcha::ready() { "ready" } else { "not installed" });
+            return Ok(());
+        }
+        None => {}
+    }
+    if a.case.as_deref().is_some_and(|c| !matches!(c, "lower" | "upper" | "any")) {
+        anyhow::bail!("--case must be lower, upper or any");
+    }
+    let kind = if a.question.is_some() { "math".to_string() } else { a.kind.to_ascii_lowercase() };
+    let mut result = if kind == "math" {
+        let question = a.question.as_deref().context("--type math needs --question")?;
+        let answer = captcha::solve_math(question).context("no arithmetic found in the question")?;
+        serde_json::json!({"v": 1, "ok": true, "kind": "math", "text": answer, "engine": "local"})
+    } else {
+        if !captcha::WORKER_KINDS.contains(&kind.as_str()) {
+            anyhow::bail!(captcha::unsupported_kind_message(&kind));
+        }
+        let b64 = |path: &std::path::Path| -> Result<String> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        };
+        let file = a.file.as_deref().context("give the captcha image file")?;
+        let mut spec = serde_json::json!({ "v": 1, "kind": kind, "image": b64(file)? });
+        if let Some(bg) = a.background.as_deref() {
+            spec["background"] = serde_json::json!(b64(bg)?);
+        }
+        if let Some(cs) = a.charset.as_deref() {
+            spec["charset"] = serde_json::json!(captcha::resolve_charset(cs).map_err(anyhow::Error::msg)?);
+        }
+        captcha::parse_spec(&spec).map_err(anyhow::Error::msg)?;
+        let envelope = c0mpute_core::jobs_gateway::submit_once(
+            captcha::WORKLOAD,
+            spec,
+            a.max_price,
+            std::time::Duration::from_secs(a.timeout_secs.clamp(5, 600)),
+        )
+        .await?;
+        flatten_job_result(envelope)
+    };
+    if let Some(text) = result.get("text").and_then(|t| t.as_str()).map(str::to_string) {
+        result["text"] = serde_json::json!(captcha::apply_case(&text, a.case.as_deref()));
+    }
+    if a.plain {
+        match kind.as_str() {
+            "slider" | "gap" => println!("{},{}", result["x"], result["y"]),
+            "detect" => println!("{}", result["boxes"]),
+            _ => println!("{}", result["text"].as_str().unwrap_or("")),
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    Ok(())
+}
+
 async fn run_jobs(cmd: JobsCmd) -> Result<()> {
     match cmd {
         JobsCmd::Serve {
@@ -4146,7 +4801,9 @@ fn parse_role(s: &str) -> Option<Role> {
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),
         "embed" | "embeddings" => Some(Role::Embed),
+        "captcha" | "captchas" => Some(Role::Captcha),
         "gameserver" | "gameservers" | "games" => Some(Role::Gameserver),
+        "apps" | "app" | "backends" | "backend" => Some(Role::Apps),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
         "render" | "blender" => Some(Role::Render),
         "inference" | "chat" | "llm" => Some(Role::Inference),

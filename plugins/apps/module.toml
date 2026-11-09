@@ -1,0 +1,51 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Built in: node/crates/c0mpute-core/src/apps/ (record, placement, runtime,
+# snapshot, proxy, deploy) and gitremote.rs; CLI `c0mpute apps`, `c0mpute git`
+# and the `git-remote-c0mpute` helper. Docs: docs/apps.md.
+#
+# An owner-signed app record names a container image (a docker-save tarball
+# published as a hosting site, or a digest-pinned registry image), a port,
+# public env, a state directory and replicas (default 3). apps nodes gossip
+# what they hold on c0mpute/apps/v1; every node computes the same holders
+# (rendezvous hashing) and the same primary (sticky, fenced by epoch). The
+# primary snapshots its state (paused copy, AES-GCM convergent 1 MiB pieces)
+# to the standbys; when it goes quiet the standby with the newest snapshot
+# promotes at epoch+1 and restores. Secrets are sealed per holder (X25519).
+# Gateways forward HTTP to the primary over the apps.http libp2p RPC and
+# serve custom domains confirmed by TXT _c0mpute-app.<domain> = app=<id>.
+
+[module]
+id          = "apps"
+name        = "Apps — backends with 3x redundancy"
+version     = "0.3.4"
+kind        = "workload"
+category    = "infrastructure"
+status      = "available"
+builtin     = true
+description = "Run an API, MCP server or worker with a SQLite database on the network from a container image: three copies, one primary, state snapshotted encrypted to the standbys, failover with no coordinator, served by every gateway at /a/<app_id>/ and on custom domains. git push c0mpute://<name> stores the repo on the network and deploys it."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["apps", "backend", "paas", "containers", "docker", "git", "vps-replacement"]
+
+[module.requirements]
+c0mpute      = ">=0.2.99"
+os           = ["linux"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["container-runtime"]
+hardware     = "opt-in worker role: docker (no public IP needed; gateways reach the primary over libp2p)"
+
+[module.workloads]
+"apps.run" = { command = "run", validation = "health_probe" }
+
+[module.dispatch]
+mode = "container"
+
+[module.surfaces]
+cli = "c0mpute apps"
+
+[module.config.defaults]
+max_apps      = 4
+max_memory_mb = 2048
+replicas      = 3
+snapshot_secs = 30

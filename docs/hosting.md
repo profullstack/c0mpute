@@ -32,7 +32,10 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 | Healing | A site with fewer than 3 live copies: each hosting node ranks the candidates (rendezvous hashing on site id + peer id). The top-ranked ones fetch a copy. A node that stops announcing stops counting after ~200 s and another node takes over. Above 5 copies the lowest-ranked holder lets go. A publisher seeding its own site is a source, not a copy. |
 | Serving | Any gateway: local chunks when it holds them, otherwise fetched over libp2p from the fastest live holder (measured round-trip, round-robin among equally fast ones), failing over to the next and then to the DHT. Every chunk is checked against its hash. |
 
-Limits per site: 256 MiB, 10,000 files. A node holds at most `hosting.max_bytes`
+Limits per site: 1 GiB, 10,000,000 files. Up to 5,000 files the manifest is one chunk;
+above that it is a root listing parts of 4,000 files each (by first path), so a
+gateway fetches only the part a request needs. Nodes before v0.3.0 cannot read
+parted manifests and skip those sites. A node holds at most `hosting.max_bytes`
 (default 5 GiB) of other people's sites, and at most 1 GiB per owner key.
 
 ```toml
@@ -60,7 +63,9 @@ cached for 10 minutes (2 minutes for a miss).
 site. The Moshpit registry resolves it to a c0mpute edge (moshpit-proxy
 `bin/moshpit-c0mpute-edge.ts`) that holds a Moshpit CA certificate for the name and
 fetches `/s/<site_id>/` from any healthy gateway, so no DNS check on the gateway is
-involved.
+involved. The public edge is `edge.c0mpute.com`; live example: `alt.2600` is site
+`ea0e1f5afde44477e71d` (`http://alt.2600`, `https://alt.2600` with the Moshpit root
+installed, `https://alt.2600.pit.world` from the regular web).
 
 ## Finding gateways
 
@@ -208,3 +213,11 @@ Payments move only between the payer and the hosts it chose; c0mpute holds nothi
 Escrow (money held until a window is proven) and proof-of-serve challenges from DIP-0015
 are not implemented: payers pay from their own wallet after the fact. Free hosting stays
 free.
+
+## Private sites
+
+`c0mpute hosting publish ./dir --name mysite --private` seals the whole site on
+this machine and prints a link like `https://gateway.c0mpute.com/p/<id>/#k=<key>`.
+Gateways serve a fixed loader page and the ciphertext; the browser decrypts it
+with the key after `#`, which is never sent to the gateway. Republishing keeps
+the link; `--rekey` invalidates it. See [private storage](private-storage.md).

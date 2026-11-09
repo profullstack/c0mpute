@@ -77,9 +77,34 @@ pub fn ed25519_public_hex(peer: &libp2p::PeerId) -> Option<String> {
     Some(ed.to_bytes().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Check that `sig` is `peer`'s signature over `msg`, using the public key
+/// the peer id inlines (identity multihash). Peer ids that hash their key
+/// (RSA) cannot be checked this way and never verify.
+pub fn verify_peer_signature(peer: &libp2p::PeerId, msg: &[u8], sig: &[u8]) -> bool {
+    let mh: &libp2p::multihash::Multihash<64> = peer.as_ref();
+    if mh.code() != 0x00 {
+        return false;
+    }
+    let Ok(public) = libp2p::identity::PublicKey::try_decode_protobuf(mh.digest()) else {
+        return false;
+    };
+    public.to_peer_id() == *peer && public.verify(msg, sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_signatures_verify_only_for_the_signer() {
+        let kp = Keypair::generate_ed25519();
+        let other = Keypair::generate_ed25519().public().to_peer_id();
+        let peer = kp.public().to_peer_id();
+        let sig = kp.sign(b"hello").unwrap();
+        assert!(verify_peer_signature(&peer, b"hello", &sig));
+        assert!(!verify_peer_signature(&peer, b"hellp", &sig));
+        assert!(!verify_peer_signature(&other, b"hello", &sig));
+    }
 
     #[test]
     fn peer_id_yields_its_ed25519_key() {

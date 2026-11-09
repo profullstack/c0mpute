@@ -591,12 +591,18 @@ pub fn pricing(price_usd: f64) -> PricingConfig {
 /// Bid only on valid webhook offers whose cap covers our price.
 pub fn offer_filter(price_usd: f64) -> OfferFilter {
     Arc::new(move |offer| {
+        // On an e2e offer the client key rides sealed; the budget is public.
+        let spec = match crate::job_e2e::bid_spec(offer) {
+            Some(crate::job_e2e::BidSpec::Public(v)) => {
+                Some(crate::job_e2e::with_placeholders(v, &[("client_pubkey", serde_json::json!("11".repeat(32)))]))
+            }
+            Some(crate::job_e2e::BidSpec::Full(v)) => Some(v.clone()),
+            None => None,
+        };
         offer.max_price_usd.is_finite()
             && offer.max_price_usd >= price_usd
-            && offer
-                .spec_inline
-                .as_ref()
-                .and_then(|v| serde_json::from_value::<WebhookSpec>(v.clone()).ok())
+            && spec
+                .and_then(|v| serde_json::from_value::<WebhookSpec>(v).ok())
                 .is_some_and(|s| {
                     let deadline_ok = offer.deadline_unix_ms.saturating_sub(offer.published_at_ms) / 1000 >= s.budget_secs();
                     s.validate().is_ok() && deadline_ok
@@ -1199,6 +1205,9 @@ mod tests {
             deadline_unix_ms: 1_000_000 + 600_000,
             published_at_ms: 1_000_000,
             external_ref: None,
+            buyer_addrs: Vec::new(),
+            bid_window_ms: None,
+            e2e: None,
         }
     }
 
@@ -1227,8 +1236,8 @@ mod tests {
     #[test]
     fn accepts_must_match_the_webhook_offer_we_bid_on() {
         let s = serde_json::to_value(spec(3)).unwrap();
-        let bid = crate::dispatch::OpenBid { cap: 0.002, price: 0.001, buyer_peer_id: "buyer".into(), spec_inline: Some(s.clone()), external_ref: Some("coinpay:inv_1".into()), expires_at_ms: u64::MAX / 2 };
-        let accept = JobAccept { job_id: "j".into(), buyer_peer_id: "buyer".into(), winning_bidder_peer_id: "us".into(), agreed_price_usd: 0.001, workload_type: WORKLOAD.into(), spec_inline: Some(s), published_at_ms: 0, external_ref: Some("coinpay:inv_1".into()), buyer_addrs: Vec::new() };
+        let bid = crate::dispatch::OpenBid { cap: 0.002, price: 0.001, buyer_peer_id: "buyer".into(), spec_inline: Some(s.clone()), external_ref: Some("coinpay:inv_1".into()), expires_at_ms: u64::MAX / 2, reserve_until_ms: u64::MAX / 2, payload: None, e2e: None };
+        let accept = JobAccept { job_id: "j".into(), buyer_peer_id: "buyer".into(), winning_bidder_peer_id: "us".into(), agreed_price_usd: 0.001, workload_type: WORKLOAD.into(), spec_inline: Some(s), published_at_ms: 0, external_ref: Some("coinpay:inv_1".into()), buyer_addrs: Vec::new(), e2e: None, result_key: None };
         assert!(bid.matches(&accept, 0).is_ok());
         // A forged accept swapping in another buyer key (to read the call) is refused.
         let mut a = accept.clone();

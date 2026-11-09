@@ -128,6 +128,10 @@ struct NetworkStatus {
     workload_types: BTreeMap<String, WorkloadStats>,
     /// `c0mpute bench` scores across online workers (see c0mpute-bench).
     bench: BenchSummary,
+    /// Canary auctions over the last hour, per workload ([`crate::canary`]):
+    /// how many probes got a bid, overall and while a capable node was
+    /// advertised.
+    auction_canary: BTreeMap<String, crate::auction_stats::Stats>,
 }
 
 #[derive(Serialize, Default, Debug, PartialEq)]
@@ -336,6 +340,7 @@ async fn build_payload(state: &AppState) -> StatusPayload {
             avg_job_latency_seconds,
             workload_types,
             bench,
+            auction_canary: crate::auction_stats::snapshot(crate::auction_stats::Kind::Probe),
         },
         source: "aggregator",
     }
@@ -744,6 +749,12 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
     tokio::spawn(run_job_tracker(net.clone(), jobs.clone()));
     tokio::spawn(run_dht_crawl(net.clone()));
 
+    // One tiny offer per workload every few minutes, bids counted, nothing
+    // accepted: the auction success rate on the status page.
+    if let Some(interval) = crate::canary::interval_from_env() {
+        tokio::spawn(crate::canary::run(net.clone(), registry.clone(), interval));
+    }
+
     let state = AppState { registry, jobs };
     let app = Router::new()
         .route("/", get(status_handler))
@@ -943,6 +954,8 @@ mod tests {
             published_at_ms: now - 5_000,
             external_ref: None,
             buyer_addrs: Vec::new(),
+            e2e: None,
+            result_key: None,
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 1);
@@ -981,6 +994,8 @@ mod tests {
             published_at_ms: now,
             external_ref: None,
             buyer_addrs: Vec::new(),
+            e2e: None,
+            result_key: None,
         })
         .await;
         jobs.on_receipt(JobReceipt {

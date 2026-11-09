@@ -25,14 +25,17 @@ impl Gateways {
             .filter(|g| !g.is_empty())
             .collect();
         if v.is_empty() {
-            Gateways(vec![DEFAULT_GATEWAY.to_string()])
+            Gateways(vec![
+                DEFAULT_GATEWAY.to_string(),
+                PUBLIC_GATEWAY.to_string(),
+            ])
         } else {
             Gateways(v)
         }
     }
 
     /// `C0MPUTE_GIT_GATEWAY` (comma-separated), else `git config c0mpute.gateway`
-    /// (may repeat), else the local node.
+    /// (may repeat), else the local node and then the public gateway.
     pub fn discover(git_dir: Option<&Path>) -> Self {
         if let Ok(v) = std::env::var("C0MPUTE_GIT_GATEWAY")
             && !v.trim().is_empty()
@@ -113,12 +116,18 @@ pub async fn fetch_state(
         {
             continue;
         }
-        let Some(entry) = manifest.files.get(DOC_PATH) else {
+        let legacy = is_legacy(&manifest);
+        let path = if legacy { LEGACY_REFS } else { DOC_PATH };
+        let Some(entry) = manifest.files.get(path) else {
             errors.push(format!("{gw}: site is not a git repo (no {DOC_PATH})"));
             continue;
         };
-        let doc = match download(&client, gw, owner, repo, DOC_PATH, entry).await {
-            Ok(b) => match RepoDoc::from_bytes(&b) {
+        let doc = match download(&client, gw, owner, repo, path, entry).await {
+            Ok(b) => match if legacy {
+                RepoDoc::from_legacy(repo, &b)
+            } else {
+                RepoDoc::from_bytes(&b)
+            } {
                 Ok(d) if d.repo == repo => d,
                 Ok(_) => {
                     errors.push(format!("{gw}: ref map names another repo"));
@@ -147,6 +156,48 @@ pub async fn fetch_state(
         bail!("no gateway reachable: {}", errors.join("; "));
     }
     Ok(best)
+}
+
+/// `(owner, repo)` of the repo with hosting site id `site_id`, from the
+/// first gateway whose signed record checks out (the id is a hash of owner
+/// and site name, so a gateway cannot substitute another repo).
+pub async fn resolve_site(gws: &Gateways, site_id: &str) -> Result<(String, String)> {
+    let client = http();
+    let mut errors = Vec::new();
+    for gw in &gws.0 {
+        let url = format!("{gw}/git/v1/sites/{site_id}");
+        let state: RepoState = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(s) => s,
+                Err(e) => {
+                    errors.push(format!("{gw}: {e}"));
+                    continue;
+                }
+            },
+            Ok(r) => {
+                errors.push(format!("{gw}: HTTP {}", r.status()));
+                continue;
+            }
+            Err(e) => {
+                errors.push(format!("{gw}: {e}"));
+                continue;
+            }
+        };
+        let r = &state.record;
+        let Some(repo) = repo_of_site(&r.name) else {
+            errors.push(format!("{gw}: site {site_id} is not a git repo"));
+            continue;
+        };
+        if !r.verify() || site::site_id_for(&r.owner, &r.name) != site_id {
+            errors.push(format!("{gw}: record does not match site {site_id}"));
+            continue;
+        }
+        return Ok((r.owner.clone(), repo.to_string()));
+    }
+    bail!(
+        "repository {site_id} was not found on the network ({})",
+        errors.join("; ")
+    )
 }
 
 /// One file of a repo, checked against its manifest entry.
@@ -328,6 +379,17 @@ impl Local {
         Ok(())
     }
 
+    /// Unpack a `git bundle` (old repo layout) into the object store.
+    pub fn unbundle(&self, bundle: &[u8]) -> Result<()> {
+        let dir = self.scratch()?;
+        let path = dir.join("repo.bundle");
+        let res = std::fs::write(&path, bundle)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| self.git(&["bundle", "unbundle", &path.to_string_lossy()]));
+        let _ = std::fs::remove_dir_all(&dir);
+        res.map(|_| ())
+    }
+
     /// Scratch directory inside the repo (never the system temp dir).
     fn scratch(&self) -> Result<PathBuf> {
         let d = self
@@ -414,6 +476,14 @@ pub async fn fetch_objects(
             return Ok(downloaded);
         }
     }
+    // The old bundle layout: one bundle holds every object.
+    if let Some(be) = v.manifest.files.get(LEGACY_BUNDLE)
+        && !local.complete(wants)
+    {
+        let bundle = download_any(gws, gw, owner, repo, LEGACY_BUNDLE, be).await?;
+        local.unbundle(&bundle)?;
+        downloaded += 1;
+    }
     if !local.complete(wants) {
         bail!("the repo's packs do not contain every object its refs need");
     }
@@ -459,6 +529,8 @@ pub struct PushReport {
     pub gateway: Option<String>,
     pub seq: u64,
     pub holders: usize,
+    /// The commit HEAD's branch now points at, when this push moved it.
+    pub head_moved: Option<String>,
 }
 
 /// Push `specs` from `local` to `<owner>/<repo>`, signed with `keypair`
@@ -537,6 +609,7 @@ pub async fn push(
         gateway,
         seq,
         holders,
+        head_moved: None,
     };
     if new_refs == remote_refs && state.is_some() {
         let seq = state.as_ref().map(|(v, _)| v.record.seq).unwrap_or(0);
@@ -566,7 +639,9 @@ pub async fn push(
     };
     let mut packs = old_packs.clone();
     let mut new_files: Vec<(String, Vec<u8>)> = Vec::new();
-    let repack = old_packs.len() + 1 > REPACK_AFTER;
+    // An old bundle-layout repo becomes one full pack (its bundle is dropped).
+    let legacy = state.as_ref().is_some_and(|(v, _)| is_legacy(&v.manifest));
+    let repack = legacy || old_packs.len() + 1 > REPACK_AFTER;
     if repack {
         files.clear();
         packs.clear();
@@ -605,6 +680,10 @@ pub async fn push(
                 .find(|k| k.starts_with("refs/heads/"))
                 .cloned()
         });
+    let head_moved = head
+        .as_ref()
+        .and_then(|h| new_refs.get(h).filter(|n| remote_refs.get(h) != Some(*n)))
+        .cloned();
     let doc = RepoDoc {
         v: 1,
         repo: repo.to_string(),
@@ -676,7 +755,9 @@ pub async fn push(
                 let v: serde_json::Value = r.json().await.unwrap_or_default();
                 let holders = v["holders"].as_u64().unwrap_or(0) as usize;
                 trace(&format!("accepted by {gw} at {:?}", t0.elapsed()));
-                return Ok(report(Some(gw.clone()), seq, holders, results));
+                let mut r = report(Some(gw.clone()), seq, holders, results);
+                r.head_moved = head_moved;
+                return Ok(r);
             }
             Ok(r) => {
                 let status = r.status();
@@ -740,7 +821,7 @@ mod tests {
     fn gateways_default_and_trim() {
         assert_eq!(
             Gateways::new(Vec::new()).0,
-            vec![DEFAULT_GATEWAY.to_string()]
+            vec![DEFAULT_GATEWAY.to_string(), PUBLIC_GATEWAY.to_string()]
         );
         assert_eq!(
             Gateways::new(vec![" http://a:1/ ".into(), "".into()]).0,

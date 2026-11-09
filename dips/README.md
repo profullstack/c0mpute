@@ -135,3 +135,5 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0025 | Signed envelopes and native `did:c0mpute` identity                | Draft      |
 | 0026 | Infernet temporal policies (liquid networks) as c0mpute workloads | Accepted   |
 | 0030 | `workflow.step` workload and the `c0mpute jobs serve` bridge      | Review     |
+| 0031 | Apps: containerised backends with 3x redundancy, git remote       | Review     |
+| 0032 | End-to-end encrypted jobs (sealed spec, inputs and results)       | Accepted   |

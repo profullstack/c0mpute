@@ -431,21 +431,35 @@ pub fn train_offer_filter(busy: Arc<std::sync::atomic::AtomicBool>) -> crate::di
         if busy.load(std::sync::atomic::Ordering::Relaxed) {
             return false;
         }
-        offer
-            .spec_inline
-            .as_ref()
-            .and_then(|v| serde_json::from_value::<TrainSpec>(v.clone()).ok())
-            .is_some_and(|s| s.validate().is_ok())
+        match crate::job_e2e::bid_spec(offer) {
+            // The dataset stays sealed: judge the job's schema, family and
+            // privacy approval; the opened spec is validated in full.
+            Some(crate::job_e2e::BidSpec::Public(v)) => {
+                let j = &v["train_job"];
+                j["schema_version"].as_str() == Some(super::SCHEMA_VERSION)
+                    && j["kind"].as_str() == Some("train_job")
+                    && super::FAMILIES.contains(&j["model_type"].as_str().unwrap_or(""))
+                    && j["privacy"]["mode"].as_str() == Some("trusted_worker")
+                    && j["privacy"]["upload_approved"].as_bool() == Some(true)
+            }
+            Some(crate::job_e2e::BidSpec::Full(v)) => {
+                serde_json::from_value::<TrainSpec>(v.clone()).ok().is_some_and(|s| s.validate().is_ok())
+            }
+            None => false,
+        }
     })
 }
 
 /// Bid only on session offers for models this node serves.
 pub fn infer_offer_filter(models: Vec<String>) -> crate::dispatch::OfferFilter {
-    Arc::new(move |offer| {
-        offer
-            .spec_inline
-            .as_ref()
-            .and_then(|v| serde_json::from_value::<SessionSpec>(v.clone()).ok())
-            .is_some_and(|s| s.validate().is_ok() && models.contains(&s.model_hash))
+    Arc::new(move |offer| match crate::job_e2e::bid_spec(offer) {
+        Some(crate::job_e2e::BidSpec::Public(v)) => {
+            v["model_hash"].as_str().is_some_and(|m| models.iter().any(|x| x == m))
+                && v["ttl_s"].as_u64().is_some_and(|t| (1..=86_400).contains(&t))
+        }
+        Some(crate::job_e2e::BidSpec::Full(v)) => serde_json::from_value::<SessionSpec>(v.clone())
+            .ok()
+            .is_some_and(|s| s.validate().is_ok() && models.contains(&s.model_hash)),
+        None => false,
     })
 }

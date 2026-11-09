@@ -209,11 +209,20 @@ pub enum Role {
     /// default; the node provisions the runtime in the background and
     /// advertises the role once it works.
     Embed,
+    /// `captcha.solve`: read image, slider, gap and click-text captchas on CPU
+    /// (ddddocr, ONNX). On by default; the node provisions the runtime in the
+    /// background and advertises the role once it works.
+    Captcha,
     /// `gameserver.start` / `gameserver.stop`: rent a Minecraft, Factorio or
     /// Valheim server for hours (pinned images under docker). Never a default
     /// role: it holds a port and RAM for the whole reservation, and needs a
     /// public address and docker.
     Gameserver,
+    /// Apps (DIP 0031): run containerised backends for the network, one
+    /// primary and warm standbys per app, state snapshotted between them.
+    /// Never a default role: it runs other people's containers and needs
+    /// docker.
+    Apps,
     /// p2p HLS live streaming: relay and serve live streams from every
     /// gateway, swarming segments between peers. On by default; relays need
     /// nothing (the broadcaster needs ffmpeg). Config/CLI spelling: `live-stream`.

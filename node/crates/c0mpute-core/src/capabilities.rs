@@ -64,7 +64,11 @@ pub fn tags_from_config(config: &Config) -> Vec<String> {
 /// restart. The hardware tag, which shells out to `nvidia-smi`, is probed
 /// once and reused.
 pub fn role_tags(config: &Config) -> Vec<String> {
-    let mut tags = Vec::new();
+    // Not a workload: this node takes end-to-end encrypted jobs (DIP-0032).
+    let mut tags = vec![crate::job_e2e::JOB_E2E_TAG.to_string()];
+    if crate::job_e2e::attestation_provider().is_some() {
+        tags.push(crate::job_e2e::CONFIDENTIAL_TAG.to_string());
+    }
     // Not a workload: shows on the node's card that it donates idle compute.
     if crate::crowdgpt::donating() {
         tags.push(crate::crowdgpt::DONATE_TAG.to_string());
@@ -95,6 +99,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
             Role::Crawl => tags.push(crate::crawl::ROLE_TAG.to_string()),
             Role::Hosting => tags.push(crate::hosting::ROLE_TAG.to_string()),
+            Role::Apps => tags.push(crate::apps::ROLE_TAG.to_string()),
             Role::Ocr => {
                 // Only where `tesseract` actually runs (probed once).
                 if crate::ocr::runtime().ready() {
@@ -104,6 +109,12 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             // Docker works, a public address is known and a game image is
             // present (probed at most once a minute).
             Role::Gameserver => tags.extend(crate::gameserver::role_tags(config)),
+            Role::Captcha => {
+                // Appears once background provisioning finishes.
+                if crate::captcha::ready() {
+                    tags.push(crate::captcha::ROLE_TAG.to_string());
+                }
+            }
             Role::Embed => {
                 // Like TTS: appears once background provisioning finishes.
                 let models = crate::embed::ready_models();

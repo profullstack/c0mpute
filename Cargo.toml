@@ -20,10 +20,11 @@ members = [
     "node/crates/c0mpute-api",
     "node/crates/c0mpute-transcode",    # in-process transcode workload (FFmpeg)
     "node/crates/c0mpute-secure-chat",  # in-process E2E encrypted p2p messaging (DIP-0018)
+    "node/crates/c0mpute-sealed",       # client-side encrypted objects: the private storage tier (DIP-0012)
 ]
 
 [workspace.package]
-version = "0.2.94"
+version = "0.3.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/profullstack/c0mpute"
@@ -87,6 +88,7 @@ c0mpute-api = { path = "node/crates/c0mpute-api" }
 c0mpute-core = { path = "node/crates/c0mpute-core" }
 c0mpute-transcode = { path = "node/crates/c0mpute-transcode" }
 c0mpute-secure-chat = { path = "node/crates/c0mpute-secure-chat" }
+c0mpute-sealed = { path = "node/crates/c0mpute-sealed" }
 
 [profile.release]
 lto = "thin"

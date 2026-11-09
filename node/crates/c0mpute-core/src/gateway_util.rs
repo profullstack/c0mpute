@@ -162,13 +162,63 @@ fn piece_error(error: anyhow::Error) -> FetchError {
     }
 }
 
-/// Fetch a worker's result by the hash its receipt named, verified, within
-/// `max_bytes` and `budget`. Workers return results up to
+/// Fetch and open the result of an auction: the chunk its receipt names is
+/// sealed to us ([`crate::job_e2e`]); it is fetched within the sealed size
+/// of `max_bytes`, opened with the auction's result key, and the plaintext
+/// checked against `max_bytes`.
+pub async fn fetch_result(
+    net: &std::sync::Arc<Libp2pNetwork>,
+    outcome: &crate::AuctionOutcome,
+    max_bytes: usize,
+    budget: Duration,
+) -> Result<Vec<u8>, FetchError> {
+    let hash = outcome
+        .receipt
+        .output_hash
+        .as_deref()
+        .ok_or(FetchError::Invalid("worker returned no output hash"))?;
+    let sealed_max = crate::job_e2e::sealed_len(max_bytes as u64) as usize;
+    let sealed = fetch_stored_result(net, hash, &outcome.accepted_bid.bidder_peer_id, sealed_max, budget).await?;
+    let plain = outcome
+        .open_result(&sealed)
+        .map_err(|_| FetchError::Invalid("worker result does not open with this job's key"))?;
+    if plain.len() > max_bytes {
+        return Err(FetchError::Invalid("worker result is over the size cap"));
+    }
+    Ok(plain)
+}
+
+/// [`fetch_result`] straight to `dest`: the sealed result is fetched to a
+/// file next to it (pieced results a piece at a time) and opened into `dest`
+/// streamed. Returns the plaintext size.
+pub async fn fetch_result_to_file(
+    net: &std::sync::Arc<Libp2pNetwork>,
+    outcome: &crate::AuctionOutcome,
+    max_bytes: usize,
+    root_budget: Duration,
+    dest: &std::path::Path,
+) -> anyhow::Result<u64> {
+    let hash = outcome.receipt.output_hash.as_deref().ok_or_else(|| anyhow::anyhow!("worker returned no output hash"))?;
+    let sealed = dest.with_extension("sealed");
+    let sealed_max = crate::job_e2e::sealed_len(max_bytes as u64) as usize;
+    let fetched =
+        fetch_stored_result_to_file(net, hash, &outcome.accepted_bid.bidder_peer_id, sealed_max, root_budget, &sealed).await;
+    let opened = match fetched {
+        Ok(_) => crate::job_e2e::open_file(&outcome.result_key, &sealed, dest).await,
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_file(&sealed).await;
+    opened
+}
+
+/// Fetch the chunk a receipt named, verified, within `max_bytes` and
+/// `budget`. Workers return results up to
 /// [`crate::pieces::RESULT_SINGLE_CHUNK_MAX`] as that one chunk (so do all
 /// workers that predate pieces, at any size); bigger results from current
 /// workers are a manifest whose pieces are fetched a few at a time and each
 /// checked, then the whole hash and size.
-pub async fn fetch_result(
+/// Fetch the chunk (or manifest and pieces) a receipt names, as stored.
+pub async fn fetch_stored_result(
     net: &std::sync::Arc<Libp2pNetwork>,
     hash: &str,
     provider_peer_id: &str,
@@ -188,14 +238,14 @@ pub async fn fetch_result(
     }
 }
 
-/// [`fetch_result`] straight to `dest` (a piece at a time for a pieced
+/// [`fetch_stored_result`] straight to `dest` (a piece at a time for a pieced
 /// result, so a multi-GiB output never sits in memory; written under a temp
 /// name and renamed into place once every check passed). `root_budget`
 /// bounds the receipt's chunk; each piece then has its own deadline
 /// ([`crate::pieces::PIECE_FETCH_TIMEOUT`]) rather than one overall cap, so a
 /// big download is not cut off while it is still making progress. Returns
 /// the size written.
-pub async fn fetch_result_to_file(
+pub async fn fetch_stored_result_to_file(
     net: &std::sync::Arc<Libp2pNetwork>,
     hash: &str,
     provider_peer_id: &str,

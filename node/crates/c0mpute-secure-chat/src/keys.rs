@@ -120,6 +120,18 @@ impl ChatKey {
         }
     }
 
+    /// A 32-byte key for another c0mpute subsystem (private storage),
+    /// HKDF-SHA256-derived from this identity's seed under `label`. Distinct
+    /// labels give independent keys, and the seed itself never leaves this
+    /// type. Labels must not collide with the `secure-chat-*` ones above.
+    pub fn derive_subkey(&self, label: &[u8]) -> Zeroizing<[u8; 32]> {
+        assert!(!label.starts_with(b"secure-chat-"), "label collides with chat keys");
+        let hk = Hkdf::<Sha256>::new(None, self.seed.as_ref());
+        let mut out = Zeroizing::new([0u8; 32]);
+        hk.expand(label, out.as_mut()).expect("32 bytes is a valid HKDF length");
+        out
+    }
+
     /// Borrow the ML-KEM-768 encapsulation (public) key.
     pub fn ml_kem_ek(&self) -> &ml_kem::EncapsulationKey<MlKem768> {
         self.ml_kem_dk.encapsulation_key()

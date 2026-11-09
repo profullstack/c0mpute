@@ -747,7 +747,7 @@ async fn run_job(
     if !is_png(&bytes) || bytes.len() > MAX_IMAGE_BYTES {
         bail!("sd-cli output is not a PNG under the 8 MiB result limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes).await
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
 }
 
 #[cfg(test)]

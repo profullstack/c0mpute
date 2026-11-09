@@ -324,7 +324,7 @@ pub async fn publish_with(
             let srec = SiteRecord::sign(
                 keypair,
                 &name,
-                &Hash::of(&built.manifest.to_bytes()),
+                &built.manifest_hash(),
                 now_seq(),
                 built.manifest.total_bytes(),
                 vec![],

@@ -350,6 +350,7 @@ mod tests {
         assert_eq!(job["system_prompt"], "from data");
         // The same spec validation the worker runs.
         let spec = crate::text::TextTrainSpec {
+            corpus_key: None,
             job: job.clone(),
             dataset_url: String::new(),
             dataset_hash: format!("sha256:{}", "a".repeat(64)),
