@@ -34,7 +34,7 @@
 [module]
 id          = "live-stream"
 name        = "Live Stream — p2p HLS live streaming"
-version     = "0.2.80"
+version     = "0.2.81"
 kind        = "service"
 category    = "media"
 status      = "available"

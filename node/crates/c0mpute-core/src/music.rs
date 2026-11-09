@@ -632,10 +632,8 @@ async fn run_job(
     if audio_content_type(&bytes).is_none() || bytes.len() > MAX_RESULT_BYTES {
         bail!("ACE-Step output is not MP3/FLAC audio under the 32 MiB result limit");
     }
-    let hash = store.put(&bytes).await?;
-    use c0mpute_net::Network;
-    net.announce(&hash).await?;
-    Ok(hash.to_hex())
+    // Over 1 MiB goes back as pieces: one chunk fetch caps out near 5 MiB.
+    crate::pieces::publish_result_bytes(net, store, &bytes).await
 }
 
 #[cfg(test)]

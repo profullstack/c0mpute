@@ -15,7 +15,7 @@
 [module]
 id          = "music"
 name        = "Music — song generation (ACE-Step 1.5)"
-version     = "0.2.80"
+version     = "0.2.81"
 kind        = "workload"
 category    = "ai"
 status      = "available"
@@ -26,7 +26,7 @@ license     = "MIT"
 keywords    = ["music", "song", "ace-step", "ace-step-1.5", "audio", "txt2music", "lyrics", "cpu"]
 
 [module.requirements]
-c0mpute      = ">=0.2.80"
+c0mpute      = ">=0.2.81"
 os           = ["linux"]
 arch         = ["x86_64"]
 capabilities = ["cpu"]
