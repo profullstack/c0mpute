@@ -69,92 +69,6 @@ fn mdns_disabled() -> bool {
     std::env::var("C0MPUTE_DISABLE_MDNS").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-/// True when every listen address is loopback (127.0.0.0/8 or ::1). Such a
-/// node is a local test or tool, not part of a LAN: it must not discover (and
-/// join) live nodes on the machine over mDNS. Every e2e test listens on
-/// 127.0.0.1, so this keeps all of them off the real network without each
-/// one remembering to set `C0MPUTE_DISABLE_MDNS`.
-pub(crate) fn loopback_only(listen: &[Multiaddr]) -> bool {
-    use libp2p::multiaddr::Protocol;
-    !listen.is_empty()
-        && listen.iter().all(|a| match a.iter().next() {
-            Some(Protocol::Ip4(ip)) => ip.is_loopback(),
-            Some(Protocol::Ip6(ip)) => ip.is_loopback(),
-            _ => false,
-        })
-}
-
-/// In-process discovery for loopback-only nodes, standing in for mDNS: a
-/// loopback-only node announces its listen addresses here and treats every
-/// other node of its cluster as an mDNS-discovered neighbour. Tests start
-/// their nodes in one process, so they still form the full mesh mDNS gave
-/// them, and nothing is ever sent on (or heard from) the network.
-///
-/// A cluster is one bootstrap tree: a node with no bootstrap peer starts its
-/// own, a node bootstrapping to a peer joins that peer's. Each test wires its
-/// nodes to its own hub, so tests running in parallel in one process never
-/// see each other's nodes.
-type Cluster = PeerId;
-
-struct LocalDiscovery {
-    inner: std::sync::Mutex<LocalInner>,
-    tx: broadcast::Sender<(Cluster, PeerId, Multiaddr)>,
-}
-
-#[derive(Default)]
-struct LocalInner {
-    cluster_of: HashMap<PeerId, Cluster>,
-    seen: Vec<(Cluster, PeerId, Multiaddr)>,
-}
-
-fn local_discovery() -> &'static LocalDiscovery {
-    static D: std::sync::OnceLock<LocalDiscovery> = std::sync::OnceLock::new();
-    D.get_or_init(|| LocalDiscovery {
-        inner: std::sync::Mutex::new(LocalInner::default()),
-        tx: broadcast::channel(1024).0,
-    })
-}
-
-impl LocalDiscovery {
-    fn inner(&self) -> std::sync::MutexGuard<'_, LocalInner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Place `me` in the cluster of its first bootstrap peer (or its own),
-    /// subscribe, and return the cluster and the neighbours already in it.
-    fn join(
-        &self,
-        me: PeerId,
-        bootstrap: &[Multiaddr],
-    ) -> (Cluster, broadcast::Receiver<(Cluster, PeerId, Multiaddr)>, Vec<(PeerId, Multiaddr)>) {
-        use libp2p::multiaddr::Protocol;
-        let mut inner = self.inner();
-        let via = bootstrap.iter().find_map(|a| {
-            a.iter().find_map(|p| match p {
-                Protocol::P2p(id) => Some(id),
-                _ => None,
-            })
-        });
-        let cluster = match via {
-            Some(id) => inner.cluster_of.get(&id).copied().unwrap_or(id),
-            None => me,
-        };
-        inner.cluster_of.insert(me, cluster);
-        let seen = inner
-            .seen
-            .iter()
-            .filter(|(c, _, _)| *c == cluster)
-            .map(|(_, p, a)| (*p, a.clone()))
-            .collect();
-        (cluster, self.tx.subscribe(), seen)
-    }
-
-    fn announce(&self, cluster: Cluster, peer: PeerId, addr: Multiaddr) {
-        self.inner().seen.push((cluster, peer, addr.clone()));
-        let _ = self.tx.send((cluster, peer, addr));
-    }
-}
-
 /// `[u16 BE topic length][topic][payload]`.
 fn encode_direct(topic: &str, payload: &[u8]) -> Vec<u8> {
     let t = topic.as_bytes();
@@ -360,19 +274,14 @@ impl Libp2pNetwork {
         let (gossip_tx, _) = broadcast::channel::<GossipMessage>(256);
 
         let rpc_handlers: RpcHandlers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let local_only = loopback_only(&config.listen);
-        let use_mdns = !mdns_disabled() && !local_only;
-        let mut task = SwarmTask::new(
+        let task = SwarmTask::new(
             keypair.clone(),
-            use_mdns,
-            !mdns_disabled() && local_only,
             config.local_source,
             gossip_tx.clone(),
             rpc_handlers.clone(),
             cmd_tx.downgrade(),
         )
         .await?;
-        task.local_bootstrap = config.bootstrap.clone();
         for addr in &config.listen {
             task.swarm
                 .lock()
@@ -806,13 +715,6 @@ mod cbor_bytes {
 type Swarm = libp2p::Swarm<C0mputeBehaviour>;
 
 struct SwarmTask {
-    /// Loopback-only node: find in-process neighbours via [`local_discovery`]
-    /// instead of mDNS.
-    local_discovery: bool,
-    /// Bootstrap peers, which decide the in-process cluster.
-    local_bootstrap: Vec<Multiaddr>,
-    local_cluster: Option<Cluster>,
-    local_rx: Option<broadcast::Receiver<(Cluster, PeerId, Multiaddr)>>,
     swarm: Arc<Mutex<Swarm>>,
     local_source: Option<Arc<dyn ChunkSource>>,
     /// Pending `fetch` calls awaiting Kad provider lookups.
@@ -843,8 +745,6 @@ struct SwarmTask {
 impl SwarmTask {
     async fn new(
         keypair: identity::Keypair,
-        use_mdns: bool,
-        local_discovery: bool,
         local_source: Option<Arc<dyn ChunkSource>>,
         gossip_tx: broadcast::Sender<GossipMessage>,
         rpc_handlers: RpcHandlers,
@@ -899,12 +799,10 @@ impl SwarmTask {
                     gossipsub_cfg,
                 )
                 .map_err(|e| std::io::Error::other(format!("gossipsub behaviour: {e}")))?;
-                // `C0MPUTE_DISABLE_MDNS=1`, or listening on loopback only,
-                // keeps a node off LAN discovery: tests run on a box beside
-                // live workers, and their offers and sites must never reach
-                // (or take copies from) the real network. Loopback-only nodes
-                // find each other in-process instead ([`local_discovery`]).
-                let mdns = if !use_mdns {
+                // `C0MPUTE_DISABLE_MDNS=1` keeps a node off LAN discovery:
+                // tests run on a box beside live workers set it, or their
+                // offers reach (and are won by) the real network.
+                let mdns = if mdns_disabled() {
                     None
                 } else {
                     Some(mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?)
@@ -926,10 +824,6 @@ impl SwarmTask {
             .build();
 
         Ok(Self {
-            local_discovery,
-            local_bootstrap: Vec::new(),
-            local_cluster: None,
-            local_rx: None,
             swarm: Arc::new(Mutex::new(swarm)),
             local_source,
             pending_kad_lookups: HashMap::new(),
@@ -947,15 +841,6 @@ impl SwarmTask {
 
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Cmd>) {
         info!("c0mpute-net swarm task running");
-        if self.local_discovery {
-            let me = *self.swarm.lock().await.local_peer_id();
-            let (cluster, rx, seen) = local_discovery().join(me, &self.local_bootstrap);
-            self.local_cluster = Some(cluster);
-            self.local_rx = Some(rx);
-            for (peer, addr) in seen {
-                self.neighbour(peer, addr).await;
-            }
-        }
         loop {
             // Drive both: incoming swarm events AND command-channel input.
             // Holding the lock briefly for next_event then yielding lets
@@ -964,20 +849,6 @@ impl SwarmTask {
                 let mut swarm = self.swarm.lock().await;
                 tokio::select! {
                     event = swarm.select_next_some() => Some(EventOrCmd::Event(event)),
-                    found = async {
-                        match self.local_rx.as_mut() {
-                            Some(rx) => rx.recv().await,
-                            None => std::future::pending().await,
-                        }
-                    } => match found {
-                        Ok((c, peer, addr)) if Some(c) == self.local_cluster => {
-                            Some(EventOrCmd::Neighbour(peer, addr))
-                        }
-                        Ok(_) => continue,
-                        // Lagged: a few announcements were skipped; they are
-                        // in the registry and peers find us through gossip.
-                        Err(_) => continue,
-                    },
                     maybe_cmd = cmd_rx.recv() => {
                         match maybe_cmd {
                             Some(c) => Some(EventOrCmd::Cmd(c)),
@@ -989,24 +860,12 @@ impl SwarmTask {
             match event_or_cmd {
                 Some(EventOrCmd::Event(e)) => self.handle_event(e).await,
                 Some(EventOrCmd::Cmd(c)) => self.handle_cmd(c).await,
-                Some(EventOrCmd::Neighbour(p, a)) => self.neighbour(p, a).await,
                 None => {
                     info!("swarm command channel closed; exiting");
                     return;
                 }
             }
         }
-    }
-
-    /// A neighbour found by in-process discovery: handled like an mDNS hit.
-    async fn neighbour(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        let mut sw = self.swarm.lock().await;
-        if peer_id == *sw.local_peer_id() {
-            return;
-        }
-        debug!(%peer_id, %addr, "in-process neighbour");
-        sw.behaviour_mut().kad.add_address(&peer_id, addr);
-        sw.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
     }
 
     async fn handle_cmd(&mut self, cmd: Cmd) {
@@ -1180,10 +1039,6 @@ impl SwarmTask {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!(%address, "listening");
-                if let Some(cluster) = self.local_cluster {
-                    let me = *self.swarm.lock().await.local_peer_id();
-                    local_discovery().announce(cluster, me, address);
-                }
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 debug!(%peer_id, "connection established");
@@ -1498,7 +1353,6 @@ impl SwarmTask {
 enum EventOrCmd {
     Event(SwarmEvent<C0mputeBehaviourEvent>),
     Cmd(Cmd),
-    Neighbour(PeerId, Multiaddr),
 }
 
 // hex helper since we use it in handle_kad_progress
@@ -1603,17 +1457,6 @@ mod tests {
             .await
             .expect("fetch should succeed");
         assert_eq!(bytes, payload);
-    }
-
-    #[test]
-    fn loopback_only_listeners_skip_mdns() {
-        let m = |s: &str| -> Multiaddr { s.parse().unwrap() };
-        assert!(loopback_only(&[m("/ip4/127.0.0.1/tcp/0")]));
-        assert!(loopback_only(&[m("/ip4/127.0.0.1/tcp/0"), m("/ip6/::1/tcp/0")]));
-        assert!(!loopback_only(&[m("/ip4/0.0.0.0/tcp/0")]));
-        assert!(!loopback_only(&[m("/ip4/127.0.0.1/tcp/0"), m("/ip4/0.0.0.0/tcp/0")]));
-        assert!(!loopback_only(&[m("/ip4/192.168.1.5/tcp/4001")]));
-        assert!(!loopback_only(&[]));
     }
 
     async fn wait_for_listen(net: &Libp2pNetwork) -> Multiaddr {
