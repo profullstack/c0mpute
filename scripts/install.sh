@@ -26,8 +26,13 @@
 #                           INFERNET_NO_HOUSE_MODELS=1). They are ON by default:
 #                           the node pulls and serves the models listed at
 #                           https://infernetprotocol.com/house-models.json that fit it.
-#   --no-uncensored-models  Skip uncensored house models only
+#   --uncensored-models     Also serve uncensored house models. They are OFF
+#                           unless you opt in (same as INFERNET_UNCENSORED_MODELS=1)
+#   --no-uncensored-models  Keep uncensored house models off
 #                           (same as INFERNET_NO_UNCENSORED_MODELS=1)
+#   --system-service        Run the worker as a root-managed systemd system
+#                           service (needs sudo). Default: a systemd *user*
+#                           service under your account, no root involved.
 #   --no-exec       Don't auto-exec a fresh shell at the end
 #                   (CI-friendly; default is to drop you into a new
 #                   shell with c0mpute already on $PATH)
@@ -59,6 +64,7 @@ WORKER_MODE=0
 DEVELOPER_MODE=0
 FORCE=0
 NO_START=0
+SYSTEM_SERVICE="${C0MPUTE_SYSTEM_SERVICE:-0}"
 
 say()  { printf '\033[1;36m→\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
@@ -91,9 +97,11 @@ while [ $# -gt 0 ]; do
     --name)         shift; C0MPUTE_NAME="${1:-}" ;;
     --name=*)       C0MPUTE_NAME="${1#--name=}" ;;
     --no-house-models)      INFERNET_NO_HOUSE_MODELS=1 ;;
+    --uncensored-models)    INFERNET_UNCENSORED_MODELS=1 ;;
     --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
+    --system-service)       SYSTEM_SERVICE=1 ;;
     --help|-h)
-      sed -n '2,33p' "$0"
+      sed -n '2,39p' "$0"
       exit 0
       ;;
     *)
@@ -331,13 +339,17 @@ house_models_notice() {
   fi
   if [ "${INFERNET_NO_UNCENSORED_MODELS:-}" = "1" ]; then
     infernet house-models uncensored off >/dev/null 2>&1 || true
+  elif [ "${INFERNET_UNCENSORED_MODELS:-}" = "1" ]; then
+    infernet house-models uncensored on >/dev/null 2>&1 || true
   fi
   say "house models: ON — this node pulls and serves the models listed at"
   say "  https://infernetprotocol.com/house-models.json that fit it (RAM; keeps 10% of disk free)."
-  if [ "${INFERNET_NO_UNCENSORED_MODELS:-}" = "1" ]; then
-    say "  uncensored house models: off (--no-uncensored-models)"
+  if [ "${INFERNET_UNCENSORED_MODELS:-}" = "1" ] && [ "${INFERNET_NO_UNCENSORED_MODELS:-}" != "1" ]; then
+    say "  uncensored house models: ON (you opted in with --uncensored-models)"
+  else
+    say "  uncensored house models: off (opt in: infernet house-models uncensored on)"
   fi
-  say "  opt out any time: infernet house-models off  (uncensored only: infernet house-models uncensored off)"
+  say "  opt out any time: infernet house-models off"
 }
 
 # transcode is in-process (no separate binary), but it depends on
@@ -701,20 +713,14 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────────────────
-# Auto-start the worker so a node self-onboards on install/upgrade. Prefers a
-# systemd system service (survives reboots, restarts on crash); falls back to a
-# background daemon. Idempotent: restarts onto the freshly installed binary.
+# Auto-start the worker so a node self-onboards on install/upgrade. Default:
+# a systemd *user* service under your own account (no root, nothing written
+# outside $HOME), with lingering so it starts at boot. A root-managed system
+# service only with --system-service, or when a previous install made one.
+# Falls back to a background daemon. Idempotent: restarts onto the new binary.
 # ────────────────────────────────────────────────────────────────────────
-start_worker() {
-  [ "$NO_START" -eq 1 ] && return 0
-  bin="$C0MPUTE_HOME/bin/c0mpute"
-  [ -x "$bin" ] || return 0
-  say "starting the c0mpute worker (auto-registers + serves its models)"
-
-  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] \
-     && { [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; }; then
-    tmp=$(mktemp)
-    cat > "$tmp" <<UNIT
+worker_unit() { # <WantedBy> [User= line]
+  cat <<UNIT
 [Unit]
 Description=c0mpute worker
 After=network-online.target
@@ -722,27 +728,83 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(id -un)
+${2:-}
 Environment=HOME=$HOME
 Environment=PATH=$C0MPUTE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=$bin worker start
+ExecStart=$C0MPUTE_HOME/bin/c0mpute worker start
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=$1
 UNIT
-    if $SUDO cp "$tmp" /etc/systemd/system/c0mpute-worker.service 2>/dev/null; then
-      rm -f "$tmp"
-      $SUDO systemctl daemon-reload 2>/dev/null
-      $SUDO systemctl enable c0mpute-worker >/dev/null 2>&1
-      if $SUDO systemctl restart c0mpute-worker 2>/dev/null; then
-        ok "worker running as a systemd service (auto-starts on boot, restarts on crash)"
-        return 0
-      fi
-    fi
+}
+
+start_system_service() {
+  { [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; } || return 1
+  tmp=$(mktemp)
+  worker_unit multi-user.target "User=$(id -un)" > "$tmp"
+  if $SUDO cp "$tmp" /etc/systemd/system/c0mpute-worker.service 2>/dev/null; then
     rm -f "$tmp"
-    warn "systemd setup failed; falling back to a background daemon"
+    $SUDO systemctl daemon-reload 2>/dev/null
+    $SUDO systemctl enable c0mpute-worker >/dev/null 2>&1
+    if $SUDO systemctl restart c0mpute-worker 2>/dev/null; then
+      ok "worker running as a systemd system service as $(id -un) (auto-starts on boot, restarts on crash)"
+      return 0
+    fi
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+start_user_service() {
+  [ "$(id -u)" = "0" ] && return 1
+  systemctl --user show-environment >/dev/null 2>&1 || return 1
+  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$unit_dir" || return 1
+  worker_unit default.target > "$unit_dir/c0mpute-worker.service" || return 1
+  "$C0MPUTE_HOME/bin/c0mpute" worker stop >/dev/null 2>&1 # a daemon from an earlier install
+  systemctl --user daemon-reload 2>/dev/null
+  systemctl --user enable c0mpute-worker >/dev/null 2>&1
+  systemctl --user restart c0mpute-worker 2>/dev/null || return 1
+  ok "worker running as a systemd user service as $(id -un) (no root; restarts on crash)"
+  # Lingering starts user services at boot, before anyone logs in. logind
+  # lets a user enable it for themselves without sudo on most distros.
+  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = "yes" ] \
+     || loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then
+    ok "  starts at boot (systemd lingering on for $(id -un); undo: loginctl disable-linger)"
+  else
+    warn "  starts when you log in. To start at boot too: sudo loginctl enable-linger $(id -un)"
+  fi
+  return 0
+}
+
+start_worker() {
+  [ "$NO_START" -eq 1 ] && return 0
+  bin="$C0MPUTE_HOME/bin/c0mpute"
+  [ -x "$bin" ] || return 0
+  say "starting the c0mpute worker (auto-registers + serves its models)"
+
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    # Keep a system service an earlier install (or --system-service) set up,
+    # so an upgrade never leaves two workers running.
+    if [ -f /etc/systemd/system/c0mpute-worker.service ]; then
+      start_system_service && return 0
+      # Never start a second worker next to the system service.
+      warn "a c0mpute-worker system service from an earlier install exists and needs sudo to restart:"
+      warn "  sudo systemctl restart c0mpute-worker"
+      warn "  (or switch to a user service: sudo systemctl disable --now c0mpute-worker &&"
+      warn "   sudo rm /etc/systemd/system/c0mpute-worker.service, then re-run this installer)"
+      return 0
+    fi
+    if [ "$SYSTEM_SERVICE" = "1" ]; then
+      start_system_service && return 0
+      warn "systemd system service setup failed (needs sudo); using a user service instead"
+    fi
+    start_user_service && return 0
+    if [ "$(id -u)" = "0" ]; then
+      start_system_service && return 0
+    fi
   fi
 
   # Fallback: detached daemon. Restart onto the new binary on upgrade.
@@ -804,6 +866,7 @@ main() {
     # House-model opt-outs reach infernet's installer through the environment.
     export INFERNET_NO_HOUSE_MODELS="${INFERNET_NO_HOUSE_MODELS:-}"
     export INFERNET_NO_UNCENSORED_MODELS="${INFERNET_NO_UNCENSORED_MODELS:-}"
+    export INFERNET_UNCENSORED_MODELS="${INFERNET_UNCENSORED_MODELS:-}"
     chain_install infernet "$INFERNET_INSTALL_URL" || true
     house_models_notice
   fi
