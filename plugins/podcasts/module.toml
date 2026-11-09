@@ -24,7 +24,7 @@
 [module]
 id          = "podcasts"
 name        = "Podcasts — p2p podcast listener"
-version     = "0.2.75"
+version     = "0.2.76"
 kind        = "service"
 category    = "media"
 status      = "available"
@@ -36,7 +36,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["podcast", "listen", "subscribe", "rss", "audio", "p2p", "podcasting2"]
 
 [module.requirements]
-c0mpute      = ">=0.2.75"
+c0mpute      = ">=0.2.76"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:egress"]
