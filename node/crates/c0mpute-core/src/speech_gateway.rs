@@ -62,6 +62,8 @@ struct GatewayState {
     penalties: crate::penalty_box::PenaltyBox,
     /// Live stages of long requests (songs), by the caller's x-request-id.
     progress: crate::job_progress::ProgressBoard,
+    /// Finished tracked requests, collectable at GET /v1/result/{id}.
+    results: crate::job_progress::ResultStore,
 }
 
 #[derive(Debug)]
@@ -179,6 +181,7 @@ pub fn router(
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
         progress: crate::job_progress::ProgressBoard::default(),
+        results: crate::job_progress::ResultStore::default(),
         penalties,
     };
     Router::new()
@@ -189,6 +192,7 @@ pub fn router(
         .route("/v1/images", post(generate_image))
         .route("/v1/music", post(generate_music))
         .route("/v1/progress/{request}", get(job_progress))
+        .route("/v1/result/{request}", get(job_result))
         .route("/v1/videos", post(generate_video))
         // OCR takes a 32 MiB document, above the router-wide audio limit.
         .route(
@@ -1048,7 +1052,7 @@ async fn generate_music(
     input
         .validate()
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
-    let _slot = state
+    let slot = state
         .music_slots
         .clone()
         .acquire_owned()
@@ -1056,13 +1060,10 @@ async fn generate_music(
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "music queue is unavailable".into()))?;
     let spec = serde_json::to_value(input.clip_for_model())
         .map_err(|error| gateway_failure(error.into()))?;
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|k| crate::job_progress::valid_key(k))
-        .map(str::to_string);
-    let job = run_speech_job(
+    let done = run_tracked(
         &state,
+        request_id(&headers),
+        slot,
         crate::music::WORKLOAD_TXT2MUSIC,
         spec,
         vec![
@@ -1070,35 +1071,126 @@ async fn generate_music(
             crate::music::MODEL_TAG.to_string(),
         ],
         crate::music::MAX_RESULT_BYTES,
-    );
-    let result = match &request_id {
-        Some(key) => {
-            state.progress.start(key);
-            crate::job_progress::CURRENT
-                .scope((state.progress.clone(), key.clone()), async {
-                    let result = job.await;
-                    crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
-                    result
-                })
-                .await
-        }
-        None => job.await,
+        |bytes| crate::music::audio_content_type(bytes).unwrap_or("audio/mpeg"),
+    )
+    .await?;
+    Ok(stored_response(done))
+}
+
+/// The caller's `x-request-id`, when it is short and URL-safe.
+fn request_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|k| crate::job_progress::valid_key(k))
+        .map(str::to_string)
+}
+
+/// Run a long job (song, image). With a request id it runs DETACHED from the
+/// HTTP request: if the caller's connection drops (Infernet redeploying
+/// mid-song cut every song in flight, 2026-11-09), the job carries on, holds
+/// its queue slot to the end, and its result waits at GET /v1/result/{id}.
+/// Progress is recorded under the same id (see `job_progress`).
+#[allow(clippy::too_many_arguments)]
+async fn run_tracked(
+    state: &GatewayState,
+    request_id: Option<String>,
+    slot: tokio::sync::OwnedSemaphorePermit,
+    workload: &'static str,
+    spec: serde_json::Value,
+    required: Vec<String>,
+    max_bytes: usize,
+    content_type: fn(&[u8]) -> &'static str,
+) -> ApiResult<crate::job_progress::Stored> {
+    use crate::job_progress::Stored;
+    let Some(key) = request_id else {
+        let (outcome, bytes) = run_speech_job(state, workload, spec, required, max_bytes).await?;
+        drop(slot);
+        return Ok(Stored::Done {
+            content_type: content_type(&bytes),
+            bytes: Arc::new(bytes),
+            job_id: outcome.job_id,
+            worker: outcome.accepted_bid.bidder_peer_id,
+        });
     };
-    let (outcome, bytes) = result?;
-    let content_type = crate::music::audio_content_type(&bytes).unwrap_or("audio/mpeg");
-    let mut response = (StatusCode::OK, bytes).into_response();
+    state.progress.start(&key);
+    let st = state.clone();
+    let task_key = key.clone();
+    let task = tokio::spawn(crate::job_progress::CURRENT.scope(
+        (state.progress.clone(), key.clone()),
+        async move {
+            let _slot = slot;
+            let result = run_speech_job(&st, workload, spec, required, max_bytes).await;
+            crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
+            let stored = match result {
+                Ok((outcome, bytes)) => Stored::Done {
+                    content_type: content_type(&bytes),
+                    bytes: Arc::new(bytes),
+                    job_id: outcome.job_id,
+                    worker: outcome.accepted_bid.bidder_peer_id,
+                },
+                Err(ApiError(status, message)) => Stored::Failed { status: status.as_u16(), message },
+            };
+            st.results.put(&task_key, stored.clone());
+            stored
+        },
+    ));
+    match task.await {
+        Ok(Stored::Failed { status, message }) => Err(ApiError(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        )),
+        Ok(done) => Ok(done),
+        Err(error) => Err(ApiError(StatusCode::BAD_GATEWAY, format!("job task failed: {error}"))),
+    }
+}
+
+/// 200 with the bytes, their type and the job headers.
+fn stored_response(done: crate::job_progress::Stored) -> Response {
+    let crate::job_progress::Stored::Done { bytes, content_type, job_id, worker } = done else {
+        return (StatusCode::BAD_GATEWAY, "job failed").into_response();
+    };
+    let mut response = (StatusCode::OK, (*bytes).clone()).into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    set_job_headers(
-        response.headers_mut(),
-        &outcome.job_id,
-        &outcome.accepted_bid.bidder_peer_id,
-    );
-    Ok(response)
+    set_job_headers(response.headers_mut(), &job_id, &worker);
+    response
+}
+
+/// `GET /v1/result/{request}`: a tracked request's result (200 with the
+/// bytes), its live progress while it runs (202 JSON), or 404. Lets a caller
+/// that restarted mid-job collect it.
+async fn job_result(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(request): Path<String>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    if !crate::job_progress::valid_key(&request) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad request id".into()));
+    }
+    match state.results.get(&request) {
+        Some(crate::job_progress::Stored::Failed { status, message }) => Err(ApiError(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        )),
+        Some(done) => Ok(stored_response(done)),
+        None => {
+            let snapshot = state
+                .progress
+                .snapshot(&request)
+                .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such request".into()))?;
+            let mut response = (StatusCode::ACCEPTED, Json(snapshot)).into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+    }
 }
 
 /// `GET /v1/progress/{request}`: the live stage of a request sent with that
@@ -1132,7 +1224,7 @@ async fn generate_image(
     input
         .validate()
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
-    let _slot = state
+    let slot = state
         .image_slots
         .clone()
         .acquire_owned()
@@ -1144,8 +1236,10 @@ async fn generate_image(
             )
         })?;
     let spec = serde_json::to_value(&input).map_err(|error| gateway_failure(error.into()))?;
-    let (outcome, bytes) = run_speech_job(
+    let done = run_tracked(
         &state,
+        request_id(&headers),
+        slot,
         crate::diffusion::WORKLOAD_TXT2IMG,
         spec,
         vec![
@@ -1153,21 +1247,10 @@ async fn generate_image(
             crate::diffusion::MODEL_TAG.to_string(),
         ],
         crate::diffusion::MAX_IMAGE_BYTES,
+        |_| "image/png",
     )
     .await?;
-    let mut response = (StatusCode::OK, bytes).into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    set_job_headers(
-        response.headers_mut(),
-        &outcome.job_id,
-        &outcome.accepted_bid.bidder_peer_id,
-    );
-    Ok(response)
+    Ok(stored_response(done))
 }
 
 #[derive(Debug, Deserialize)]

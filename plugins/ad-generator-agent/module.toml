@@ -21,7 +21,7 @@
 [module]
 id          = "ad-generator-agent"
 name        = "Ad Generator Agent — every ad type from one URL"
-version     = "0.2.90"
+version     = "0.2.91"
 kind        = "service"
 category    = "applications"
 status      = "available"
