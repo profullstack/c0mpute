@@ -254,7 +254,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         // on the gossip mesh, which drops them while it re-forms.
         buyer_addrs: offer_buyer_addrs(&net).await,
         bid_window_ms: Some(auction.bid_window.as_millis() as u64),
-        e2e: Some(session.offer_part(&auction.workload_type, &auction.spec_inline)),
+        e2e: Some(session.offer_part(&auction.workload_type, &auction.spec_inline, crate::reachability::own_hint_addrs(&net).await)),
     };
 
     info!(
@@ -447,6 +447,18 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     let mut direct_accept = accept.clone();
     direct_accept.sealed_spec = sealed_b64;
     let accept_bytes = serde_json::to_vec(&direct_accept)?;
+    // A winner whose bid reached us only over gossip may have no address we
+    // know: take the addresses its bid gave (same host or LAN), else look it
+    // up in the DHT, before the direct send.
+    if let Some(e) = &winner.e2e {
+        let own = net.listen_addrs().await.unwrap_or_default();
+        for a in crate::reachability::hint_addrs(&e.addrs, &own) {
+            net.add_peer_address(winner_peer, a).await;
+        }
+    }
+    if let Err(e) = net.reach(winner_peer, DIRECT_ACCEPT_TIMEOUT).await {
+        debug!(%job_id, err = %e, "buyer: winner not reachable directly yet");
+    }
     let direct = net
         .send_direct(winner_peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
         .await;
@@ -583,7 +595,7 @@ pub async fn probe_auction(
         external_ref: None,
         buyer_addrs: offer_buyer_addrs(&net).await,
         bid_window_ms: Some(window.as_millis() as u64),
-        e2e: Some(session.offer_part(workload, &spec_inline)),
+        e2e: Some(session.offer_part(workload, &spec_inline, Vec::new())),
     };
     publish_json(&net, &topic, &offer).await?;
     let deadline = Instant::now() + window;

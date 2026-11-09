@@ -124,6 +124,11 @@ pub struct OfferE2e {
     /// worker's attestation report must bind (with its X25519 key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attest_nonce: Option<String>,
+    /// The buyer's listen addresses, so the winner can dial it for the
+    /// sealed spec even when they share no public address (same host or
+    /// LAN). A worker only uses one in an address class it listens in too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addrs: Vec<String>,
 }
 
 /// The e2e part of a [`JobBid`].
@@ -139,6 +144,10 @@ pub struct BidE2e {
     /// require [`CONFIDENTIAL_TAG`]. Its report data binds `worker_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<serde_json::Value>,
+    /// The worker's listen addresses, for the buyer's direct accept (same
+    /// rule as [`OfferE2e::addrs`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addrs: Vec<String>,
 }
 
 /// A 32-byte job key held in memory only: never serialized, never printed,

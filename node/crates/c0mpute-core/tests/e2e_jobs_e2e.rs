@@ -422,10 +422,69 @@ async fn live_capture_shows_no_plaintext() {
         net.subscribe(&job_topic(t)).await.unwrap();
     }
     let mut rx = net.messages();
+    // Optionally buy a real job from a separate buyer node meanwhile:
+    // C0MPUTE_CAPTURE_BUY=infernet.inference sends a chat with the needle in
+    // the prompt (C0MPUTE_CAPTURE_MODEL picks the model).
+    let buyer_task = std::env::var("C0MPUTE_CAPTURE_BUY").ok().map(|workload| {
+        let needle = needle.clone();
+        tokio::spawn(async move {
+            let bdir = tempdir().unwrap();
+            let buyer = Arc::new(
+                Libp2pNetwork::spawn(
+                    NetworkConfig::for_dir(bdir.path().join("id"))
+                        .with_listen(vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap()])
+                        .with_bootstrap(c0mpute_net::bootstrap::default_seeds()),
+                )
+                .await
+                .unwrap(),
+            );
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let spec = match workload.as_str() {
+                "embed.text" => json!({"v": 1, "texts": [format!("{needle} private document")]}),
+                _ => {
+                    let mut s = json!({"v": 1, "messages": [{"role": "user", "content": format!("{needle}: reply with the single word ok")}], "max_tokens": 16});
+                    if let Ok(m) = std::env::var("C0MPUTE_CAPTURE_MODEL") {
+                        s["model"] = json!(m);
+                    }
+                    s
+                }
+            };
+            let caps = match workload.as_str() {
+                "embed.text" => vec![c0mpute_core::embed::ROLE_TAG.to_string()],
+                _ => vec![c0mpute_core::inference::ROLE_TAG.to_string()],
+            };
+            let auction = JobAuction::new(workload.clone(), spec)
+                .with_required_capabilities(caps)
+                .with_max_price_usd(0.05)
+                .with_bid_window(Duration::from_secs(10))
+                .with_receipt_timeout(Duration::from_secs(90));
+            let o = run_auction(buyer.clone(), auction).await;
+            match o {
+                Ok(o) => {
+                    let r = gateway_util::fetch_result(&buyer, &o, 1 << 20, Duration::from_secs(30)).await;
+                    eprintln!(
+                        "BUYER: job {} won by {} status {:?} output_hash {:?}; opened result: {}",
+                        o.job_id,
+                        o.accepted_bid.bidder_peer_id,
+                        o.receipt.status,
+                        o.receipt.output_hash,
+                        r.map(|b| String::from_utf8_lossy(&b).chars().take(300).collect::<String>()).unwrap_or_else(|e| format!("{e:?}"))
+                    );
+                }
+                Err(e) => eprintln!("BUYER: auction failed: {e:#}"),
+            }
+        })
+    });
     let mut f = std::fs::File::create(&out).unwrap();
     let (mut n, mut leaks, mut offers) = (0usize, 0usize, 0usize);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while let Ok(Ok(m)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+    loop {
+        let m = match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => break,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => break,
+            Ok(Ok(m)) => m,
+        };
         n += 1;
         if contains(&m.data, needle.as_bytes()) {
             leaks += 1;
@@ -449,6 +508,9 @@ async fn live_capture_shows_no_plaintext() {
             String::from_utf8_lossy(&m.data)
         )
         .unwrap();
+    }
+    if let Some(t) = buyer_task {
+        let _ = t.await;
     }
     eprintln!("captured {n} messages ({offers} offers) on {topics:?}; {leaks} contain the needle");
     assert_eq!(leaks, 0, "plaintext on gossip");

@@ -629,7 +629,11 @@ async fn handle_offer(
     // A fresh X25519 key for this one job, signed by our identity.
     let (session, e2e) = match offer.e2e.as_ref() {
         Some(_) => match crate::job_e2e::WorkerSession::for_offer(net, offer) {
-            Ok((s, e)) => (Some(s), Some(e)),
+            Ok((s, mut e)) => {
+                // So the buyer can push the sealed spec to us directly.
+                e.addrs = crate::reachability::own_hint_addrs(net).await;
+                (Some(s), Some(e))
+            }
             Err(e) => {
                 debug!(job_id = %offer.job_id, err = %e, "dispatch: cannot bid on this e2e offer");
                 return None;

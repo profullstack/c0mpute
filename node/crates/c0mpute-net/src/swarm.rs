@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use c0mpute_proto::{ChunkRequest, Hash};
 use futures::StreamExt;
@@ -192,6 +192,11 @@ enum Cmd {
     KadFindNode {
         key: Vec<u8>,
         reply: oneshot::Sender<()>,
+    },
+    /// Look `peer` up in the DHT and learn its addresses.
+    FindPeer {
+        peer: PeerId,
+        reply: oneshot::Sender<Vec<Multiaddr>>,
     },
 }
 
@@ -435,6 +440,59 @@ impl Libp2pNetwork {
         self.peer_id
     }
 
+    /// Ask the DHT for `peer`'s addresses (a Kademlia lookup of its id) and
+    /// teach them to the routing table, so a dial by peer id works for a peer
+    /// we only ever heard of through gossip relayed by others. Returns the
+    /// addresses found (empty when the lookup found none within `timeout`).
+    pub async fn find_peer(&self, peer: PeerId, timeout: Duration) -> Vec<Multiaddr> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::FindPeer { peer, reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        tokio::time::timeout(timeout, rx).await.ok().and_then(|r| r.ok()).unwrap_or_default()
+    }
+
+    /// Make sure there is a connection to `peer`: already connected, or a
+    /// dial with the addresses we know, or a DHT lookup for its addresses and
+    /// a dial with those. Used before point-to-point exchanges with a peer
+    /// heard of only through gossip.
+    pub async fn reach(&self, peer: PeerId, timeout: Duration) -> Result<()> {
+        if peer == self.peer_id || self.is_connected(peer).await {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let wait_connected = |deadline: tokio::time::Instant| async move {
+            while tokio::time::Instant::now() < deadline {
+                if self.is_connected(peer).await {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        };
+        // Dial with what we know; failing that, ask the DHT (a routing table
+        // still filling right after start may need another round) and dial
+        // again, until the deadline.
+        loop {
+            let dialed = self.connect(peer).await;
+            debug!(%peer, dial = ?dialed.as_ref().err(), "reach: dial by peer id");
+            let step = (tokio::time::Instant::now() + Duration::from_millis(1500)).min(deadline);
+            if dialed.is_ok() && wait_connected(step).await {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
+            if self.find_peer(peer, left.min(Duration::from_secs(3))).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(500).min(left)).await;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
+        }
+    }
+
     /// Fetch a chunk directly from a peer already identified by a job offer
     /// or receipt. This avoids waiting for a DHT provider record to propagate.
     pub async fn fetch_from_peer(&self, peer: PeerId, req: &ChunkRequest) -> Result<Vec<u8>> {
@@ -657,6 +715,8 @@ struct SwarmTask {
     fetch_v1_only: std::collections::HashSet<PeerId>,
     /// Pending outbound RPC calls.
     pending_rpcs: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
+    /// Pending `find_peer` lookups: the peer sought and who to tell.
+    pending_find_peers: HashMap<kad::QueryId, (PeerId, oneshot::Sender<Vec<Multiaddr>>)>,
     rpc_handlers: RpcHandlers,
     /// For handler tasks to hand their answer back to the swarm loop (weak,
     /// so the loop still ends when the last `Libp2pNetwork` drops).
@@ -756,6 +816,7 @@ impl SwarmTask {
             pending_fetches2: HashMap::new(),
             fetch_v1_only: std::collections::HashSet::new(),
             pending_rpcs: HashMap::new(),
+            pending_find_peers: HashMap::new(),
             rpc_handlers,
             cmd_weak,
             gossip_tx,
@@ -940,6 +1001,10 @@ impl SwarmTask {
                     .map(|_| ())
                     .map_err(|e| anyhow!("gossipsub subscribe: {e}"));
                 let _ = reply.send(r);
+            }
+            Cmd::FindPeer { peer, reply } => {
+                let id = self.swarm.lock().await.behaviour_mut().kad.get_closest_peers(peer);
+                self.pending_find_peers.insert(id, (peer, reply));
             }
             Cmd::KadFindNode { key, reply } => {
                 let _ = self
@@ -1156,6 +1221,27 @@ impl SwarmTask {
     }
 
     async fn handle_kad_progress(&mut self, id: kad::QueryId, result: kad::QueryResult) {
+        if let kad::QueryResult::GetClosestPeers(r) = &result
+            && let Some((target, reply)) = self.pending_find_peers.remove(&id)
+        {
+            let peers = match r {
+                Ok(ok) => &ok.peers,
+                Err(kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
+            };
+            let addrs: Vec<Multiaddr> = peers
+                .iter()
+                .filter(|p| p.peer_id == target)
+                .flat_map(|p| p.addrs.iter().cloned())
+                .collect();
+            let mut sw = self.swarm.lock().await;
+            for a in &addrs {
+                sw.behaviour_mut().kad.add_address(&target, a.clone());
+            }
+            let table: usize = sw.behaviour_mut().kad.kbuckets().map(|b| b.num_entries()).sum();
+            debug!(%target, found = addrs.len(), peers_seen = peers.len(), routing_table = table, ok = r.is_ok(), "find_peer: DHT lookup done");
+            let _ = reply.send(addrs);
+            return;
+        }
         match result {
             kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
                 key,
@@ -1465,6 +1551,40 @@ mod tests {
     /// A direct send arrives on the receiver's gossip stream, attributed to
     /// the sender, with no topic subscription or mesh at all; non-job topics
     /// and sends to ourselves are refused.
+    /// Two peers that only share a third (both bootstrapped to it, never
+    /// told each other's address) find and reach each other through the DHT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peers_known_only_through_a_third_reach_each_other() {
+        // SAFETY: set before any node starts; the test owns its process env.
+        unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
+        let hub = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("reach-hub")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        let hub_addr = wait_for_listen(&hub).await.with(libp2p::multiaddr::Protocol::P2p(hub.peer_id()));
+        let mk = |name: &'static str, boot: Multiaddr| async move {
+            Libp2pNetwork::spawn(
+                NetworkConfig::for_dir(tempdir(name))
+                    .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
+                    .with_bootstrap(vec![boot]),
+            )
+            .await
+            .unwrap()
+        };
+        let a = mk("reach-a", hub_addr.clone()).await;
+        let b = mk("reach-b", hub_addr).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The hub's routing table knows b: a DHT lookup from a finds it.
+        let found = a.find_peer(b.peer_id(), Duration::from_secs(10)).await;
+        assert!(!found.is_empty(), "find_peer found b's addresses through the hub");
+        a.reach(b.peer_id(), Duration::from_secs(10)).await.expect("a reaches b through the hub's routing table");
+        assert!(a.is_connected(b.peer_id()).await);
+        let topic = "c0mpute/jobs/diffusion.txt2img";
+        b.reach(a.peer_id(), Duration::from_secs(10)).await.unwrap();
+        a.send_direct(b.peer_id(), topic, b"x", Duration::from_secs(5)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn direct_send_reaches_the_peer_without_a_mesh() {
         let net_a = Libp2pNetwork::spawn(

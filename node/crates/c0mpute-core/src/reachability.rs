@@ -73,9 +73,101 @@ pub fn dialable_buyer_addrs(addrs: &[String], buyer_peer_id: &str) -> Vec<Multia
         .collect()
 }
 
+/// Most address hints taken from one e2e offer or bid.
+pub const MAX_HINT_ADDRS: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AddrClass {
+    Loopback,
+    Private,
+    Public,
+}
+
+fn class_of(addr: &Multiaddr) -> Option<AddrClass> {
+    for p in addr.iter() {
+        let ip: std::net::IpAddr = match p {
+            Protocol::Ip4(ip) => ip.into(),
+            Protocol::Ip6(ip) => ip.into(),
+            _ => continue,
+        };
+        return Some(if ip.is_loopback() {
+            AddrClass::Loopback
+        } else if crate::net_guard::is_public_ip(ip) {
+            AddrClass::Public
+        } else {
+            AddrClass::Private
+        });
+    }
+    None
+}
+
+/// Addresses another peer gave for itself on an e2e offer or bid that are
+/// worth dialing from here: TCP, and public, or in an address class this node
+/// listens in too (loopback for a peer on the same host, private for one on
+/// the same LAN). So a stranger cannot point us at arbitrary internal hosts
+/// we are not on a network with.
+pub fn hint_addrs(addrs: &[String], own: &[Multiaddr]) -> Vec<Multiaddr> {
+    let own: Vec<AddrClass> = own.iter().filter_map(class_of).collect();
+    addrs
+        .iter()
+        .filter_map(|s| s.parse::<Multiaddr>().ok())
+        .filter(|a| a.iter().any(|p| matches!(p, Protocol::Tcp(_))))
+        .filter(|a| match class_of(a) {
+            Some(AddrClass::Public) => true,
+            Some(c) => own.contains(&c),
+            None => false,
+        })
+        .map(|mut a| {
+            if matches!(a.iter().last(), Some(Protocol::P2p(_))) {
+                a.pop();
+            }
+            a
+        })
+        .take(MAX_HINT_ADDRS)
+        .collect()
+}
+
+/// This node's listen addresses to hand a peer on an e2e offer or bid.
+pub async fn own_hint_addrs(net: &c0mpute_net::Libp2pNetwork) -> Vec<String> {
+    let mut out: Vec<String> = net
+        .advertised_addrs()
+        .await
+        .iter()
+        // 0.0.0.0 / :: are where we listen, not where anyone can dial us.
+        .filter(|a| {
+            !a.iter().any(|p| match p {
+                Protocol::Ip4(ip) => ip.is_unspecified(),
+                Protocol::Ip6(ip) => ip.is_unspecified(),
+                _ => false,
+            })
+        })
+        .map(|a| a.to_string())
+        .collect();
+    out.truncate(MAX_HINT_ADDRS);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hints_are_taken_only_in_classes_we_listen_in() {
+        let lo: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().unwrap();
+        let lan: Multiaddr = "/ip4/192.168.1.5/tcp/1".parse().unwrap();
+        let addrs = vec![
+            "/ip4/127.0.0.1/tcp/4001".to_string(),
+            "/ip4/10.0.0.7/tcp/4001".to_string(),
+            "/ip4/8.8.8.8/tcp/4001".to_string(),
+            "/ip4/8.8.4.4/udp/4001/quic-v1".to_string(),
+            "garbage".to_string(),
+        ];
+        let only_lo = hint_addrs(&addrs, std::slice::from_ref(&lo));
+        assert_eq!(only_lo.iter().map(|a| a.to_string()).collect::<Vec<_>>(), ["/ip4/127.0.0.1/tcp/4001", "/ip4/8.8.8.8/tcp/4001"]);
+        let only_lan = hint_addrs(&addrs, std::slice::from_ref(&lan));
+        assert_eq!(only_lan.iter().map(|a| a.to_string()).collect::<Vec<_>>(), ["/ip4/10.0.0.7/tcp/4001", "/ip4/8.8.8.8/tcp/4001"]);
+        assert_eq!(hint_addrs(&addrs, &[]).len(), 1, "public only");
+    }
 
     const PEER: &str = "12D3KooWADm5FfNxzPRanv1vacpPD7eh1bWv6pqmDCGE69Zof2n6";
     const OTHER: &str = "12D3KooWN99F7k4Fj6SdUqZ2VG4ZBLuw1e1ftwdPDBx3GsiDXzqv";
