@@ -156,7 +156,7 @@ pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
         && installed()
         && fast_enough(config)
         && has_headroom_with(config, memory())
-        && idle_enough_with(load_avg_1m(), logical_cpus())
+        && idle_enough_with(load_avg_1m(), logical_cpus(), config.max_load_per_cpu)
         && node_slot().available_permits() > 0
 }
 
@@ -166,8 +166,8 @@ pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
 pub const MAX_LOAD_PER_CPU: f64 = 0.75;
 
 /// Pure decision: is the box idle enough to start an image now?
-pub fn idle_enough_with(load_1m: f64, cpus: usize) -> bool {
-    cpus > 0 && load_1m.is_finite() && load_1m < cpus as f64 * MAX_LOAD_PER_CPU
+pub fn idle_enough_with(load_1m: f64, cpus: usize, max_per_cpu: f64) -> bool {
+    cpus > 0 && load_1m.is_finite() && load_1m < cpus as f64 * max_per_cpu
 }
 
 fn load_avg_1m() -> f64 {
@@ -730,11 +730,13 @@ mod tests {
 
     #[test]
     fn a_busy_box_does_not_take_images() {
-        assert!(idle_enough_with(4.0, 16));
-        assert!(!idle_enough_with(26.5, 16), "seed2 at load 26 on 16 vCPUs");
-        assert!(!idle_enough_with(12.0, 16), "75% is the line");
-        assert!(!idle_enough_with(f64::NAN, 16));
-        assert!(!idle_enough_with(0.0, 0));
+        assert!(idle_enough_with(4.0, 16, MAX_LOAD_PER_CPU));
+        assert!(!idle_enough_with(26.5, 16, MAX_LOAD_PER_CPU), "seed2 at load 26 on 16 vCPUs");
+        assert!(!idle_enough_with(12.0, 16, MAX_LOAD_PER_CPU), "75% is the line");
+        assert!(!idle_enough_with(f64::NAN, 16, MAX_LOAD_PER_CPU));
+        assert!(!idle_enough_with(0.0, 0, MAX_LOAD_PER_CPU));
+        // dev2's low-priority container: load 30 on 32 still renders in 106 s.
+        assert!(idle_enough_with(30.0, 32, 2.0));
     }
 
     #[test]

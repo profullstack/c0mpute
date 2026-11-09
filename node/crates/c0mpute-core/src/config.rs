@@ -66,6 +66,11 @@ pub struct DiffusionConfig {
     /// 768x512 image takes ~2-4 min; at 3 it passes the 15-minute job limit.
     #[serde(default = "default_diffusion_min_cpu_threads")]
     pub min_cpu_threads: usize,
+    /// Busiest the box may be (1-minute load average per logical CPU) and
+    /// still take a render. A low-priority container on a busy host can set
+    /// this high: its renders only use idle CPU.
+    #[serde(default = "default_diffusion_max_load_per_cpu")]
+    pub max_load_per_cpu: f64,
 }
 
 impl Default for DiffusionConfig {
@@ -76,6 +81,7 @@ impl Default for DiffusionConfig {
             min_free_ram_gb: default_diffusion_min_free_ram_gb(),
             min_free_disk_gb: default_diffusion_min_free_disk_gb(),
             min_cpu_threads: default_diffusion_min_cpu_threads(),
+            max_load_per_cpu: default_diffusion_max_load_per_cpu(),
         }
     }
 }
@@ -95,6 +101,9 @@ fn default_diffusion_min_free_disk_gb() -> u64 {
 }
 fn default_diffusion_min_cpu_threads() -> usize {
     8
+}
+fn default_diffusion_max_load_per_cpu() -> f64 {
+    crate::diffusion::MAX_LOAD_PER_CPU
 }
 
 impl DiffusionConfig {
