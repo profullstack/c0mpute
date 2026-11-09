@@ -18,7 +18,7 @@
 [module]
 id          = "apps"
 name        = "Apps — backends with 3x redundancy"
-version     = "0.2.96"
+version     = "0.2.99"
 kind        = "workload"
 category    = "infrastructure"
 status      = "available"
@@ -29,7 +29,7 @@ license     = "MIT"
 keywords    = ["apps", "backend", "paas", "containers", "docker", "git", "vps-replacement"]
 
 [module.requirements]
-c0mpute      = ">=0.2.96"
+c0mpute      = ">=0.2.99"
 os           = ["linux"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["container-runtime"]

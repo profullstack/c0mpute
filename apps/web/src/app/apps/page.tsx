@@ -33,7 +33,7 @@ export default function AppsPage() {
 
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ deploy ]</h2>
-        <Code>{`curl -fsSL https://c0mpute.com/install.sh | sh        # c0mpute 0.2.96+
+        <Code>{`curl -fsSL https://c0mpute.com/install.sh | sh        # c0mpute 0.2.99+
 
 c0mpute apps deploy ./api --name api --port 8080 --state /data
 building ./api ...
