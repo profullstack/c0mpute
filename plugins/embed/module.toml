@@ -19,7 +19,7 @@
 [module]
 id          = "embed"
 name        = "Embeddings — vector generation"
-version     = "0.2.77"
+version     = "0.2.78"
 kind        = "workload"
 category    = "ai"
 status      = "available"
