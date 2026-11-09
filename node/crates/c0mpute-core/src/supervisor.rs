@@ -684,6 +684,7 @@ impl Supervisor {
         crate::opendisk::spawn_listing(&self.config, self.libp2p.clone());
 
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
+            crate::gateway_announce::spawn(&self.config);
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;
             let state = c0mpute_gateway::GatewayState {
                 store: self.store.clone(),

@@ -253,6 +253,64 @@ impl JobState {
 struct AppState {
     registry: Registry,
     jobs: Arc<JobState>,
+    /// Last probe result per announced gateway origin (`/healthz` answered).
+    gateways: GatewayProbes,
+}
+
+/// Announced gateways the aggregator could reach on its last probe. A node's
+/// ad says where its gateway is; the board publishes it only once the
+/// aggregator has fetched `<origin>/healthz` itself, so an unreachable or
+/// made-up address never reaches clients (the Moshpit edge, d1sks).
+type GatewayProbes = Arc<tokio::sync::RwLock<std::collections::HashMap<String, bool>>>;
+
+const GATEWAY_PROBE_EVERY: Duration = Duration::from_secs(120);
+
+/// Drop every `gateway` the last probe did not reach.
+fn keep_reachable_gateways(payload: &mut NodesPayload, probes: &std::collections::HashMap<String, bool>) {
+    for n in &mut payload.nodes {
+        if n.gateway.as_ref().is_some_and(|g| probes.get(g) != Some(&true)) {
+            n.gateway = None;
+        }
+    }
+}
+
+async fn run_gateway_probes(registry: Registry, probes: GatewayProbes) {
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return;
+    };
+    loop {
+        let origins: std::collections::BTreeSet<String> = registry
+            .list()
+            .await
+            .into_iter()
+            .filter_map(|(_, ad)| {
+                ad.hardware
+                    .get("gateway")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::capabilities::gateway_origin)
+            })
+            .collect();
+        let mut set = tokio::task::JoinSet::new();
+        for origin in origins {
+            let http = http.clone();
+            set.spawn(async move {
+                let ok = crate::gateway_announce::answers(&http, &origin).await;
+                (origin, ok)
+            });
+        }
+        let mut seen = std::collections::HashMap::new();
+        while let Some(Ok((origin, ok))) = set.join_next().await {
+            seen.insert(origin, ok);
+        }
+        let reachable = seen.values().filter(|ok| **ok).count();
+        debug!(probed = seen.len(), reachable, "aggregator: gateway probes");
+        *probes.write().await = seen;
+        tokio::time::sleep(GATEWAY_PROBE_EVERY).await;
+    }
 }
 
 async fn build_payload(state: &AppState) -> StatusPayload {
@@ -621,7 +679,9 @@ async fn nodes_handler(State(state): State<AppState>) -> Json<NodesPayload> {
         .into_iter()
         .map(|(p, a)| (p.to_base58(), a))
         .collect();
-    Json(build_nodes(&ads, now_ms()))
+    let mut payload = build_nodes(&ads, now_ms());
+    keep_reachable_gateways(&mut payload, &*state.gateways.read().await);
+    Json(payload)
 }
 
 async fn healthz() -> &'static str {
@@ -755,7 +815,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         tokio::spawn(crate::canary::run(net.clone(), registry.clone(), interval));
     }
 
-    let state = AppState { registry, jobs };
+    let gateways: GatewayProbes = Default::default();
+    tokio::spawn(run_gateway_probes(registry.clone(), gateways.clone()));
+
+    let state = AppState { registry, jobs, gateways };
     let app = Router::new()
         .route("/", get(status_handler))
         .route("/nodes", get(nodes_handler))
@@ -881,6 +944,16 @@ mod tests {
         );
         assert_eq!(p.nodes[1].gateway, None, "an invalid gateway is dropped");
         assert_eq!(p.nodes[2].gateway, None, "no gateway unless announced");
+        // Published only after the aggregator reached it itself.
+        let mut unprobed = build_nodes(&ads, 40_000);
+        keep_reachable_gateways(&mut unprobed, &HashMap::new());
+        assert_eq!(unprobed.nodes[0].gateway, None, "not probed yet: not published");
+        let mut down = build_nodes(&ads, 40_000);
+        keep_reachable_gateways(&mut down, &HashMap::from([("http://203.0.113.7:7777".to_string(), false)]));
+        assert_eq!(down.nodes[0].gateway, None, "unreachable: not published");
+        let mut up = build_nodes(&ads, 40_000);
+        keep_reachable_gateways(&mut up, &HashMap::from([("http://203.0.113.7:7777".to_string(), true)]));
+        assert_eq!(up.nodes[0].gateway.as_deref(), Some("http://203.0.113.7:7777"));
         assert_eq!(
             p.operators,
             vec![OperatorRow {
