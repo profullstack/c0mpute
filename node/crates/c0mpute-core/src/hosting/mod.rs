@@ -2808,6 +2808,8 @@ mod tests {
             addrs: vec!["/ip4/203.0.113.7/tcp/40001".into(); 8],
             price: Some("0.004".into()),
             payout: None,
+            full: false,
+            room_gib: Some(u64::MAX),
             room: Some(u64::MAX),
         })
         .unwrap();
