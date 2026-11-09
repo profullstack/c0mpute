@@ -11,6 +11,11 @@ name: release
 # published + marked Latest on the first upload, so for ~3 minutes after a
 # tag `releases/latest/download/<artifact>` 404'd for every platform still
 # building, and `curl -fsSL https://c0mpute.com/install.sh | sh` failed.
+# Before publishing, the `publish` job signs every artifact with the
+# production minisign key (repo secrets MINISIGN_SECRET_KEY + MINISIGN_PASSWORD;
+# public key minisign.pub) and uploads <artifact>.minisig next to it, which
+# scripts/install.sh requires. A release is never published unsigned.
+#
 # A failed platform leaves the draft unpublished (Latest stays on the
 # previous release); fix and re-run the failed jobs.
 #
@@ -142,6 +147,47 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      # minisign from its upstream release, pinned by sha256 (the same pin
+      # scripts/install.sh uses to verify downloads when minisign is missing).
+      - name: Install minisign (pinned)
+        run: |
+          set -eu
+          curl -fsSL -o "$RUNNER_TEMP/minisign.tar.gz" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" minisign-linux/x86_64/minisign
+          install -m 755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign 2>/dev/null \
+            || sudo install -m 755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          minisign -v
+
+      # Sign every artifact with the production key (public half: minisign.pub,
+      # embedded in scripts/install.sh). Secret key + password live in the
+      # MINISIGN_SECRET_KEY / MINISIGN_PASSWORD repo secrets (source of truth:
+      # logicsrc team vault c0mpute--signing). Only this job sees them.
+      - name: Sign artifacts and upload .minisig files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+          MINISIGN_PUBKEY: RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM
+        run: |
+          set -eu
+          [ -n "$MINISIGN_SECRET_KEY" ] && [ -n "$MINISIGN_PASSWORD" ] || { echo "MINISIGN_SECRET_KEY / MINISIGN_PASSWORD secrets missing; not publishing unsigned" >&2; exit 1; }
+          umask 077
+          work="$RUNNER_TEMP/sign"; mkdir -p "$work"; cd "$work"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
+          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip"
+          for a in $want; do
+            gh release download "$TAG" -p "$a" -p "$a.sha256" --clobber
+            # Sign only what the platform build uploaded: check its checksum first.
+            sha256sum -c "$a.sha256"
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$a" \
+              -t "timestamp:$(date +%s) version:$TAG file:$a" >/dev/null
+            # Must verify against the committed public key (minisign.pub).
+            minisign -V -P "$MINISIGN_PUBKEY" -m "$a"
+            gh release upload "$TAG" "$a.minisig" --clobber
+          done
+
       - name: Check every asset is on the release, then publish it as Latest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -150,14 +196,16 @@ jobs:
           want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip"
           have=$(gh release view "$TAG" --json assets -q '.assets[].name')
           for a in $want; do
-            for f in "$a" "$a.sha256"; do
+            for f in "$a" "$a.sha256" "$a.minisig"; do
               echo "$have" | grep -qx "$f" || { echo "missing asset $f on $TAG; not publishing" >&2; exit 1; }
             done
           done
           gh release edit "$TAG" --draft=false --latest
           # The public download URL must now serve every platform.
           for a in $want; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -L "https://github.com/$GH_REPO/releases/download/$TAG/$a")
-            echo "$a -> $code"
-            [ "$code" = "200" ] || { echo "asset $a not downloadable after publish" >&2; exit 1; }
+            for f in "$a" "$a.minisig"; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -L "https://github.com/$GH_REPO/releases/download/$TAG/$f")
+              echo "$f -> $code"
+              [ "$code" = "200" ] || { echo "asset $f not downloadable after publish" >&2; exit 1; }
+            done
           done

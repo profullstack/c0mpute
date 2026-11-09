@@ -65,6 +65,27 @@ That installs three CLIs into `~/.c0mpute/bin`:
 
 The c0mpute installer pulls each from its own release feed.
 
+### Verified downloads
+
+Every c0mpute release artifact is signed with [minisign](https://jedisct1.github.io/minisign/).
+The public key is [`minisign.pub`](minisign.pub):
+
+```
+RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM
+```
+
+The installer checks `<artifact>.minisig` before it unpacks anything and aborts if the
+signature is missing or does not verify. If `minisign` is not installed it fetches a pinned
+minisign release (checked against a hard-coded sha256) into a temp dir; no root needed.
+`c0mpute` self-updates verify the same signature, with the key compiled in, before swapping
+the binary. To check a download by hand:
+
+```sh
+minisign -Vm c0mpute-linux-x86_64.tar.gz -P RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM
+```
+
+See [SECURITY.md](SECURITY.md).
+
 ## What c0mpute does
 
 ```sh
