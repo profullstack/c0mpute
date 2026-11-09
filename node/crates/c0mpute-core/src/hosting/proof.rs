@@ -131,6 +131,23 @@ pub fn pick_from(all: &[String], nonce: &[u8]) -> Option<String> {
     Some(all[(n % all.len() as u64) as usize].clone())
 }
 
+/// The chunk to ask for when the holder holds only some groups of a striped
+/// site: a nonce-picked group among `groups`, then a nonce-picked chunk in it.
+pub fn pick_chunk_of(layout: &super::stripe::Layout, groups: &[u32], nonce: &[u8]) -> Option<String> {
+    if groups.is_empty() {
+        return None;
+    }
+    let h = Hash::of(nonce).0;
+    let a = u64::from_le_bytes(h[..8].try_into().expect("8 bytes"));
+    let b = u64::from_le_bytes(h[8..16].try_into().expect("8 bytes"));
+    let g = groups[(a % groups.len() as u64) as usize];
+    let chunks = layout.group(g);
+    if chunks.is_empty() {
+        return None;
+    }
+    Some(chunks[(b % chunks.len() as u64) as usize].to_hex())
+}
+
 /// Whether a holder has lost preference: of its most recent [`RECENT`]
 /// receipts signed by a `trusted` key (the site's owner or payer), at least
 /// [`FAIL_LIMIT`] failed. `receipts` may be in any order and may include

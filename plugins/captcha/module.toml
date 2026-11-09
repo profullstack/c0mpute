@@ -22,7 +22,7 @@
 [module]
 id          = "captcha"
 name        = "Captcha — image, slider, audio and math solving"
-version     = "0.3.6"
+version     = "0.3.7"
 kind        = "workload"
 category    = "ai"
 status      = "available"

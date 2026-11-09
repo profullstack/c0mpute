@@ -20,14 +20,17 @@
 //!   through [`crate::payments`], off unless the operator turns it on).
 
 pub mod dns;
+pub mod fetch;
 pub mod market;
 pub mod meta;
 pub mod proof;
 pub mod replicas;
+pub mod seed;
 pub mod settle;
 pub mod site;
+pub mod stripe;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,7 +54,7 @@ use tracing::{debug, info, warn};
 use crate::payments::{Micros, Payee};
 use proof::Receipt;
 use replicas::{Action, ReplicaMap};
-use site::{Manifest, ManifestPart, PartRef, SiteRecord};
+use site::{Manifest, ManifestPart, PartRef, SiteManifest, SiteRecord};
 
 pub const TOPIC: &str = "c0mpute/hosting/v1";
 pub const ROLE_TAG: &str = "c0mpute:role:hosting";
@@ -59,14 +62,28 @@ pub const ROLE_TAG: &str = "c0mpute:role:hosting";
 pub const TARGET_REPLICAS: usize = 3;
 /// Above this many copies, the lowest-ranked holder lets go.
 pub const MAX_REPLICAS: usize = 5;
-/// Default bytes a node will hold for other people's sites.
-pub const DEFAULT_MAX_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-/// Most bytes a node holds for any one owner key, so one publisher cannot
-/// fill every node's budget.
-pub const MAX_BYTES_PER_OWNER: u64 = 1024 * 1024 * 1024;
+/// `[hosting] max_bytes = 0` (the default): the budget follows the disk, see
+/// [`auto_budget`].
+pub const DEFAULT_MAX_BYTES: u64 = 0;
+/// Share of the free space above the free-disk floor an automatic budget may
+/// use, in percent.
+pub const AUTO_BUDGET_PERCENT: u64 = 25;
+/// Most bytes of FREE sites a node holds for any one owner key, so one
+/// publisher cannot fill every volunteer's disk. Sites a node is a preferred
+/// (paid) host for are not counted: it was picked, and is paid, for them.
+pub const MAX_BYTES_PER_OWNER: u64 = 16 * GIB_BYTES;
 /// Sites per holding message, so one message stays well under gossipsub's
 /// 64 KiB limit.
 const SITES_PER_MESSAGE: usize = 200;
+/// Bytes of site entries per holding message (group bitmaps make entries of
+/// striped sites larger than the rest).
+const HOLDING_MESSAGE_BYTES: usize = 40 * 1024;
+/// A group short of copies for this long brings in one more candidate per
+/// period, so a chosen node that cannot take it does not stall the group.
+const WIDEN_AFTER: Duration = Duration::from_secs(180);
+/// Most hosting peers a node keeps itself connected to (see
+/// [`Hosting::connect_hosts`]).
+const CONNECT_HOSTS_MAX: usize = 24;
 
 /// How often things happen. Tests shrink these.
 #[derive(Clone, Debug)]
@@ -128,6 +145,11 @@ pub enum HostingMsg {
         /// first in the rendezvous fill. Absent from older nodes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         room_gib: Option<u64>,
+        /// Bytes it can still take for the network. Sent only by nodes that
+        /// place striped sites, which is how others know to count on them for
+        /// a group. Absent from older nodes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room: Option<u64>,
     },
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
@@ -147,12 +169,20 @@ pub struct Held {
     pub site_id: String,
     pub manifest: String,
     pub seq: u64,
+    /// Striped site held in part: bitmap of the groups held
+    /// ([`stripe::encode_groups`]). Absent = the whole site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<String>,
 }
 
 /// Sites this node holds, persisted next to the chunk store.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Catalog {
     sites: HashMap<String, SiteRecord>,
+    /// Striped sites: the groups of `sites[id]`'s manifest held here. A site
+    /// in `sites` without an entry is held whole.
+    #[serde(default)]
+    stripes: HashMap<String, BTreeSet<u32>>,
 }
 
 struct Inner {
@@ -180,6 +210,12 @@ struct Inner {
     turn: AtomicUsize,
     stopped: std::sync::atomic::AtomicBool,
     fetch_slots: Semaphore,
+    /// Per-peer speed and load for multi-source fetching.
+    stats: fetch::Stats,
+    /// Group layouts of striped manifests, by manifest hash.
+    layouts: RwLock<HashMap<String, Arc<stripe::Layout>>>,
+    /// When each short group was first seen short, for widening.
+    short_since: std::sync::Mutex<HashMap<(String, u32), Instant>>,
     dns: dns::Verifier,
     /// Optional handler for requests with a query string (podcast ad
     /// insertion installs one); it may decline and let the plain serve run.
@@ -196,6 +232,7 @@ struct Inner {
     /// Receipts this node signed, for settlement (kept on disk too).
     own_receipts: RwLock<Vec<Receipt>>,
     receipts_path: Option<PathBuf>,
+    disk_override: Option<(u64, u64)>,
 }
 
 /// Which sites a node challenges.
@@ -265,6 +302,9 @@ pub struct Options {
     pub payout: Option<Payee>,
     /// JSONL file of this node's own receipts (survives restarts).
     pub receipts_path: Option<PathBuf>,
+    /// Pretend the disk has (free, total) bytes instead of asking the OS.
+    /// For tests on machines whose disk is below the free-disk floor.
+    pub disk_override: Option<(u64, u64)>,
 }
 
 impl Default for Options {
@@ -281,6 +321,7 @@ impl Default for Options {
             price: None,
             payout: None,
             receipts_path: None,
+            disk_override: None,
         }
     }
 }
@@ -335,7 +376,10 @@ impl Hosting {
             replicating: RwLock::new(HashSet::new()),
             turn: AtomicUsize::new(0),
             stopped: std::sync::atomic::AtomicBool::new(false),
-            fetch_slots: Semaphore::new(8),
+            fetch_slots: Semaphore::new(128),
+            stats: fetch::Stats::default(),
+            layouts: RwLock::new(HashMap::new()),
+            short_since: std::sync::Mutex::new(HashMap::new()),
             dns: opts.dns,
             hook: std::sync::OnceLock::new(),
             host_hook: std::sync::OnceLock::new(),
@@ -347,6 +391,7 @@ impl Hosting {
             payout: opts.payout.filter(|p| p.valid()),
             own_receipts: RwLock::new(own_receipts),
             receipts_path: opts.receipts_path,
+            disk_override: opts.disk_override,
         });
         let h = Hosting(inner);
         // Records seen before a restart (each re-verified).
@@ -359,10 +404,24 @@ impl Hosting {
         // Sites held before a restart: keep them only if their chunks are
         // still here.
         for (id, rec) in catalog.sites {
-            if h.has_complete_copy(&rec).await {
-                h.0.catalog.write().await.sites.insert(id, rec.clone());
-                h.0.map.write().await.apply_record(rec);
+            match catalog.stripes.get(&id) {
+                Some(groups) => {
+                    let kept = h.complete_groups(&rec, groups).await;
+                    if kept.is_empty() {
+                        continue;
+                    }
+                    let mut cat = h.0.catalog.write().await;
+                    cat.sites.insert(id.clone(), rec.clone());
+                    cat.stripes.insert(id, kept);
+                }
+                None => {
+                    if !h.has_complete_copy(&rec).await {
+                        continue;
+                    }
+                    h.0.catalog.write().await.sites.insert(id, rec.clone());
+                }
             }
+            h.0.map.write().await.apply_record(rec);
         }
         net.subscribe(TOPIC).await.context("subscribe to hosting topic")?;
         h.spawn_gossip_reader();
@@ -394,7 +453,8 @@ impl Hosting {
         let mut rx = self.0.net.messages();
         tokio::spawn(async move {
             // Partial holding lists from multi-part announcements.
-            let mut partial: HashMap<String, (u32, HashMap<String, (String, u64)>)> = HashMap::new();
+            type Part = (u32, HashMap<String, (String, u64)>, HashMap<String, BTreeSet<u32>>);
+            let mut partial: HashMap<String, Part> = HashMap::new();
             loop {
                 let msg: GossipMessage = match rx.recv().await {
                     Ok(m) => m,
@@ -428,6 +488,7 @@ impl Hosting {
                         payout,
                         full,
                         room_gib,
+                        room,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -437,20 +498,41 @@ impl Hosting {
                             }
                         }
                         let parts = parts.clamp(1, 1000);
-                        let entry = partial.entry(source.clone()).or_insert((0, HashMap::new()));
+                        let entry = partial
+                            .entry(source.clone())
+                            .or_insert((0, HashMap::new(), HashMap::new()));
                         if part == 0 {
-                            *entry = (0, HashMap::new());
+                            *entry = (0, HashMap::new(), HashMap::new());
                         }
                         for s in sites.into_iter().take(SITES_PER_MESSAGE) {
+                            if let Some(g) = &s.groups {
+                                // An unreadable bitmap: skip the entry rather
+                                // than count the peer as holding everything.
+                                let Some(gs) = stripe::decode_groups(g) else {
+                                    continue;
+                                };
+                                entry.2.insert(s.site_id.clone(), gs);
+                            }
                             entry.1.insert(s.site_id, (s.manifest, s.seq));
                         }
                         entry.0 += 1;
                         if part + 1 >= parts {
-                            let (_, all) = partial.remove(&source).unwrap_or_default();
+                            let (_, all, groups) = partial.remove(&source).unwrap_or_default();
                             let price = price.as_deref().and_then(|p| crate::payments::parse_usd(p).ok());
                             let payout = payout.filter(|p| p.valid());
+                            let addrs: Vec<String> = addrs.into_iter().take(8).collect();
                             let mut map = h.0.map.write().await;
-                            map.apply_holding_meta(&source, all, Instant::now(), hosts, price, payout);
+                            map.apply_holding_full(
+                                &source,
+                                all,
+                                groups,
+                                Instant::now(),
+                                hosts,
+                                price,
+                                payout,
+                                room,
+                                addrs,
+                            );
                             map.set_full(&source, full);
                             map.set_room(&source, room_gib);
                         }
@@ -473,57 +555,91 @@ impl Hosting {
 
     /// Announce what this node holds, and count itself in its own map.
     pub async fn announce_holding(&self) {
-        let held: Vec<Held> = self
-            .0
-            .catalog
-            .read()
-            .await
-            .sites
-            .values()
-            .map(|r| Held {
-                site_id: r.site_id.clone(),
-                manifest: r.manifest.clone(),
-                seq: r.seq,
-            })
-            .collect();
-        let mine: HashMap<String, (String, u64)> = held
-            .iter()
-            .map(|h| (h.site_id.clone(), (h.manifest.clone(), h.seq)))
-            .collect();
+        let (held, mine, my_groups): (
+            Vec<Held>,
+            HashMap<String, (String, u64)>,
+            HashMap<String, BTreeSet<u32>>,
+        ) = {
+            let cat = self.0.catalog.read().await;
+            let held = cat
+                .sites
+                .values()
+                .map(|r| Held {
+                    site_id: r.site_id.clone(),
+                    manifest: r.manifest.clone(),
+                    seq: r.seq,
+                    groups: cat.stripes.get(&r.site_id).map(stripe::encode_groups),
+                })
+                .collect();
+            let mine = cat
+                .sites
+                .values()
+                .map(|r| (r.site_id.clone(), (r.manifest.clone(), r.seq)))
+                .collect();
+            (held, mine, cat.stripes.clone())
+        };
         let (price, payout) = if self.0.hosts {
             (self.0.price, self.0.payout.clone())
         } else {
             (None, None)
         };
-        let full = self.0.hosts && self.is_full().await;
-        let room_gib = if self.0.hosts { self.room_gib() } else { None };
-        if self.0.hosts || !mine.is_empty() {
-            let mut map = self.0.map.write().await;
-            map.apply_holding_meta(&self.0.me, mine, Instant::now(), self.0.hosts, price, payout.clone());
-            map.set_full(&self.0.me, full);
-            map.set_room(&self.0.me, room_gib);
+        let room = if self.0.hosts {
+            Some(self.room().await)
         } else {
+            None
+        };
+        let full = room.is_some_and(|r| r < FULL_HEADROOM_BYTES);
+        let room_gib = room.map(|r| r / GIB_BYTES);
+        if !self.0.hosts && mine.is_empty() {
             return;
         }
-        let chunks: Vec<&[Held]> = if held.is_empty() {
-            vec![&[]]
-        } else {
-            held.chunks(SITES_PER_MESSAGE).collect()
-        };
-        let parts = chunks.len() as u32;
         let addrs: Vec<String> = self
             .0
             .net
             .advertised_addrs()
             .await
             .into_iter()
-            .filter(|a| !a.to_string().contains("/ip4/0.0.0.0") && !a.to_string().contains("/ip6/::/"))
+            .filter(|a| {
+                !a.to_string().contains("/ip4/0.0.0.0") && !a.to_string().contains("/ip6/::/")
+            })
             .take(8)
             .map(|a| a.to_string())
             .collect();
+        self.0.map.write().await.apply_holding_full(
+            &self.0.me,
+            mine,
+            my_groups,
+            Instant::now(),
+            self.0.hosts,
+            price,
+            payout.clone(),
+            room,
+            addrs.clone(),
+        );
+        {
+            let mut map = self.0.map.write().await;
+            map.set_full(&self.0.me, full);
+            map.set_room(&self.0.me, room_gib);
+        }
+        // Split by count and by size: group bitmaps make striped entries big.
+        let mut chunks: Vec<Vec<Held>> = vec![Vec::new()];
+        let mut bytes = 0usize;
+        for h in held {
+            let len = 120 + h.groups.as_ref().map(|g| g.len()).unwrap_or(0);
+            let cur = chunks.last_mut().expect("one chunk");
+            if !cur.is_empty()
+                && (cur.len() >= SITES_PER_MESSAGE || bytes + len > HOLDING_MESSAGE_BYTES)
+            {
+                chunks.push(Vec::new());
+                bytes = 0;
+            }
+            chunks.last_mut().expect("one chunk").push(h);
+            bytes += len;
+        }
+        let parts = chunks.len() as u32;
         for (i, c) in chunks.into_iter().enumerate() {
             self.publish(&HostingMsg::Holding {
-                sites: c.to_vec(),
+                sites: c,
                 part: i as u32,
                 parts,
                 hosts: self.0.hosts,
@@ -532,8 +648,100 @@ impl Hosting {
                 payout: payout.clone(),
                 full,
                 room_gib,
+                room,
             })
             .await;
+        }
+    }
+
+    /// Bytes this node holds for the network (striped sites: the groups held).
+    async fn held_bytes(&self) -> u64 {
+        let (recs, stripes): (Vec<SiteRecord>, HashMap<String, BTreeSet<u32>>) = {
+            let cat = self.0.catalog.read().await;
+            (cat.sites.values().cloned().collect(), cat.stripes.clone())
+        };
+        let mut total = 0;
+        for r in recs {
+            total += match stripes.get(&r.site_id) {
+                Some(gs) => match self.layout(&r).await {
+                    Ok(l) => l.bytes_of(gs),
+                    Err(_) => {
+                        gs.len() as u64 * (stripe::GROUP_CHUNKS * site::FILE_CHUNK_BYTES) as u64
+                    }
+                },
+                None => r.size,
+            };
+        }
+        total
+    }
+
+    /// (free, total) bytes of the disk the chunk store is on.
+    fn disk(&self) -> (u64, u64) {
+        self.0
+            .disk_override
+            .unwrap_or_else(|| crate::opendisk::disk_for(self.0.store.root()))
+    }
+
+    /// The most this node holds for the network right now: `[hosting]
+    /// max_bytes` when set, else [`auto_budget`] of the disk.
+    pub async fn budget(&self) -> u64 {
+        let held = self.held_bytes().await;
+        self.budget_with(held)
+    }
+
+    fn budget_with(&self, held: u64) -> u64 {
+        if self.0.max_bytes > 0 {
+            return self.0.max_bytes;
+        }
+        let (free, total) = self.disk();
+        auto_budget(held, free, total)
+    }
+
+    /// Bytes this node can still take: within its budget, and leaving the
+    /// free-disk floor.
+    pub async fn room(&self) -> u64 {
+        let held = self.held_bytes().await;
+        let budget = self.budget_with(held);
+        let (free, total) = self.disk();
+        let by_disk = if total == 0 {
+            u64::MAX
+        } else {
+            free.saturating_sub(free_disk_floor(total))
+        };
+        budget.saturating_sub(held).min(by_disk)
+    }
+
+    /// Keep a connection open to the hosting peers that announced a public
+    /// address. c0mpute has no relay: a node behind NAT cannot be dialled, so
+    /// other nodes could never fetch the copies it holds, or the site it is
+    /// publishing. Dialling out to them gives every such peer a connection it
+    /// can fetch over (gossipsub keeps it open).
+    pub async fn connect_hosts(&self) {
+        let connected: HashSet<String> = self
+            .0
+            .net
+            .connected_peers()
+            .await
+            .iter()
+            .map(|p| p.to_base58())
+            .collect();
+        let targets: Vec<String> = {
+            let map = self.0.map.read().await;
+            let mut v: Vec<String> = map
+                .peers
+                .iter()
+                .filter(|(p, h)| h.hosts && **p != self.0.me && !connected.contains(*p))
+                .filter(|(_, h)| h.addrs.iter().any(|a| public_tcp_addr(a)))
+                .map(|(p, _)| p.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        let room = CONNECT_HOSTS_MAX.saturating_sub(connected.len().min(CONNECT_HOSTS_MAX));
+        for p in targets.into_iter().take(room.max(4)) {
+            if let Ok(pid) = p.parse::<c0mpute_net::PeerId>() {
+                let _ = self.0.net.connect(pid).await;
+            }
         }
     }
 
@@ -590,6 +798,7 @@ impl Hosting {
                     return;
                 }
                 h.announce_holding().await;
+                h.connect_hosts().await;
                 if last_records.elapsed() >= h.0.timing.records_every {
                     h.announce_records().await;
                     last_records = Instant::now();
@@ -621,25 +830,29 @@ impl Hosting {
         // A full node does not put itself forward for new copies (it would be
         // chosen, fail, and hold the slot from the next ranked node).
         let can_take = self.0.hosts && !self.is_full().await;
-        let actions: Vec<(SiteRecord, Action)> = {
+        let (whole, striped): (Vec<(SiteRecord, Action)>, Vec<SiteRecord>) = {
             let mut map = self.0.map.write().await;
             map.prune(Instant::now(), self.0.timing.holder_ttl);
-            map.records
-                .values()
-                .map(|r| {
-                    let a = replicas::decide(
-                        &map,
-                        &r.site_id,
-                        &self.0.me,
-                        can_take,
-                        TARGET_REPLICAS,
-                        MAX_REPLICAS,
-                    );
-                    (r.clone(), a)
-                })
-                .collect()
+            let mut whole = Vec::new();
+            let mut striped = Vec::new();
+            for r in map.records.values() {
+                if stripe::is_striped(r.size) {
+                    striped.push(r.clone());
+                    continue;
+                }
+                let a = replicas::decide(
+                    &map,
+                    &r.site_id,
+                    &self.0.me,
+                    can_take,
+                    TARGET_REPLICAS,
+                    MAX_REPLICAS,
+                );
+                whole.push((r.clone(), a));
+            }
+            (whole, striped)
         };
-        for (rec, action) in actions {
+        for (rec, action) in whole {
             // A site we hold whose record moved on: fetch the new version.
             let stale = self
                 .0
@@ -659,6 +872,88 @@ impl Hosting {
                 Action::Nothing if stale => self.spawn_replicate(rec),
                 Action::Nothing => {}
             }
+        }
+        for rec in striped {
+            self.repair_striped(rec).await;
+        }
+    }
+
+    /// One striped site: work out which groups this node should take or let
+    /// go, then do it.
+    async fn repair_striped(&self, rec: SiteRecord) {
+        let held = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
+        // Only nodes that host, or already hold groups, need the manifest.
+        if !self.0.hosts && held.is_none() {
+            return;
+        }
+        // Holding the current version whole (a publisher seeding it): nothing
+        // to place. An older whole copy is replaced group by group below.
+        if held.as_ref().is_some_and(|h| h.seq >= rec.seq)
+            && !self
+                .0
+                .catalog
+                .read()
+                .await
+                .stripes
+                .contains_key(&rec.site_id)
+        {
+            return;
+        }
+        if self.0.replicating.read().await.contains(&rec.site_id) {
+            return;
+        }
+        let layout = match self.layout(&rec).await {
+            Ok(l) => l,
+            Err(e) => {
+                debug!(site = %rec.site_id, err = %e, "hosting: striped manifest unavailable");
+                return;
+            }
+        };
+        let plan = {
+            let map = self.0.map.read().await;
+            let holders = map.group_holders(&rec.site_id, layout.len(), true);
+            let now = Instant::now();
+            let mut short = self.0.short_since.lock().expect("short_since");
+            for (g, hs) in holders.iter().enumerate() {
+                let key = (rec.site_id.clone(), g as u32);
+                if hs.len() < TARGET_REPLICAS {
+                    short.entry(key).or_insert(now);
+                } else {
+                    short.remove(&key);
+                }
+            }
+            let widen = |g: u32| -> usize {
+                short
+                    .get(&(rec.site_id.clone(), g))
+                    .map(|t| (now.duration_since(*t).as_secs() / WIDEN_AFTER.as_secs()) as usize)
+                    .unwrap_or(0)
+            };
+            stripe::plan(
+                &map,
+                &rec.site_id,
+                &layout,
+                &self.0.me,
+                self.0.hosts,
+                TARGET_REPLICAS,
+                MAX_REPLICAS,
+                &widen,
+            )
+        };
+        let stale = held.as_ref().is_some_and(|h| h.seq < rec.seq);
+        if !plan.drop.is_empty() && !stale {
+            self.drop_groups(&rec.site_id, &plan.drop).await;
+        }
+        let mine: BTreeSet<u32> = self
+            .0
+            .catalog
+            .read()
+            .await
+            .stripes
+            .get(&rec.site_id)
+            .cloned()
+            .unwrap_or_default();
+        if stale || plan.fetch.iter().any(|g| !mine.contains(g)) {
+            self.spawn_replicate_groups(rec, plan.fetch);
         }
     }
 
@@ -683,81 +978,132 @@ impl Hosting {
         });
     }
 
-    /// True when this node cannot take another copy: its disk is at the free
-    /// floor (with a little headroom) or its hosting budget is used up.
+    /// True when this node cannot take another copy: what it may still take
+    /// (budget and free-disk floor, see [`Self::room`]) is under a little
+    /// headroom.
     pub async fn is_full(&self) -> bool {
-        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
-        !leaves_free_floor(disk_free, disk_total, FULL_HEADROOM_BYTES)
-            || self.held_bytes().await.saturating_add(FULL_HEADROOM_BYTES) > self.0.max_bytes
+        self.room().await < FULL_HEADROOM_BYTES
     }
 
-    /// Free disk above the floor in whole GiB, or None when the disk is unknown.
-    fn room_gib(&self) -> Option<u64> {
-        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
-        if disk_total == 0 {
-            return None;
-        }
-        Some(disk_free.saturating_sub(free_disk_floor(disk_total)) / GIB_BYTES)
+    fn spawn_replicate_groups(&self, rec: SiteRecord, groups: Vec<u32>) {
+        let h = self.clone();
+        tokio::spawn(async move {
+            {
+                let mut busy = h.0.replicating.write().await;
+                if !busy.insert(rec.site_id.clone()) {
+                    return;
+                }
+            }
+            let id = rec.site_id.clone();
+            match h.replicate_groups(&rec, &groups).await {
+                Ok(n) if n > 0 => {
+                    info!(site = %id, name = %rec.name, groups = n, "hosting: holding groups of a striped site");
+                }
+                Ok(_) => {}
+                Err(e) => warn!(site = %id, err = %e, "hosting: replicate failed"),
+            }
+            h.announce_holding().await;
+            h.0.replicating.write().await.remove(&id);
+        });
     }
 
-    async fn held_bytes(&self) -> u64 {
-        self.0.catalog.read().await.sites.values().map(|r| r.size).sum()
-    }
-
-    /// Fetch every chunk of `rec` and start holding it.
-    pub async fn replicate(&self, rec: &SiteRecord) -> Result<()> {
-        let previous = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
-        let already = previous.as_ref().map(|p| p.size).unwrap_or(0);
-        if self.held_bytes().await - already + rec.size > self.0.max_bytes {
-            bail!("over this node's hosting budget");
-        }
-        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
-        if !leaves_free_floor(disk_free, disk_total, rec.size.saturating_sub(already)) {
-            bail!(
-                "disk nearly full: {} GiB free, a copy must leave at least {} GiB",
-                disk_free / GIB_BYTES,
-                free_disk_floor(disk_total) / GIB_BYTES
-            );
-        }
-        let owner_bytes: u64 = self
+    /// The per-owner limit applies to free copies only: a preferred host was
+    /// picked (and is paid) for the site.
+    async fn owner_bytes_excluding(&self, rec: &SiteRecord) -> u64 {
+        let recs: Vec<SiteRecord> = self
             .0
             .catalog
             .read()
             .await
             .sites
             .values()
-            .filter(|r| r.owner == rec.owner && r.site_id != rec.site_id)
-            .map(|r| r.size)
-            .sum();
-        if owner_bytes + rec.size > MAX_BYTES_PER_OWNER {
-            bail!("over this node's per-owner hosting budget");
+            .filter(|r| r.owner == rec.owner && r.site_id != rec.site_id && !r.prefers(&self.0.me))
+            .cloned()
+            .collect();
+        let stripes = self.0.catalog.read().await.stripes.clone();
+        let mut total = 0;
+        for r in recs {
+            total += match stripes.get(&r.site_id) {
+                Some(gs) => self.layout(&r).await.map(|l| l.bytes_of(gs)).unwrap_or(0),
+                None => r.size,
+            };
         }
+        total
+    }
+
+    /// Whether this node may take `extra` more bytes of `rec`: budget, the
+    /// free-disk floor, and (free copies only) the per-owner limit. The error
+    /// says which limit.
+    async fn check_room(&self, rec: &SiteRecord, extra: u64, this_site_held: u64) -> Result<()> {
+        let held = self.held_bytes().await;
+        let budget = self.budget_with(held);
+        if held + extra > budget {
+            bail!(
+                "over this node's hosting budget ({} GiB held of {} GiB; set [hosting] max_bytes to change it)",
+                held / GIB_BYTES,
+                budget / GIB_BYTES
+            );
+        }
+        let (disk_free, disk_total) = self.disk();
+        if !leaves_free_floor(disk_free, disk_total, extra) {
+            bail!(
+                "disk nearly full: {} GiB free, a copy must leave at least {} GiB",
+                disk_free / GIB_BYTES,
+                free_disk_floor(disk_total) / GIB_BYTES
+            );
+        }
+        if !rec.prefers(&self.0.me) {
+            let owner = self.owner_bytes_excluding(rec).await;
+            if owner + this_site_held + extra > MAX_BYTES_PER_OWNER {
+                bail!(
+                    "over this node's per-owner limit for free hosting ({} GiB)",
+                    MAX_BYTES_PER_OWNER / GIB_BYTES
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetch every chunk of `rec` and start holding it.
+    pub async fn replicate(&self, rec: &SiteRecord) -> Result<()> {
+        let previous = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
+        let already = previous.as_ref().map(|p| p.size).unwrap_or(0);
+        self.check_room(rec, rec.size.saturating_sub(already), 0)
+            .await?;
         let manifest = self.manifest(rec).await?;
         if manifest.total_bytes() != rec.size || manifest.name() != rec.name {
             bail!("manifest does not match its record");
         }
         let holders = self.0.map.read().await.sources(&rec.site_id);
-        // Files part by part (a large site's chunk list never sits in memory
-        // whole); the root goes in last, marking the copy complete.
-        let mut todo: Vec<String> = Vec::new();
+        // Part by part for a parted manifest (its chunk list never sits in
+        // memory whole), many chunks in flight; the root goes in last,
+        // marking the copy complete.
         match &*manifest {
-            Manifest::Inline(m) => todo.extend(m.chunk_hashes()),
+            Manifest::Inline(m) => {
+                let wanted: Vec<(Hash, Vec<String>)> = m
+                    .chunk_hashes()
+                    .iter()
+                    .filter_map(|h| Hash::from_hex(h).ok())
+                    .map(|h| (h, holders.clone()))
+                    .collect();
+                self.fetch_into_store(wanted, fetch::BULK_WINDOW).await?;
+            }
             Manifest::Parted(r) => {
                 for pr in &r.parts {
                     let part = self.part(&rec.site_id, pr).await?;
-                    let hashes: Vec<String> = part.chunk_hashes().cloned().collect();
-                    self.store_chunks(&hashes, &holders).await?;
-                    self.0.store.put(&serde_json::to_vec(&*part)?).await?;
+                    let mut hs: Vec<Hash> = part.chunk_hashes().filter_map(|h| Hash::from_hex(h).ok()).collect();
+                    hs.sort_by(|a, b| a.0.cmp(&b.0));
+                    hs.dedup();
+                    let wanted = hs.into_iter().map(|h| (h, holders.clone())).collect();
+                    self.fetch_into_store(wanted, fetch::BULK_WINDOW).await?;
                 }
             }
         }
-        self.store_chunks(&todo, &holders).await?;
-        let mh = Hash::from_hex(&rec.manifest).context("manifest hash")?;
-        let mbytes = self.fetch_chunk(&mh, &holders).await?;
-        self.0.store.put(&mbytes).await?;
+        self.store_manifest(rec, &manifest).await?;
         {
             let mut cat = self.0.catalog.write().await;
             cat.sites.insert(rec.site_id.clone(), rec.clone());
+            cat.stripes.remove(&rec.site_id);
         }
         self.save_catalog().await;
         if let Some(old) = previous
@@ -773,10 +1119,260 @@ impl Hosting {
         Ok(())
     }
 
+    /// Store a manifest's parts and root locally (every holder keeps them,
+    /// so any holder can answer for the manifest). The root goes in last.
+    async fn store_manifest(&self, rec: &SiteRecord, manifest: &Manifest) -> Result<()> {
+        if let Manifest::Parted(r) = manifest {
+            for pr in &r.parts {
+                let part = self.part(&rec.site_id, pr).await?;
+                self.0.store.put(&serde_json::to_vec(&*part)?).await?;
+            }
+        }
+        let mh = Hash::from_hex(&rec.manifest).context("manifest hash")?;
+        if !self.0.store.has(&mh).await {
+            let holders = self.0.map.read().await.sources(&rec.site_id);
+            let bytes = self.fetch_chunk(&mh, &holders).await?;
+            self.0.store.put(&bytes).await?;
+        }
+        Ok(())
+    }
+
+    /// Fetch chunks that are not local yet, `window` at a time, from their
+    /// sources, into the store. Chunks that fail are retried once (sources
+    /// may have changed); the error names how many are still missing.
+    async fn fetch_into_store(
+        &self,
+        wanted: Vec<(Hash, Vec<String>)>,
+        window: usize,
+    ) -> Result<u64> {
+        use futures::StreamExt;
+        let mut todo = Vec::new();
+        for (h, src) in wanted {
+            if !self.0.store.has(&h).await {
+                todo.push((h, src));
+            }
+        }
+        let mut fetched = 0u64;
+        for attempt in 0..2 {
+            if todo.is_empty() {
+                break;
+            }
+            let results: Vec<(Hash, Vec<String>, Result<usize>)> =
+                futures::stream::iter(todo.into_iter())
+                    .map(|(h, src)| async move {
+                        let r = match self.fetch_chunk(&h, &src).await {
+                            Ok(bytes) => self.0.store.put(&bytes).await.map(|_| bytes.len()),
+                            Err(e) => Err(e),
+                        };
+                        (h, src, r)
+                    })
+                    .buffer_unordered(window.max(1))
+                    .collect()
+                    .await;
+            todo = Vec::new();
+            let mut last_err = None;
+            for (h, src, r) in results {
+                match r {
+                    Ok(n) => fetched += n as u64,
+                    Err(e) => {
+                        last_err = Some(e);
+                        todo.push((h, src));
+                    }
+                }
+            }
+            if attempt == 1
+                && let Some(e) = last_err
+            {
+                bail!("{} chunks still missing: {e}", todo.len());
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// Fetch the given groups of a striped site (those not held yet) and
+    /// hold them. A newer version of a site held in part is fetched in full
+    /// (chunks it shares with the old version are not fetched again) before
+    /// it replaces the old one. Returns how many groups were added.
+    pub async fn replicate_groups(&self, rec: &SiteRecord, groups: &[u32]) -> Result<usize> {
+        let manifest = self.manifest(rec).await?;
+        if manifest.total_bytes() != rec.size || manifest.name() != rec.name {
+            bail!("manifest does not match its record");
+        }
+        let layout = self.layout(rec).await?;
+        let previous = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
+        let same_version = previous
+            .as_ref()
+            .is_some_and(|p| p.manifest == rec.manifest);
+        let mine: BTreeSet<u32> = if same_version {
+            self.0
+                .catalog
+                .read()
+                .await
+                .stripes
+                .get(&rec.site_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        };
+        if same_version && previous.as_ref().is_some_and(|p| p.seq < rec.seq) {
+            // Same content, newer record (a re-publish): nothing to fetch.
+            self.0
+                .catalog
+                .write()
+                .await
+                .sites
+                .insert(rec.site_id.clone(), rec.clone());
+            self.save_catalog().await;
+        }
+        let todo: Vec<u32> = groups
+            .iter()
+            .copied()
+            .filter(|g| !mine.contains(g) && (*g as usize) < layout.len())
+            .collect();
+        if todo.is_empty() {
+            if !same_version && previous.is_some() {
+                // The new version needs nothing from us: let the old one go.
+                self.drop_site(&rec.site_id).await?;
+            }
+            return Ok(0);
+        }
+        self.store_manifest(rec, &manifest).await?;
+        let this_site = std::sync::atomic::AtomicU64::new(layout.bytes_of(&mine));
+        let mut added: BTreeSet<u32> = BTreeSet::new();
+        let mut last_announce = Instant::now();
+        let mut first_err: Option<anyhow::Error> = None;
+        let full = std::sync::atomic::AtomicBool::new(false);
+        {
+            use futures::StreamExt;
+            // Two groups at a time keeps the pipe full between groups.
+            let layout2 = layout.clone();
+            let mut results = futures::stream::iter(todo)
+                .map(|g| {
+                    let layout = layout2.clone();
+                    let this_site = &this_site;
+                    let full = &full;
+                    async move {
+                        if full.load(Ordering::Relaxed) || self.is_stopped() {
+                            return (g, Err(anyhow::anyhow!("stopped")));
+                        }
+                        let need = layout.bytes(g);
+                        if let Err(e) = self
+                            .check_room(rec, need, this_site.load(Ordering::Relaxed))
+                            .await
+                        {
+                            full.store(true, Ordering::Relaxed);
+                            return (g, Err(e));
+                        }
+                        this_site.fetch_add(need, Ordering::Relaxed);
+                        let sources = self.0.map.read().await.group_sources(&rec.site_id, g);
+                        let wanted: Vec<(Hash, Vec<String>)> = layout
+                            .group(g)
+                            .iter()
+                            .map(|h| (*h, sources.clone()))
+                            .collect();
+                        let r = self.fetch_into_store(wanted, fetch::BULK_WINDOW).await;
+                        if r.is_err() {
+                            this_site.fetch_sub(need, Ordering::Relaxed);
+                        }
+                        (
+                            g,
+                            r.map(|_| ()).map_err(|e| e.context(format!("group {g}"))),
+                        )
+                    }
+                })
+                .buffer_unordered(2);
+            while let Some((g, r)) = results.next().await {
+                if let Err(e) = r {
+                    if !e.to_string().contains("stopped") {
+                        first_err.get_or_insert(e);
+                    }
+                    continue;
+                }
+                added.insert(g);
+                if same_version {
+                    // Hold each group as soon as it is complete, so the copy
+                    // counts (and a restart resumes) group by group.
+                    {
+                        let mut cat = self.0.catalog.write().await;
+                        cat.sites.insert(rec.site_id.clone(), rec.clone());
+                        cat.stripes
+                            .entry(rec.site_id.clone())
+                            .or_default()
+                            .insert(g);
+                    }
+                    self.save_catalog().await;
+                    if last_announce.elapsed() > Duration::from_secs(20) {
+                        self.announce_holding().await;
+                        last_announce = Instant::now();
+                    }
+                }
+            }
+        }
+        if !same_version && !added.is_empty() {
+            {
+                let mut cat = self.0.catalog.write().await;
+                cat.sites.insert(rec.site_id.clone(), rec.clone());
+                cat.stripes.insert(rec.site_id.clone(), added.clone());
+            }
+            self.save_catalog().await;
+            if let Some(old) = &previous {
+                self.collect_garbage(old, None).await;
+            }
+        }
+        if previous.is_none() || !same_version {
+            let _ = self
+                .0
+                .net
+                .announce(&Hash::from_hex(&rec.manifest).context("manifest hash")?)
+                .await;
+        }
+        match first_err {
+            Some(e) if added.is_empty() => Err(e),
+            Some(e) => {
+                warn!(site = %rec.site_id, err = %e, "hosting: some groups not taken");
+                Ok(added.len())
+            }
+            None => Ok(added.len()),
+        }
+    }
+
+    /// Let go of some groups of a striped site: announce first, delete their
+    /// chunks once peers have seen it (as [`Self::drop_site`] does).
+    async fn drop_groups(&self, site_id: &str, groups: &[u32]) {
+        let rec = {
+            let mut cat = self.0.catalog.write().await;
+            let Some(rec) = cat.sites.get(site_id).cloned() else {
+                return;
+            };
+            let Some(mine) = cat.stripes.get_mut(site_id) else {
+                return;
+            };
+            for g in groups {
+                mine.remove(g);
+            }
+            if mine.is_empty() {
+                cat.stripes.remove(site_id);
+                cat.sites.remove(site_id);
+            }
+            rec
+        };
+        self.save_catalog().await;
+        self.announce_holding().await;
+        info!(site = %site_id, groups = groups.len(), "hosting: released surplus groups");
+        let h = self.clone();
+        let grace = self.0.timing.holder_ttl;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            h.collect_garbage(&rec, None).await;
+        });
+    }
+
     async fn drop_site(&self, site_id: &str) -> Result<()> {
         let Some(rec) = self.0.catalog.write().await.sites.remove(site_id) else {
             return Ok(());
         };
+        self.0.catalog.write().await.stripes.remove(site_id);
         self.save_catalog().await;
         // Tell the network first, and keep the chunks (still served to
         // fetches and challenges) until peers have certainly seen that we no
@@ -797,6 +1393,28 @@ impl Hosting {
         Ok(())
     }
 
+    /// The chunks (data and manifest) a held site needs kept.
+    async fn live_chunks_of(&self, rec: &SiteRecord, groups: Option<&BTreeSet<u32>>, live: &mut HashSet<String>) {
+        live.insert(rec.manifest.clone());
+        let Ok(m) = self.manifest(rec).await else {
+            return;
+        };
+        match groups {
+            Some(gs) => {
+                if let Manifest::Parted(r) = &*m {
+                    live.extend(r.parts.iter().map(|p| p.hash.clone()));
+                }
+                if let Ok(layout) = self.layout(rec).await {
+                    for g in gs {
+                        live.extend(layout.group(*g).iter().map(|h| h.to_hex()));
+                    }
+                }
+            }
+            // Whole: every chunk, parts included.
+            None => live.extend(self.chunk_set(&rec.site_id, &m).await),
+        }
+    }
+
     /// Delete chunks of `old` that no held site (and not `keep`) still uses.
     async fn collect_garbage(&self, old: &SiteRecord, keep: Option<&Manifest>) {
         let Ok(old_manifest) = self.manifest(old).await else {
@@ -806,12 +1424,12 @@ impl Hosting {
         if let Some(k) = keep {
             live.extend(self.chunk_set(&old.site_id, k).await);
         }
-        let held: Vec<SiteRecord> = self.0.catalog.read().await.sites.values().cloned().collect();
+        let (held, stripes): (Vec<SiteRecord>, HashMap<String, BTreeSet<u32>>) = {
+            let cat = self.0.catalog.read().await;
+            (cat.sites.values().cloned().collect(), cat.stripes.clone())
+        };
         for r in held {
-            live.insert(r.manifest.clone());
-            if let Ok(m) = self.manifest(&r).await {
-                live.extend(self.chunk_set(&r.site_id, &m).await);
-            }
+            self.live_chunks_of(&r, stripes.get(&r.site_id), &mut live).await;
         }
         let doomed = self.chunk_set(&old.site_id, &old_manifest).await;
         for h in doomed.into_iter().chain([old.manifest.clone()]) {
@@ -838,39 +1456,57 @@ impl Hosting {
     }
 
     async fn has_complete_copy(&self, rec: &SiteRecord) -> bool {
-        let Ok(mh) = Hash::from_hex(&rec.manifest) else {
+        let Ok(files) = self.local_files(rec).await else {
             return false;
         };
-        let Ok(bytes) = self.0.store.get(&mh).await else {
-            return false;
-        };
-        let Ok(m) = Manifest::from_bytes(&bytes) else {
-            return false;
-        };
-        let mut hashes: Vec<String> = Vec::new();
-        match &m {
-            Manifest::Inline(m) => hashes.extend(m.chunk_hashes()),
-            Manifest::Parted(r) => {
-                for pr in &r.parts {
-                    let Ok(ph) = Hash::from_hex(&pr.hash) else { return false };
-                    let Ok(pb) = self.0.store.get(&ph).await else { return false };
-                    let Ok(part) = ManifestPart::from_bytes(&pb, pr) else { return false };
-                    for h in part.chunk_hashes() {
-                        match Hash::from_hex(h) {
-                            Ok(hash) if self.0.store.has(&hash).await => {}
-                            _ => return false,
-                        }
-                    }
+        for f in &files {
+            for h in &f.chunks {
+                match Hash::from_hex(h) {
+                    Ok(hash) if self.0.store.has(&hash).await => {}
+                    _ => return false,
                 }
             }
         }
-        for h in hashes {
-            match Hash::from_hex(&h) {
-                Ok(hash) if self.0.store.has(&hash).await => {}
-                _ => return false,
+        true
+    }
+
+    /// The groups of `groups` whose chunks are all still here.
+    async fn complete_groups(&self, rec: &SiteRecord, groups: &BTreeSet<u32>) -> BTreeSet<u32> {
+        let Ok(files) = self.local_files(rec).await else {
+            return BTreeSet::new();
+        };
+        let layout = stripe::Layout::new(stripe::group_count(rec.size), files.iter());
+        let mut out = BTreeSet::new();
+        'g: for g in groups {
+            if *g as usize >= layout.len() {
+                continue;
+            }
+            for h in layout.group(*g) {
+                if !self.0.store.has(h).await {
+                    continue 'g;
+                }
+            }
+            out.insert(*g);
+        }
+        out
+    }
+
+    /// Every file entry of a site, from local chunks only (root and parts).
+    async fn local_files(&self, rec: &SiteRecord) -> Result<Vec<site::FileEntry>> {
+        let mh = Hash::from_hex(&rec.manifest).context("manifest hash")?;
+        let bytes = self.0.store.get(&mh).await?;
+        match Manifest::from_bytes(&bytes)? {
+            Manifest::Inline(m) => Ok(m.files.into_values().collect()),
+            Manifest::Parted(r) => {
+                let mut out = Vec::new();
+                for pr in &r.parts {
+                    let ph = Hash::from_hex(&pr.hash).context("part hash")?;
+                    let pb = self.0.store.get(&ph).await?;
+                    out.extend(ManifestPart::from_bytes(&pb, pr)?.files.into_values());
+                }
+                Ok(out)
             }
         }
-        true
     }
 
     // ── publishing ───────────────────────────────────────────────────────
@@ -903,6 +1539,43 @@ impl Hosting {
         self.announce_holding().await;
         let _ = self.0.net.announce(&mh).await;
         Ok(())
+    }
+
+    /// Hand a site scanned in place to the network: its chunks are served
+    /// straight from the source files ([`seed`]), only the manifest is stored.
+    /// Publishing the same version again (to resume) is accepted.
+    pub async fn publish_scanned(&self, scanned: &site::ScannedSite, record: SiteRecord) -> Result<()> {
+        seed::register(&scanned.locations);
+        let stored = scanned.manifest.stored();
+        for p in &stored.parts {
+            self.0.store.put(p).await?;
+        }
+        let mh = self.0.store.put(&stored.root).await?;
+        if mh.to_hex() != record.manifest {
+            bail!("record does not point at this manifest");
+        }
+        let applied = self.0.map.write().await.apply_record(record.clone());
+        if !applied && self.record_for(&record.site_id).await.as_ref() != Some(&record) {
+            bail!("record rejected (bad signature, or a newer version exists)");
+        }
+        self.0
+            .catalog
+            .write()
+            .await
+            .sites
+            .insert(record.site_id.clone(), record.clone());
+        self.save_catalog().await;
+        self.publish(&HostingMsg::Record { record }).await;
+        self.announce_holding().await;
+        let _ = self.0.net.announce(&mh).await;
+        Ok(())
+    }
+
+    /// Per-group holders of a striped site, from this node's map.
+    pub async fn group_holders(&self, rec: &SiteRecord) -> Result<(Arc<stripe::Layout>, Vec<Vec<String>>)> {
+        let layout = self.layout(rec).await?;
+        let holders = self.0.map.read().await.group_holders(&rec.site_id, layout.len(), true);
+        Ok((layout, holders))
     }
 
     /// Re-gossip a record (publishers repeat it while the mesh forms).
@@ -969,6 +1642,18 @@ impl Hosting {
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
+    }
+
+    /// Per-group copy health of a striped site (`None` for a whole site).
+    pub async fn health(&self, rec: &SiteRecord) -> Option<stripe::Health> {
+        if !stripe::is_striped(rec.size) {
+            return None;
+        }
+        let map = self.0.map.read().await;
+        Some(stripe::health(
+            &map.group_holders(&rec.site_id, stripe::group_count(rec.size), true),
+            TARGET_REPLICAS,
+        ))
     }
 
     /// Every known site: record plus live copy count.
@@ -1065,7 +1750,24 @@ impl Hosting {
     ) -> Result<Receipt> {
         let manifest = self.manifest(rec).await?;
         let nonce: [u8; 32] = rand::random();
+        let striped_pick = if stripe::is_striped(rec.size) {
+            // Only a chunk of a group the holder says it holds.
+            let layout = self.layout(rec).await?;
+            let groups: Vec<u32> = {
+                let map = self.0.map.read().await;
+                map.group_holders(&rec.site_id, layout.len(), true)
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hs)| hs.iter().any(|p| p == holder))
+                    .map(|(g, _)| g as u32)
+                    .collect()
+            };
+            Some(proof::pick_chunk_of(&layout, &groups, &nonce).context("holder holds no groups")?)
+        } else {
+            None
+        };
         let chunk = match &*manifest {
+            _ if striped_pick.is_some() => striped_pick,
             Manifest::Inline(m) => proof::pick_chunk(m, &nonce),
             Manifest::Parted(r) => {
                 // A random part, then a random chunk of it (or the part itself).
@@ -1196,54 +1898,76 @@ impl Hosting {
 
     // ── fetching ─────────────────────────────────────────────────────────
 
+    /// One chunk: local (store, or a file this process is publishing), else
+    /// from the best of `holders` (see [`fetch`]).
     async fn fetch_chunk(&self, hash: &Hash, holders: &[String]) -> Result<Vec<u8>> {
-        let _slot = self.0.fetch_slots.acquire().await?;
         if self.0.store.has(hash).await {
             return self.0.store.get(hash).await;
         }
-        let order = {
-            let turn = self.0.turn.fetch_add(1, Ordering::Relaxed);
-            self.0.map.read().await.proxy_order(holders, turn)
-        };
-        let req = ChunkRequest {
-            chunk_hash: *hash,
-            shard_index: None,
-        };
-        let mut last = String::from("no holders");
-        for peer in order.iter().filter(|p| **p != self.0.me) {
-            let Ok(pid) = peer.parse::<c0mpute_net::PeerId>() else {
-                continue;
-            };
-            let started = Instant::now();
-            match tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await {
-                Ok(Ok(bytes)) if Hash::of(&bytes) == *hash => {
-                    let ms = started.elapsed().as_secs_f64() * 1000.0;
-                    self.0.map.write().await.observe_rtt(peer, ms);
-                    return Ok(bytes);
-                }
-                Ok(Ok(_)) => last = format!("{peer} sent bytes that do not match the hash"),
-                Ok(Err(e)) => last = format!("{peer}: {e}"),
-                Err(_) => last = format!("{peer}: timed out"),
-            }
-            // A failed holder sorts last until it proves itself again.
-            self.0.map.write().await.observe_rtt(peer, 5_000.0);
+        if let Some(bytes) = seed::read_async(hash).await {
+            return Ok(bytes);
         }
-        // Last resort: the DHT (any peer that announced the chunk).
-        match tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch(&req)).await {
-            Ok(Ok(bytes)) if Hash::of(&bytes) == *hash => Ok(bytes),
-            _ => bail!("could not fetch chunk {}: {last}", hash.to_hex()),
+        let _slot = self.0.fetch_slots.acquire().await?;
+        let turn = self.0.turn.fetch_add(1, Ordering::Relaxed);
+        fetch::fetch_one(
+            &self.0.net,
+            &self.0.stats,
+            &self.0.me,
+            hash,
+            holders,
+            self.0.timing.fetch_timeout,
+            turn,
+        )
+        .await
+    }
+
+    /// Bytes received from each peer by this node's fetches so far.
+    pub fn fetched_by_peer(&self) -> Vec<(String, u64)> {
+        self.0.stats.bytes_by_peer()
+    }
+
+    /// Every file entry of a site (all parts of a parted manifest).
+    async fn files_of(&self, rec: &SiteRecord, m: &Manifest) -> Result<Vec<site::FileEntry>> {
+        match m {
+            Manifest::Inline(m) => Ok(m.files.values().cloned().collect()),
+            Manifest::Parted(r) => {
+                let mut out = Vec::new();
+                for pr in &r.parts {
+                    out.extend(self.part(&rec.site_id, pr).await?.files.values().cloned());
+                }
+                Ok(out)
+            }
         }
     }
 
-    async fn store_chunks(&self, hashes: &[String], holders: &[String]) -> Result<()> {
-        for h in hashes {
-            let hash = Hash::from_hex(h).context("bad chunk hash")?;
-            if !self.0.store.has(&hash).await {
-                let bytes = self.fetch_chunk(&hash, holders).await?;
-                self.0.store.put(&bytes).await?;
-            }
+    /// The group layout of a striped site's current manifest.
+    async fn layout(&self, rec: &SiteRecord) -> Result<Arc<stripe::Layout>> {
+        if let Some(l) = self.0.layouts.read().await.get(&rec.manifest) {
+            return Ok(l.clone());
         }
-        Ok(())
+        let m = self.manifest(rec).await?;
+        let files = self.files_of(rec, &m).await?;
+        let l = Arc::new(stripe::Layout::new(stripe::group_count(rec.size), files.iter()));
+        let mut cache = self.0.layouts.write().await;
+        if cache.len() > 64 {
+            cache.clear();
+        }
+        cache.insert(rec.manifest.clone(), l.clone());
+        Ok(l)
+    }
+
+    /// Where to fetch the chunks of `rec` from: per chunk for a striped site
+    /// (the holders of its group, found from its hash), else every source.
+    async fn chunk_sources(&self, rec: &SiteRecord) -> ChunkSources {
+        let map = self.0.map.read().await;
+        if !stripe::is_striped(rec.size) {
+            return ChunkSources::Whole(map.sources(&rec.site_id));
+        }
+        let n = stripe::group_count(rec.size);
+        ChunkSources::Striped {
+            n,
+            per_group: map.group_holders(&rec.site_id, n, false),
+        }
     }
 
     /// One part of a large site's manifest (local, cached, or fetched).
@@ -1374,17 +2098,36 @@ impl Hosting {
     }
 
     async fn read_entry(&self, rec: &SiteRecord, entry: &site::FileEntry) -> Result<Vec<u8>> {
-        let holders = self.0.map.read().await.sources(&rec.site_id);
-        let mut body = Vec::with_capacity(entry.size as usize);
-        for h in &entry.chunks {
-            let hash = Hash::from_hex(h).context("bad chunk hash")?;
-            body.extend_from_slice(&self.fetch_chunk(&hash, &holders).await?);
-        }
-        Ok(body)
+        let sources = self.chunk_sources(rec).await;
+        let wanted: Vec<(u64, Hash)> = entry
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                Hash::from_hex(h)
+                    .map(|h| (i as u64, h))
+                    .context("bad chunk hash")
+            })
+            .collect::<Result<_>>()?;
+        self.read_range(rec, &sources, &wanted, 0, entry.size.saturating_sub(1))
+            .await
     }
 
     /// Serve `path` of a site: from local chunks, else proxied from holders.
     pub async fn serve(&self, rec: &SiteRecord, path: &str) -> Response {
+        self.serve_request(rec, path, &HeaderMap::new()).await
+    }
+
+    /// Serve `path` of a site for a request with these headers: Range
+    /// requests (206 with only the chunks the range needs), conditional
+    /// requests (304), and large files streamed with read-ahead so video
+    /// seeks and plays without loading the whole file first.
+    pub async fn serve_request(
+        &self,
+        rec: &SiteRecord,
+        path: &str,
+        headers: &HeaderMap,
+    ) -> Response {
         let manifest = match self.manifest(rec).await {
             Ok(m) => m,
             Err(e) => {
@@ -1410,26 +2153,206 @@ impl Hosting {
         let Some((entry, status)) = found else {
             return (StatusCode::NOT_FOUND, "not found").into_response();
         };
-        let body = match self.read_entry(rec, &entry).await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(site = %rec.site_id, err = %e, "hosting: chunk unavailable");
-                return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
-            }
+        let etag = format!(
+            "\"{}\"",
+            &Hash::of(entry.chunks.join(",").as_bytes()).to_hex()[..32]
+        );
+        let html = entry.content_type.starts_with("text/html");
+        let cache = if html || status != StatusCode::OK {
+            "public, max-age=60"
+        } else {
+            // Media and assets: a new version of the site changes the ETag.
+            "public, max-age=3600"
         };
-        let etag = format!("\"{}\"", &Hash::of(entry.chunks.join(",").as_bytes()).to_hex()[..32]);
-        let mut resp = (status, Body::from(body)).into_response();
-        let hdr = resp.headers_mut();
-        if let Ok(v) = HeaderValue::from_str(&entry.content_type) {
-            hdr.insert(header::CONTENT_TYPE, v);
+        let base_headers = |resp: &mut Response| {
+            let hdr = resp.headers_mut();
+            if let Ok(v) = HeaderValue::from_str(&entry.content_type) {
+                hdr.insert(header::CONTENT_TYPE, v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&etag) {
+                hdr.insert(header::ETAG, v);
+            }
+            hdr.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+            hdr.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            hdr.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
+            hdr.insert(
+                "x-c0mpute-site",
+                HeaderValue::from_str(&rec.site_id).unwrap_or(HeaderValue::from_static("")),
+            );
+        };
+        if status == StatusCode::OK
+            && headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
+        {
+            let mut resp = StatusCode::NOT_MODIFIED.into_response();
+            base_headers(&mut resp);
+            resp.headers_mut().remove(header::CONTENT_TYPE);
+            return resp;
         }
-        if let Ok(v) = HeaderValue::from_str(&etag) {
-            hdr.insert(header::ETAG, v);
+        // A Range applies only to the real file, and only when If-Range (if
+        // any) still names this version.
+        let range = if status == StatusCode::OK {
+            let if_range_ok = headers
+                .get(header::IF_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .is_none_or(|v| v.trim() == etag);
+            headers
+                .get(header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .filter(|_| if_range_ok)
+                .map(|v| parse_range(v, entry.size))
+        } else {
+            None
+        };
+        let (start, end_incl, status) = match range {
+            None | Some(RangeSpec::Ignore) => (0, entry.size.saturating_sub(1), status),
+            Some(RangeSpec::Unsatisfiable) => {
+                let mut resp = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+                base_headers(&mut resp);
+                resp.headers_mut().remove(header::CONTENT_TYPE);
+                if let Ok(v) = HeaderValue::from_str(&format!("bytes */{}", entry.size)) {
+                    resp.headers_mut().insert(header::CONTENT_RANGE, v);
+                }
+                return resp;
+            }
+            Some(RangeSpec::Bytes(a, b)) => (a, b, StatusCode::PARTIAL_CONTENT),
+        };
+        let len = if entry.size == 0 {
+            0
+        } else {
+            end_incl - start + 1
+        };
+        let sources = Arc::new(self.chunk_sources(rec).await);
+        let cb = site::FILE_CHUNK_BYTES as u64;
+        let (first, last) = if len == 0 {
+            (0, 0)
+        } else {
+            (start / cb, end_incl / cb)
+        };
+        let wanted: Vec<(u64, Hash)> = entry
+            .chunks
+            .iter()
+            .enumerate()
+            .skip(first as usize)
+            .take((last - first + 1) as usize)
+            .filter_map(|(i, h)| Hash::from_hex(h).ok().map(|h| (i as u64, h)))
+            .collect();
+        // Small bodies are read whole first, so a missing chunk is a clean 502.
+        let small = wanted.len() <= fetch::READ_AHEAD;
+        let body = if small || html {
+            match self
+                .read_range(rec, &sources, &wanted, start, end_incl)
+                .await
+            {
+                Ok(b) => Body::from(b),
+                Err(e) => {
+                    warn!(site = %rec.site_id, err = %e, "hosting: chunk unavailable");
+                    return (StatusCode::BAD_GATEWAY, "site is unavailable right now")
+                        .into_response();
+                }
+            }
+        } else {
+            // Fetch the first chunk before answering, so an unavailable site
+            // still answers 502 rather than a truncated 200.
+            let (i0, h0) = wanted[0];
+            let first_bytes = match self.fetch_chunk(&h0, sources.for_chunk(&h0)).await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(site = %rec.site_id, err = %e, "hosting: chunk unavailable");
+                    return (StatusCode::BAD_GATEWAY, "site is unavailable right now")
+                        .into_response();
+                }
+            };
+            Body::from_stream(self.stream_range(
+                sources,
+                wanted,
+                (i0, first_bytes),
+                start,
+                end_incl,
+            ))
+        };
+        let mut resp = (status, body).into_response();
+        base_headers(&mut resp);
+        if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
+            resp.headers_mut().insert(header::CONTENT_LENGTH, v);
         }
-        hdr.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
-        hdr.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
-        hdr.insert("x-c0mpute-site", HeaderValue::from_str(&rec.site_id).unwrap_or(HeaderValue::from_static("")));
+        if status == StatusCode::PARTIAL_CONTENT
+            && let Ok(v) =
+                HeaderValue::from_str(&format!("bytes {start}-{end_incl}/{}", entry.size))
+        {
+            resp.headers_mut().insert(header::CONTENT_RANGE, v);
+        }
         resp
+    }
+
+    /// The bytes `start..=end` of a file whose chunks `wanted` (index, hash)
+    /// cover that range, read whole.
+    async fn read_range(
+        &self,
+        _rec: &SiteRecord,
+        sources: &ChunkSources,
+        wanted: &[(u64, Hash)],
+        start: u64,
+        end_incl: u64,
+    ) -> Result<Vec<u8>> {
+        use futures::StreamExt;
+        let parts: Vec<Result<(u64, Vec<u8>)>> = futures::stream::iter(wanted.iter().copied())
+            .map(|(i, h)| async move {
+                self.fetch_chunk(&h, sources.for_chunk(&h))
+                    .await
+                    .map(|b| (i, b))
+            })
+            .buffered(fetch::READ_AHEAD)
+            .collect()
+            .await;
+        let mut out = Vec::new();
+        for p in parts {
+            let (i, b) = p?;
+            out.extend_from_slice(slice_chunk(i, &b, start, end_incl));
+        }
+        Ok(out)
+    }
+
+    /// Stream the bytes `start..=end`, fetching [`fetch::READ_AHEAD`] chunks
+    /// ahead of what has been sent.
+    fn stream_range(
+        &self,
+        sources: Arc<ChunkSources>,
+        wanted: Vec<(u64, Hash)>,
+        first: (u64, Vec<u8>),
+        start: u64,
+        end_incl: u64,
+    ) -> impl futures::Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>>
+    + Send
+    + 'static {
+        use futures::StreamExt;
+        let h = self.clone();
+        let head = futures::stream::once(async move { Ok::<_, anyhow::Error>(first) });
+        let rest = futures::stream::iter(wanted.into_iter().skip(1))
+            .map(move |(i, hash)| {
+                let h = h.clone();
+                let sources = sources.clone();
+                async move {
+                    h.fetch_chunk(&hash, sources.for_chunk(&hash))
+                        .await
+                        .map(|b| (i, b))
+                }
+            })
+            .buffered(fetch::READ_AHEAD);
+        head.chain(rest).map(move |r| match r {
+            Ok((i, b)) => Ok(axum::body::Bytes::copy_from_slice(slice_chunk(
+                i, &b, start, end_incl,
+            ))),
+            Err(e) => {
+                warn!(err = %e, "hosting: chunk unavailable mid-stream");
+                Err(std::io::Error::other(e.to_string()))
+            }
+        })
     }
 
     /// Gateway routes: `/s/{site}/...`, `/hosting/v1/sites`, and custom
@@ -1538,6 +2461,110 @@ fn leaves_free_floor(disk_free: u64, disk_total: u64, extra: u64) -> bool {
     disk_total == 0 || disk_free.saturating_sub(extra) >= free_disk_floor(disk_total)
 }
 
+/// Where to fetch each chunk of one site from.
+enum ChunkSources {
+    Whole(Vec<String>),
+    Striped { n: usize, per_group: Vec<Vec<String>> },
+}
+
+impl ChunkSources {
+    fn for_chunk(&self, h: &Hash) -> &[String] {
+        match self {
+            ChunkSources::Whole(v) => v,
+            ChunkSources::Striped { n, per_group } => per_group
+                .get(stripe::group_of_hash(h, *n) as usize)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+        }
+    }
+}
+
+/// A `Range` header against a file of `size` bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeSpec {
+    /// Serve the whole file (no usable range: several ranges, other units).
+    Ignore,
+    Unsatisfiable,
+    /// Inclusive byte range.
+    Bytes(u64, u64),
+}
+
+fn parse_range(v: &str, size: u64) -> RangeSpec {
+    let Some(spec) = v.trim().strip_prefix("bytes=") else {
+        return RangeSpec::Ignore;
+    };
+    if spec.contains(',') {
+        return RangeSpec::Ignore;
+    }
+    let Some((a, b)) = spec.trim().split_once('-') else {
+        return RangeSpec::Ignore;
+    };
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() {
+        // Suffix: the last `b` bytes.
+        let Ok(n) = b.parse::<u64>() else {
+            return RangeSpec::Ignore;
+        };
+        if n == 0 || size == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        return RangeSpec::Bytes(size.saturating_sub(n), size - 1);
+    }
+    let Ok(start) = a.parse::<u64>() else {
+        return RangeSpec::Ignore;
+    };
+    if start >= size {
+        return RangeSpec::Unsatisfiable;
+    }
+    let end = if b.is_empty() {
+        size - 1
+    } else {
+        match b.parse::<u64>() {
+            Ok(e) if e >= start => e.min(size - 1),
+            _ => return RangeSpec::Ignore,
+        }
+    };
+    RangeSpec::Bytes(start, end)
+}
+
+/// The part of chunk `i` (1 MiB each) inside the inclusive range.
+fn slice_chunk(i: u64, bytes: &[u8], start: u64, end_incl: u64) -> &[u8] {
+    let cb = site::FILE_CHUNK_BYTES as u64;
+    let c0 = i * cb;
+    let from = start.saturating_sub(c0).min(bytes.len() as u64) as usize;
+    let to = (end_incl + 1).saturating_sub(c0).min(bytes.len() as u64) as usize;
+    &bytes[from..to.max(from)]
+}
+
+/// The automatic hosting budget (`[hosting] max_bytes = 0`): what the node
+/// already holds plus [`AUTO_BUDGET_PERCENT`] of the free space above the
+/// free-disk floor. It follows the disk: a nearly full disk takes nothing new,
+/// a big empty one takes a lot.
+pub fn auto_budget(held: u64, disk_free: u64, disk_total: u64) -> u64 {
+    if disk_total == 0 {
+        return held + 5 * GIB_BYTES;
+    }
+    held + disk_free.saturating_sub(free_disk_floor(disk_total)) / 100 * AUTO_BUDGET_PERCENT
+}
+
+/// A multiaddr string with a public IP over TCP.
+fn public_tcp_addr(a: &str) -> bool {
+    let Ok(ma) = a.parse::<c0mpute_net::Multiaddr>() else {
+        return false;
+    };
+    let mut ip = false;
+    let mut tcp = false;
+    for p in ma.iter() {
+        match p {
+            c0mpute_net::Protocol::Ip4(v) => ip = crate::net_guard::is_public_ip(v.into()),
+            c0mpute_net::Protocol::Ip6(v) => ip = crate::net_guard::is_public_ip(v.into()),
+            c0mpute_net::Protocol::Tcp(_) => tcp = true,
+            _ => {}
+        }
+    }
+    ip && tcp
+}
+
 pub(crate) fn jitter(d: Duration) -> Duration {
     let ms = d.as_millis() as u64;
     let spread = ms / 10;
@@ -1549,12 +2576,12 @@ pub(crate) fn jitter(d: Duration) -> Duration {
 }
 
 async fn list_sites(State(h): State<Hosting>) -> Response {
-    let sites: Vec<serde_json::Value> = h
-        .sites()
-        .await
-        .into_iter()
-        .map(|(r, copies)| {
-            serde_json::json!({
+    let mut sites: Vec<serde_json::Value> = Vec::new();
+    for (r, copies) in h.sites().await {
+        // Striped sites: copies = the fewest copies of any group.
+        let health = h.health(&r).await;
+        let copies = health.as_ref().map(|x| x.min_copies).unwrap_or(copies);
+        let mut v = serde_json::json!({
                 "site_id": r.site_id,
                 "name": r.name,
                 "owner": r.owner,
@@ -1565,9 +2592,15 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
                 "path": format!("/s/{}/", r.site_id),
                 "preferred_hosts": r.preferred_hosts,
                 "price_per_gib_month": r.price_per_gib_month,
-            })
-        })
-        .collect();
+            });
+        if let Some(x) = health {
+            v["striped"] = serde_json::json!(true);
+            v["groups"] = serde_json::json!(x.groups);
+            v["short_groups"] = serde_json::json!(x.short);
+            v["missing_groups"] = serde_json::json!(x.missing);
+        }
+        sites.push(v);
+    }
     axum::Json(serde_json::json!({ "target_copies": TARGET_REPLICAS, "sites": sites })).into_response()
 }
 
@@ -1618,6 +2651,10 @@ async fn with_absolute_meta(resp: Response, page_url: Option<&str>) -> Response 
     let Some(page) = page_url.and_then(|u| url::Url::parse(u).ok()) else {
         return resp;
     };
+    // A byte range of a page cannot be rewritten (its length is promised).
+    if resp.status() == StatusCode::PARTIAL_CONTENT {
+        return resp;
+    }
     let html = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1649,7 +2686,7 @@ impl Hosting {
         {
             return resp;
         }
-        self.serve(rec, path).await
+        self.serve_request(rec, path, headers).await
     }
 }
 
@@ -1701,6 +2738,84 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges_parse_like_browsers_send_them() {
+        let n = 10 * 1024 * 1024;
+        assert_eq!(parse_range("bytes=0-99", n), RangeSpec::Bytes(0, 99));
+        assert_eq!(parse_range("bytes=100-", n), RangeSpec::Bytes(100, n - 1));
+        assert_eq!(parse_range("bytes=-500", n), RangeSpec::Bytes(n - 500, n - 1));
+        assert_eq!(parse_range("bytes=-99999999999", n), RangeSpec::Bytes(0, n - 1));
+        assert_eq!(parse_range("bytes=5-99999999999", n), RangeSpec::Bytes(5, n - 1));
+        assert_eq!(parse_range("bytes=0-0", n), RangeSpec::Bytes(0, 0));
+        assert_eq!(parse_range(&format!("bytes={n}-"), n), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_range("bytes=-0", n), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_range("bytes=0-1,5-9", n), RangeSpec::Ignore);
+        assert_eq!(parse_range("items=0-1", n), RangeSpec::Ignore);
+        assert_eq!(parse_range("bytes=9-3", n), RangeSpec::Ignore);
+        assert_eq!(parse_range("bytes=0-", 0), RangeSpec::Unsatisfiable);
+    }
+
+    #[test]
+    fn chunk_slices_cover_a_range_exactly() {
+        let cb = site::FILE_CHUNK_BYTES as u64;
+        let size = 3 * cb + 17;
+        let file: Vec<u8> = (0..size).map(|i| (i % 253) as u8).collect();
+        let chunks: Vec<&[u8]> = file.chunks(cb as usize).collect();
+        for (a, b) in [(0, 0), (0, cb - 1), (cb - 3, cb + 3), (5, size - 1), (2 * cb, 2 * cb + 1), (size - 1, size - 1)] {
+            let mut out = Vec::new();
+            for i in a / cb..=b / cb {
+                out.extend_from_slice(slice_chunk(i, chunks[i as usize], a, b));
+            }
+            assert_eq!(out, file[a as usize..=b as usize].to_vec(), "{a}-{b}");
+        }
+    }
+
+    #[test]
+    fn auto_budget_follows_the_disk() {
+        let g = GIB_BYTES;
+        // 1.8 TiB disk with 57 GiB free: floor 50 GiB, a quarter of 7 GiB.
+        assert_eq!(auto_budget(0, 57 * g, 1843 * g), 7 * g / 100 * 25);
+        // Below the floor: nothing new.
+        assert_eq!(auto_budget(3 * g, 40 * g, 1843 * g), 3 * g);
+        // A big empty disk takes a lot.
+        assert!(auto_budget(0, 3000 * g, 4000 * g) > 700 * g);
+        // Unknown disk: the old 5 GiB.
+        assert_eq!(auto_budget(0, 0, 0), 5 * g);
+    }
+
+    #[test]
+    fn a_holding_message_of_striped_sites_fits_gossipsub() {
+        // Entries are packed up to HOLDING_MESSAGE_BYTES; the largest bitmap
+        // (every group of a 4 TiB site, MAX_GROUPS) still leaves room.
+        let all: BTreeSet<u32> = (0..stripe::group_count(site::MAX_SITE_BYTES) as u32).collect();
+        let g = stripe::encode_groups(&all);
+        let per = HOLDING_MESSAGE_BYTES / (120 + g.len()) + 1;
+        let sites: Vec<Held> = (0..per)
+            .map(|i| Held {
+                site_id: format!("{:020}", i),
+                manifest: "f".repeat(64),
+                seq: u64::MAX,
+                groups: Some(g.clone()),
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&HostingMsg::Holding {
+            sites,
+            part: 0,
+            parts: 1,
+            hosts: true,
+            addrs: vec!["/ip4/203.0.113.7/tcp/40001".into(); 8],
+            price: Some("0.004".into()),
+            payout: None,
+            full: false,
+            room_gib: Some(u64::MAX),
+            room: Some(u64::MAX),
+        })
+        .unwrap();
+        assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
+    }
+
     #[test]
     fn hosting_copy_must_leave_a_free_disk_floor() {
         let g = GIB_BYTES;
@@ -1730,7 +2845,6 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
-    use super::*;
 
     #[test]
     fn holding_messages_round_trip() {
@@ -1739,6 +2853,7 @@ mod tests {
                 site_id: "a".into(),
                 manifest: "b".into(),
                 seq: 1,
+                groups: None,
             }],
             part: 0,
             parts: 1,
@@ -1748,6 +2863,7 @@ mod tests {
             payout: None,
             full: false,
             room_gib: Some(3000),
+            room: None,
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
@@ -1768,6 +2884,7 @@ mod tests {
                 site_id: format!("{:020}", i),
                 manifest: "f".repeat(64),
                 seq: u64::MAX,
+                groups: None,
             })
             .collect();
         let bytes = serde_json::to_vec(&HostingMsg::Holding {
@@ -1783,6 +2900,7 @@ mod tests {
             }),
             full: true,
             room_gib: Some(u64::MAX),
+            room: Some(u64::MAX),
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -1912,8 +3030,67 @@ pub async fn pick_terms(m: &MarketOptions, size: u64, hosting: Option<&Hosting>)
     }
 }
 
+/// Prints a progress bar on one line of stderr (a plain line every few
+/// seconds when stderr is not a terminal).
+struct Progress {
+    tty: bool,
+    last: Instant,
+    every: Duration,
+}
+
+impl Progress {
+    fn new() -> Self {
+        use std::io::IsTerminal;
+        let tty = std::io::stderr().is_terminal();
+        Self {
+            tty,
+            last: Instant::now() - Duration::from_secs(3600),
+            every: if tty {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(15)
+            },
+        }
+    }
+
+    fn show(&mut self, line: &str, force: bool) {
+        if !force && self.last.elapsed() < self.every {
+            return;
+        }
+        self.last = Instant::now();
+        if self.tty {
+            eprint!("\r\x1b[2K{line}");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+
+    fn done(&mut self, line: &str) {
+        self.show(line, true);
+        if self.tty {
+            eprintln!();
+        }
+    }
+}
+
+fn bar(frac: f64) -> String {
+    let n = (frac.clamp(0.0, 1.0) * 24.0).round() as usize;
+    format!("[{}{}]", "#".repeat(n), ".".repeat(24 - n))
+}
+
+fn gib(b: u64) -> f64 {
+    b as f64 / GIB_BYTES as f64
+}
+
 /// [`publish_dir`], optionally picking paid hosts from the d1sks marketplace
 /// first and signing them into a v2 record.
+///
+/// The folder is scanned in place (nothing is copied; re-running reuses the
+/// hashes of unchanged files) and served from the files while the network
+/// takes copies. Running it again with the same folder resumes: the record
+/// already on the network is reused, and holders keep what they have.
+/// Large sites are striped; the wait ends once every group has
+/// [`TARGET_REPLICAS`] copies, or after `wait` with no progress.
 pub async fn publish_dir_with(
     dir: &std::path::Path,
     name: &str,
@@ -1926,44 +3103,384 @@ pub async fn publish_dir_with(
             bail!("invalid domain {d:?}");
         }
     }
-    let built = site::build_from_dir(dir, name)?;
+    let cache_path = crate::config::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("hosting")
+        .join("scan-cache.json");
+    let scanned = {
+        let dir = dir.to_path_buf();
+        let name = name.to_string();
+        let cache_path = cache_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<site::ScannedSite> {
+            let mut cache = site::ScanCache::load(&cache_path);
+            let mut p = Progress::new();
+            let started = Instant::now();
+            let mut show = |done: u64, total: u64| {
+                let secs = started.elapsed().as_secs_f64().max(0.001);
+                p.show(
+                    &format!(
+                        "  hashing     {} {:>6.2}/{:.2} GiB  {:.0} MB/s",
+                        bar(done as f64 / total.max(1) as f64),
+                        gib(done),
+                        gib(total),
+                        done as f64 / secs / 1e6
+                    ),
+                    done == total,
+                );
+            };
+            let r = site::scan_dir(&dir, &name, &mut cache, &mut show);
+            cache.save(&cache_path);
+            if r.is_ok() {
+                eprintln!();
+            }
+            r
+        })
+        .await
+        .context("scan task")??
+    };
+    let total = scanned.manifest.total_bytes();
+    site::check_site_size(total, market.is_some())?;
+    let striped = stripe::is_striped(total);
+    let manifest_hash = scanned.manifest.stored().hash();
     let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
     let keypair = publisher_keypair()?;
-    let manifest_hash = built.manifest_hash();
+    let owner = site::owner_hex(&keypair).context("hosting needs an ed25519 identity")?;
+    let site_id = site::site_id_for(&owner, name);
     let seq = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     // Join the hosting gossip first: picking marketplace hosts checks the
     // d1sks listing against which hosting nodes are live right now.
-    let hosting = Hosting::start(supervisor.libp2p.clone(), supervisor.store.clone(), Options::default()).await?;
-    let terms = match &market {
-        Some(m) => pick_terms(m, built.manifest.total_bytes(), Some(&hosting)).await,
-        None => None,
-    };
-    let record = SiteRecord::sign_with_terms(
-        &keypair,
-        name,
-        &manifest_hash,
-        seq,
-        built.manifest.total_bytes(),
-        domains,
-        terms,
-    )?;
+    let hosting = Hosting::start(
+        supervisor.libp2p.clone(),
+        supervisor.store.clone(),
+        Options::default(),
+    )
+    .await?;
     // Let the swarm reach peers before the first gossip.
     tokio::time::sleep(Duration::from_secs(5)).await;
-    hosting.publish_site(&built, record.clone()).await?;
+    // Resume: the same version already on the network is reused as it is,
+    // so holders keep every group they have.
+    let existing = hosting.lookup_record(&site_id).await.filter(|r| {
+        r.manifest == manifest_hash.to_hex()
+            && r.domains == domains
+            && market.is_some() == !r.preferred_hosts.is_empty()
+    });
+    let record = match existing {
+        Some(r) => {
+            eprintln!(
+                "resuming: the network already has this version of {name} (seq {})",
+                r.seq
+            );
+            r
+        }
+        None => {
+            let terms = match &market {
+                Some(m) => {
+                    // Striped over more preferred hosts than the copy target,
+                    // each holds only its share: ask for disks with room for that.
+                    let n = m.copies.clamp(1, site::MAX_PREFERRED_HOSTS) as u64;
+                    let t = TARGET_REPLICAS as u64;
+                    let share = if striped && n > t {
+                        total / n * t
+                    } else {
+                        total
+                    };
+                    pick_terms(m, share, Some(&hosting)).await
+                }
+                None => None,
+            };
+            if terms.is_none() && total > site::MAX_FREE_SITE_BYTES {
+                bail!(
+                    "no d1sks hosting disk has room for this site ({:.1} GiB each), and it is too big to publish free \
+                     (at most {} GiB). Try `c0mpute hosting disks` to see what is listed, --copies 5 to spread it \
+                     over more paid hosts, or split the folder into several sites.",
+                    gib(total),
+                    site::MAX_FREE_SITE_BYTES / GIB_BYTES
+                );
+            }
+            SiteRecord::sign_with_terms(&keypair, name, &manifest_hash, seq, total, domains, terms)?
+        }
+    };
+    hosting.publish_scanned(&scanned, record.clone()).await?;
     eprintln!(
-        "published {} ({} files, {} bytes) as site {}",
+        "published {} ({} files, {:.2} GiB{}) as site {}",
         name,
-        built.manifest.files.len(),
-        record.size,
+        scanned.manifest.files.len(),
+        gib(record.size),
+        if striped {
+            let n = stripe::group_count(record.size) as u64;
+            format!(", striped in {n} groups of ~{} MiB", record.size.div_ceil(n) >> 20)
+        } else {
+            String::new()
+        },
         record.site_id
     );
-    // Wait for copies, healing as we go: re-announce on a Fibonacci schedule
-    // (1, 1, 2, 3, 5, ... s, capped at REANNOUNCE_CAP) that starts over
-    // whenever a new copy shows up, so a stalled publish keeps knocking
-    // without hammering the mesh.
+    eprintln!(
+        "  keep this running until the network holds copies; if it stops, run the same command again to resume"
+    );
+    let copies = if striped {
+        wait_striped(&hosting, &record, &scanned.manifest, wait).await
+    } else {
+        wait_whole(&hosting, &record, wait).await
+    };
+    Ok((record, copies))
+}
+
+/// What [`download`] did.
+pub struct Download {
+    pub bytes: u64,
+    pub took: Duration,
+    /// Bytes per source peer.
+    pub by_peer: Vec<(String, u64)>,
+}
+
+/// `c0mpute hosting get`: fetch one file of a site from the network into
+/// `out`, the way a gateway does. `sequential` fetches one chunk at a time
+/// from the first source that answers (how every release up to 0.2.99
+/// replicated and proxied), for comparison. `from` limits the sources to
+/// these peers.
+pub async fn download(
+    site_id: &str,
+    path: &str,
+    out: &std::path::Path,
+    sequential: bool,
+    from: Vec<String>,
+) -> Result<Download> {
+    use futures::StreamExt;
+    use std::io::Write;
+    let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
+    let hosting = Hosting::start(
+        supervisor.libp2p.clone(),
+        supervisor.store.clone(),
+        Options::default(),
+    )
+    .await?;
+    // `--from` takes peer ids or full multiaddrs (`/ip4/../tcp/../p2p/<id>`):
+    // dial the addresses, keep the ids.
+    let mut from_ids = Vec::new();
+    for f in &from {
+        match f.parse::<c0mpute_net::Multiaddr>() {
+            Ok(ma) => {
+                if let Some(id) = ma.iter().find_map(|p| match p {
+                    c0mpute_net::Protocol::P2p(id) => Some(id.to_base58()),
+                    _ => None,
+                }) {
+                    from_ids.push(id);
+                }
+                let _ = hosting.0.net.dial(ma).await;
+            }
+            Err(_) => from_ids.push(f.clone()),
+        }
+    }
+    let from = from_ids;
+    for p in &from {
+        if let Ok(pid) = p.parse::<c0mpute_net::PeerId>() {
+            let _ = hosting.0.net.connect(pid).await;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let started = Instant::now();
+    let mut rec = None;
+    while started.elapsed() < Duration::from_secs(90) {
+        // Ask the named sources first: they certainly know the record.
+        for p in &from {
+            let Ok(pid) = p.parse::<c0mpute_net::PeerId>() else {
+                continue;
+            };
+            if let Ok(Ok(body)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                hosting.0.net.rpc(pid, RPC_RECORD, site_id.as_bytes().to_vec()),
+            )
+            .await
+                && let Ok(r) = serde_json::from_slice::<SiteRecord>(&body)
+                && r.site_id == site_id
+            {
+                hosting.0.map.write().await.apply_record(r);
+            }
+        }
+        if let Some(r) = hosting.lookup_record(site_id).await {
+            rec = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    let rec = rec.with_context(|| format!("no record for site {site_id} on the network"))?;
+    // Named sources serve the whole site whatever the gossip has said so far.
+    for p in &from {
+        let mut sites = HashMap::new();
+        sites.insert(rec.site_id.clone(), (rec.manifest.clone(), rec.seq));
+        hosting.0.map.write().await.apply_holding_full(
+            p,
+            sites,
+            HashMap::new(),
+            Instant::now(),
+            false,
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+    }
+    // Wait for holders to announce themselves (once a minute).
+    let mut sources = Vec::new();
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(75) {
+        sources = hosting.0.map.read().await.sources(&rec.site_id);
+        sources.extend(hosting.holders(&rec.site_id).await);
+        sources.sort();
+        sources.dedup();
+        if !from.is_empty() {
+            sources.retain(|p| from.contains(p));
+        }
+        if !sources.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    if sources.is_empty() {
+        bail!("no live holder of {site_id} announced itself");
+    }
+    for p in &sources {
+        if let Ok(pid) = p.parse::<c0mpute_net::PeerId>() {
+            let _ = hosting.0.net.connect(pid).await;
+        }
+    }
+    let manifest = hosting.manifest(&rec).await?;
+    let entry = hosting
+        .resolve_entry(&rec, &manifest, path)
+        .await?
+        .with_context(|| format!("{path} is not in site {site_id}"))?;
+    let chunk_sources = Arc::new(hosting.chunk_sources(&rec).await);
+    let only: Option<Vec<String>> = (!from.is_empty()).then(|| from.clone());
+    let pick = move |src: &ChunkSources, h: &Hash| -> Vec<String> {
+        let v = src.for_chunk(h).to_vec();
+        match &only {
+            Some(o) => v.into_iter().filter(|p| o.contains(p)).collect(),
+            None => v,
+        }
+    };
+    let hashes: Vec<Hash> = entry
+        .chunks
+        .iter()
+        .filter_map(|h| Hash::from_hex(h).ok())
+        .collect();
+    let mut f = std::fs::File::create(out).with_context(|| format!("create {}", out.display()))?;
+    let mut p = Progress::new();
+    let t0 = Instant::now();
+    let mut done = 0u64;
+    let mut by_peer: HashMap<String, u64> = HashMap::new();
+    let report = |done: u64, p: &mut Progress, force: bool| {
+        let secs = t0.elapsed().as_secs_f64().max(0.001);
+        p.show(
+            &format!(
+                "  downloading {} {:.1}/{:.1} MiB  {:.1} MB/s",
+                bar(done as f64 / entry.size.max(1) as f64),
+                done as f64 / 1048576.0,
+                entry.size as f64 / 1048576.0,
+                done as f64 / secs / 1e6
+            ),
+            force,
+        );
+    };
+    if sequential {
+        for h in &hashes {
+            let req = ChunkRequest {
+                chunk_hash: *h,
+                shard_index: None,
+            };
+            let mut got = None;
+            for peer in pick(&chunk_sources, h) {
+                let Ok(pid) = peer.parse::<c0mpute_net::PeerId>() else {
+                    continue;
+                };
+                if let Ok(Ok(b)) = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    hosting.0.net.fetch_from_peer(pid, &req),
+                )
+                .await
+                    && Hash::of(&b) == *h
+                {
+                    *by_peer.entry(peer).or_default() += b.len() as u64;
+                    got = Some(b);
+                    break;
+                }
+            }
+            let b = got.with_context(|| format!("chunk {} unavailable", h.to_hex()))?;
+            f.write_all(&b)?;
+            done += b.len() as u64;
+            report(done, &mut p, false);
+        }
+    } else {
+        let h2 = hosting.clone();
+        let src2 = chunk_sources.clone();
+        let mut stream = futures::stream::iter(hashes.clone())
+            .map(move |h| {
+                let hosting = h2.clone();
+                let srcs = pick(&src2, &h);
+                async move { hosting.fetch_chunk(&h, &srcs).await }
+            })
+            .buffered(fetch::BULK_WINDOW);
+        while let Some(r) = stream.next().await {
+            let b = r?;
+            f.write_all(&b)?;
+            done += b.len() as u64;
+            report(done, &mut p, false);
+        }
+        by_peer = hosting.fetched_by_peer().into_iter().collect();
+    }
+    report(done, &mut p, true);
+    p.done("");
+    let mut by_peer: Vec<(String, u64)> = by_peer.into_iter().collect();
+    by_peer.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(Download {
+        bytes: done,
+        took: t0.elapsed(),
+        by_peer,
+    })
+}
+
+/// `c0mpute hosting rm`: replace a site with an empty version (no files).
+/// Holders switch to it and delete the old chunks; gateways answer 404. The
+/// record stays (a few hundred bytes), so the name can be published again.
+/// Works on every node version: it is a plain v1 record.
+pub async fn unpublish(name: &str, wait: Duration) -> Result<SiteRecord> {
+    let manifest = SiteManifest {
+        v: 1,
+        name: name.to_string(),
+        files: std::collections::BTreeMap::new(),
+    };
+    let scanned = site::ScannedSite {
+        manifest,
+        locations: HashMap::new(),
+    };
+    let manifest_hash = scanned.manifest.stored().hash();
+    let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
+    let keypair = publisher_keypair()?;
+    let seq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let record = SiteRecord::sign(&keypair, name, &manifest_hash, seq, 0, vec![])?;
+    let hosting = Hosting::start(
+        supervisor.libp2p.clone(),
+        supervisor.store.clone(),
+        Options::default(),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    hosting.publish_scanned(&scanned, record.clone()).await?;
+    eprintln!("site {} ({name}) is now empty; telling the network", record.site_id);
+    wait_whole(&hosting, &record, wait).await;
+    Ok(record)
+}
+
+/// Wait for a whole (small) site to reach its copies, healing as we go:
+/// re-announce on a Fibonacci schedule (1, 1, 2, 3, 5, ... s, capped at
+/// [`REANNOUNCE_CAP`]) that starts over whenever a new copy shows up, so a
+/// stalled publish keeps knocking without hammering the mesh.
+async fn wait_whole(hosting: &Hosting, record: &SiteRecord, wait: Duration) -> usize {
     let started = Instant::now();
     let mut copies = 0;
     let mut schedule = crate::backoff::Fibonacci::new(REANNOUNCE_CAP);
@@ -1997,9 +3514,84 @@ pub async fn publish_dir_with(
             break;
         }
         if Instant::now() >= next_announce {
-            hosting.reannounce(&record).await;
+            hosting.reannounce(record).await;
             next_announce = Instant::now() + schedule.next_delay();
         }
     }
-    Ok((record, copies))
+    copies
+}
+
+/// Wait for every group of a striped site to reach its copies, showing
+/// progress. Gives up after `wait` without progress. Returns the fewest
+/// copies of any group.
+async fn wait_striped(
+    hosting: &Hosting,
+    record: &SiteRecord,
+    manifest: &SiteManifest,
+    wait: Duration,
+) -> usize {
+    let layout = stripe::Layout::of(manifest);
+    let want = record.size.saturating_mul(TARGET_REPLICAS as u64).max(1);
+    let mut p = Progress::new();
+    let mut schedule = crate::backoff::Fibonacci::new(REANNOUNCE_CAP);
+    let mut next_announce = Instant::now() + schedule.next_delay();
+    let mut last_progress = Instant::now();
+    let mut best = 0u64;
+    let mut rate = 0f64;
+    let mut prev = (Instant::now(), 0u64);
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if Instant::now() >= next_announce {
+            hosting.reannounce(record).await;
+            next_announce = Instant::now() + schedule.next_delay();
+        }
+        let holders = hosting
+            .0
+            .map
+            .read()
+            .await
+            .group_holders(&record.site_id, layout.len(), true);
+        let placed: u64 = holders
+            .iter()
+            .enumerate()
+            .map(|(g, hs)| hs.len().min(TARGET_REPLICAS) as u64 * layout.bytes(g as u32))
+            .sum();
+        let h = stripe::health(&holders, TARGET_REPLICAS);
+        let dt = prev.0.elapsed().as_secs_f64();
+        if dt >= 2.0 {
+            let r = placed.saturating_sub(prev.1) as f64 / dt;
+            rate = if rate == 0.0 { r } else { rate * 0.7 + r * 0.3 };
+            prev = (Instant::now(), placed);
+        }
+        if placed > best {
+            best = placed;
+            last_progress = Instant::now();
+            schedule.reset();
+        }
+        let line = format!(
+            "  replicating {} {:>5.1}%  {:.2}/{:.2} GiB of {} copies, groups {}/{} complete, {} without a copy, {:.1} MB/s",
+            bar(placed as f64 / want as f64),
+            placed as f64 * 100.0 / want as f64,
+            gib(placed),
+            gib(want),
+            TARGET_REPLICAS,
+            h.groups - h.short,
+            h.groups,
+            h.missing,
+            rate / 1e6
+        );
+        if h.short == 0 && h.groups > 0 {
+            p.done(&line);
+            return h.min_copies;
+        }
+        p.show(&line, false);
+        if last_progress.elapsed() >= wait {
+            p.done(&line);
+            eprintln!(
+                "  no progress for {} s: stopping. The copies made so far stay; run the same command to resume.",
+                wait.as_secs()
+            );
+            return h.min_copies;
+        }
+    }
 }

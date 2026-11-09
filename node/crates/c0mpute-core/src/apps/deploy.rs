@@ -209,12 +209,12 @@ pub async fn deploy(opts: DeployOptions) -> Result<AppRecord> {
             let tmp = std::env::temp_dir().join(format!("c0mpute-deploy-{}-{seq}", opts.name));
             std::fs::create_dir_all(&tmp)?;
             let size = save_image(&tag, &tmp).await?;
-            if size > site::MAX_SITE_BYTES {
+            if size > site::MAX_SMALL_SITE_BYTES {
                 let _ = std::fs::remove_dir_all(&tmp);
                 bail!(
                     "the image is {} MiB gzipped; the limit is {} MiB (use a slim base image, or --pull a pinned registry image)",
                     size >> 20,
-                    site::MAX_SITE_BYTES >> 20
+                    site::MAX_SMALL_SITE_BYTES >> 20
                 );
             }
             let site_name = format!("app-{}", opts.name);
