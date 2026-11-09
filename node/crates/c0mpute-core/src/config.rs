@@ -64,6 +64,10 @@ pub struct Config {
     /// Game server rentals (`gameserver` role, opt-in).
     #[serde(default)]
     pub gameserver: GameserverConfig,
+    /// Apps (`apps` role, opt-in): how many backends this node runs for the
+    /// network and how much memory they may take together.
+    #[serde(default)]
+    pub apps: AppsConfig,
     /// Money movement (hosting settlement; ads billing later). Off unless
     /// `enabled = true` and the rail's key is in the environment.
     #[serde(default)]
@@ -140,6 +144,29 @@ pub struct GameserverConfig {
     /// Lowest price per GB of RAM per hour; offers capped below it are skipped.
     pub min_usd_per_gb_hour: f64,
     pub games: Vec<crate::gameserver::Game>,
+}
+
+/// `[apps]`: limits for the apps this node runs (`apps` role).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AppsConfig {
+    /// Apps held at once (primary or standby).
+    pub max_apps: usize,
+    /// Memory all held apps may reserve together, MiB.
+    pub max_memory_mb: u32,
+    /// Run only apps signed by these owner keys (hex ed25519, as `c0mpute
+    /// apps status` shows them). Empty = anyone's apps.
+    pub owners: Vec<String>,
+}
+
+impl Default for AppsConfig {
+    fn default() -> Self {
+        Self {
+            max_apps: 4,
+            max_memory_mb: 2048,
+            owners: Vec::new(),
+        }
+    }
 }
 
 impl Default for GameserverConfig {
@@ -574,6 +601,7 @@ impl Default for Config {
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
             gameserver: GameserverConfig::default(),
+            apps: AppsConfig::default(),
             payments: Default::default(),
             crowdgpt: Default::default(),
         }

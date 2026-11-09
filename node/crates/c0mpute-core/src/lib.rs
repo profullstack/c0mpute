@@ -5,6 +5,7 @@
 //! for each role.
 
 pub mod activity;
+pub mod apps;
 pub mod ads;
 pub mod auction_stats;
 pub mod buyer;
@@ -25,6 +26,7 @@ pub mod dispatch;
 pub mod embed;
 pub mod gameserver;
 pub mod gateway_util;
+pub mod gitremote;
 pub mod handoff;
 pub mod jobs_gateway;
 pub mod net_guard;

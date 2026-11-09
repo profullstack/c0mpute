@@ -13,6 +13,7 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: `${BASE}/plugins`,            priority: 0.8,  changeFrequency: "weekly"  },
   { url: `${BASE}/chat`,               priority: 0.9,  changeFrequency: "weekly" },
   { url: `${BASE}/train`,              priority: 0.9,  changeFrequency: "weekly" },
+  { url: `${BASE}/apps`,               priority: 0.9,  changeFrequency: "weekly" },
   { url: `${BASE}/temporal`,           priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/blog`,               priority: 0.8,  changeFrequency: "daily"   },
   { url: `${BASE}/status`,             priority: 0.6,  changeFrequency: "hourly"  },

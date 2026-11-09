@@ -622,6 +622,27 @@ impl Supervisor {
             None
         };
 
+        // Apps: `apps` nodes run backends for the network; every gateway
+        // routes to them (and serves their custom domains before sites).
+        let apps = if self.config.roles.contains(&c0mpute_proto::Role::Apps)
+            || self.config.roles.contains(&c0mpute_proto::Role::Gateway)
+        {
+            match self.start_apps(hosting.clone()).await {
+                Ok(a) => {
+                    if let Some(h) = &hosting {
+                        h.set_host_hook(std::sync::Arc::new(a.clone()));
+                    }
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::warn!(err = %e, "apps: not started");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Every storage node lists its disk on d1sks with a signed heartbeat,
         // gateway or not, NAT or not (opt-outs in `Config::lists_on_d1sks`).
         crate::opendisk::spawn_listing(&self.config, self.libp2p.clone());
@@ -640,6 +661,9 @@ impl Supervisor {
                 app = app.merge(l.router());
             }
             if let Some(a) = &ads {
+                app = app.merge(a.router());
+            }
+            if let Some(a) = &apps {
                 app = app.merge(a.router());
             }
             if let Some(h) = &hosting {
@@ -675,6 +699,31 @@ impl Supervisor {
         tokio::signal::ctrl_c().await?;
         info!("ctrl-c received; shutting down");
         Ok(())
+    }
+
+    /// Start the apps service. It runs apps only with the `apps` role and a
+    /// working docker; otherwise it only routes (a gateway).
+    pub async fn start_apps(&self, hosting: Option<crate::hosting::Hosting>) -> Result<crate::apps::Apps> {
+        let wants = self.config.roles.contains(&c0mpute_proto::Role::Apps) && !self.config.private.enabled;
+        let hosts = wants && crate::apps::runtime::available().await;
+        if wants && !hosts {
+            tracing::warn!("apps: role set but docker is not answering; routing only");
+        }
+        let cfg = &self.config.apps;
+        crate::apps::Apps::start(
+            self.libp2p.clone(),
+            self.store.clone(),
+            crate::apps::Options {
+                hosts,
+                max_apps: cfg.max_apps,
+                max_memory_mb: cfg.max_memory_mb,
+                owners: cfg.owners.clone(),
+                dir: Some(self.config.storage.root.join("apps")),
+                hosting,
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Start the hosting service: gossip, replica map, self-healing copies.

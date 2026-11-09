@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub const TXT_PREFIX: &str = "_c0mpute-hosting";
+/// TXT name prefix that points a domain at an app (`app=<app_id>`).
+pub const APP_TXT_PREFIX: &str = "_c0mpute-app";
 const POSITIVE_TTL: Duration = Duration::from_secs(600);
 const NEGATIVE_TTL: Duration = Duration::from_secs(120);
 
@@ -50,19 +52,30 @@ impl Verifier {
 
     /// Does DNS say `domain` belongs to `site_id`?
     pub async fn confirms(&self, domain: &str, site_id: &str) -> bool {
-        let key = (domain.to_string(), site_id.to_string());
+        self.confirms_token(TXT_PREFIX, "site", domain, site_id).await
+    }
+
+    /// Does DNS say `domain` belongs to app `app_id`
+    /// (`TXT _c0mpute-app.<domain>` holds `app=<app_id>`)?
+    pub async fn confirms_app(&self, domain: &str, app_id: &str) -> bool {
+        self.confirms_token(APP_TXT_PREFIX, "app", domain, app_id).await
+    }
+
+    async fn confirms_token(&self, prefix: &str, field: &str, domain: &str, id: &str) -> bool {
+        let site_id = id;
+        let key = (format!("{prefix}.{domain}"), format!("{field}={site_id}"));
         if let Some((ok, at)) = self.cache.read().await.get(&key).copied() {
             let ttl = if ok { POSITIVE_TTL } else { NEGATIVE_TTL };
             if at.elapsed() < ttl {
                 return ok;
             }
         }
-        let name = format!("{TXT_PREFIX}.{domain}");
+        let name = format!("{prefix}.{domain}");
         let txts = match &self.fixed {
             Some(t) => t.get(&name).cloned().unwrap_or_default(),
             None => self.lookup_txt(&name).await,
         };
-        let ok = txts.iter().any(|t| txt_names_site(t, site_id));
+        let ok = txts.iter().any(|t| txt_names(t, field, site_id));
         self.cache.write().await.insert(key, (ok, Instant::now()));
         ok
     }
@@ -110,8 +123,13 @@ pub fn parse_doh_txt(v: &serde_json::Value) -> Vec<String> {
 
 /// `site=<id>` among the space-separated tokens of a TXT string.
 pub fn txt_names_site(txt: &str, site_id: &str) -> bool {
+    txt_names(txt, "site", site_id)
+}
+
+/// `<field>=<id>` among the space-separated tokens of a TXT string.
+pub fn txt_names(txt: &str, field: &str, id: &str) -> bool {
     txt.split_whitespace()
-        .any(|tok| tok.strip_prefix("site=") == Some(site_id))
+        .any(|tok| tok.split_once('=') == Some((field, id)))
 }
 
 #[cfg(test)]
@@ -138,5 +156,16 @@ mod tests {
         assert!(v.confirms("blog.example", "s1").await);
         assert!(!v.confirms("blog.example", "s2").await);
         assert!(!v.confirms("other.example", "s1").await);
+    }
+
+    #[tokio::test]
+    async fn app_records_use_their_own_name_and_field() {
+        let mut t = HashMap::new();
+        t.insert("_c0mpute-app.api.example".to_string(), vec!["app=a1".to_string()]);
+        t.insert("_c0mpute-hosting.api.example".to_string(), vec!["site=a2".to_string()]);
+        let v = Verifier::fixed(t);
+        assert!(v.confirms_app("api.example", "a1").await);
+        assert!(!v.confirms_app("api.example", "a2").await, "a site TXT never names an app");
+        assert!(!v.confirms("api.example", "a1").await, "an app TXT never names a site");
     }
 }
