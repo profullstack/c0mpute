@@ -3171,6 +3171,10 @@ pub async fn publish_dir_with(
             bail!("invalid domain {d:?}");
         }
     }
+    // Before hashing anything: a big folder takes minutes to scan, and an
+    // unreadable identity (created by `sudo c0mpute ...`) used to fail only
+    // after the scan finished.
+    publisher_keypair()?;
     let cache_path = crate::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hosting")
