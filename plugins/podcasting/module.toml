@@ -24,7 +24,7 @@
 [module]
 id          = "podcasting"
 name        = "Podcasting — p2p podcast publishing"
-version     = "0.2.74"
+version     = "0.2.75"
 kind        = "service"
 category    = "media"
 status      = "available"
@@ -36,7 +36,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["podcast", "podcasting", "rss", "audio", "publishing", "censorship-resistant", "podcasting2", "p2p"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.75"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:egress"]
