@@ -990,6 +990,15 @@ have the model). Check it with:
   c0mpute worker status     # running? + which models are eligible to distribute
   c0mpute -v                # versions
 
+Disk provider (on by default): every node stores shards and holds sites for the
+network, and lists its disk on d1sks (https://d1sks.pwa.pit.world) with a signed
+heartbeat, behind NAT or not. Cap it with [storage] cap_bytes, or opt out in
+~/.config/c0mpute/config.toml:
+  [storage] enabled = false        # no storage role, not listed (or --no-storage, C0MPUTE_STORAGE=0)
+  [storage] list_on_d1sks = false  # store for the network, stay off d1sks (or C0MPUTE_D1SKS=0)
+  [hosting] enabled = false        # hold no sites (or --no-hosting, C0MPUTE_HOSTING=0)
+Private mode never lists.
+
 Optional — claim this node under your account (for the dashboard + earnings;
 NOT required to serve): c0mpute login && infernet pubkey link
 

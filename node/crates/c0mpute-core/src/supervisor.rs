@@ -618,6 +618,10 @@ impl Supervisor {
             None
         };
 
+        // Every storage node lists its disk on d1sks with a signed heartbeat,
+        // gateway or not, NAT or not (opt-outs in `Config::lists_on_d1sks`).
+        crate::opendisk::spawn_listing(&self.config, self.libp2p.clone());
+
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;
             let state = c0mpute_gateway::GatewayState {
@@ -871,7 +875,6 @@ impl Supervisor {
                     }
                 }),
             );
-            crate::opendisk::spawn_self_listing(&self.config);
         }
         app
     }

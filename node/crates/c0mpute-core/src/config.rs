@@ -161,6 +161,11 @@ impl Default for GameserverConfig {
 /// sites so the network keeps three of each; every gateway serves them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostingConfig {
+    /// Hold sites for the network. On by default on every node, whatever
+    /// `roles` lists; `false` (or `C0MPUTE_HOSTING=0`, or `worker start
+    /// --no-hosting`) is the opt-out.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Most bytes of other people's sites this node will hold.
     #[serde(default = "default_hosting_max_bytes")]
     pub max_bytes: u64,
@@ -193,6 +198,7 @@ pub struct HostingConfig {
 impl Default for HostingConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_bytes: default_hosting_max_bytes(),
             price_usd_per_gib_month: default_hosting_price(),
             payout_wallet: None,
@@ -589,6 +595,12 @@ impl Default for ApiConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StorageConfig {
+    /// Be a disk provider: store shards for the network and offer this disk
+    /// on d1sks. On by default on every node, whatever `roles` lists; `false`
+    /// (or `C0MPUTE_STORAGE=0`, or `worker start --no-storage`) is the opt-out.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_storage_root")]
     pub root: PathBuf,
     pub cap_bytes: Option<u64>,
     /// The price this node asks to hold data, per GiB-month in USD. Published
@@ -607,6 +619,20 @@ pub struct StorageConfig {
     /// The OpenDisk marketplace this node registers with.
     #[serde(default = "default_d1sks_url")]
     pub d1sks_url: String,
+    /// List this disk on d1sks with a signed heartbeat (every few minutes,
+    /// expiring when the node goes quiet), NAT or not. On by default;
+    /// `false` or `C0MPUTE_D1SKS=0` keeps the disk off the marketplace while
+    /// it still stores for the network. Private mode never lists.
+    #[serde(default = "default_true")]
+    pub list_on_d1sks: bool,
+    /// ISO 3166-1 alpha-2 country this disk is in, published in the listing
+    /// so publishers can pick hosts by country (`C0MPUTE_COUNTRY` wins).
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
+fn default_storage_root() -> PathBuf {
+    data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data"))
 }
 
 fn default_storage_price() -> f64 {
@@ -620,12 +646,15 @@ fn default_d1sks_url() -> String {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            root: data_dir().unwrap_or_else(|| PathBuf::from("./c0mpute-data")),
+            enabled: true,
+            root: default_storage_root(),
             cap_bytes: None,
             price_usd_per_gib_month: default_storage_price(),
             trusted_writers: Vec::new(),
             opendisk: true,
             d1sks_url: default_d1sks_url(),
+            list_on_d1sks: true,
+            country: None,
         }
     }
 }
@@ -679,8 +708,67 @@ pub fn default_config_path() -> PathBuf {
         .join("config.toml")
 }
 
+/// An on/off switch from the environment: `0`/`false`/`no`/`off` is off,
+/// anything else set is on, unset keeps `configured`.
+fn env_switch(name: &str, configured: bool) -> bool {
+    auto_install_enabled_with(configured, std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
+}
+
 impl Config {
+    /// Storage (disk provider) is on: the config and `C0MPUTE_STORAGE` agree.
+    pub fn storage_enabled(&self) -> bool {
+        env_switch("C0MPUTE_STORAGE", self.storage.enabled)
+    }
+
+    /// Hosting (holding sites) is on: the config and `C0MPUTE_HOSTING` agree.
+    pub fn hosting_enabled(&self) -> bool {
+        env_switch("C0MPUTE_HOSTING", self.hosting.enabled)
+    }
+
+    /// This disk goes on d1sks: storage on, OpenDisk on, listing on,
+    /// `C0MPUTE_D1SKS` not off, and not private mode.
+    pub fn lists_on_d1sks(&self) -> bool {
+        self.roles.contains(&Role::Storage)
+            && self.storage.opendisk
+            && env_switch("C0MPUTE_D1SKS", self.storage.list_on_d1sks)
+            && !self.private.enabled
+    }
+
+    /// The country to publish: `C0MPUTE_COUNTRY`, else `[storage] country`,
+    /// when it is a two-letter code.
+    pub fn country(&self) -> Option<String> {
+        let raw = std::env::var("C0MPUTE_COUNTRY").ok().or_else(|| self.storage.country.clone())?;
+        let c = raw.trim().to_ascii_uppercase();
+        (c.len() == 2 && c.chars().all(|ch| ch.is_ascii_uppercase())).then_some(c)
+    }
+
+    /// Every node is a disk provider: `storage` and `hosting` join the roles
+    /// even when `roles` (or `--roles`) lists others, unless the operator
+    /// turned them off (`enabled = false` or the env switch), which also
+    /// takes them out of an explicit list. Private mode adds nothing: a
+    /// private node keeps exactly the roles it asked for.
+    pub fn apply_disk_provider_defaults(&mut self) {
+        let wanted = [
+            (Role::Storage, self.storage_enabled()),
+            (Role::Hosting, self.hosting_enabled()),
+        ];
+        for (role, on) in wanted {
+            if !on {
+                self.roles.retain(|r| *r != role);
+            } else if !self.private.enabled && !self.roles.contains(&role) {
+                self.roles.push(role);
+            }
+        }
+    }
+
     pub fn load_or_default(path: &Path) -> Result<Self> {
+        let mut cfg = Self::load_raw(path)?;
+        cfg.apply_disk_provider_defaults();
+        Ok(cfg)
+    }
+
+    /// The file as written, without the disk-provider defaults applied.
+    pub fn load_raw(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -728,6 +816,47 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_role_list_still_provides_disk() {
+        let mut cfg: Config = toml::from_str("roles = [\"tts\", \"stt\"]\n").unwrap();
+        cfg.apply_disk_provider_defaults();
+        assert!(cfg.roles.contains(&Role::Storage));
+        assert!(cfg.roles.contains(&Role::Hosting));
+        assert!(cfg.roles.contains(&Role::Tts));
+        assert!(cfg.storage.list_on_d1sks);
+    }
+
+    #[test]
+    fn enabled_false_is_the_opt_out_even_from_an_explicit_list() {
+        let mut cfg: Config = toml::from_str(
+            "roles = [\"storage\", \"hosting\", \"tts\"]\n[storage]\nenabled = false\n[hosting]\nenabled = false\n",
+        )
+        .unwrap();
+        cfg.apply_disk_provider_defaults();
+        assert!(!cfg.roles.contains(&Role::Storage));
+        assert!(!cfg.roles.contains(&Role::Hosting));
+        assert!(!cfg.lists_on_d1sks());
+    }
+
+    #[test]
+    fn private_mode_adds_nothing_and_never_lists() {
+        let mut cfg: Config = toml::from_str("roles = [\"tts\"]\n[private]\nenabled = true\n").unwrap();
+        cfg.apply_disk_provider_defaults();
+        assert_eq!(cfg.roles, vec![Role::Tts]);
+        let mut cfg = Config::default();
+        cfg.private.enabled = true;
+        assert!(!cfg.lists_on_d1sks());
+    }
+
+    #[test]
+    fn listing_can_be_turned_off_alone() {
+        let mut cfg: Config = toml::from_str("[storage]\nlist_on_d1sks = false\n").unwrap();
+        cfg.apply_disk_provider_defaults();
+        assert!(cfg.roles.contains(&Role::Storage), "still stores for the network");
+        assert!(!cfg.lists_on_d1sks());
+        assert!(Config::default().lists_on_d1sks());
+    }
 
     #[test]
     fn game_servers_are_opt_in() {
