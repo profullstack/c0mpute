@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """c0mpute video-generation runner.
 
-One job per process: read a job JSON, generate a clip (Wan 2.2, or LTX-2.3
-with a synchronized soundtrack), encode an MP4, write a metadata sidecar, and
+One job per process: read a job JSON, generate a clip (Wan 2.2 / 2.1, or
+LTX-2.3 with a synchronized soundtrack), encode an MP4, write a metadata sidecar, and
 exit non-zero on any failure. The node's
 `video` runner invokes this inside the container and never parses stdout, so
 the contract is entirely files on disk:
@@ -21,7 +21,8 @@ Job JSON:
       "prompt":   "a neon alley in the rain",
       "negative_prompt": "",           # optional
       "image":    "input.png",         # img2vid only, relative to the job dir
-      "frames":   81,                  # optional, defaults from module.toml
+      "frames":   81,                  # optional; the model's defaults from
+                                       # module.toml, else 81/24/30/1280x704
       "fps":      24,
       "steps":    30,
       "width":    1280,
@@ -50,7 +51,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-RUNNER_VERSION = "2"
+RUNNER_VERSION = "3"
 
 # Where the image puts the manifest it was built from. Overridable so the
 # selftest can run against a checkout.
@@ -73,6 +74,10 @@ BACKENDS = ("wan", "ltx2")
 # `steps` from the job is ignored for them and this is what ran.
 LTX2_DISTILLED_STEPS = 8
 
+# Job fields a manifest row may give its own default for, and the default
+# when it does not.
+JOB_DEFAULTS = {"frames": 81, "fps": 24, "steps": 30, "width": 1280, "height": 704}
+
 
 class JobError(Exception):
     """A problem with the job itself — refuse it, do not retry."""
@@ -89,6 +94,14 @@ class Model:
     backend: str = "wan"
     audio: bool = False
     distilled: bool = False
+    # VRAM to hold every component on the card at once. 0 = unknown, and the
+    # runner loads the whole pipeline onto the card as before.
+    full_vram_gib: int = 0
+    # Job defaults for this model (see JOB_DEFAULTS).
+    defaults: tuple[tuple[str, int], ...] = ()
+
+    def default(self, field: str) -> int:
+        return dict(self.defaults).get(field, JOB_DEFAULTS[field])
 
 
 def load_models(path: Path) -> dict[str, Model]:
@@ -122,6 +135,8 @@ def load_models(path: Path) -> dict[str, Model]:
             backend=row.get("backend", "wan"),
             audio=bool(row.get("audio", False)),
             distilled=bool(row.get("distilled", False)),
+            full_vram_gib=int(row.get("full_vram_gib", 0)),
+            defaults=tuple((k, int(row[k])) for k in JOB_DEFAULTS if k in row),
         )
         if models[mid].backend not in BACKENDS:
             # Fail loudly: a typo here would otherwise advertise a model the
@@ -149,11 +164,15 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
     if len(prompt) > MAX_PROMPT_CHARS:
         raise JobError(f"prompt exceeds {MAX_PROMPT_CHARS} characters")
 
-    frames = int(raw.get("frames", 81))
-    fps = int(raw.get("fps", 24))
-    steps = int(raw.get("steps", 30))
-    width = int(raw.get("width", 1280))
-    height = int(raw.get("height", 704))
+    def field(name: str) -> int:
+        value = raw.get(name)
+        return model.default(name) if value is None else int(value)
+
+    frames = field("frames")
+    fps = field("fps")
+    steps = field("steps")
+    width = field("width")
+    height = field("height")
 
     if not 1 <= frames <= MAX_FRAMES:
         raise JobError(f"frames must be 1..{MAX_FRAMES}")
@@ -166,6 +185,11 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
         raise JobError("width and height must be multiples of 16")
     if width * height > MAX_PIXELS:
         raise JobError(f"width*height must not exceed {MAX_PIXELS}")
+    if model.backend == "wan" and frames % 4 != 1:
+        # The Wan VAE compresses time by 4; the pipeline rounds any other
+        # count with only a warning, and the clip then fails the exact
+        # frame-count validation after the worker paid for it.
+        raise JobError(f"{model.id}: frames must be 4k+1 (e.g. 33, 81, 121)")
     if model.backend == "ltx2":
         # The pipeline raises on sizes not divisible by 32, and silently
         # rounds a frame count that is not 8k+1 (its VAE compresses time by
@@ -302,8 +326,23 @@ def write_wav(samples, rate: int, path: Path) -> None:
         w.writeframes(pcm.tobytes())
 
 
+def use_offload(model: Model, card_gib: float) -> bool:
+    """Whether this card is too small to hold the whole pipeline.
+
+    Pure, so the policy is tested without a GPU. A model with no
+    `full_vram_gib` keeps the old behaviour (everything on the card).
+    """
+    return model.full_vram_gib > 0 and card_gib < model.full_vram_gib
+
+
+def card_vram_gib() -> float:
+    import torch
+
+    return torch.cuda.get_device_properties(0).total_memory / 2**30
+
+
 def generate_frames(job: dict, frame_dir: Path) -> None:
-    """Run Wan 2.2 and write frames as zero-padded PNGs.
+    """Run a Wan pipeline and write frames as zero-padded PNGs.
 
     Imported lazily: the selftest and the job-validation path must not need
     torch, which is most of the image.
@@ -320,11 +359,39 @@ def generate_frames(job: dict, frame_dir: Path) -> None:
     vae = AutoencoderKLWan.from_pretrained(repo, subfolder="vae", torch_dtype=torch.float32)
     pipe_cls = WanPipeline if job["workload"] == "video.txt2vid" else WanImageToVideoPipeline
     pipe = pipe_cls.from_pretrained(repo, vae=vae, torch_dtype=dtype)
-    pipe.to("cuda")
 
-    kwargs = dict(
+    prompt_kwargs: dict = dict(
         prompt=job["prompt"],
         negative_prompt=job["negative_prompt"] or None,
+    )
+    job["offload"] = use_offload(model, card_vram_gib())
+    if job["offload"]:
+        # A card below the model's full-load size (an 8 GiB card and Wan 2.1
+        # 1.3B): the UMT5-XXL encoder alone is ~11 GB in bf16, and model
+        # offload would still move it onto the card whole. So encode the
+        # prompt here on the CPU, before the offload hooks exist, and hand
+        # the pipeline embeddings; the encoder is then never called and never
+        # leaves host RAM. The transformer and VAE take turns on the card.
+        with torch.no_grad():
+            embeds, negative = pipe.encode_prompt(
+                prompt=job["prompt"],
+                negative_prompt=job["negative_prompt"] or None,
+                do_classifier_free_guidance=job["guidance_scale"] > 1.0,
+                device=torch.device("cpu"),
+            )
+        prompt_kwargs = dict(
+            prompt_embeds=embeds.to("cuda"),
+            negative_prompt_embeds=None if negative is None else negative.to("cuda"),
+        )
+        pipe.enable_model_cpu_offload()
+        if hasattr(pipe.vae, "enable_tiling"):
+            # Decoding a whole clip at once is the other VRAM peak.
+            pipe.vae.enable_tiling()
+    else:
+        pipe.to("cuda")
+
+    kwargs = dict(
+        **prompt_kwargs,
         height=job["height"],
         width=job["width"],
         num_frames=job["frames"],
@@ -527,6 +594,7 @@ def write_sidecar(job_dir: Path, job: dict, probed: dict) -> None:
         "seed": job["seed"],
         "steps": job["steps"],
         "guidance_scale": job["guidance_scale"],
+        "offload": bool(job.get("offload", False)),
         "requested": {
             "frames": job["frames"],
             "fps": job["fps"],
@@ -546,7 +614,8 @@ def selftest(job_dir: Path) -> int:
     provider's box, the job would have failed too.
     """
     job_dir.mkdir(parents=True, exist_ok=True)
-    frames, fps, width, height = 8, 8, 64, 64
+    # 9 frames: every Wan model needs 4k+1.
+    frames, fps, width, height = 9, 8, 64, 64
     job_path = job_dir / "job.json"
     job_path.write_text(
         json.dumps(

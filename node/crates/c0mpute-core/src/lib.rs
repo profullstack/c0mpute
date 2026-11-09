@@ -51,6 +51,7 @@ pub mod text;
 pub mod train;
 pub mod train_verify;
 pub mod video;
+pub mod video_cpu;
 pub mod webhook;
 pub mod workflow;
 

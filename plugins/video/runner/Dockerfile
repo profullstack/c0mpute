@@ -1,4 +1,4 @@
-# c0mpute video-generation runner — Wan 2.2 and LTX-2.3 (video + audio) via diffusers.
+# c0mpute video-generation runner — Wan 2.2 / 2.1 and LTX-2.3 (video + audio) via diffusers.
 #
 # Published as ghcr.io/profullstack/c0mpute-video-runner (see
 # .github/workflows/video-runner.yml); the tag the node pulls is the one in

@@ -73,6 +73,11 @@ export interface ModelOption {
   audio?: boolean;
   /** Few-step distilled checkpoint (fixed schedule, no CFG). */
   distilled?: boolean;
+  /**
+   * CPU-only nodes can serve it too; the string says what that takes and
+   * how slow it is (CPU video is batch, minutes per clip).
+   */
+  cpu?: string | boolean;
 }
 
 /**

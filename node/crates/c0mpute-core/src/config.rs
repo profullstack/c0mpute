@@ -47,6 +47,10 @@ pub struct Config {
     /// Music generation (`music.txt2music`, ACE-Step 1.5) provisioning and gates.
     #[serde(default)]
     pub music: MusicConfig,
+    /// Video generation. The GPU path needs nothing here; this is the CPU
+    /// path (Wan 2.1 1.3B through stable-diffusion.cpp, opt-in).
+    #[serde(default)]
+    pub video: VideoConfig,
     /// Static-site hosting: how much this node holds for the network.
     #[serde(default)]
     pub hosting: HostingConfig,
@@ -395,6 +399,76 @@ impl MusicConfig {
     }
 }
 
+/// CPU video (`video_cpu`): Wan 2.1 T2V 1.3B on stable-diffusion.cpp.
+///
+/// Opt-in, because a 33-frame clip holds 16 threads for many minutes:
+/// - `cpu` unset (the default): serve only if an operator installed it with
+///   `c0mpute video setup --cpu`; never download anything on its own.
+/// - `cpu = true` (or `C0MPUTE_VIDEO_CPU=1`): install in the background on a
+///   box that passes the gates, then serve.
+/// - `cpu = false` (or `C0MPUTE_VIDEO_CPU=0`): never serve, even if installed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VideoConfig {
+    #[serde(default)]
+    pub cpu: Option<bool>,
+    #[serde(default = "default_video_min_ram_gb")]
+    pub min_ram_gb: u64,
+    #[serde(default = "default_video_min_free_ram_gb")]
+    pub min_free_ram_gb: u64,
+    #[serde(default = "default_video_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+    /// Smallest per-job CPU thread budget worth serving clips with.
+    #[serde(default = "default_video_min_cpu_threads")]
+    pub min_cpu_threads: usize,
+    /// Busiest the box may be (1-minute load per logical CPU) and still take a clip.
+    #[serde(default = "default_diffusion_max_load_per_cpu")]
+    pub max_load_per_cpu: f64,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            cpu: None,
+            min_ram_gb: default_video_min_ram_gb(),
+            min_free_ram_gb: default_video_min_free_ram_gb(),
+            min_free_disk_gb: default_video_min_free_disk_gb(),
+            min_cpu_threads: default_video_min_cpu_threads(),
+            max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+        }
+    }
+}
+
+fn default_video_min_ram_gb() -> u64 {
+    16
+}
+fn default_video_min_free_ram_gb() -> u64 {
+    // sd-cli holds ~1.8 GB RSS with the encoder and VAE streamed from disk
+    // (cgroup peak 4.8 GB with page cache; dev2, 2026-11-09). The headroom
+    // is for the host: a clip runs for ~25 minutes, and on a box that dips
+    // low in that window an OOM guard kills it.
+    8
+}
+fn default_video_min_free_disk_gb() -> u64 {
+    // 5.4 GB of weights on top of the sd.cpp runtime, plus frames.
+    12
+}
+fn default_video_min_cpu_threads() -> usize {
+    16
+}
+
+impl VideoConfig {
+    /// `Some(true)`: install and serve; `Some(false)`: never; `None`: serve
+    /// only what an operator installed by hand. The environment wins.
+    pub fn cpu_setting(&self) -> Option<bool> {
+        match std::env::var("C0MPUTE_VIDEO_CPU") {
+            Ok(value) if !value.trim().is_empty() => {
+                Some(auto_install_enabled_with(true, Some(value)))
+            }
+            _ => self.cpu,
+        }
+    }
+}
+
 /// CPU text-to-speech provisioning.
 ///
 /// Kokoro is small enough — an int8 ONNX export of hexgrad/Kokoro-82M, about
@@ -465,6 +539,9 @@ impl Default for Config {
                 Role::WorkflowStep,
                 Role::Diffusion,
                 Role::Music,
+                // Subscribes only where it can serve: a ready GPU runner, or
+                // CPU video the operator opted into.
+                Role::Video,
                 Role::Crawl,
                 Role::Hosting,
                 Role::Ocr,
@@ -483,6 +560,7 @@ impl Default for Config {
             speech: SpeechConfig::default(),
             diffusion: DiffusionConfig::default(),
             music: MusicConfig::default(),
+            video: VideoConfig::default(),
             hosting: HostingConfig::default(),
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),

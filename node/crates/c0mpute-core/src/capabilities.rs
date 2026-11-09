@@ -134,8 +134,13 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                 // Same rule as TTS: advertise only what this box can do now.
                 // A node without the GPU, the runtime or the image would win
                 // auctions and fail them.
+                // One model tag per model the card can hold. With no GPU,
+                // CPU video (opt-in) advertises the small Wan model while
+                // the box is idle with free RAM, re-checked each tick.
                 if crate::video::readiness_cached(crate::video::RUNNER_IMAGE).is_none() {
-                    tags.push(crate::video::ROLE_TAG.to_string());
+                    tags.extend(crate::video::gpu_tags());
+                } else if crate::video_cpu::can_serve(&config.video) {
+                    tags.extend(crate::video_cpu::tags());
                 }
             }
             Role::Diffusion => {

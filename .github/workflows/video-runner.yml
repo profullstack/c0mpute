@@ -105,7 +105,7 @@ jobs:
           # Links the package to this public repo (and its README/license).
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=c0mpute video runner (Wan 2.2, LTX-2.3)
+            org.opencontainers.image.description=c0mpute video runner (Wan 2.2 / 2.1, LTX-2.3)
             org.opencontainers.image.licenses=MIT
           # The context is plugins/video so module.toml — the runner's model
           # registry — is part of the image.

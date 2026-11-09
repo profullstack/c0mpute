@@ -1,4 +1,4 @@
-# video runner — Wan 2.2 and LTX-2.3 (video + audio)
+# video runner — Wan 2.2 / 2.1 and LTX-2.3 (video + audio)
 
 The container the `video` plugin dispatches to. One job per process: read
 `job.json`, generate a clip, encode an MP4, write a sidecar, exit non-zero on
@@ -56,6 +56,29 @@ image. A model the runner accepts and a model the marketplace advertises
 therefore cannot drift apart, and adding one is a manifest row plus a rebuild.
 Each row needs a `diffusers_repo`; rows without one are ignored by this
 backend rather than breaking it.
+
+A row may also set its own job defaults (`frames`, `fps`, `steps`, `width`,
+`height`) for fields a job leaves out; the node's gateway applies the same
+ones. Every Wan model needs `frames` = 4k+1 and the runner refuses any other
+count up front (the pipeline would round it and fail validation afterwards).
+
+## Small cards: Wan 2.1 T2V 1.3B on 8 GiB
+
+`wan2.1-t2v-1.3b` (`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, Apache-2.0) is the
+model an 8 GiB card can serve. Its row says `vram_gib = 8` (the floor with
+offload) and `full_vram_gib = 20` (everything on the card at once). When the
+card is smaller than `full_vram_gib` the runner:
+
+- encodes the prompt on the CPU first: the UMT5-XXL text encoder is ~11 GB in
+  bf16, and model offload would still move it onto the card whole, so the
+  pipeline gets embeddings and never calls the encoder;
+- then `enable_model_cpu_offload()` (transformer and VAE take turns on the
+  card) and VAE tiling for the decode.
+
+Expect ~16 GB of system RAM for the encoder on the host. Defaults are small:
+33 frames of 480x272 at 16 fps, 20 steps. The sidecar records `offload`.
+CPU-only nodes serve the same model id without this runner, through
+stable-diffusion.cpp (`node/crates/c0mpute-core/src/video_cpu.rs`).
 
 ## Why diffusers and not ComfyUI
 
@@ -133,8 +156,10 @@ Verified in CI and locally: manifest parsing, job validation and refusals,
 PNG→MP4 encode, ffprobe validation, the sidecar, and that this pin set
 imports.
 
-**Not yet verified: a real clip.** That needs a 24 GiB NVIDIA card (48 GiB
-for LTX-2.3), which no node in the fleet currently has. The LTX-2 sampling
+**Not yet verified: a real clip on a GPU.** The fleet's one NVIDIA card has
+8 GiB, which is what `wan2.1-t2v-1.3b` and its offload path are for; the
+24/48 GiB models have no card yet. The same model on CPU (sd.cpp, not this
+runner) has produced real clips. The LTX-2 sampling
 call is written against the diffusers 0.42.1 source and the model card, and
 its audio mux is covered by the selftest with a synthetic tone, but the
 pipeline itself has never run here.

@@ -1,4 +1,6 @@
-//! `video.txt2vid` / `video.img2vid` — Wan 2.2 video generation.
+//! `video.txt2vid` / `video.img2vid` — Wan 2.2 / 2.1 and LTX-2.3 video
+//! generation on an NVIDIA GPU. (CPU-only nodes serve the small Wan 2.1
+//! model through stable-diffusion.cpp instead: see `video_cpu`.)
 //!
 //! This is the first *container* workload: unlike transcode, TTS and STT,
 //! the work happens in `ghcr.io/profullstack/c0mpute-video-runner` rather than in this
@@ -40,8 +42,146 @@ pub const WORKLOAD_TXT2VID: &str = "video.txt2vid";
 pub const WORKLOAD_IMG2VID: &str = "video.img2vid";
 
 /// Advertised only when the container runtime, the image and an NVIDIA GPU
-/// are all present — see [`readiness`].
+/// are all present — see [`readiness`] — or when CPU video is installed
+/// (`video_cpu`).
 pub const ROLE_TAG: &str = "c0mpute:role:video";
+
+/// One tag per model a node can actually run: `c0mpute:video:model:<id>`.
+/// The gateway requires the tag of the model a job names, so a job for a
+/// 48 GiB model never goes to an 8 GiB card or a CPU node.
+pub const MODEL_TAG_PREFIX: &str = "c0mpute:video:model:";
+
+pub fn model_tag(model: &str) -> String {
+    format!("{MODEL_TAG_PREFIX}{model}")
+}
+
+/// The plugin manifest this binary was built with: the model table the
+/// runner image reads too (a unit test keeps the image pin and this file in
+/// step, so they describe the same runner).
+const MANIFEST: &str = include_str!("../../../../plugins/video/module.toml");
+
+/// One row of `[module.models]`, as far as the node needs it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManifestModel {
+    pub id: String,
+    /// VRAM floor (GiB) at the stated precision, offload included.
+    pub vram_gib: u64,
+    pub workloads: Vec<String>,
+    /// The model's own defaults for fields a job leaves out.
+    pub defaults: Vec<(String, u32)>,
+    /// A CPU-only node can serve it too (`video_cpu`).
+    pub cpu: bool,
+}
+
+/// Job fields a manifest row may give its own default for.
+pub const DEFAULTABLE: [&str; 5] = ["frames", "fps", "steps", "width", "height"];
+
+/// The models in the manifest, parsed once.
+pub fn manifest_models() -> &'static [ManifestModel] {
+    static MODELS: std::sync::OnceLock<Vec<ManifestModel>> = std::sync::OnceLock::new();
+    MODELS.get_or_init(|| parse_manifest_models(MANIFEST))
+}
+
+pub fn parse_manifest_models(text: &str) -> Vec<ManifestModel> {
+    let Ok(manifest) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(table) = manifest
+        .get("module")
+        .and_then(|m| m.get("models"))
+        .and_then(|m| m.as_table())
+    else {
+        return Vec::new();
+    };
+    let mut models: Vec<ManifestModel> = table
+        .iter()
+        .map(|(id, row)| ManifestModel {
+            id: id.clone(),
+            vram_gib: row.get("vram_gib").and_then(|v| v.as_integer()).unwrap_or(0).max(0) as u64,
+            workloads: row
+                .get("workloads")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|w| w.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+            defaults: DEFAULTABLE
+                .iter()
+                .filter_map(|k| {
+                    row.get(*k)
+                        .and_then(|v| v.as_integer())
+                        .and_then(|v| u32::try_from(v).ok())
+                        .map(|v| (k.to_string(), v))
+                })
+                .collect(),
+            cpu: row.get("cpu").is_some_and(|v| v.as_bool().unwrap_or(true)),
+        })
+        .collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models
+}
+
+pub fn manifest_model(id: &str) -> Option<&'static ManifestModel> {
+    manifest_models().iter().find(|m| m.id == id)
+}
+
+/// Fill the fields a request left out with the named model's own defaults
+/// (Wan 2.1 1.3B: 33 frames of 480x272 at 16 fps), so a buyer who only
+/// names the small model does not get the 1280x704, 81-frame defaults sized
+/// for the big ones. Fields the request set are never touched.
+pub fn apply_model_defaults(request: &mut serde_json::Value) {
+    let Some(model) = request
+        .get("model")
+        .and_then(|m| m.as_str())
+        .and_then(manifest_model)
+    else {
+        return;
+    };
+    let Some(obj) = request.as_object_mut() else {
+        return;
+    };
+    for (key, value) in &model.defaults {
+        if obj.get(key).is_none_or(|v| v.is_null()) {
+            obj.insert(key.clone(), serde_json::json!(value));
+        }
+    }
+}
+
+/// Models a card with `vram_mib` of memory can run, by the manifest's VRAM
+/// floors. 512 MiB of slack: an "8 GB" card reports a little under 8192.
+pub fn models_for_vram(vram_mib: u64) -> Vec<&'static str> {
+    manifest_models()
+        .iter()
+        .filter(|m| m.vram_gib > 0 && m.vram_gib * 1024 <= vram_mib + 512)
+        .map(|m| m.id.as_str())
+        .collect()
+}
+
+/// Largest card's memory per `nvidia-smi`, in MiB.
+pub fn nvidia_vram_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_vram_mib(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub fn parse_vram_mib(text: &str) -> Option<u64> {
+    text.lines().filter_map(|l| l.trim().parse::<u64>().ok()).max()
+}
+
+/// Tags a GPU video node advertises: the role, plus one per model its card
+/// can hold. Probed once (a card does not change size under a running node).
+pub fn gpu_tags() -> Vec<String> {
+    static VRAM: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let vram = *VRAM.get_or_init(nvidia_vram_mib);
+    let mut tags = vec![ROLE_TAG.to_string()];
+    if let Some(mib) = vram {
+        tags.extend(models_for_vram(mib).into_iter().map(model_tag));
+    }
+    tags
+}
 
 /// Where `.github/workflows/video-runner.yml` publishes the runner.
 pub const RUNNER_REPOSITORY: &str = "ghcr.io/profullstack/c0mpute-video-runner";
@@ -184,6 +324,13 @@ impl VideoJobInline {
         }
         if !(1..=MAX_FRAMES).contains(&self.frames) {
             return Err(format!("frames must be 1..{MAX_FRAMES}"));
+        }
+        if self.frames % 4 != 1 {
+            // Every model here compresses time by 4 (LTX-2 by 8, so 8k+1 is
+            // also 4k+1). Any other count is silently rounded by the model
+            // and the clip then fails the runner's exact frame check after
+            // the worker has paid for it.
+            return Err("frames must be 4k+1 (e.g. 33, 81, 121)".into());
         }
         if !(1..=60).contains(&self.fps) {
             return Err("fps must be 1..60".into());
@@ -841,6 +988,56 @@ mod tests {
             Some(RUNNER_PULL_REF),
             "plugins/video/module.toml [module.dispatch] image must be the pinned digest"
         );
+    }
+
+    #[test]
+    fn frame_counts_must_be_4k_plus_1() {
+        let mut j = job();
+        j.frames = 80;
+        assert!(j.validate(WORKLOAD_TXT2VID).is_err());
+        j.frames = 33;
+        assert!(j.validate(WORKLOAD_TXT2VID).is_ok());
+    }
+
+    #[test]
+    fn the_manifest_lists_the_small_wan_model_for_8_gib_and_cpu() {
+        let small = manifest_model("wan2.1-t2v-1.3b").expect("wan2.1-t2v-1.3b in module.toml");
+        assert_eq!(small.vram_gib, 8);
+        assert!(small.cpu);
+        assert_eq!(small.workloads, vec![WORKLOAD_TXT2VID.to_string()]);
+        assert!(!manifest_model("wan2.2-ti2v-5b").unwrap().cpu);
+        assert_eq!(manifest_models().len(), 5);
+    }
+
+    #[test]
+    fn a_card_advertises_only_the_models_it_can_hold() {
+        // An 8 GB card (nvidia-smi says 8192, some say a little less).
+        assert_eq!(models_for_vram(8192), vec!["wan2.1-t2v-1.3b"]);
+        assert_eq!(models_for_vram(7982), vec!["wan2.1-t2v-1.3b"]);
+        assert!(models_for_vram(6144).is_empty());
+        let big = models_for_vram(24 * 1024);
+        assert!(big.contains(&"wan2.2-ti2v-5b") && big.contains(&"wan2.1-t2v-1.3b"));
+        assert!(!big.contains(&"wan2.2-t2v-a14b"));
+        assert_eq!(models_for_vram(80 * 1024).len(), 5);
+        assert_eq!(parse_vram_mib("8192\n24576\n"), Some(24576));
+        assert_eq!(parse_vram_mib("No devices were found"), None);
+        assert_eq!(model_tag("wan2.1-t2v-1.3b"), "c0mpute:video:model:wan2.1-t2v-1.3b");
+    }
+
+    #[test]
+    fn omitted_fields_take_the_named_models_defaults() {
+        let mut req = serde_json::json!({ "model": "wan2.1-t2v-1.3b", "prompt": "p", "steps": 8 });
+        apply_model_defaults(&mut req);
+        let inline: VideoJobInline = serde_json::from_value(req).unwrap();
+        assert_eq!((inline.frames, inline.fps, inline.width, inline.height), (33, 16, 480, 272));
+        assert_eq!(inline.steps, 8, "a field the buyer set is kept");
+        assert!(inline.validate(WORKLOAD_TXT2VID).is_ok());
+
+        // A model without its own defaults keeps the serde ones.
+        let mut req = serde_json::json!({ "model": "wan2.2-ti2v-5b", "prompt": "p" });
+        apply_model_defaults(&mut req);
+        let inline: VideoJobInline = serde_json::from_value(req).unwrap();
+        assert_eq!((inline.frames, inline.width), (81, 1280));
     }
 
     #[test]
