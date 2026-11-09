@@ -4373,6 +4373,40 @@ struct CaptchaArgs {
     timeout_secs: u64,
 }
 
+/// The jobs bridge answers `{job_id, worker, price, output_hash, result}`;
+/// print the answer itself (as `POST /v1/captcha` does) with the job fields
+/// beside it.
+fn flatten_job_result(envelope: serde_json::Value) -> serde_json::Value {
+    let mut answer = match envelope.get("result") {
+        Some(serde_json::Value::Object(o)) => serde_json::Value::Object(o.clone()),
+        _ => return envelope,
+    };
+    for (from, to) in [("job_id", "job_id"), ("worker", "worker_peer_id"), ("price", "price")] {
+        if let Some(v) = envelope.get(from) {
+            answer[to] = v.clone();
+        }
+    }
+    answer
+}
+
+#[cfg(test)]
+mod captcha_cli_tests {
+    #[test]
+    fn job_envelope_is_flattened() {
+        let env = serde_json::json!({
+            "job_id": "j", "worker": "w", "price": 0.0006, "output_hash": "h",
+            "result": {"v": 1, "ok": true, "kind": "image", "text": "4831"}
+        });
+        let out = super::flatten_job_result(env);
+        assert_eq!(out["text"], "4831");
+        assert_eq!(out["worker_peer_id"], "w");
+        assert_eq!(out["job_id"], "j");
+        assert!(out.get("result").is_none());
+        let bare = serde_json::json!({"text": "7"});
+        assert_eq!(super::flatten_job_result(bare.clone()), bare);
+    }
+}
+
 async fn run_captcha(a: CaptchaArgs) -> Result<()> {
     use base64::Engine as _;
     use c0mpute_core::captcha;
@@ -4414,13 +4448,14 @@ async fn run_captcha(a: CaptchaArgs) -> Result<()> {
             spec["charset"] = serde_json::json!(captcha::resolve_charset(cs).map_err(anyhow::Error::msg)?);
         }
         captcha::parse_spec(&spec).map_err(anyhow::Error::msg)?;
-        c0mpute_core::jobs_gateway::submit_once(
+        let envelope = c0mpute_core::jobs_gateway::submit_once(
             captcha::WORKLOAD,
             spec,
             a.max_price,
             std::time::Duration::from_secs(a.timeout_secs.clamp(5, 600)),
         )
-        .await?
+        .await?;
+        flatten_job_result(envelope)
     };
     if let Some(text) = result.get("text").and_then(|t| t.as_str()).map(str::to_string) {
         result["text"] = serde_json::json!(captcha::apply_case(&text, a.case.as_deref()));
