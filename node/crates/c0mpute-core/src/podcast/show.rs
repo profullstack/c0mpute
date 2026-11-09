@@ -76,7 +76,7 @@ pub struct AdsMeta {
     /// Lowest CPM in USD, e.g. "1.50".
     pub min_cpm: Option<String>,
     pub max_ad_secs: Option<u64>,
-    /// Where the show's ad revenue goes, `<CHAIN>:<address>` (e.g.
+    /// Where the show's ad revenue goes, `<COIN>:<address>` (e.g.
     /// "SOL:9xQe..."). Without it the show runs ads unpaid.
     pub payout: Option<String>,
 }
@@ -118,7 +118,7 @@ impl AdsMeta {
         }
         if let Some(p) = &self.payout {
             if !crate::ads::billing::valid_payout(p.trim()) {
-                bail!("[ads] payout must be <CHAIN>:<address>, e.g. \"SOL:9xQe...\"");
+                bail!("[ads] payout must be <COIN>:<address>, e.g. \"SOL:9xQe...\"");
             }
             s.payout = Some(p.trim().to_string());
         }

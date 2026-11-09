@@ -133,7 +133,7 @@ pub struct Options {
     pub ffprobe: Option<PathBuf>,
     /// Absolute origin for URLs in VAST (else from the request's Host).
     pub public_origin: Option<String>,
-    /// Where this gateway is paid for the ads it serves, `<CHAIN>:<address>`.
+    /// Where this gateway is paid for the ads it serves, `<COIN>:<address>`.
     /// Without one it serves and signs receipts but never claims.
     pub payout: Option<String>,
     /// Smallest claim worth making, USD millionths.
@@ -247,7 +247,7 @@ impl Ads {
         let payout = opts.payout.filter(|p| {
             let ok = billing::valid_payout(p);
             if !ok {
-                warn!(payout = %p, "ads: payout is not <CHAIN>:<address>; this gateway will not claim");
+                warn!(payout = %p, "ads: payout is not <COIN>:<address>; this gateway will not claim");
             }
             ok
         });

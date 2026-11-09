@@ -730,10 +730,10 @@ enum PodcastingCmd {
         /// Without it (or [ads]) no gateway ever inserts ads.
         #[arg(long, value_name = "BREAKS")]
         ads: Option<String>,
-        /// Where the show's share of ad revenue goes, <CHAIN>:<address>
+        /// Where the show's share of ad revenue goes, <COIN>:<address>
         /// (e.g. SOL:9xQe...). Same as `payout` in [ads]. Without it the show
         /// runs ads unpaid.
-        #[arg(long, value_name = "CHAIN:ADDRESS")]
+        #[arg(long, value_name = "COIN:ADDRESS")]
         ads_payout: Option<String>,
         /// Build the show folder only; do not publish.
         #[arg(long)]
@@ -765,12 +765,14 @@ enum AdsCmd {
         json: bool,
     },
     /// Verify gateways' payment claims for a campaign and (with --pay) settle
-    /// and pay them from your CoinPay wallet. Without --pay it only reports.
+    /// and pay them through the node's payment rail ([payments]). Without
+    /// --pay it only reports.
     Settle {
         /// Campaign name (local) or id.
         campaign: String,
         /// Sign settlements and send payouts. Also needs `[ads] payouts =
-        /// true` in config.toml: real money leaves your wallet.
+        /// true` and `[payments] enabled = true` in config.toml: real money
+        /// moves.
         #[arg(long)]
         pay: bool,
         /// How long to collect claims and receipts over gossip.
@@ -818,9 +820,9 @@ struct AdsTargetArgs {
     /// Most the campaign pays for one UTC day of impressions, USD.
     #[arg(long)]
     daily_budget: Option<String>,
-    /// Your paying CoinPay wallet, <CHAIN>:<address> (claims paying out to it
+    /// Your paying CoinPay wallet, <COIN>:<address> (claims paying out to it
     /// are refused as self-dealing).
-    #[arg(long, value_name = "CHAIN:ADDRESS")]
+    #[arg(long, value_name = "COIN:ADDRESS")]
     payer: Option<String>,
     /// A CoinPay escrow or payment id that shows the budget is funded.
     #[arg(long)]
@@ -3306,23 +3308,26 @@ async fn run_ads(cmd: AdsCmd) -> Result<()> {
             let cfg = Config::load_or_default(&config::default_config_path())?;
             let fee_payout = cfg.ads.fee_payout.clone().unwrap_or_default();
             if !fee_payout.is_empty() && !billing::valid_payout(&fee_payout) {
-                bail!("[ads] fee_payout must be <CHAIN>:<address>");
+                bail!("[ads] fee_payout must be <COIN>:<address>, e.g. \"USDC_POL:0x...\"");
             }
-            let coinpay;
-            let rail: Option<&dyn billing::PaymentRail> = if pay {
-                if !cfg.ads.payouts {
+            // Real money needs both switches: `[ads] payouts` (this feature)
+            // and `[payments] enabled` (the node's one payment rail).
+            let rail: Option<std::sync::Arc<dyn c0mpute_core::payments::Rail>> = if pay {
+                if !cfg.ads.payouts || !cfg.payments.enabled {
                     bail!(
-                        "--pay sends real money from your CoinPay wallet; turn it on with `[ads] payouts = true` in {}",
+                        "--pay sends real money; it needs both `[ads] payouts = true` and `[payments] enabled = true` in {}",
                         config::default_config_path().display()
                     );
                 }
-                coinpay = billing::CoinpayCliRail::find()
-                    .context("`coinpay` is not installed: c0mpute update installs it, then `c0mpute coinpay login`")?;
-                Some(&coinpay)
+                Some(
+                    c0mpute_core::payments::rail_from_config(&cfg.payments)?
+                        .context("[payments] is enabled but no rail was configured")?,
+                )
             } else {
                 None
             };
-            let (round, ledger) = manage::settle(&record, &fee_payout, rail, wait(wait_secs)).await?;
+            let (round, ledger) =
+                manage::settle(&record, &fee_payout, rail.as_deref(), cfg.payments.round_cap(), wait(wait_secs)).await?;
             if json {
                 let settled: Vec<_> = round
                     .settled
