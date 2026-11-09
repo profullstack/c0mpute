@@ -1,44 +1,63 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Containerized fine-tuning. Suggested upstreams: axolotl (config-
-#   driven), unsloth (memory-efficient LoRA/QLoRA), torchtune. Inputs:
-#   base-model hash + dataset (JSONL or parquet) + training config.
-#   Outputs: LoRA/QLoRA adapter weights (safetensors) + training-log
-#   sidecar. Longer-running jobs; settlement is checkpoint-based with
-#   intermediate receipts so a worker can fail-forward without losing
-#   the whole reward.
+# Built in: `c0mpute train lora` (node/crates/c0mpute-cli/src/train.rs and
+# c0mpute-core/src/train.rs) is the front door to the LoRA training c0mpute
+# already runs as the `infernet.text.train` workload (c0mpute-core/src/text.rs,
+# DIP-0027). It does not add a second trainer:
+#
+#   1. checks the dataset: UTF-8 JSONL, one object per line as {text, title?},
+#      {prompt, completion} or {messages: [{role, content}]}; at least 2
+#      records, at most 1,000,000 records, 1 MiB per record, 512 MiB in all;
+#   2. converts it to the {title, text} corpus the worker's peft runner reads
+#      (prompt -> title, completion -> text; for messages the last user and
+#      assistant turns, and a shared system turn becomes the system prompt);
+#   3. writes the @infernetprotocol/training job (kind "lora", base_model,
+#      hyperparams lr / epochs / lora_r / seq_len / batch_size / max_steps);
+#   4. auctions it through text::train, relays live progress, downloads the
+#      adapter and keeps it only if its sha256 matches the receipt;
+#   5. prints how to use it: `c0mpute infernet text chat --adapter <out>`.
+#
+# Worker side (unchanged): `c0mpute infernet text serve`, which needs Infernet
+# >= 0.1.79 with the peft runtime (`infernet model runtime setup --peft --yes`:
+# torch + transformers + peft in Infernet's venv). Training is fp32 LoRA on CPU
+# or a CUDA GPU when torch sees one (buyers can require it with --gpu); no GPU
+# is required, so keep base models small (0.5B-class trains on CPU in hours).
+#
+# No QLoRA: the peft runner loads the base model in fp32 with no 4-bit
+# quantization (no bitsandbytes), so `train.qlora` is not offered.
 
 [module]
 id          = "train"
-name        = "Fine-tune — LoRA/QLoRA training"
-version     = "0.2.76"
+name        = "Fine-tune — LoRA training"
+version     = "0.2.77"
 kind        = "workload"
 category    = "ai"
-status      = "coming-soon"
-description = "Decentralized model fine-tuning (LoRA, QLoRA) on consumer/prosumer GPUs using axolotl or unsloth."
+status      = "partial"
+status_note = "LoRA works end to end through infernet.text.train (`c0mpute train lora`). The buyer serves the corpus and receives the adapter over HTTP from its own machine, so the worker must reach it: same LAN, or pass --public-url to a forwarded https address. Each record trains as one 'Brief me on: <title>' exchange, so multi-turn chats keep only their last turn. No QLoRA (the peft runner trains fp32 LoRA)."
+builtin     = true
+description = "Fine-tune a LoRA adapter on a c0mpute worker from a JSONL dataset (text, prompt/completion or chat messages): live progress, adapter verified by hash, then chat with it."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["train", "finetune", "lora", "qlora", "axolotl", "unsloth"]
+keywords    = ["train", "finetune", "lora", "peft", "adapter", "infernet"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
-os           = ["linux"]
-arch         = ["x86_64"]
-capabilities = ["gpu:nvidia", "vram:24gb+", "container-runtime"]
+c0mpute      = ">=0.2.77"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["bin:infernet", "infernet:text:runtime:peft", "gpu:cuda?"]
 
 [module.workloads]
-"train.lora"  = { command = "train-lora",  validation = "loss_curve_and_checkpoint_hash" }
-"train.qlora" = { command = "train-qlora", validation = "loss_curve_and_checkpoint_hash" }
+"train.lora" = { command = "lora", runs = "infernet.text.train", validation = "adapter_sha256_matches_receipt" }
 
 [module.dispatch]
-mode  = "container"
-image = "ghcr.io/c0mpute/train-runner:candidate"
+mode = "subprocess"
 
 [module.surfaces]
-cli = "c0mpute train"
+cli = "c0mpute train lora"
 
 [module.config.defaults]
-framework = "unsloth"
-precision = "bf16"
+epochs     = 1
+rank       = 8
+lr         = 0.0002
+seq_len    = 256
+batch_size = 4

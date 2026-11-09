@@ -24,7 +24,7 @@
 [module]
 id          = "ctv-ads"
 name        = "CTV Ads — VAST and VMAP from every gateway"
-version     = "0.2.76"
+version     = "0.2.77"
 kind        = "service"
 category    = "applications"
 status      = "partial"

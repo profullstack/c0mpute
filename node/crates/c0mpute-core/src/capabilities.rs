@@ -97,6 +97,9 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.push(crate::ocr::ROLE_TAG.to_string());
                 }
             }
+            // Docker works, a public address is known and a game image is
+            // present (probed at most once a minute).
+            Role::Gameserver => tags.extend(crate::gameserver::role_tags(config)),
             Role::Embed => {
                 // Like TTS: appears once background provisioning finishes.
                 let models = crate::embed::ready_models();
