@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use c0mpute_net::{ChunkSource, Libp2pNetwork, Network, NetworkConfig, bootstrap};
 
 use crate::capabilities::{self, Registry};

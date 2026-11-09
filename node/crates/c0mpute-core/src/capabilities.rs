@@ -612,6 +612,7 @@ impl Registry {
         // Spawn a separate eviction task that drops entries older than
         // MAX_AD_AGE every 30s.
         let inner = self.inner.clone();
+        let instances = self.instances.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
             loop {

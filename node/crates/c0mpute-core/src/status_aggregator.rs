@@ -1080,6 +1080,7 @@ mod tests {
             e2e: None,
             sealed_spec: None,
             result_key: None,
+            winning_instance: None,
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 1);
@@ -1094,6 +1095,8 @@ mod tests {
             completed_at_ms: now,
             signature: None,
             external_ref: None,
+            instance: None,
+            fault: None,
         })
         .await;
         // Cleared from in-flight, recorded as completed with ~5s latency.
@@ -1121,6 +1124,7 @@ mod tests {
             e2e: None,
             sealed_spec: None,
             result_key: None,
+            winning_instance: None,
         })
         .await;
         jobs.on_receipt(JobReceipt {
@@ -1133,6 +1137,8 @@ mod tests {
             completed_at_ms: now,
             signature: None,
             external_ref: None,
+            instance: None,
+            fault: None,
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 0);

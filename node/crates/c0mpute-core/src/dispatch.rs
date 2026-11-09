@@ -305,11 +305,14 @@ pub fn run_worker_subscriber_with_load(
                     continue;
                 }
                 let won = accept.winning_bidder_peer_id == our_peer_id;
-                // The same accept arrives directly and over gossip.
-                if seen_accepts.contains(&accept.job_id) {
+                // The same accept arrives directly and over gossip. A job can
+                // be accepted twice: re-awarded to the next bidder when the
+                // first winner's twin answered (see `buyer`).
+                let accept_key = format!("{}/{}", accept.job_id, accept.winning_bidder_peer_id);
+                if seen_accepts.contains(&accept_key) {
                     continue;
                 }
-                let Some(bid) = open_bids.remove(&accept.job_id) else {
+                let Some(bid) = open_bids.get(&accept.job_id) else {
                     if won {
                         warn!(job_id = %accept.job_id, "dispatch: discarding accept for a job we never bid on");
                     }
@@ -322,10 +325,16 @@ pub fn run_worker_subscriber_with_load(
                 if seen_accepts.len() >= MAX_SEEN_ACCEPTS {
                     seen_accepts.pop_front();
                 }
-                seen_accepts.push_back(accept.job_id.clone());
-                market.observe(bid.cap, bid.price, accept.agreed_price_usd, won);
-                debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
+                seen_accepts.push_back(accept_key);
                 if !won {
+                    // Lost: the bid stops holding capacity, but stays
+                    // honourable for a re-award until it expires.
+                    if let Some(bid) = open_bids.get_mut(&accept.job_id)
+                        && bid.reserve_until_ms != 0
+                    {
+                        bid.reserve_until_ms = 0;
+                        market.observe(bid.cap, bid.price, accept.agreed_price_usd, false);
+                    }
                     debug!(
                         job_id = %accept.job_id,
                         winner = %accept.winning_bidder_peer_id,
@@ -333,6 +342,9 @@ pub fn run_worker_subscriber_with_load(
                     );
                     continue;
                 }
+                let Some(bid) = open_bids.remove(&accept.job_id) else { continue };
+                market.observe(bid.cap, bid.price, accept.agreed_price_usd, true);
+                debug!(job_id = %accept.job_id, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
                 // The buyer kept another process's bid under our peer id:
                 // that process runs the job, not this one. Say so at once, so
                 // the buyer re-awards instead of waiting or failing the job.
@@ -837,6 +849,7 @@ mod tests {
             e2e: None,
             sealed_spec: None,
             result_key: None,
+            winning_instance: None,
         }
     }
 

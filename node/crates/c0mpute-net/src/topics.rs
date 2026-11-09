@@ -398,6 +398,7 @@ mod tests {
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         };
         let json = serde_json::to_value(&bid).unwrap();
         assert_eq!(json["expires_at_ms"], 1000);
@@ -424,6 +425,8 @@ mod tests {
             completed_at_ms: 0,
             signature: None,
             external_ref: Some("infernet:job_42".into()),
+            instance: None,
+            fault: None,
         };
         let back: JobReceipt =
             serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
@@ -443,6 +446,7 @@ mod tests {
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         };
         assert!(bid.is_live(u64::MAX), "old bids never expire");
         bid.expires_at_ms = Some(100);

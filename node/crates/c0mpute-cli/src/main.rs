@@ -72,8 +72,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Run full-stack diagnostic checks.
-    Doctor,
+    /// Run full-stack diagnostic checks, and list every c0mpute worker
+    /// process, systemd unit and identity lock on this machine (duplicates,
+    /// stale locks, wedged workers, units on old binaries).
+    Doctor {
+        /// Disable the extra worker units it may (your own user units; system
+        /// units only as root, otherwise it prints the sudo command) and add
+        /// the restart-loop guard to units that lack it.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Benchmark this machine (fib / matmul / hash at 1…N threads) and record
     /// a score the worker advertises to the network. Report lands in
     /// `<data-dir>/bench.json`, same shape as fleetcode's runtime-benchmarks.
@@ -539,6 +547,18 @@ enum WorkerCmd {
     },
     /// Stop a running worker.
     Stop,
+    /// Install the worker as a systemd service (a user unit by default) that
+    /// starts at boot. Refuses when another unit already runs a worker for
+    /// this user, so one machine never runs one identity twice.
+    Install {
+        /// A system unit (`/etc/systemd/system`, needs root) running as the
+        /// invoking user instead of a user unit.
+        #[arg(long)]
+        system: bool,
+        /// Do not start it now.
+        #[arg(long)]
+        no_start: bool,
+    },
     /// Show worker status.
     Status,
 }
@@ -1566,6 +1586,20 @@ fn main() -> Result<()> {
         return run_attached_worker(passthrough);
     }
 
+    // One worker per identity on this machine: take the identity lock now,
+    // replacing a worker that already runs it (newest start wins), before
+    // any setup and before a daemon forks (the child keeps the lock).
+    if let Some(Cmd::Worker {
+        cmd: WorkerCmd::Start { attach: false, .. },
+    }) = &cli.command
+    {
+        let dir = c0mpute_core::config::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        if let Err(e) = c0mpute_core::instance::claim(&dir) {
+            exit_if_duplicate(&e);
+            return Err(e);
+        }
+    }
+
     // Daemonize BEFORE the async runtime starts. Forking is unsafe once the
     // multi-threaded Tokio runtime has spawned worker threads, so this must
     // happen while the process is still single-threaded. Only `worker start
@@ -1582,7 +1616,21 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run_app(cli))
+    let out = runtime.block_on(run_app(cli));
+    if let Err(e) = &out {
+        exit_if_duplicate(e);
+    }
+    out
+}
+
+/// A worker that could not take over the identity exits with a code every
+/// c0mpute unit lists in `RestartPreventExitStatus`, so systemd does not
+/// restart it in a loop.
+fn exit_if_duplicate(e: &anyhow::Error) {
+    if e.downcast_ref::<c0mpute_core::instance::DuplicateWorker>().is_some() {
+        eprintln!("c0mpute worker: not started: {e}");
+        std::process::exit(c0mpute_core::instance::EXIT_DUPLICATE);
+    }
 }
 
 fn start_auto_update_poller(configured: bool) {
@@ -1626,7 +1674,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Pool { node: Some(id), .. } => run_pool_node(&id),
         Cmd::Pool { model, node: None } => run_pool(model),
-        Cmd::Doctor => run_doctor().await,
+        Cmd::Doctor { fix } => run_doctor(fix).await,
         Cmd::Bench {
             cmd,
             quick,
@@ -1786,11 +1834,12 @@ async fn run_app(cli: Cli) -> Result<()> {
 // doctor
 // ────────────────────────────────────────────────────────────────────────
 
-async fn run_doctor() -> Result<()> {
+async fn run_doctor(fix: bool) -> Result<()> {
     let local = c0mpute_doctor::run().await;
     for r in &local {
         println!("{:5} {} — {:?}", status_label(&r.status), r.name, r.status);
     }
+    print_worker_census(fix);
 
     println!("{:5} c0mpute — Ok (this binary)", "OK");
     println!(
@@ -1804,6 +1853,159 @@ async fn run_doctor() -> Result<()> {
         peer_status_text("infernet")
     );
 
+    Ok(())
+}
+
+/// `c0mpute doctor`: every worker process, unit and identity lock on this
+/// machine, what is wrong, and (`--fix`) the fixes it may apply.
+fn print_worker_census(fix: bool) {
+    use c0mpute_core::instance;
+    let report = instance::scan();
+    println!();
+    println!("workers on this machine:");
+    if report.processes.is_empty() {
+        println!("  processes: none running");
+    }
+    for p in &report.processes {
+        println!(
+            "  process pid {} as {} in {}{}",
+            p.pid,
+            p.user,
+            p.unit.as_ref().map(|u| u.describe()).unwrap_or_else(|| "no systemd unit".into()),
+            if p.exe_deleted { " (binary replaced on disk)" } else { "" }
+        );
+    }
+    for u in &report.units {
+        println!(
+            "  unit {} ({}) runs as {}, {}, restart-loop guard {}, starts {}",
+            u.unit.describe(),
+            u.path.display(),
+            u.runs_as,
+            if u.enabled { "enabled" } else { "disabled" },
+            if u.restart_prevented { "on" } else { "OFF" },
+            u.exec.as_deref().unwrap_or("?")
+        );
+    }
+    for l in &report.locks {
+        let who = match (&l.holder, l.held) {
+            (Some(h), true) => format!("held by {}", h.describe()),
+            (_, true) => "held".to_string(),
+            (Some(h), false) => format!("free (last holder pid {})", h.pid),
+            (None, false) => "free".to_string(),
+        };
+        println!(
+            "  identity {} (user {}): {who}{}{}",
+            l.dir.display(),
+            l.owner,
+            l.heartbeat_age_s.map(|a| format!(", heartbeat {a}s ago")).unwrap_or_default(),
+            if l.takeover_pending { ", takeover pending" } else { "" }
+        );
+    }
+    if report.findings.is_empty() {
+        println!("OK    workers: one per identity, no duplicate units");
+        return;
+    }
+    for f in &report.findings {
+        let level = match f.kind {
+            instance::FindingKind::StaleLock => "INFO",
+            instance::FindingKind::DuplicateProcesses
+            | instance::FindingKind::DuplicateUnits
+            | instance::FindingKind::Wedged => "FAIL",
+            _ => "WARN",
+        };
+        println!("{level:5} {}", f.message);
+        if let Some(cmd) = &f.fix {
+            println!("        fix: {cmd}");
+        }
+    }
+    if fix {
+        for line in instance::fix(&report) {
+            println!("FIXED {line}");
+        }
+    } else if report.findings.iter().any(|f| f.disable.is_some() || f.add_dropin.is_some()) {
+        println!("        run `c0mpute doctor --fix` to apply the fixes this user may make");
+    }
+}
+
+/// `c0mpute worker install`: one systemd unit for this user's worker.
+fn install_worker_unit(system: bool, no_start: bool) -> Result<()> {
+    use c0mpute_core::instance;
+    // SAFETY: getuid has no preconditions.
+    let me = instance::user_name(unsafe { libc::getuid() });
+    let report = instance::scan();
+    if let Some(other) = report
+        .units
+        .iter()
+        .find(|u| u.runs_as == me && u.enabled && u.unit.user == system)
+    {
+        anyhow::bail!(
+            "{} already runs a c0mpute worker as {me} ({}). One identity, one worker: remove it first ({}) \
+             or keep using it.",
+            other.unit.describe(),
+            other.path.display(),
+            other.unit.disable_command()
+        );
+    }
+    let exe = std::env::current_exe()?.display().to_string();
+    let exe = exe.trim_end_matches(" (deleted)").to_string();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let bin_dir = std::path::Path::new(&exe)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let user_line = if system { format!("User={me}\n") } else { String::new() };
+    let unit = format!(
+        "[Unit]\nDescription=c0mpute worker\nAfter=network-online.target\nWants=network-online.target\n\n\
+         [Service]\nType=simple\n{user_line}Environment=HOME={home}\n\
+         Environment=PATH={bin_dir}:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin\n\
+         ExecStart={exe} worker start\nRestart=on-failure\nRestartSec=5\n\
+         # 90: replaced by a newer start of this identity; 91: a duplicate that stood down.\n\
+         RestartPreventExitStatus={}\nTimeoutStopSec=30\n\n[Install]\nWantedBy={}\n",
+        instance::RESTART_PREVENT_EXIT_STATUS,
+        if system { "multi-user.target" } else { "default.target" }
+    );
+    let (path, ctl): (PathBuf, Vec<&str>) = if system {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            anyhow::bail!(
+                "a system unit needs root: sudo -E {exe} worker install --system (or drop --system for a user unit)"
+            );
+        }
+        (PathBuf::from("/etc/systemd/system/c0mpute-worker.service"), vec![])
+    } else {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
+        (base.join("systemd/user/c0mpute-worker.service"), vec!["--user"])
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, unit)?;
+    println!("wrote {}", path.display());
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("systemctl")
+            .args(&ctl)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("systemctl {} {} failed", ctl.join(" "), args.join(" "));
+        }
+        ok
+    };
+    run(&["daemon-reload"]);
+    if no_start {
+        run(&["enable", "c0mpute-worker.service"]);
+    } else {
+        // A daemon from `worker start -d` would be replaced by the service
+        // anyway; stop it cleanly first.
+        let _ = stop_worker();
+        run(&["enable", "--now", "c0mpute-worker.service"]);
+    }
+    if !system {
+        println!("starts at boot once lingering is on: loginctl enable-linger {me}");
+    }
     Ok(())
 }
 
@@ -1972,6 +2174,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             Ok(())
         }
         WorkerCmd::Stop => stop_worker(),
+        WorkerCmd::Install { system, no_start } => install_worker_unit(system, no_start),
         WorkerCmd::Start {
             roles,
             storage: _,

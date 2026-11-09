@@ -469,6 +469,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                     continue;
                 }
                 if is_twin_receipt(&receipt, &awards[i].bid) {
+                    // The same answer arrives directly and over gossip.
+                    if awards[i].twin_reported {
+                        continue;
+                    }
+                    awards[i].twin_reported = true;
                     let peer = receipt.worker_peer_id.clone();
                     let strikes = note_identity_fault(&peer);
                     warn!(
@@ -479,11 +484,6 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                         strikes,
                         "buyer: the accept reached a twin of the winner (one identity running twice); not a compute fault, re-awarding"
                     );
-                    // The same answer arrives directly and over gossip.
-                    if awards[i].twin_reported {
-                        continue;
-                    }
-                    awards[i].twin_reported = true;
                     match bids.first().cloned() {
                         Some(next) => {
                             bids.remove(0);
@@ -750,6 +750,7 @@ pub async fn resume_auction(
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         },
         receipt,
         external_ref: job.external_ref.clone(),
@@ -1033,6 +1034,7 @@ mod tests {
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         }
     }
 
