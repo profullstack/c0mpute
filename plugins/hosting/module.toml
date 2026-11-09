@@ -12,7 +12,7 @@
 [module]
 id          = "hosting"
 name        = "Hosting — censorship-resistant static sites"
-version     = "0.2.70"
+version     = "0.2.71"
 kind        = "workload"
 category    = "data"
 status      = "coming-soon"
