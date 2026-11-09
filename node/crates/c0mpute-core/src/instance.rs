@@ -1004,6 +1004,25 @@ pub struct WorkerProcess {
     /// The binary was replaced on disk since the process started.
     pub exe_deleted: bool,
     pub args: Vec<String>,
+    /// The container it runs in (short id), if any: each container has its
+    /// own filesystem and so its own identity.
+    pub container: Option<String>,
+}
+
+/// The container a `/proc/<pid>/cgroup` text places a process in (docker,
+/// podman, containerd), as a 12-character id.
+pub fn container_of(cgroup: &str) -> Option<String> {
+    for seg in cgroup.lines().flat_map(|l| l.rsplit(':').next().unwrap_or("").split('/')) {
+        let id = seg
+            .strip_suffix(".scope")
+            .and_then(|s| s.rsplit_once('-').map(|(_, id)| id))
+            .filter(|_| seg.starts_with("docker-") || seg.starts_with("libpod-") || seg.starts_with("cri-containerd-"))
+            .or_else(|| (seg.len() == 64 && seg.bytes().all(|b| b.is_ascii_hexdigit())).then_some(seg));
+        if let Some(id) = id {
+            return Some(id.chars().take(12).collect());
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1119,6 +1138,9 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
                 exe_deleted: exe.as_deref().is_some_and(|e| e.ends_with(" (deleted)")),
                 exe,
                 args,
+                container: std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+                    .ok()
+                    .and_then(|c| container_of(&c)),
             });
         }
     }
@@ -1275,12 +1297,18 @@ fn restart_prevented_in(path: &Path, text: &str, dir: &Path) -> bool {
 
 fn findings(r: &Report) -> Vec<Finding> {
     let mut out = Vec::new();
-    // Two worker processes for one user: one identity running twice.
-    let mut uids: Vec<u32> = r.processes.iter().map(|p| p.uid).collect();
-    uids.sort();
-    uids.dedup();
-    for uid in uids {
-        let ps: Vec<&WorkerProcess> = r.processes.iter().filter(|p| p.uid == uid).collect();
+    // Two worker processes for one user (in one container, or both on the
+    // host): one identity running twice.
+    let mut groups: Vec<(u32, Option<String>)> =
+        r.processes.iter().map(|p| (p.uid, p.container.clone())).collect();
+    groups.sort();
+    groups.dedup();
+    for (uid, container) in groups {
+        let ps: Vec<&WorkerProcess> = r
+            .processes
+            .iter()
+            .filter(|p| p.uid == uid && p.container == container)
+            .collect();
         if ps.len() > 1 {
             let list: Vec<String> = ps
                 .iter()
@@ -1549,6 +1577,18 @@ mod tests {
         // cgroup v1.
         let v1 = "12:pids:/x\n1:name=systemd:/system.slice/c0mpute-worker.service\n";
         assert_eq!(parse_cgroup(v1).map(|u| u.user), Some(false));
+    }
+
+    #[test]
+    fn container_cgroups() {
+        let id = "3cafaca0397090a4cead5d0b2572298fffc577a9bd5c906192ffaa920b1ca21c";
+        assert_eq!(
+            container_of(&format!("0::/system.slice/docker-{id}.scope\n")).as_deref(),
+            Some("3cafaca03970")
+        );
+        assert_eq!(container_of(&format!("12:pids:/docker/{id}\n")).as_deref(), Some("3cafaca03970"));
+        assert_eq!(container_of("0::/system.slice/c0mpute-worker.service\n"), None);
+        assert_eq!(container_of("0::/user.slice/user-1000.slice/session-4.scope\n"), None);
     }
 
     #[test]

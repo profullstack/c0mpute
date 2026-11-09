@@ -1905,7 +1905,11 @@ fn print_worker_census(fix: bool) {
             "  process pid {} as {} in {}{}",
             p.pid,
             p.user,
-            p.unit.as_ref().map(|u| u.describe()).unwrap_or_else(|| "no systemd unit".into()),
+            p.unit
+                .as_ref()
+                .map(|u| u.describe())
+                .or_else(|| p.container.as_ref().map(|c| format!("container {c}")))
+                .unwrap_or_else(|| "no systemd unit".into()),
             if p.exe_deleted { " (binary replaced on disk)" } else { "" }
         );
     }
