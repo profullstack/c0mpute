@@ -20,6 +20,7 @@ pub mod jobs_gateway;
 pub mod net_guard;
 pub mod ocr;
 pub mod opendisk;
+pub mod payments;
 pub mod penalty_box;
 pub mod pieces;
 pub mod podcast;

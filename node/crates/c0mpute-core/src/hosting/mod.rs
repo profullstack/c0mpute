@@ -13,9 +13,17 @@
 //!   chunks when this node holds them and otherwise fetched over libp2p from
 //!   the fastest live holder (round-robin among equally fast ones), failing
 //!   over to the next.
+//! * Marketplace sites (v2 records) name preferred hosts picked from d1sks
+//!   ([`market`]). Holders are challenged with random chunk fetches and the
+//!   challenger signs availability receipts ([`proof`]); preferred holders
+//!   that pass are paid per GiB-month by the site's payer ([`settle`],
+//!   through [`crate::payments`], off unless the operator turns it on).
 
 pub mod dns;
+pub mod market;
+pub mod proof;
 pub mod replicas;
+pub mod settle;
 pub mod site;
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +47,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, info, warn};
 
+use crate::payments::{Micros, Payee};
+use proof::Receipt;
 use replicas::{Action, ReplicaMap};
 use site::{SiteManifest, SiteRecord};
 
@@ -100,7 +110,17 @@ pub enum HostingMsg {
         /// can fetch from a holder it has no connection to yet.
         #[serde(default)]
         addrs: Vec<String>,
+        /// The hosting price this node asks to be a preferred host, USD per
+        /// GiB-month (decimal). Absent from older nodes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        price: Option<String>,
+        /// Where it is paid for marketplace copies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payout: Option<Payee>,
     },
+    /// A signed availability receipt (proof-of-storage challenge result).
+    /// Older nodes do not know this variant and skip it.
+    Receipt { receipt: Receipt },
 }
 
 fn one() -> u32 {
@@ -145,7 +165,43 @@ struct Inner {
     /// Optional handler for requests with a query string (podcast ad
     /// insertion installs one); it may decline and let the plain serve run.
     hook: std::sync::OnceLock<Arc<dyn ServeHook>>,
+    /// Signs challenge receipts (and is the payer identity for settlement).
+    challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
+    challenger_hex: Option<String>,
+    challenge: ChallengeScope,
+    challenge_every: Duration,
+    price: Option<Micros>,
+    payout: Option<Payee>,
+    /// Receipts this node signed, for settlement (kept on disk too).
+    own_receipts: RwLock<Vec<Receipt>>,
+    receipts_path: Option<PathBuf>,
 }
+
+/// Which sites a node challenges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChallengeScope {
+    Off,
+    /// Sites whose owner or payer is the challenger key.
+    Own,
+    /// Own sites, plus a sample of every other site's holders.
+    All,
+}
+
+impl ChallengeScope {
+    pub fn parse(s: &str) -> Self {
+        match s.trim() {
+            "off" | "none" | "false" => ChallengeScope::Off,
+            "all" => ChallengeScope::All,
+            _ => ChallengeScope::Own,
+        }
+    }
+}
+
+/// Most (site, holder) challenges in one round, so a gateway that knows many
+/// sites stays at a few MiB of challenge traffic per round.
+const CHALLENGES_PER_ROUND: usize = 32;
+/// Receipts kept in memory/on disk for settlement.
+const OWN_RECEIPTS_MAX: usize = 200_000;
 
 /// A handler a gateway can put in front of plain site serving for requests
 /// that carry a query string (e.g. `?ads=1` on a podcast episode).
@@ -166,6 +222,16 @@ pub struct Options {
     pub catalog_path: Option<PathBuf>,
     pub timing: Timing,
     pub dns: dns::Verifier,
+    /// Key that signs proof-of-storage receipts; no challenges without it.
+    pub challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
+    pub challenge: ChallengeScope,
+    pub challenge_every: Duration,
+    /// Hosting price this node asks (micro-USD per GiB-month), gossiped.
+    pub price: Option<Micros>,
+    /// Payout address, gossiped so payers can pay this node.
+    pub payout: Option<Payee>,
+    /// JSONL file of this node's own receipts (survives restarts).
+    pub receipts_path: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -176,6 +242,12 @@ impl Default for Options {
             catalog_path: None,
             timing: Timing::default(),
             dns: dns::Verifier::default(),
+            challenger: None,
+            challenge: ChallengeScope::Own,
+            challenge_every: Duration::from_secs(600),
+            price: None,
+            payout: None,
+            receipts_path: None,
         }
     }
 }
@@ -190,6 +262,23 @@ impl Hosting {
             .and_then(|b| serde_json::from_slice::<Catalog>(&b).ok())
             .unwrap_or_default();
         let me = net.peer_id().to_base58();
+        let own_receipts: Vec<Receipt> = opts
+            .receipts_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|text| {
+                let mut v: Vec<Receipt> = text
+                    .lines()
+                    .filter_map(|l| serde_json::from_str::<Receipt>(l).ok())
+                    .filter(|r| r.verify())
+                    .collect();
+                if v.len() > OWN_RECEIPTS_MAX {
+                    v.drain(..v.len() - OWN_RECEIPTS_MAX);
+                }
+                v
+            })
+            .unwrap_or_default();
+        let challenger_hex = opts.challenger.as_ref().and_then(site::owner_hex);
         let inner = Arc::new(Inner {
             net: net.clone(),
             store,
@@ -207,6 +296,14 @@ impl Hosting {
             fetch_slots: Semaphore::new(8),
             dns: opts.dns,
             hook: std::sync::OnceLock::new(),
+            challenger: opts.challenger,
+            challenger_hex,
+            challenge: opts.challenge,
+            challenge_every: opts.challenge_every,
+            price: opts.price,
+            payout: opts.payout.filter(|p| p.valid()),
+            own_receipts: RwLock::new(own_receipts),
+            receipts_path: opts.receipts_path,
         });
         let h = Hosting(inner);
         // Sites held before a restart: keep them only if their chunks are
@@ -221,6 +318,7 @@ impl Hosting {
         h.spawn_gossip_reader();
         h.spawn_announcer();
         h.spawn_repair();
+        h.spawn_challenger();
         Ok(h)
     }
 
@@ -274,6 +372,8 @@ impl Hosting {
                         parts,
                         hosts,
                         addrs,
+                        price,
+                        payout,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -293,11 +393,16 @@ impl Hosting {
                         entry.0 += 1;
                         if part + 1 >= parts {
                             let (_, all) = partial.remove(&source).unwrap_or_default();
+                            let price = price.as_deref().and_then(|p| crate::payments::parse_usd(p).ok());
+                            let payout = payout.filter(|p| p.valid());
                             h.0.map
                                 .write()
                                 .await
-                                .apply_holding_as(&source, all, Instant::now(), hosts);
+                                .apply_holding_meta(&source, all, Instant::now(), hosts, price, payout);
                         }
+                    }
+                    HostingMsg::Receipt { receipt } => {
+                        h.0.map.write().await.apply_receipt(receipt);
                     }
                 }
             }
@@ -331,12 +436,20 @@ impl Hosting {
             .iter()
             .map(|h| (h.site_id.clone(), (h.manifest.clone(), h.seq)))
             .collect();
+        let (price, payout) = if self.0.hosts {
+            (self.0.price, self.0.payout.clone())
+        } else {
+            (None, None)
+        };
         if self.0.hosts || !mine.is_empty() {
-            self.0
-                .map
-                .write()
-                .await
-                .apply_holding_as(&self.0.me, mine, Instant::now(), self.0.hosts);
+            self.0.map.write().await.apply_holding_meta(
+                &self.0.me,
+                mine,
+                Instant::now(),
+                self.0.hosts,
+                price,
+                payout.clone(),
+            );
         } else {
             return;
         }
@@ -363,6 +476,8 @@ impl Hosting {
                 parts,
                 hosts: self.0.hosts,
                 addrs: addrs.clone(),
+                price: price.map(crate::payments::format_usd),
+                payout: payout.clone(),
             })
             .await;
         }
@@ -649,6 +764,198 @@ impl Hosting {
         v
     }
 
+    // ── proof of storage ─────────────────────────────────────────────────
+
+    fn spawn_challenger(&self) {
+        if self.0.challenger.is_none() || self.0.challenge == ChallengeScope::Off {
+            return;
+        }
+        let h = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(jitter(h.0.challenge_every)).await;
+                if h.is_stopped() {
+                    return;
+                }
+                let n = h.challenge_round().await.len();
+                if n > 0 {
+                    debug!(receipts = n, "hosting: challenge round");
+                }
+            }
+        });
+    }
+
+    /// The hex key receipts are signed with (the payer identity), if any.
+    pub fn challenger_key(&self) -> Option<&str> {
+        self.0.challenger_hex.as_deref()
+    }
+
+    /// One challenge round: for each site in scope, ask every live holder
+    /// for one random chunk, straight from that peer, and sign a receipt.
+    /// Receipts are applied locally and gossiped. Returns them.
+    pub async fn challenge_round(&self) -> Vec<Receipt> {
+        let (Some(kp), Some(me_key)) = (self.0.challenger.clone(), self.0.challenger_hex.clone()) else {
+            return Vec::new();
+        };
+        if self.0.challenge == ChallengeScope::Off {
+            return Vec::new();
+        }
+        let (mut own, mut others): (Vec<(SiteRecord, String)>, Vec<(SiteRecord, String)>) = (Vec::new(), Vec::new());
+        {
+            let map = self.0.map.read().await;
+            for rec in map.records.values() {
+                let mine = rec.owner == me_key || rec.payer_key() == me_key;
+                if !mine && self.0.challenge != ChallengeScope::All {
+                    continue;
+                }
+                for holder in map.holders(&rec.site_id) {
+                    if holder == self.0.me {
+                        continue;
+                    }
+                    if mine {
+                        own.push((rec.clone(), holder));
+                    } else {
+                        others.push((rec.clone(), holder));
+                    }
+                }
+            }
+        }
+        own.sort_by(|a, b| a.0.site_id.cmp(&b.0.site_id).then(a.1.cmp(&b.1)));
+        // Others: a random sample each round.
+        {
+            use rand::seq::SliceRandom;
+            others.shuffle(&mut rand::thread_rng());
+        }
+        let picks: Vec<(SiteRecord, String)> = own.into_iter().chain(others).take(CHALLENGES_PER_ROUND).collect();
+        let mut out = Vec::new();
+        for (rec, holder) in picks {
+            match self.challenge_one(&kp, &rec, &holder).await {
+                Ok(r) => out.push(r),
+                Err(e) => debug!(site = %rec.site_id, %holder, err = %e, "hosting: no challenge"),
+            }
+        }
+        out
+    }
+
+    /// Challenge one holder of one site and record the signed receipt.
+    pub async fn challenge_one(
+        &self,
+        kp: &c0mpute_net::libp2p::identity::Keypair,
+        rec: &SiteRecord,
+        holder: &str,
+    ) -> Result<Receipt> {
+        let manifest = self.manifest(rec).await?;
+        let nonce: [u8; 32] = rand::random();
+        let chunk = proof::pick_chunk(&manifest, &nonce).context("site has no chunks")?;
+        let hash = Hash::from_hex(&chunk).context("bad chunk hash")?;
+        let pid: c0mpute_net::PeerId = holder.parse().context("holder is not a peer id")?;
+        let req = ChunkRequest {
+            chunk_hash: hash,
+            shard_index: None,
+        };
+        let started = Instant::now();
+        let got = tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await;
+        let ok = matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash);
+        let rtt_ms = if ok { started.elapsed().as_millis().min(u32::MAX as u128) as u32 } else { 0 };
+        let receipt = Receipt::sign(
+            kp,
+            proof::Challenge {
+                site_id: &rec.site_id,
+                manifest: &rec.manifest,
+                holder,
+                chunk: &chunk,
+                ok,
+                rtt_ms,
+                at: crate::payments::now_secs(),
+            },
+        )?;
+        self.record_receipt(receipt.clone()).await;
+        Ok(receipt)
+    }
+
+    /// Keep a receipt this node signed: in the map, in the settlement log,
+    /// and on gossip.
+    async fn record_receipt(&self, r: Receipt) {
+        self.0.map.write().await.apply_receipt(r.clone());
+        {
+            let mut own = self.0.own_receipts.write().await;
+            own.push(r.clone());
+            if own.len() > OWN_RECEIPTS_MAX {
+                let extra = own.len() - OWN_RECEIPTS_MAX;
+                own.drain(..extra);
+            }
+        }
+        if let Some(p) = &self.0.receipts_path
+            && let Ok(line) = serde_json::to_string(&r)
+        {
+            use std::io::Write;
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        self.publish(&HostingMsg::Receipt { receipt: r }).await;
+    }
+
+    /// Receipts this node signed.
+    pub async fn own_receipts(&self) -> Vec<Receipt> {
+        self.0.own_receipts.read().await.clone()
+    }
+
+    /// Receipts the network gossiped for one holder of one site.
+    pub async fn receipts_for(&self, site_id: &str, holder: &str) -> Vec<Receipt> {
+        self.0.map.read().await.receipts_for(site_id, holder).to_vec()
+    }
+
+    /// The preferred hosts of a site that count right now.
+    pub async fn preferred(&self, site_id: &str) -> Vec<String> {
+        self.0.map.read().await.effective_preferred(site_id)
+    }
+
+    // ── settlement ───────────────────────────────────────────────────────
+
+    /// What this node (as payer) owes preferred holders for `[from, to)`.
+    pub async fn dues(&self, from: u64, to: u64) -> Vec<settle::Due> {
+        let Some(payer) = self.0.challenger_hex.clone() else {
+            return Vec::new();
+        };
+        let (records, payouts, mut receipts) = {
+            let map = self.0.map.read().await;
+            let records: Vec<SiteRecord> = map.records.values().cloned().collect();
+            let payouts: HashMap<String, Payee> = map
+                .peers
+                .iter()
+                .filter_map(|(p, h)| h.payout.clone().map(|po| (p.clone(), po)))
+                .collect();
+            let receipts: Vec<Receipt> = map.receipts.values().flatten().cloned().collect();
+            (records, payouts, receipts)
+        };
+        receipts.extend(self.own_receipts().await);
+        settle::dues(&records, &receipts, &payouts, &payer, from, to)
+    }
+
+    /// One settlement round for `[from, to)`: work out the dues and pay them
+    /// through `rail` (skipping anything the ledger already paid, capped at
+    /// `cap` micro-USD).
+    pub async fn settle_round(
+        &self,
+        rail: &dyn crate::payments::Rail,
+        ledger: &crate::payments::Ledger,
+        from: u64,
+        to: u64,
+        cap: Micros,
+    ) -> (Vec<settle::Due>, Vec<(crate::payments::Transfer, crate::payments::Outcome)>) {
+        let dues = self.dues(from, to).await;
+        let Some(payer) = self.0.challenger_hex.clone() else {
+            return (dues, Vec::new());
+        };
+        let transfers = settle::transfers(&dues, &payer);
+        let outcomes = crate::payments::pay_all(rail, ledger, &transfers, cap).await;
+        (dues, outcomes)
+    }
+
     // ── fetching ─────────────────────────────────────────────────────────
 
     async fn fetch_chunk(&self, hash: &Hash, holders: &[String]) -> Result<Vec<u8>> {
@@ -821,6 +1128,8 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
                 "domains": r.domains,
                 "copies": copies,
                 "path": format!("/s/{}/", r.site_id),
+                "preferred_hosts": r.preferred_hosts,
+                "price_per_gib_month": r.price_per_gib_month,
             })
         })
         .collect();
@@ -908,11 +1217,19 @@ mod tests {
             parts: 1,
             hosts: true,
             addrs: vec![],
+            price: Some("0.004".into()),
+            payout: None,
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
         let back: HostingMsg = serde_json::from_slice(&bytes).unwrap();
         assert!(matches!(back, HostingMsg::Holding { .. }));
+        // A holding message from an older node (no price/payout) still parses.
+        let old = br#"{"t":"holding","sites":[],"part":0,"parts":1,"hosts":true,"addrs":[]}"#;
+        assert!(matches!(
+            serde_json::from_slice::<HostingMsg>(old).unwrap(),
+            HostingMsg::Holding { price: None, payout: None, .. }
+        ));
     }
 
     #[test]
@@ -930,6 +1247,11 @@ mod tests {
             parts: 1,
             hosts: true,
             addrs: vec!["/ip4/203.0.113.7/tcp/40001".into(); 8],
+            price: Some("0.004".into()),
+            payout: Some(Payee {
+                wallet: "0x".to_string() + &"a".repeat(40),
+                coin: "USDC_POL".into(),
+            }),
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -954,6 +1276,68 @@ pub async fn publish_dir(
     domains: Vec<String>,
     wait: Duration,
 ) -> Result<(SiteRecord, usize)> {
+    publish_dir_with(dir, name, domains, wait, None).await
+}
+
+/// Marketplace options for [`publish_dir_with`].
+#[derive(Clone, Debug)]
+pub struct MarketOptions {
+    pub query: market::DiskQuery,
+    /// Preferred (paid) hosts to pick, 1-5.
+    pub copies: usize,
+    /// The OpenDisk marketplace to ask (discovery only).
+    pub d1sks_url: String,
+}
+
+/// Pick preferred hosts from d1sks for a site of `size` bytes. `None` (with
+/// a note on stderr) when d1sks is unreachable or nothing matches: the site
+/// then publishes as a plain free site, which the network still keeps.
+pub async fn pick_terms(m: &MarketOptions, size: u64) -> Option<site::HostingTerms> {
+    let disks = match market::query(&m.d1sks_url, &m.query).await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("d1sks: {e}; publishing without preferred hosts (the network still keeps 3 free copies)");
+            return None;
+        }
+    };
+    let ranked = market::rank(&disks, &m.query, size);
+    match market::choose(&ranked, m.copies, None) {
+        Some((chosen, terms)) => {
+            eprintln!(
+                "marketplace: {} preferred host(s) at ${}/GiB-month:",
+                chosen.len(),
+                crate::payments::format_usd(terms.price_per_gib_month)
+            );
+            for d in &chosen {
+                eprintln!(
+                    "  {}  {}  ${}/GiB-month  {}",
+                    d.peer_id,
+                    d.name,
+                    crate::payments::format_usd(d.price),
+                    d.countries.join(",")
+                );
+            }
+            Some(terms)
+        }
+        None => {
+            eprintln!(
+                "d1sks: no c0mpute hosting disk matches ({} listed); publishing without preferred hosts",
+                disks.len()
+            );
+            None
+        }
+    }
+}
+
+/// [`publish_dir`], optionally picking paid hosts from the d1sks marketplace
+/// first and signing them into a v2 record.
+pub async fn publish_dir_with(
+    dir: &std::path::Path,
+    name: &str,
+    domains: Vec<String>,
+    wait: Duration,
+    market: Option<MarketOptions>,
+) -> Result<(SiteRecord, usize)> {
     for d in &domains {
         if !site::valid_domain(d) {
             bail!("invalid domain {d:?}");
@@ -967,13 +1351,18 @@ pub async fn publish_dir(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let record = SiteRecord::sign(
+    let terms = match &market {
+        Some(m) => pick_terms(m, built.manifest.total_bytes()).await,
+        None => None,
+    };
+    let record = SiteRecord::sign_with_terms(
         &keypair,
         name,
         &manifest_hash,
         seq,
         built.manifest.total_bytes(),
         domains,
+        terms,
     )?;
     let hosting = Hosting::start(supervisor.libp2p.clone(), supervisor.store.clone(), Options::default()).await?;
     // Let the swarm reach peers before the first gossip.
@@ -991,12 +1380,25 @@ pub async fn publish_dir(
     while started.elapsed() < wait {
         tokio::time::sleep(Duration::from_secs(5)).await;
         hosting.regossip(&record).await;
-        let others = hosting.holders(&record.site_id).await.len();
+        let holders = hosting.holders(&record.site_id).await;
+        let others = holders.len();
         if others != copies {
             copies = others;
-            eprintln!("  {copies}/{TARGET_REPLICAS} network copies");
+            let paid = holders.iter().filter(|h| record.prefers(h)).count();
+            if record.preferred_hosts.is_empty() {
+                eprintln!("  {copies}/{TARGET_REPLICAS} network copies");
+            } else {
+                eprintln!(
+                    "  {copies}/{TARGET_REPLICAS} network copies ({paid}/{} preferred)",
+                    record.preferred_hosts.len()
+                );
+            }
         }
-        if copies >= TARGET_REPLICAS {
+        let paid_done = record.preferred_hosts.is_empty()
+            || holders.iter().filter(|h| record.prefers(h)).count() >= record.preferred_hosts.len();
+        // A marketplace site waits a little longer for its preferred hosts,
+        // but never past `wait`.
+        if copies >= TARGET_REPLICAS && (paid_done || started.elapsed() > wait / 2) {
             break;
         }
     }

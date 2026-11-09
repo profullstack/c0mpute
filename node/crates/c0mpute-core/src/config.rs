@@ -57,6 +57,10 @@ pub struct Config {
     /// Game server rentals (`gameserver` role, opt-in).
     #[serde(default)]
     pub gameserver: GameserverConfig,
+    /// Money movement (hosting settlement; ads billing later). Off unless
+    /// `enabled = true` and the rail's key is in the environment.
+    #[serde(default)]
+    pub payments: crate::payments::PaymentsConfig,
 }
 
 /// Ads on a gateway (`ads-manager`, `ctv-ads`, `podcast-ads`). Every gateway
@@ -124,14 +128,81 @@ pub struct HostingConfig {
     /// Most bytes of other people's sites this node will hold.
     #[serde(default = "default_hosting_max_bytes")]
     pub max_bytes: u64,
+    /// What this node asks to be a preferred (paid) host, USD per GiB-month.
+    /// Published in the OpenDisk descriptor and in hosting gossip; a site
+    /// offering less does not count this node as preferred.
+    #[serde(default = "default_hosting_price")]
+    pub price_usd_per_gib_month: f64,
+    /// Where marketplace payments for holding sites go (a wallet address on
+    /// `payout_coin`'s chain). Without it this node can still be preferred,
+    /// but nobody can pay it.
+    #[serde(default)]
+    pub payout_wallet: Option<String>,
+    #[serde(default = "crate::payments::default_coin")]
+    pub payout_coin: String,
+    /// Which sites this node challenges for proof of storage: `own` (sites
+    /// its publisher key owns or pays for), `all` (also a sample of everyone
+    /// else's, as a gateway might), or `off`.
+    #[serde(default = "default_challenge")]
+    pub challenge: String,
+    /// Seconds between challenge rounds.
+    #[serde(default = "default_challenge_every")]
+    pub challenge_every_secs: u64,
+    /// Seconds between settlement rounds (paying preferred holders of the
+    /// sites this node pays for). Payments only move when `[payments]` is on.
+    #[serde(default = "default_settle_every")]
+    pub settle_every_secs: u64,
 }
 
 impl Default for HostingConfig {
     fn default() -> Self {
         Self {
             max_bytes: default_hosting_max_bytes(),
+            price_usd_per_gib_month: default_hosting_price(),
+            payout_wallet: None,
+            payout_coin: crate::payments::default_coin(),
+            challenge: default_challenge(),
+            challenge_every_secs: default_challenge_every(),
+            settle_every_secs: default_settle_every(),
         }
     }
+}
+
+impl HostingConfig {
+    /// The hosting price in micro-USD per GiB-month (the default when unusable).
+    pub fn price_micros(&self) -> crate::payments::Micros {
+        let p = if self.price_usd_per_gib_month.is_finite() && self.price_usd_per_gib_month >= 0.0 {
+            self.price_usd_per_gib_month
+        } else {
+            default_hosting_price()
+        };
+        (p * crate::payments::MICROS_PER_USD as f64).round() as crate::payments::Micros
+    }
+
+    /// The payout address, when set and well formed.
+    pub fn payee(&self) -> Option<crate::payments::Payee> {
+        let p = crate::payments::Payee {
+            wallet: self.payout_wallet.clone()?.trim().to_string(),
+            coin: self.payout_coin.trim().to_string(),
+        };
+        p.valid().then_some(p)
+    }
+}
+
+fn default_hosting_price() -> f64 {
+    crate::opendisk::DEFAULT_PRICE_USD_PER_GIB_MONTH
+}
+
+fn default_challenge() -> String {
+    "own".into()
+}
+
+fn default_challenge_every() -> u64 {
+    600
+}
+
+fn default_settle_every() -> u64 {
+    24 * 60 * 60
 }
 
 fn default_hosting_max_bytes() -> u64 {
@@ -327,6 +398,7 @@ impl Default for Config {
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
             gameserver: GameserverConfig::default(),
+            payments: Default::default(),
         }
     }
 }

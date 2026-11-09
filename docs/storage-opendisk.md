@@ -8,6 +8,10 @@ Storage is a default role. Every node that runs it (that is every node unless
 | `/storage/v1/objects/{hash}`, `/shards/{hash}`, `/manifests/{hash}`, `/status` | The CIP-002 storage API. Reads are open: a blake3 hash is the capability, and private-tier objects are ciphertext. Writes need an `x-coinpay-auth` envelope signed by the node's own ed25519 key or a key in `storage.trusted_writers`, so a stranger cannot fill the disk. |
 | `/.well-known/opendisk.json` | The node's [OpenDisk 0.1](https://d1sks.pwa.pit.world/docs) descriptor: `key` (`ed25519:` + the node's identity key), live `capacity.free_gib` / `total_gib`, `price.per_gib_month`, and a `c0mpute` block with the peer id and storage API URL. |
 
+A node with the `hosting` role also says so: `accepts.hosting: true`, `c0mpute.roles`, and
+`c0mpute.hosting { price_per_gib_month, max_gib }`. d1sks lists those at `?hosting=1`, and
+`c0mpute hosting publish --disks auto` picks paid hosts from them (see [hosting](hosting.md)).
+
 ## Listing on d1sks
 
 A node lists itself; nothing central does it for the node. When the gateway announces a

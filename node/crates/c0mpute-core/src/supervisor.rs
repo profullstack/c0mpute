@@ -514,18 +514,95 @@ impl Supervisor {
     /// Start the hosting service: gossip, replica map, self-healing copies.
     pub async fn start_hosting(&self) -> Result<crate::hosting::Hosting> {
         let hosts = self.config.roles.contains(&c0mpute_proto::Role::Hosting);
-        let catalog_path = Some(self.config.storage.root.join("hosting").join("catalog.json"));
-        crate::hosting::Hosting::start(
+        let dir = self.config.storage.root.join("hosting");
+        let catalog_path = Some(dir.join("catalog.json"));
+        let cfg = &self.config.hosting;
+        // Receipts are signed with this machine's publisher key: the key that
+        // owns (and pays for) the sites published from here.
+        let challenge = crate::hosting::ChallengeScope::parse(&cfg.challenge);
+        let challenger = if challenge == crate::hosting::ChallengeScope::Off || self.config.private.enabled {
+            None
+        } else {
+            crate::hosting::publisher_keypair().ok()
+        };
+        let hosting = crate::hosting::Hosting::start(
             self.libp2p.clone(),
             self.store.clone(),
             crate::hosting::Options {
                 hosts,
-                max_bytes: self.config.hosting.max_bytes,
+                max_bytes: cfg.max_bytes,
                 catalog_path,
+                challenger,
+                challenge,
+                challenge_every: std::time::Duration::from_secs(cfg.challenge_every_secs.max(30)),
+                price: Some(cfg.price_micros()),
+                payout: cfg.payee(),
+                receipts_path: Some(dir.join("receipts.jsonl")),
                 ..Default::default()
             },
         )
-        .await
+        .await?;
+        self.spawn_settlement(hosting.clone(), dir);
+        Ok(hosting)
+    }
+
+    /// Settle with the preferred holders of the sites this machine pays for,
+    /// once per `hosting.settle_every_secs`. With `[payments]` off (the
+    /// default) it only logs what it would pay; nothing moves.
+    fn spawn_settlement(&self, hosting: crate::hosting::Hosting, dir: std::path::PathBuf) {
+        if hosting.challenger_key().is_none() {
+            return;
+        }
+        let every = self.config.hosting.settle_every_secs.max(60);
+        let payments = self.config.payments.clone();
+        let rail = match crate::payments::rail_from_config(&payments) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(err = %e, "payments: misconfigured, hosting settlement stays dry-run");
+                None
+            }
+        };
+        let ledger = std::sync::Arc::new(crate::payments::Ledger::open(dir.join("ledger.json")));
+        let cursor_path = dir.join("settled-until");
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+                let now = crate::payments::now_secs();
+                let from = std::fs::read_to_string(&cursor_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .filter(|f| *f < now)
+                    .unwrap_or(now.saturating_sub(every));
+                match &rail {
+                    Some(rail) => {
+                        let (dues, outcomes) = hosting
+                            .settle_round(rail.as_ref(), &ledger, from, now, payments.round_cap())
+                            .await;
+                        for (t, o) in &outcomes {
+                            tracing::info!(key = %t.key, amount = %crate::payments::format_usd(t.amount), wallet = %t.payee.wallet, outcome = ?o, "hosting settlement");
+                        }
+                        tracing::debug!(dues = dues.len(), "hosting settlement round");
+                        // Always move on: windows never overlap, so a key is
+                        // never paid twice. A failed transfer is logged above
+                        // and not retried (an underpayment, never a double one).
+                        let _ = std::fs::write(&cursor_path, now.to_string());
+                    }
+                    None => {
+                        for d in hosting.dues(from, now).await.into_iter().filter(|d| d.amount > 0) {
+                            tracing::info!(
+                                site = %d.site_id,
+                                holder = %d.holder,
+                                amount = %crate::payments::format_usd(d.amount),
+                                passed = d.passed,
+                                challenged = d.challenged,
+                                "hosting settlement (dry run: [payments] is off, nothing paid)"
+                            );
+                        }
+                        let _ = std::fs::write(&cursor_path, now.to_string());
+                    }
+                }
+            }
+        });
     }
 
     /// Start the ads service on a gateway: campaign index, VAST/VMAP, and
