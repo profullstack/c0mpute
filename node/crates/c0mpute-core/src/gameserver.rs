@@ -1439,10 +1439,9 @@ impl Worker {
         }
     }
 
-    async fn publish_result(&self, v: &Value) -> Result<String> {
-        let h = self.store.put(&serde_json::to_vec(v)?).await?;
-        self.net.announce(&h).await?;
-        Ok(h.to_hex())
+    /// Store the job's result, sealed to the buyer for e2e jobs (DIP-0032).
+    async fn publish_result(&self, accept: &c0mpute_net::topics::JobAccept, v: &Value) -> Result<String> {
+        crate::pieces::publish_result_bytes(&self.net, &self.store, accept, &serde_json::to_vec(v)?).await
     }
 }
 
@@ -1456,7 +1455,7 @@ fn spawn_runner(worker: Arc<Worker>, slots: Arc<Semaphore>, stop: bool) -> mpsc:
                 let _slot = slot;
                 let res = if stop { w.stop(&job).await } else { w.start(&job).await };
                 let res = match res {
-                    Ok(v) => w.publish_result(&v).await,
+                    Ok(v) => w.publish_result(&job.accept, &v).await,
                     Err(e) => Err(e),
                 };
                 match res {

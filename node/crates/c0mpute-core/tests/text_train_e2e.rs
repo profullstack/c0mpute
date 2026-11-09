@@ -168,9 +168,11 @@ async fn trains_peer_to_peer_with_pieces_and_conversations() {
     assert_eq!(ans["text"], "[HuggingFaceTB/SmolLM2-135M-Instruct] system=You are a pricing coach. | user=How should I price it?", "{ans}");
     assert_eq!(ans["adapter_hash"], out["adapter_hash"]);
     assert!(!ans["receipt"]["output_hash"].as_str().unwrap().starts_with("sha256:"), "answer came back as a chunk");
-    // The worker cached the adapter it fetched as pieces.
+    // The adapter came sealed (DIP-0032): the worker kept it only for the
+    // job, never in its adapter cache, and removed it afterwards.
     let cached = tmp.path().join("w/cache/text/adapters").join(out["adapter_hash"].as_str().unwrap().trim_start_matches("sha256:"));
-    assert_eq!(std::fs::read(cached.join("adapter_model.safetensors")).unwrap(), want);
+    assert!(!cached.join("adapter_model.safetensors").exists(), "a sealed adapter must not be cached");
+    let _ = &want;
 }
 
 /// A corpus with conversations is never placed on a worker whose runner
