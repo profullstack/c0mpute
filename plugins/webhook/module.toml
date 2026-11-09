@@ -7,7 +7,7 @@
 [module]
 id          = "webhook"
 name        = "Webhooks — paid, end-to-end encrypted delivery"
-version     = "0.3.12"
+version     = "0.3.13"
 kind        = "workload"
 category    = "infrastructure"
 status      = "available"

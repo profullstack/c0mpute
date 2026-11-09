@@ -15,7 +15,7 @@
 [module]
 id          = "music"
 name        = "Music — song generation (ACE-Step 1.5)"
-version     = "0.3.12"
+version     = "0.3.13"
 kind        = "workload"
 category    = "ai"
 status      = "available"
