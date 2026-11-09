@@ -1,49 +1,117 @@
 # Git hosting: repos kept alive by the network
 
-The `git` plugin hosts git repositories on c0mpute with no server of record. A repo is
-signed by its owner's key, hosting nodes keep three self-healing copies of it, and any
-gateway serves clones. There is no coordinator and no central index: it is the
-[hosting](hosting.md) machinery with git on top.
+c0mpute hosts git repositories with no server of record. A repo is signed by its owner's
+key, hosting nodes keep three self-healing copies of it, and any gateway serves clones,
+with the owner's machine offline. There is no account, no coordinator and no central
+index: it is the [hosting](hosting.md) machinery with git on top. You use plain `git`;
+the `c0mpute git` commands are shortcuts.
+
+`c0mpute git --help` prints this guide in short form. `c0mpute git <command> -h` shows
+one command.
+
+## Quick start
 
 ```sh
-c0mpute git install-helper                 # once: puts git-remote-c0mpute on PATH
+c0mpute git install                        # once: puts git-remote-c0mpute on PATH
 cd my-project
-c0mpute git init my-project                # prints c0mpute://<your-key>/my-project, adds remote "origin"
-git push origin main                       # signed, sent to a gateway, replicated x3
+c0mpute git init my-project                # adds remote "origin" = c0mpute://<your-key>/my-project
+git push origin main                       # signed by your key, kept by the network x3
 
-# anyone, anywhere:
-git clone c0mpute://<owner-key>/my-project                       # via the remote helper, verified
-git clone https://<any-gateway>/git/<owner-key>/my-project.git   # plain git, no helper
-c0mpute git ls --gateway https://<gateway>                       # repos a gateway knows
+# anyone, anywhere, no account:
+git clone c0mpute://<owner-key>/my-project                                 # verified by the helper
+git clone https://gateway.c0mpute.com/git/<owner-key>/my-project.git       # plain git, nothing installed
 ```
 
-`c0mpute git clone` and `c0mpute git push` are the same as `git clone`/`git push` with
-the helper put on PATH for that one command, so they work before `install-helper`.
+That is the whole setup. Everything after it is ordinary git.
 
-## Who can push
+## Commands
 
-The owner key is this machine's c0mpute identity (`<data_dir>/buyer/identity.key`, the
-same key that owns hosting sites; `c0mpute git key` prints it). Only that key can publish
-a new version of `c0mpute://<that-key>/<repo>`. To push from a second machine, copy the
-key file there (multi-writer repos are not built yet, see below).
+| Command | What it does |
+|---|---|
+| `c0mpute git install` | Put `git-remote-c0mpute` (a link to the `c0mpute` binary) next to it, so plain `git push`/`git clone` understand `c0mpute://` URLs. `--dir <dir>` to put it elsewhere on PATH. Alias of `install-helper`. |
+| `c0mpute git init <repo>` | Print `c0mpute://<your-key>/<repo>`; inside a work tree, add it as remote `origin` (`--remote <name>` for another name). Publishes nothing until you push. |
+| `c0mpute git url <repo>` | Print the clone URL of one of your repos. |
+| `c0mpute git key` | Print this machine's owner key (the `<owner-key>` in URLs). |
+| `c0mpute git clone <url> [dir]` | `git clone` with the helper on PATH, so it works before `install`. `--gateway <url>` to pick a gateway. |
+| `c0mpute git push [git args]` | `git push` with the helper on PATH. `--gateway <url>` goes before git's arguments: `c0mpute git push --gateway https://gateway.c0mpute.com origin main`. |
+| `c0mpute git ls` | Repos a gateway knows, with live copy counts (`--gateway <url>`; default your node, else the public gateway). |
+| `c0mpute git help` / `-h` / `--help` | Help; `--help` adds the full guide. |
 
-`c0mpute://<repo>` with no owner means "my key", handy for your own remotes.
+## URLs
+
+| URL | Means |
+|---|---|
+| `c0mpute://<owner-key>/<repo>` | Anyone's repo. `<owner-key>` is 64 hex (`c0mpute git key`). |
+| `c0mpute://<repo>` | A repo of this machine's key: the short form for your own remotes. |
+| `c0mpute://<20-hex site id>` | The URL form of c0mpute before 0.3.11; still clones (see [Old repos](#old-repos)). |
+| `https://<gateway>/git/<owner-key>/<repo>.git` | The same repo over git's plain ("dumb") HTTP: read-only, no c0mpute needed. |
+
+Repo names are 1-59 of `a-z`, `0-9` and `-`.
+
+## Everyday git
+
+It is git: `git push`, `git pull`, `git fetch`, branches, tags (annotated tags too),
+`git push origin --delete <branch>`. A few rules come from the network:
+
+- **Only the owner key can push.** Everyone else can clone and fetch.
+- **Fast-forward only** unless you force: `git push --force` (or a `+refspec`) rewrites
+  history, as on any forge. Tags never move without force.
+- **Two machines, one key:** the gateway refuses a push built on a version it no longer
+  has as current ("the repo moved on since you fetched it"). `git pull`, then push again.
+- **Size:** hosting's site limits apply (see [Limits](#limits)).
+
+## Actions: push to deploy
+
+A push can deploy. When it moves the default branch (HEAD) and that commit has a
+`c0mpute.toml` with an `[app]` table, the push also deploys the commit as a
+[c0mpute app](apps.md): three copies, failover, served at `/a/<app_id>/` on every
+gateway and on your custom domains.
+
+```toml
+# c0mpute.toml at the repo root
+[app]
+name = "api"
+port = 8080
+health = "/healthz"
+```
+
+```sh
+git push origin main
+# c0mpute: deploying app api from 1a2b3c4d5e6f
+# c0mpute: app api deployed: /a/<app_id>/ on any gateway
+```
+
+The full `[app]` reference is in [apps.md](apps.md). Turn deploys off for one repo with
+`git config c0mpute.deploy false`. A failed deploy is reported but does not fail the
+push: the repo is stored either way.
+
+There is no CI runner yet (no build or test jobs triggered by a push). To run checks on
+push today, keep a GitHub mirror with Actions, or run them before you push.
+
+## A second machine
+
+The owner key is the machine's c0mpute identity, `<data_dir>/buyer/identity.key`
+(`~/.local/share/c0mpute/buyer/identity.key` on Linux). To push from another machine,
+copy that file there. Multi-writer repos (a signed list of keys) are not built yet.
 
 ## Gateways
 
-The helper reads from and pushes to, in order:
+Pushes and clones go through a gateway over HTTP. The helper uses, in order:
 
-1. `C0MPUTE_GIT_GATEWAY` (comma-separated), else
-2. `git config c0mpute.gateway` (repeatable, per repo or global), else
-3. `http://127.0.0.1:7777`, the local node.
+1. `--gateway` on `clone`/`push`/`ls`, or `C0MPUTE_GIT_GATEWAY` (comma-separated), else
+2. `git config c0mpute.gateway` (repeatable, per repo or `--global`), else
+3. your own node, `http://127.0.0.1:7777`, then the public `https://gateway.c0mpute.com`.
 
-Reads ask every listed gateway and take the newest version that verifies. Pushes go to
-the first gateway that accepts. Any gateway works: the helper checks the owner signature
-and every chunk hash itself, so a gateway can refuse or lag but cannot forge or corrupt a
+Reads ask every listed gateway and take the newest version that verifies. Pushes go to the
+first gateway that accepts. Gateways are untrusted: the helper checks the owner signature
+and every file hash itself, so a gateway can refuse or lag but cannot forge or corrupt a
 repo. Public gateways are on the node board (`gateway` on `/api/nodes`) and on
 [d1sks](https://d1sks.pwa.pit.world/disks?hosting=1).
 
-A gateway accepts pushes unless its operator turns them off:
+A new repo is served at once by the gateway you pushed to. Other gateways learn about it
+by gossip, which can take a few minutes; until then they answer "no such repo (yet)".
+
+Running a gateway? It accepts pushes unless you turn them off:
 
 ```toml
 # ~/.config/c0mpute/config.toml
@@ -51,8 +119,27 @@ A gateway accepts pushes unless its operator turns them off:
 git_pushes = false      # reads and clones are always served
 ```
 
-Pushes count against the gateway's `hosting.max_bytes` and the 1 GiB per-owner budget,
-like any site it holds. In private mode a node accepts pushes only from its own key.
+A push needs room on the gateway: the node's hosting budget (automatic, from free disk,
+unless `[hosting] max_bytes` is set), the free-disk floor and the per-owner limit, like
+any copy it takes. In private mode a node accepts pushes only from its own key.
+
+## Old repos
+
+c0mpute before 0.3.11 stored a repo as `refs.json` plus one `repo.bundle`. Nothing to do:
+such repos still clone, also by their old `c0mpute://<site id>` URL, and the owner's next
+push rewrites the repo in the current layout (one full pack) with its whole history.
+
+## Troubleshooting
+
+| Symptom | Cause, fix |
+|---|---|
+| `git: 'remote-c0mpute' is not a git command` | The helper is not on PATH: `c0mpute git install` (or use `c0mpute git push`/`clone`). |
+| `HTTP 507 ... hosting budget` on push | That gateway has no room. Push through another: `--gateway https://gateway.c0mpute.com`. |
+| `no such repo on the network (yet)` | That gateway has not heard of it. Wait a few minutes, or use the gateway you pushed to. |
+| `the repo moved on since you fetched it` | Someone (your other machine) pushed first. `git pull`, then push. |
+| `non-fast-forward` | Your branch is behind. Pull, or `git push --force` if you mean to rewrite. |
+| `belongs to key ...; this machine's key is ...` | Pushing to another key's repo. Only its owner can push. |
+| Anything slow | `C0MPUTE_GIT_TRACE=1 git push ...` prints phase timings. |
 
 ## How it works
 
@@ -80,9 +167,10 @@ like any site it holds. In private mode a node accepts pushes only from its own 
 
 ### Limits
 
-256 MiB and 10,000 files per repo (hosting's site limits). Repo names are 1-59 of
-`a-z`, `0-9` and `-`. SHA-1 repositories.
-
+1 GiB per repo (`MAX_REPO_BYTES`: above that hosting would stripe the site across nodes,
+and a push is held whole by its gateway), and the gateway's hosting budget plus the
+per-owner limit. Repo names are 1-59 of `a-z`, `0-9` and `-`. SHA-1 repositories. Keep
+large binaries out of git.
 ## Paying hosts
 
 Repos are hosting sites, so free copies are kept by volunteers exactly like free sites, and
@@ -93,7 +181,7 @@ published today is a free (v1) site.
 ## Not yet
 
 - **Smart HTTP.** Clones are dumb HTTP: a clone downloads every pack (bounded by repacking
-  every 16 pushes), there is no object negotiation. Fine at hosting's 256 MiB cap.
+  every 16 pushes), there is no object negotiation. Fine at the 1 GiB repo cap.
 - **Collaborators.** One key writes a repo. Multi-writer repos need a signed writer list in
   the ref map and gateways checking it.
 - **Server-side fast-forward.** Gateways enforce `prev` and pack retention, not commit
@@ -106,6 +194,8 @@ published today is a free (v1) site.
   such repo" and the push is signed as a first version, which then wins on `seq`. The
   old packs stay on holders until garbage collection, but the refs are replaced. Point
   pushes at a gateway that has been up a while (your own node is), or list several.
+- **CI / actions beyond deploy.** A push can deploy an app (see above), but there is no
+  runner for build or test jobs on push.
 - git-lfs, sha256 repositories, a web UI, issues and pull requests.
 
 ## Testing

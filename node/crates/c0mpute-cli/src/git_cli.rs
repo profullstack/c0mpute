@@ -10,10 +10,66 @@ use clap::{Parser, Subcommand};
 
 const HELPER: &str = "git-remote-c0mpute";
 
+const LONG_ABOUT: &str = "\
+Git repos kept by the c0mpute network. A repo is signed by this machine's key,
+the network keeps three self-healing copies, and anyone can clone it from any
+gateway, with your machine offline. Plain `git` works once the helper is
+installed; the `c0mpute git` commands below are shortcuts.";
+
+const GUIDE: &str = "\
+QUICK START
+  c0mpute git install                  # once: put git-remote-c0mpute on PATH
+  cd my-project
+  c0mpute git init my-project          # adds remote origin = c0mpute://<your-key>/my-project
+  git push origin main                 # publish (signed by your key)
+
+  # anyone, anywhere, no account:
+  git clone c0mpute://<owner-key>/my-project
+  git clone https://gateway.c0mpute.com/git/<owner-key>/my-project.git   # no c0mpute needed
+
+URLS
+  c0mpute://<owner-key>/<repo>         anyone's repo (owner-key: 64 hex, see `c0mpute git key`)
+  c0mpute://<repo>                     a repo of THIS machine's key (short form for your own)
+  c0mpute://<20-hex site id>           old URLs from c0mpute < 0.3.11 still work
+  Repo names: 1-59 of a-z, 0-9 and '-'.
+
+EVERYDAY GIT
+  Everything is normal git: push branches and tags, pull, fetch, clone.
+  Only the owner key can push. Pushes are fast-forward only; `git push --force`
+  (or +refspec) rewrites history, as on any forge.
+
+ACTIONS: PUSH TO DEPLOY
+  When a push moves the default branch (HEAD) and that commit has a
+  c0mpute.toml with an [app] table, the push also deploys it as a c0mpute app
+  (served at /a/<app_id>/ on every gateway). Turn it off per repo:
+    git config c0mpute.deploy false
+  There is no CI runner (build/test jobs on push) yet.
+
+GATEWAYS
+  Pushes and clones go through a gateway over HTTP. Order tried:
+    1. --gateway on clone/push/ls, or C0MPUTE_GIT_GATEWAY (comma-separated)
+    2. git config c0mpute.gateway (repeatable)
+    3. your own node (http://127.0.0.1:7777), then https://gateway.c0mpute.com
+  Gateways are untrusted: the helper checks the owner signature and every file hash.
+  A brand-new repo can take a few minutes to show up on OTHER gateways (gossip);
+  the gateway you pushed to serves it at once.
+
+DEBUG
+  C0MPUTE_GIT_TRACE=1 git push ...     phase timings on stderr
+  HTTP 507 on push                     that gateway has no room: push via another
+  \"no such repo (yet)\"                 the gateway has not heard of it; wait or pick
+                                       the gateway you pushed to
+
+Docs: https://github.com/profullstack/c0mpute/blob/master/docs/git-hosting.md";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "c0mpute git",
-    about = "Git repos kept by the network: signed by your key, three self-healing copies, clone from any gateway"
+    about = "Git repos kept by the network: signed by your key, three self-healing copies, clone from any gateway",
+    long_about = LONG_ABOUT,
+    after_help = "Run `c0mpute git --help` for the full guide (URLs, push to deploy, gateways), or `c0mpute git <command> -h`.",
+    after_long_help = GUIDE,
+    arg_required_else_help = true
 )]
 struct GitCli {
     #[command(subcommand)]
@@ -24,32 +80,45 @@ struct GitCli {
 enum Sub {
     /// Print the c0mpute:// URL of a repo under this machine's key and, inside
     /// a git work tree, add it as a remote. Nothing is published until you push.
+    #[command(after_help = "Example:\n  cd my-project && c0mpute git init my-project && git push origin main")]
     Init {
+        /// Repo name: 1-59 of a-z, 0-9 and '-'.
         repo: String,
         /// Remote name to add (skipped if it already exists).
         #[arg(long, default_value = "origin")]
         remote: String,
     },
-    /// `git clone c0mpute://<owner>/<repo>` with the remote helper on PATH.
+    /// `git clone <url> [dir]` with the remote helper on PATH (no install needed).
+    #[command(
+        after_help = "Examples:\n  c0mpute git clone c0mpute://<owner-key>/my-project\n  c0mpute git clone c0mpute://<owner-key>/my-project ./src --gateway https://gateway.c0mpute.com"
+    )]
     Clone {
+        /// c0mpute://<owner-key>/<repo>, c0mpute://<repo> (yours) or c0mpute://<site id>.
         url: String,
+        /// Directory to clone into (default: the repo name).
         dir: Option<String>,
-        /// Gateway(s) to read from (comma-separated; default C0MPUTE_GIT_GATEWAY,
-        /// git config c0mpute.gateway, else http://127.0.0.1:7777).
+        /// Gateway(s) to read from, comma-separated (default: C0MPUTE_GIT_GATEWAY,
+        /// git config c0mpute.gateway, else your node then https://gateway.c0mpute.com).
         #[arg(long)]
         gateway: Option<String>,
     },
-    /// `git push` with the remote helper on PATH (arguments go to git).
+    /// `git push ...` with the remote helper on PATH; every argument goes to git.
+    #[command(
+        after_help = "Examples:\n  c0mpute git push origin main\n  c0mpute git push --gateway https://gateway.c0mpute.com origin main   (--gateway before git's arguments)\n  c0mpute git push --tags"
+    )]
     Push {
+        /// Arguments for `git push` (remote, refspecs, --tags, --force, ...).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Gateway(s) to push to, comma-separated. Must come before the git arguments.
         #[arg(long)]
         gateway: Option<String>,
     },
     /// Repos a gateway knows, with live copy counts.
     Ls {
-        #[arg(long, default_value = git::DEFAULT_GATEWAY)]
-        gateway: String,
+        /// Gateway to ask (default: your node, else https://gateway.c0mpute.com).
+        #[arg(long)]
+        gateway: Option<String>,
     },
     /// This machine's owner key (the <owner> in c0mpute://<owner>/<repo>).
     Key,
@@ -197,7 +266,24 @@ pub async fn run(args: &[String]) -> Result<()> {
             run_git(&a, gateway.as_deref())
         }
         Sub::Ls { gateway } => {
-            let repos = client::list(&gateway).await?;
+            let candidates = match gateway {
+                Some(g) => vec![g],
+                None => client::Gateways::discover(None).0,
+            };
+            let mut last = None;
+            let mut found = None;
+            for g in candidates {
+                match client::list(&g).await {
+                    Ok(r) => {
+                        found = Some((g, r));
+                        break;
+                    }
+                    Err(e) => last = Some(e),
+                }
+            }
+            let Some((gateway, repos)) = found else {
+                return Err(last.unwrap_or_else(|| anyhow::anyhow!("no gateway")));
+            };
             if repos.is_empty() {
                 println!("no repos known to {gateway} yet");
             }

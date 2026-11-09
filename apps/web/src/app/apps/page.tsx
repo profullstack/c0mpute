@@ -51,7 +51,8 @@ c0mpute apps ls | status api | logs api | destroy api --yes`}</Code>
         <Code>{`c0mpute git install
 git remote add c0 c0mpute://api
 git push c0 main          # repo kept by the network; deploys when c0mpute.toml has [app]
-git clone c0mpute://<repo_id>    # works with the owner offline
+git clone c0mpute://<owner-key>/api   # anyone; works with the owner offline
+c0mpute git --help               # the full guide
 
 # c0mpute.toml
 [app]
