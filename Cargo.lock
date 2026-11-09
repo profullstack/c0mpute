@@ -486,7 +486,11 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "c0mpute-api"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -501,7 +505,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-bench"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "blake3",
@@ -512,7 +520,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "async-trait",
@@ -549,7 +561,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -600,7 +616,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "serde",
@@ -612,7 +632,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-envelope"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "blake3",
  "bs58",
@@ -625,7 +649,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "axum",
@@ -647,7 +675,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-market"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "c0mpute-envelope",
  "serde",
@@ -657,7 +689,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "async-trait",
@@ -678,7 +714,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-placement"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "async-trait",
@@ -699,7 +739,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "blake3",
  "hex",
@@ -711,7 +755,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-sealed"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "aes",
  "aes-gcm",
@@ -733,7 +781,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -756,7 +808,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "blake3",
@@ -774,7 +830,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -787,7 +847,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "hex",
@@ -802,7 +866,11 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
+<<<<<<< HEAD
 version = "0.3.12"
+=======
+version = "0.3.13"
+>>>>>>> origin/master
 dependencies = [
  "anyhow",
  "blake3",

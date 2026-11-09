@@ -7,7 +7,11 @@
 [module]
 id          = "whisper"
 name        = "Whisper — speech-to-text"
+<<<<<<< HEAD
 version     = "0.3.12"
+=======
+version     = "0.3.14"
+>>>>>>> origin/master
 kind        = "workload"
 category    = "ai"
 status      = "available"

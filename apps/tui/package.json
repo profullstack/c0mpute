@@ -1,6 +1,10 @@
 {
   "name": "@c0mpute/tui",
+<<<<<<< HEAD
   "version": "0.3.12",
+=======
+  "version": "0.3.14",
+>>>>>>> origin/master
   "private": true,
   "type": "module",
   "bin": {

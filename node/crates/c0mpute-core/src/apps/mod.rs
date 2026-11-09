@@ -1056,6 +1056,16 @@ impl Apps {
                         "image site is at another version (waiting for the matching record)"
                     );
                 }
+                // Keep a real copy of the image site (stored and announced), so
+                // every holder of the app is a source the next one can fetch
+                // from: an app never depends on hosting nodes it cannot reach.
+                // A node too full to keep a copy still reads it once below.
+                match hosting.replicate(&site).await {
+                    Ok(()) => hosting.announce_holding().await,
+                    Err(e) => {
+                        debug!(app = %rec.app_id, err = %e, "apps: not keeping a copy of the image site")
+                    }
+                }
                 let (_, bytes) = hosting
                     .read_file(&site, file)
                     .await?
