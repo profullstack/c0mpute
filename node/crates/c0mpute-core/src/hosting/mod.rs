@@ -124,6 +124,10 @@ pub enum HostingMsg {
         /// copies from the next ranked nodes. Absent (false) from older nodes.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         full: bool,
+        /// Free disk above its floor, whole GiB: nodes with more room rank
+        /// first in the rendezvous fill. Absent from older nodes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_gib: Option<u64>,
     },
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
@@ -402,6 +406,7 @@ impl Hosting {
                         price,
                         payout,
                         full,
+                        room_gib,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -426,6 +431,7 @@ impl Hosting {
                             let mut map = h.0.map.write().await;
                             map.apply_holding_meta(&source, all, Instant::now(), hosts, price, payout);
                             map.set_full(&source, full);
+                            map.set_room(&source, room_gib);
                         }
                     }
                     HostingMsg::Receipt { receipt } => {
@@ -469,10 +475,12 @@ impl Hosting {
             (None, None)
         };
         let full = self.0.hosts && self.is_full().await;
+        let room_gib = if self.0.hosts { self.room_gib() } else { None };
         if self.0.hosts || !mine.is_empty() {
             let mut map = self.0.map.write().await;
             map.apply_holding_meta(&self.0.me, mine, Instant::now(), self.0.hosts, price, payout.clone());
             map.set_full(&self.0.me, full);
+            map.set_room(&self.0.me, room_gib);
         } else {
             return;
         }
@@ -502,6 +510,7 @@ impl Hosting {
                 price: price.map(crate::payments::format_usd),
                 payout: payout.clone(),
                 full,
+                room_gib,
             })
             .await;
         }
@@ -620,6 +629,15 @@ impl Hosting {
         let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
         !leaves_free_floor(disk_free, disk_total, FULL_HEADROOM_BYTES)
             || self.held_bytes().await.saturating_add(FULL_HEADROOM_BYTES) > self.0.max_bytes
+    }
+
+    /// Free disk above the floor in whole GiB, or None when the disk is unknown.
+    fn room_gib(&self) -> Option<u64> {
+        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
+        if disk_total == 0 {
+            return None;
+        }
+        Some(disk_free.saturating_sub(free_disk_floor(disk_total)) / GIB_BYTES)
     }
 
     async fn held_bytes(&self) -> u64 {
@@ -1664,6 +1682,7 @@ mod tests {
             price: Some("0.004".into()),
             payout: None,
             full: false,
+            room_gib: Some(3000),
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
@@ -1698,6 +1717,7 @@ mod tests {
                 coin: "USDC_POL".into(),
             }),
             full: true,
+            room_gib: Some(u64::MAX),
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());

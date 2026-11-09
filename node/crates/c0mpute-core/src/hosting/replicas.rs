@@ -38,6 +38,9 @@ pub struct Holding {
     /// It hosts but cannot take another copy right now; left out of the
     /// rendezvous fill (its existing copies still count).
     pub full: bool,
+    /// Free disk above its floor, GiB, when it says. More room ranks higher
+    /// in the fill (see [`space_tier`]).
+    pub room_gib: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -102,8 +105,16 @@ impl ReplicaMap {
                 price,
                 payout,
                 full: false,
+                room_gib: None,
             },
         );
+    }
+
+    /// Record how much room `peer` says it has (see [`Holding::room_gib`]).
+    pub fn set_room(&mut self, peer: &str, room_gib: Option<u64>) {
+        if let Some(h) = self.peers.get_mut(peer) {
+            h.room_gib = room_gib;
+        }
     }
 
     /// Mark whether `peer` can take new copies (see [`Holding::full`]).
@@ -297,6 +308,26 @@ pub fn chosen(site_id: &str, candidates: &[String], need: usize) -> Vec<String> 
     ranked.into_iter().take(need).map(|(p, _)| p.clone()).collect()
 }
 
+/// A peer's priority tier from the room it reports: the bit length of its
+/// free GiB, so a node with about twice the room ranks one tier higher. A
+/// peer that does not say (an older node) sits at the 64 GiB tier. Integer
+/// only, so every node computes the same tiers.
+pub fn space_tier(room_gib: Option<u64>) -> u32 {
+    let gib = room_gib.unwrap_or(64);
+    64 - gib.leading_zeros()
+}
+
+/// Like [`chosen`], but nodes with more free disk come first: candidates are
+/// ordered by [`space_tier`], then by rendezvous score within a tier, so the
+/// biggest disks take copies first while load still spreads among equals.
+pub fn chosen_by_space(map: &ReplicaMap, site_id: &str, candidates: &[String], need: usize) -> Vec<String> {
+    let tier = |p: &String| space_tier(map.peers.get(p).and_then(|h| h.room_gib));
+    let mut ranked: Vec<(&String, u32, [u8; 32])> =
+        candidates.iter().map(|p| (p, tier(p), score(site_id, p))).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(b.0)));
+    ranked.into_iter().take(need).map(|(p, _, _)| p.clone()).collect()
+}
+
 /// When a site has more than `max` live copies, the lowest-ranked holder
 /// lets its copy go. Returns that holder.
 pub fn surplus(site_id: &str, holders: &[String], max: usize) -> Option<String> {
@@ -364,7 +395,7 @@ pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: u
     if !candidates.iter().any(|p| p == me) {
         candidates.push(me.to_string());
     }
-    if chosen(site_id, &candidates, target - holders.len())
+    if chosen_by_space(map, site_id, &candidates, target - holders.len())
         .iter()
         .any(|p| p == me)
     {
@@ -400,6 +431,39 @@ mod tests {
             .collect();
         assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
         assert!(!takers.contains(&first));
+    }
+
+    #[test]
+    fn nodes_with_more_room_take_copies_first() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r);
+        let now = Instant::now();
+        let peers: Vec<String> = (0..8).map(|i| format!("h{i}")).collect();
+        for p in &peers {
+            m.apply_holding_meta(p, HashMap::new(), now, true, None, None);
+            m.set_room(p, Some(20));
+        }
+        // The three that rank LAST by hash have the big disks.
+        let mut by_hash = chosen(&site, &peers, peers.len());
+        let big: Vec<String> = by_hash.split_off(peers.len() - 3);
+        for p in &big {
+            m.set_room(p, Some(3000));
+        }
+        let takers: Vec<String> = peers
+            .iter()
+            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .cloned()
+            .collect();
+        let mut want = big.clone();
+        want.sort();
+        assert_eq!(takers, want, "the roomiest disks fill the site");
+        assert_eq!(space_tier(Some(0)), 0);
+        assert_eq!(space_tier(Some(1)), 1);
+        assert_eq!(space_tier(Some(3000)), 12);
+        assert_eq!(space_tier(None), space_tier(Some(64)));
     }
 
     fn rec(kp: &c0mpute_net::libp2p::identity::Keypair, seq: u64) -> SiteRecord {
