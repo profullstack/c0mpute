@@ -19,7 +19,7 @@
 [module]
 id          = "embed"
 name        = "Embeddings — vector generation"
-version     = "0.2.72"
+version     = "0.2.73"
 kind        = "workload"
 category    = "ai"
 status      = "available"
@@ -30,7 +30,7 @@ license     = "MIT"
 keywords    = ["embeddings", "vectors", "fastembed", "bge", "nomic", "rag", "onnx"]
 
 [module.requirements]
-c0mpute      = ">=0.2.71"
+c0mpute      = ">=0.2.73"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["cpu", "python:>=3.10"]
