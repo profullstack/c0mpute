@@ -268,7 +268,8 @@ export function ChatApp({ error }: { error: string | null }) {
       const start = await res.json().catch(() => ({}));
       if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
       // Infernet may write lyrics from the brief first; keep what it wrote.
-      let written: { caption: string; lyrics: string } | null = null;
+      let written: { caption: string; lyrics: string; title?: string | null } | null = null;
+      let coverUrl: string | null = null;
       const deadline = Date.now() + 45 * 60_000;
       let done: Response | null = null;
       while (!done) {
@@ -279,7 +280,15 @@ export function ChatApp({ error }: { error: string | null }) {
         if (poll.status === 202) {
           const p = await poll.json().catch(() => ({}));
           const secs = Math.round((Date.now() - started) / 1000);
-          if (typeof p.caption === "string") written = { caption: p.caption, lyrics: typeof p.lyrics === "string" ? p.lyrics : "" };
+          if (typeof p.caption === "string") written = { caption: p.caption, lyrics: typeof p.lyrics === "string" ? p.lyrics : "", title: typeof p.title === "string" ? p.title : null };
+          // Cover art is drawn in parallel and usually lands before the song.
+          if (p.cover === "ready" && !coverUrl) {
+            const c = await fetch(`${start.poll}/cover`, { cache: "no-store", signal: ctrl.signal }).catch(() => null);
+            if (c?.ok) {
+              coverUrl = URL.createObjectURL(await c.blob());
+              setLast({ image: coverUrl });
+            }
+          }
           const node = sanitizeNodeProgress(p.node);
           const head =
             p.stage === "writing"
@@ -299,7 +308,8 @@ export function ChatApp({ error }: { error: string | null }) {
       const blob = await done.blob();
       const url = URL.createObjectURL(blob);
       setLast({
-        content: `[music: ${(written?.caption ?? music.prompt).slice(0, 300)}${written?.lyrics || music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
+        ...(coverUrl ? { image: coverUrl } : {}),
+        content: `${written?.title ? `"${written.title}" ` : ""}[music: ${(written?.caption ?? music.prompt).slice(0, 300)}${written?.lyrics || music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
         audio: url,
         audioType: blob.type || "audio/mpeg",
       });
