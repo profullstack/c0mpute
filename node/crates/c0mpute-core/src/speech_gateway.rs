@@ -137,9 +137,32 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
     }
 
     let supervisor = Supervisor::boot_buyer(Config::default()).await?;
+    let penalties = crate::penalty_box::PenaltyBox::persistent(
+        crate::config::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+            .join("gateway-penalties.json"),
+    );
+    let app = router(supervisor.libp2p, supervisor.store, token, max_price_usd, penalties);
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind c0mpute speech gateway at {bind}"))?;
+    tracing::info!(%bind, "c0mpute speech gateway listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The gateway's routes over an already booted buyer node. `serve` uses it;
+/// so do the loopback end-to-end tests, with their own node and listener.
+pub fn router(
+    net: Arc<Libp2pNetwork>,
+    store: ChunkStore,
+    token: String,
+    max_price_usd: f64,
+    penalties: crate::penalty_box::PenaltyBox,
+) -> Router {
     let state = GatewayState {
-        net: supervisor.libp2p,
-        store: supervisor.store,
+        net,
+        store,
         token: Arc::from(token),
         max_price_usd,
         // Let one multi-chunk readback fan out across up to six network
@@ -151,13 +174,9 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
-        penalties: crate::penalty_box::PenaltyBox::persistent(
-            crate::config::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
-                .join("gateway-penalties.json"),
-        ),
+        penalties,
     };
-    let app = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
@@ -178,13 +197,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .route("/v1/sessions/{session}", delete(close_session))
         .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("bind c0mpute speech gateway at {bind}"))?;
-    tracing::info!(%bind, "c0mpute speech gateway listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn healthz() -> Json<serde_json::Value> {

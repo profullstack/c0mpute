@@ -186,6 +186,12 @@ function PluginCard({ p }: { p: PluginManifest }) {
 
       <ModelList p={p} />
 
+      {typeof p.requirements?.hardware === "string" && (
+        <p className="text-xs text-[var(--color-dim)]">
+          <span className="accent">requires:</span> {p.requirements.hardware}
+        </p>
+      )}
+
       {p.status === "partial" && p.statusNote && (
         <p className="text-xs text-[var(--color-dim)]">
           <span className="accent">partial:</span> {p.statusNote}

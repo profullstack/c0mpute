@@ -11,7 +11,11 @@
 # Source: https://github.com/profullstack/c0mpute/tree/master/plugins/video
 set -eu
 
-IMAGE="${C0MPUTE_VIDEO_IMAGE:-ghcr.io/profullstack/c0mpute-video-runner:candidate}"
+# The published runner, pinned by digest (keep in step with module.toml
+# [module.dispatch] and RUNNER_DIGEST in video.rs), and the local name the
+# node runs, whichever way the image arrives.
+PULL_REF="${C0MPUTE_VIDEO_PULL_REF:-ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c}"
+IMAGE="c0mpute/video-runner:stable"
 SOURCE_REPO="${C0MPUTE_VIDEO_SOURCE_REPO:-https://github.com/profullstack/c0mpute.git}"
 
 say()  { printf '\033[1;36m→\033[0m %s\n' "$*"; }
@@ -43,12 +47,12 @@ else
 fi
 
 if [ "$missing" -eq 0 ]; then
-  say "pulling $IMAGE (several GB, once)"
-  if ! docker pull "$IMAGE"; then
+  say "pulling $PULL_REF (several GB, once)"
+  if ! { docker pull "$PULL_REF" && docker tag "$PULL_REF" "$IMAGE"; }; then
     # The registry is a convenience, not a dependency: private, rate-limited
     # or offline is no reason a box with a card cannot serve video. This repo
     # is public, so build the same image from source.
-    warn "could not pull $IMAGE (private, rate-limited or offline)"
+    warn "could not pull $PULL_REF (private, rate-limited or offline)"
     if command -v git >/dev/null 2>&1; then
       say "building it from source instead (several minutes)"
       src=$(mktemp -d)

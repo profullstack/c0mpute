@@ -5,9 +5,15 @@
 # published as the image below; the node's video runner invokes it per job and
 # reads files, never stdout. See that directory's README for the job contract.
 #
-# The image below is a convenience: `c0mpute video setup` falls back to
-# building it from this public repo when the registry will not serve it, so a
-# node with a GPU never needs a registry account.
+# The image below is pinned by digest (the same digest as RUNNER_DIGEST in
+# node/crates/c0mpute-core/src/video.rs, checked by a unit test).
+# `c0mpute video setup` pulls it and tags it locally as
+# c0mpute/video-runner:stable, the name the worker runs. If the registry will
+# not serve it, setup builds the same Dockerfile from this public repo, so a
+# node with a GPU never needs a registry account. The workflow
+# .github/workflows/video-runner.yml publishes :stable, :candidate and :<sha>
+# on every master build and prints the new digest; bump both pins to it after
+# a runner change.
 #
 #   Backend: Diffusers, not ComfyUI. ComfyUI would mean shipping hand-authored
 #   API graph JSON per model, which cannot be checked by reading it; the
@@ -47,18 +53,19 @@ name        = "Video — generation (Wan 2.2, LTX-2.3 with audio)"
 version     = "0.2.81"
 kind        = "workload"
 category    = "ai"
-status      = "partial"
-status_note = "Needs an NVIDIA GPU and the c0mpute video runner image."
+status      = "available"
+builtin     = true
 description = "Decentralized video generation on consumer/prosumer GPUs: Wan 2.2 text/image-to-video, and LTX-2.3 video with a synchronized soundtrack."
 author      = "Profullstack"
 license     = "MIT"
 keywords    = ["video", "wan", "wan2.2", "ltx-2", "ltx-2.3", "audio", "txt2vid", "img2vid", "generation", "diffusion"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=NEXT"
 os           = ["linux"]
 arch         = ["x86_64"]
 capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
+hardware     = "NVIDIA GPU (24 GiB VRAM for the default model, 48 GiB for the 14B and LTX models) + docker with the NVIDIA container runtime"
 
 [module.workloads]
 "video.txt2vid" = { command = "txt2vid", validation = "schema_and_ffprobe" }
@@ -80,7 +87,7 @@ capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
 
 [module.dispatch]
 mode  = "container"
-image = "ghcr.io/profullstack/c0mpute-video-runner:candidate"
+image = "ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c"
 
 [module.surfaces]
 cli = "c0mpute video"
