@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path as AxPath, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use c0mpute_proto::Hash;
@@ -321,7 +321,17 @@ pub fn router() -> Router<Hosting> {
             )),
         )
         .route("/git/v1/sites/{site_id}", get(get_repo_by_site))
+        .route("/git/{owner}/{repo}", get(browse_home))
         .route("/git/{owner}/{repo}/{*path}", get(get_file))
+}
+
+/// The repo's web page ([`super::git_browse`]); `<repo>.git` redirects there.
+async fn browse_home(
+    State(h): State<Hosting>,
+    AxPath((owner, repo)): AxPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    super::git_browse::home(&h, &owner, &repo, &headers).await
 }
 
 async fn get_repo_by_site(State(h): State<Hosting>, AxPath(site_id): AxPath<String>) -> Response {
@@ -406,7 +416,15 @@ async fn post_push(
 async fn get_file(
     State(h): State<Hosting>,
     AxPath((owner, repo, path)): AxPath<(String, String, String)>,
+    headers: HeaderMap,
 ) -> Response {
+    // `<repo>/tree/...` and friends are web pages; `<repo>.git/...` and
+    // every other path are git's dumb HTTP files.
+    if !repo.ends_with(".git")
+        && let Some(resp) = super::git_browse::page(&h, &owner, &repo, &path, &headers).await
+    {
+        return resp;
+    }
     let Some((owner, repo)) = parse(&owner, &repo) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
