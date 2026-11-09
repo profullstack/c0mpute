@@ -34,6 +34,14 @@ pub struct JobProgress {
     pub detail: Option<String>,
     pub started_at_ms: u64,
     pub stage_since_ms: u64,
+    /// Longest this request waits in the queue for a worker.
+    pub max_wait_s: Option<u64>,
+}
+
+impl JobProgress {
+    pub fn finished(&self) -> bool {
+        self.stage == "done" || self.stage == "failed"
+    }
 }
 
 fn now_ms() -> u64 {
@@ -50,9 +58,14 @@ impl ProgressBoard {
     pub fn start(&self, key: &str) {
         let now = now_ms();
         let Ok(mut map) = self.0.lock() else { return };
-        map.retain(|_, p| now.saturating_sub(p.started_at_ms) < KEEP_MS);
+        // A request still queued or running stays readable however long it
+        // waits (a queued job may wait hours); finished ones for KEEP_MS.
+        map.retain(|_, p| !p.finished() || now.saturating_sub(p.stage_since_ms) < KEEP_MS);
         if map.len() >= MAX_ENTRIES
-            && let Some(oldest) = map.iter().min_by_key(|(_, p)| p.started_at_ms).map(|(k, _)| k.clone())
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, p)| (!p.finished(), p.started_at_ms))
+                .map(|(k, _)| k.clone())
         {
             map.remove(&oldest);
         }
@@ -67,6 +80,7 @@ impl ProgressBoard {
                 detail: None,
                 started_at_ms: now,
                 stage_since_ms: now,
+                max_wait_s: None,
             },
         );
     }
@@ -226,6 +240,21 @@ pub struct PendingJob {
     pub required: Vec<String>,
     pub max_bytes: usize,
     pub started_at_ms: u64,
+    /// The request's queue limit; older pending files predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wait_ms: Option<u64>,
+}
+
+/// How long a pending request without a recorded limit is resumable.
+const DEFAULT_RESUME_MS: u64 = 2 * 60 * 60 * 1000;
+
+impl PendingJob {
+    /// Still worth resuming at `now`: within its queue limit (plus the keep
+    /// window, for a job that was already running when the gateway stopped).
+    pub fn resumable_at(&self, now: u64) -> bool {
+        let limit = self.max_wait_ms.unwrap_or(DEFAULT_RESUME_MS).max(KEEP_MS) + KEEP_MS;
+        now.saturating_sub(self.started_at_ms) < limit
+    }
 }
 
 /// Unfinished tracked requests on disk (`<dir>/<id>.json`).
@@ -261,7 +290,7 @@ impl PendingStore {
             let Some(key) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
             let job = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<PendingJob>(&b).ok());
             match job {
-                Some(job) if valid_key(&key) && now.saturating_sub(job.started_at_ms) < KEEP_MS => out.push((key, job)),
+                Some(job) if valid_key(&key) && job.resumable_at(now) => out.push((key, job)),
                 _ => {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -285,6 +314,21 @@ pub fn valid_key(key: &str) -> bool {
 tokio::task_local! {
     /// The board and request id of the job running on this task, if any.
     pub static CURRENT: (ProgressBoard, String);
+    /// The queue limit of the request running on this task, and when it was
+    /// first queued (unix ms; kept across a gateway restart).
+    pub static QUEUE: QueueCtx;
+}
+
+/// See [`QUEUE`].
+#[derive(Clone, Copy, Debug)]
+pub struct QueueCtx {
+    pub max_wait: std::time::Duration,
+    pub queued_at_ms: u64,
+}
+
+/// The current task's queue context, if it runs inside one.
+pub fn queue_ctx() -> Option<QueueCtx> {
+    QUEUE.try_with(|q| *q).ok()
 }
 
 /// Change the current request's progress; a no-op outside a tracked job.
@@ -364,11 +408,11 @@ mod tests {
             let pending = PendingStore::persistent(dir.join("jobs"));
             pending.save(
                 "song-10",
-                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({"prompt": "x"}), required: vec![], max_bytes: 1, started_at_ms: now_ms() },
+                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({"prompt": "x"}), required: vec![], max_bytes: 1, started_at_ms: now_ms(), max_wait_ms: None },
             );
             pending.save(
                 "stale",
-                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({}), required: vec![], max_bytes: 1, started_at_ms: 1 },
+                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({}), required: vec![], max_bytes: 1, started_at_ms: 1, max_wait_ms: None },
             );
         }
         // "Restart": fresh stores over the same directories.
@@ -390,4 +434,40 @@ mod tests {
         assert!(!valid_key("../etc"));
         assert!(!valid_key(&"a".repeat(65)));
     }
+
+    #[test]
+    fn a_queued_job_stays_resumable_for_its_whole_wait() {
+        let now = 10 * 60 * 60 * 1000;
+        let job = |age_ms: u64, max_wait_ms: Option<u64>| PendingJob {
+            workload: "diffusion.txt2img".into(),
+            spec: serde_json::json!({}),
+            required: vec![],
+            max_bytes: 1,
+            started_at_ms: now - age_ms,
+            max_wait_ms,
+        };
+        let hour = 60 * 60 * 1000;
+        // Queued 90 min with a 2 h limit: resumed (the old rule dropped it at 30 min).
+        assert!(job(90 * 60 * 1000, Some(2 * hour)).resumable_at(now));
+        assert!(!job(3 * hour, Some(2 * hour)).resumable_at(now));
+        // Files from before the limit was recorded get the 2 h default.
+        assert!(job(90 * 60 * 1000, None).resumable_at(now));
+    }
+
+    #[test]
+    fn a_long_queued_request_keeps_its_progress_entry() {
+        let board = ProgressBoard::default();
+        board.start("q");
+        board.update("q", |p| {
+            p.stage = "queued";
+            p.started_at_ms -= 2 * KEEP_MS;
+            p.stage_since_ms -= 2 * KEEP_MS;
+        });
+        board.start("other"); // runs the retain
+        assert!(board.snapshot("q").is_some(), "still queued, still visible");
+        board.update("q", |p| p.stage = "done");
+        board.start("third");
+        assert!(board.snapshot("q").is_none(), "finished long ago, dropped");
+    }
+
 }

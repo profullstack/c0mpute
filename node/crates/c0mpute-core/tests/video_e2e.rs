@@ -90,6 +90,9 @@ fn fake_docker() -> &'static PathBuf {
         unsafe {
             std::env::set_var(c0mpute_core::container::ENV, &bin);
             std::env::set_var("FAKE_DIR", &dir);
+            // Queue re-offers every second in these tests (5-30 s in prod).
+            std::env::set_var("C0MPUTE_QUEUE_MIN_PAUSE_SECS", "1");
+            std::env::set_var("C0MPUTE_QUEUE_MAX_PAUSE_SECS", "1");
         }
         dir
     })
@@ -275,4 +278,155 @@ async fn setup_pulls_the_pinned_digest_or_builds_from_source() {
     let log = std::fs::read_to_string(dir.join("log")).unwrap();
     assert!(log.contains(&format!("tag {} {}", video::RUNNER_PULL_REF, video::RUNNER_IMAGE)), "{log}");
     let _ = std::fs::remove_file(dir.join("pull-ok"));
+}
+
+
+// ── buyer queue ─────────────────────────────────────────────────────────
+
+/// A video worker (fake docker runner) that dials `bootstrap`.
+async fn start_worker(dir: &Path, bootstrap: Vec<libp2p::Multiaddr>) -> Arc<Libp2pNetwork> {
+    let (worker, worker_store) = node(dir, bootstrap).await;
+    let load = c0mpute_core::WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(1)), 1);
+    let runner = video::spawn_video_runner(
+        worker.clone(),
+        worker_store,
+        dir.join("cache"),
+        video::WORKLOAD_TXT2VID.to_string(),
+        video::RUNNER_IMAGE.to_string(),
+        load.clone(),
+    );
+    dispatch::run_worker_subscriber_with_load(
+        worker.clone(),
+        video::WORKLOAD_TXT2VID.to_string(),
+        vec![video::ROLE_TAG.to_string(), video::model_tag("wan2.2-ti2v-5b"), "c0mpute:gpu:nvidia".to_string()],
+        Some(runner),
+        None,
+        Some(PricingConfig::default()),
+        Some(load),
+    );
+    worker
+}
+
+/// A gateway on its own buyer node with no worker yet; `persist` keeps its
+/// tracked jobs on disk like the served gateway.
+async fn lone_gateway(dir: &Path, persist: Option<PathBuf>) -> (String, libp2p::Multiaddr) {
+    fake_docker();
+    let (buyer, buyer_store) = node(dir, vec![]).await;
+    let addr = wait_for_listen(&buyer).await.with(Protocol::P2p(buyer.peer_id()));
+    let app = speech_gateway::router_with(buyer, buyer_store, TOKEN.into(), 100.0, PenaltyBox::new(), persist);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, addr)
+}
+
+fn video_body(prompt: &str) -> serde_json::Value {
+    serde_json::json!({"model": "wan2.2-ti2v-5b", "prompt": prompt, "frames": 9, "steps": 2, "width": 64, "height": 64})
+}
+
+/// Poll `GET /v1/result/{id}` until it is no longer 202.
+async fn await_result(url: &str, id: &str, within: Duration) -> reqwest::Response {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let r = reqwest::Client::new().get(format!("{url}/v1/result/{id}")).bearer_auth(TOKEN).send().await.unwrap();
+        if r.status() != 202 || tokio::time::Instant::now() > deadline {
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// No worker when the job arrives: it is queued (202, position 1, "queued,
+/// waiting for a worker") instead of failing, and served once a worker
+/// joins later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_job_is_served_when_a_worker_appears_later() {
+    let tmp = tempdir().unwrap();
+    let (url, buyer_addr) = lone_gateway(&tmp.path().join("b"), None).await;
+    let res = reqwest::Client::new()
+        .post(format!("{url}/v1/videos"))
+        .bearer_auth(TOKEN)
+        .header("x-request-id", "late-worker-1")
+        .header("prefer", "respond-async")
+        .json(&video_body("a queued clip"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 202);
+    assert_eq!(res.headers()["location"], "/v1/result/late-worker-1");
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["request_id"], "late-worker-1");
+    assert_eq!(body["queue_position"], 1);
+
+    // Nobody to bid for a while: still queued, not failed.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let p: serde_json::Value = reqwest::Client::new()
+        .get(format!("{url}/v1/progress/late-worker-1"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(p["stage"], "queued", "{p}");
+    assert!(p["detail"].as_str().unwrap().starts_with("queued, waiting for a worker"), "{p}");
+    assert_eq!(p["max_wait_s"], 7200, "2 h by default");
+
+    // A worker joins: the job is served.
+    let _worker = start_worker(&tmp.path().join("w"), vec![buyer_addr]).await;
+    let done = await_result(&url, "late-worker-1", Duration::from_secs(90)).await;
+    assert_eq!(done.status(), 200, "{:?}", done.text().await);
+    assert_eq!(done.bytes().await.unwrap().as_ref(), tiny_mp4().as_slice());
+}
+
+/// Its own max wait runs out with no worker: a clear error naming the
+/// workload, the model and the wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_fails_only_when_its_max_wait_runs_out() {
+    let tmp = tempdir().unwrap();
+    let (url, _) = lone_gateway(&tmp.path().join("b"), None).await;
+    let started = std::time::Instant::now();
+    let res = reqwest::Client::new()
+        .post(format!("{url}/v1/videos?max_wait=4"))
+        .bearer_auth(TOKEN)
+        .json(&video_body("nobody home"))
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 503);
+    assert!(started.elapsed() >= Duration::from_secs(4), "waited the limit first");
+    let msg = res.text().await.unwrap();
+    assert!(msg.contains("no worker for video.txt2vid/wan2.2-ti2v-5b within 4s"), "{msg}");
+}
+
+/// The gateway restarts while a job is queued: the new process picks it up
+/// from disk under the same request id and serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_job_survives_a_gateway_restart() {
+    let tmp = tempdir().unwrap();
+    let persist = tmp.path().join("gw-data");
+    let (url_a, _) = lone_gateway(&tmp.path().join("a"), Some(persist.clone())).await;
+    let res = reqwest::Client::new()
+        .post(format!("{url_a}/v1/videos"))
+        .bearer_auth(TOKEN)
+        .header("x-request-id", "restart-1")
+        .header("prefer", "wait=1")
+        .json(&video_body("survives a restart"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 202, "queued, answered after the 1 s sync window");
+    assert!(persist.join("gateway-jobs").join("restart-1.json").exists(), "on disk while queued");
+
+    // "Restart": a new gateway process over the same data dir, then a worker.
+    let (url_b, addr_b) = lone_gateway(&tmp.path().join("b"), Some(persist.clone())).await;
+    let resumed = reqwest::Client::new().get(format!("{url_b}/v1/progress/restart-1")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(resumed.status(), 200, "the restarted gateway knows the job");
+    let _worker = start_worker(&tmp.path().join("w"), vec![addr_b]).await;
+    let done = await_result(&url_b, "restart-1", Duration::from_secs(90)).await;
+    assert_eq!(done.status(), 200, "{:?}", done.text().await);
 }

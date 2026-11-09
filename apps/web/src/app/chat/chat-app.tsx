@@ -27,6 +27,10 @@ type Me = { id: string; did: string; name: string | null; balance?: Balance | nu
 type Key = { id: string; label: string; prefix: string; created_at: string; last_used_at: string | null };
 
 const STORE = "c0_chats_v1";
+// How long the chat keeps polling a media job: the network queues a job up to
+// 2 h for a free worker, then renders it.
+const QUEUE_DEADLINE_MS = 3 * 60 * 60_000;
+const clock = (s: number) => (s < 120 ? `${s}s` : `${Math.floor(s / 60)} min`);
 
 /**
  * What this person can spend on inference: money they topped up on Infernet
@@ -198,7 +202,8 @@ export function ChatApp({ error }: { error: string | null }) {
       });
       const start = await res.json().catch(() => ({}));
       if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
-      const deadline = Date.now() + 15 * 60_000;
+      // The network queues a job until a worker is free (up to 2 h), then draws it.
+      const deadline = Date.now() + QUEUE_DEADLINE_MS;
       let done: Response | null = null;
       while (!done) {
         if (Date.now() > deadline) throw new Error("image timed out");
@@ -206,7 +211,14 @@ export function ChatApp({ error }: { error: string | null }) {
         if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
         const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
         if (poll.status === 202) {
-          setLast({ content: `// drawing on a c0mpute CPU worker… ${Math.round((Date.now() - started) / 1000)}s` });
+          const p = await poll.json().catch(() => ({}));
+          const secs = Math.round((Date.now() - started) / 1000);
+          setLast({
+            content:
+              p.stage === "queued"
+                ? `// queued for a c0mpute worker${typeof p.queue_position === "number" ? ` (#${p.queue_position} in line)` : ""}, it starts when one is free… ${clock(secs)}`
+                : `// drawing on a c0mpute CPU worker… ${clock(secs)}`,
+          });
           continue;
         }
         if (!poll.ok) {
@@ -275,7 +287,7 @@ export function ChatApp({ error }: { error: string | null }) {
       // Infernet may write lyrics from the brief first; keep what it wrote.
       let written: { caption: string; lyrics: string; title?: string | null } | null = null;
       let coverUrl: string | null = null;
-      const deadline = Date.now() + 45 * 60_000;
+      const deadline = Date.now() + QUEUE_DEADLINE_MS;
       let done: Response | null = null;
       while (!done) {
         if (Date.now() > deadline) throw new Error("song timed out");
@@ -390,7 +402,7 @@ export function ChatApp({ error }: { error: string | null }) {
       });
       const start = await res.json().catch(() => ({}));
       if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
-      const deadline = Date.now() + 60 * 60_000;
+      const deadline = Date.now() + QUEUE_DEADLINE_MS;
       while (true) {
         if (Date.now() > deadline) throw new Error("promo timed out");
         await new Promise((r) => setTimeout(r, 4000));
