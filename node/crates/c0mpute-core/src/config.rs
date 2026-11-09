@@ -44,6 +44,41 @@ pub struct Config {
     /// CPU image generation (`diffusion.txt2img`) provisioning and gates.
     #[serde(default)]
     pub diffusion: DiffusionConfig,
+    /// CPU text embeddings (`embed.text`) provisioning.
+    #[serde(default)]
+    pub embed: EmbedConfig,
+}
+
+/// CPU text embeddings: fastembed (ONNX Runtime) in a per-user virtualenv with
+/// BAAI/bge-small-en-v1.5, about 130 MB of model. Small enough that every node
+/// provisions it in the background by default. Opt out with
+/// `C0MPUTE_EMBED_AUTO=0` or `auto_install = false`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbedConfig {
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+    /// Skip provisioning when the disk has less than this much free.
+    #[serde(default = "default_embed_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            auto_install: true,
+            min_free_disk_gb: default_embed_min_free_disk_gb(),
+        }
+    }
+}
+
+fn default_embed_min_free_disk_gb() -> u64 {
+    3
+}
+
+impl EmbedConfig {
+    pub fn auto_install_enabled(&self) -> bool {
+        auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_EMBED_AUTO").ok())
+    }
 }
 
 /// CPU image generation: stable-diffusion.cpp + Z-Image-Turbo, ~6.7 GB of
@@ -176,6 +211,8 @@ impl Default for Config {
                 Role::WorkflowStep,
                 Role::Diffusion,
                 Role::Crawl,
+                Role::Ocr,
+                Role::Embed,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),
@@ -185,6 +222,7 @@ impl Default for Config {
             private: Default::default(),
             speech: SpeechConfig::default(),
             diffusion: DiffusionConfig::default(),
+            embed: EmbedConfig::default(),
         }
     }
 }

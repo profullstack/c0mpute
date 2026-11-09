@@ -194,6 +194,14 @@ pub enum Role {
     /// `crawl.fetch`: fetch one public web page for a buyer (static, robots
     /// aware, SSRF-guarded). On by default; it needs nothing but a network.
     Crawl,
+    /// `ocr.extract`: text from images and PDFs with the box's own Tesseract
+    /// (and poppler for PDFs). On by default; advertised only where
+    /// `tesseract` is installed.
+    Ocr,
+    /// `embed.text`: CPU text embeddings (fastembed, bge-small-en-v1.5). On by
+    /// default; the node provisions the runtime in the background and
+    /// advertises the role once it works.
+    Embed,
 }
 
 #[cfg(test)]

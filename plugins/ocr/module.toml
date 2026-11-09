@@ -1,13 +1,19 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Document OCR. Suggested upstreams: Tesseract (lean, broad-lang),
-#   PaddleOCR (better on real-world scans), docTR (HF, GPU-friendly).
-#   Inputs: PDF or image (PNG/JPG/TIFF). Outputs: searchable PDF +
-#   per-page JSON {blocks: [{bbox, text, conf}]}.
-#   Validation: schema + word-level edit-distance spot-check on a
-#   sampled page against a second worker.
+# Built into the c0mpute binary as the `ocr.extract` workload
+# (node/crates/c0mpute-core/src/ocr.rs). Workers run the operator's own
+# Tesseract (`tesseract` on PATH; `apt install tesseract-ocr poppler-utils`),
+# rasterizing PDFs page by page with poppler's pdftoppm. The node installs
+# nothing itself: it advertises c0mpute:role:ocr only where tesseract runs,
+# and bids only on languages it has (and PDFs only with poppler).
+#
+# Input: a PNG, JPEG, TIFF, WebP or PDF up to 32 MiB / 50 pages, carried by
+# content hash like stt.transcribe audio. Output: JSON
+# {v, ok, text, pages: [{page, text}], engine: "tesseract", lang}.
+# Buyers: `c0mpute ocr <file> [--lang eng]`, POST /v1/ocr?lang=eng on
+# `c0mpute speech serve` (raw bytes body), or the jobs bridge by hash.
+# Not built yet: layout boxes / confidences, searchable-PDF output, GPU
+# engines (PaddleOCR, docTR), cross-worker spot checks.
 
 [module]
 id          = "ocr"
@@ -15,28 +21,30 @@ name        = "OCR — document text extraction"
 version     = "0.2.70"
 kind        = "workload"
 category    = "ai"
-status      = "coming-soon"
-description = "Decentralized OCR for PDFs and scanned documents (Tesseract, PaddleOCR, docTR) with CPU or GPU runners."
+status      = "available"
+builtin     = true
+description = "Text from images and PDFs on CPU workers running Tesseract: PNG, JPEG, TIFF, WebP or PDF up to 50 pages, plain text per page, any installed Tesseract language."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["ocr", "tesseract", "paddleocr", "doctr", "pdf", "documents"]
+keywords    = ["ocr", "tesseract", "pdf", "documents", "scan", "text-extraction"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.71"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["gpu:nvidia?"]
+capabilities = ["cpu", "bin:tesseract", "bin:pdftoppm?"]
 
 [module.workloads]
-"ocr.extract" = { command = "extract", validation = "schema_and_edit_distance_spotcheck" }
+"ocr.extract" = { command = "extract", validation = "result_schema" }
 
 [module.dispatch]
-mode   = "subprocess"
-binary = "c0mpute-ocr"
+mode = "in-process"
 
 [module.surfaces]
 cli = "c0mpute ocr"
+api = "POST /v1/ocr (c0mpute speech serve)"
 
 [module.config.defaults]
 engine    = "tesseract"
 languages = ["eng"]
+max_pages = 50
