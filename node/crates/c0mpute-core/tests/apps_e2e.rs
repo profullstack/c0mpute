@@ -144,6 +144,9 @@ async fn apps_place_three_copies_serve_snapshot_and_fail_over() {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     unsafe {
+        // Never discover (and join) a live network on the machine running
+        // the tests: loopback peers only.
+        std::env::set_var("C0MPUTE_DISABLE_MDNS", "1");
         std::env::set_var(c0mpute_core::container::ENV, &bin);
         std::env::set_var("FAKE_DIR", &fake);
     }
@@ -210,6 +213,7 @@ async fn apps_place_three_copies_serve_snapshot_and_fail_over() {
             millicpus: 500,
             replicas: 3,
             domains: vec![],
+            hosts: vec![],
         },
         1,
     )
