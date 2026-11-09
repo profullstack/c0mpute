@@ -109,6 +109,15 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                 }
             }
             Role::LiveStream => tags.push(crate::live::ROLE_TAG.to_string()),
+            Role::Inference => {
+                // Only while the local runtime lists chat models (refreshed
+                // every minute), one tag per model.
+                let models = crate::inference::ready_models();
+                if !models.is_empty() {
+                    tags.push(crate::inference::ROLE_TAG.to_string());
+                    tags.extend(models.iter().map(|m| crate::inference::model_tag(m)));
+                }
+            }
             Role::Render => {
                 // Only where `blender` runs. The probe (a few seconds) runs
                 // once at worker start; until it finishes, nothing is shown.

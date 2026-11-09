@@ -5,8 +5,9 @@
 //! winner's receipt, fetches the result by the receipt's hash from the
 //! winner, checks the bytes against that hash, and answers with the result.
 //! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash),
-//! `embed.text` and `blender.render-frame` (input pieces by hash; the bridge
-//! fetches and checks the frames and returns them base64-encoded);
+//! `embed.text`, `blender.render-frame` (input pieces by hash; the bridge
+//! fetches and checks the frames and returns them base64-encoded) and
+//! `infernet.inference` (chat completions);
 //! [`Workload`] is where more go.
 //!
 //! Same hardening as `c0mpute speech serve`: a required bearer token
@@ -55,6 +56,7 @@ enum Workload {
     OcrExtract,
     EmbedText,
     RenderFrame,
+    Inference,
 }
 
 impl Workload {
@@ -64,6 +66,7 @@ impl Workload {
         Workload::OcrExtract,
         Workload::EmbedText,
         Workload::RenderFrame,
+        Workload::Inference,
     ];
 
     fn parse(name: &str) -> Option<Self> {
@@ -76,6 +79,7 @@ impl Workload {
             Workload::OcrExtract => crate::ocr::WORKLOAD,
             Workload::EmbedText => crate::embed::WORKLOAD,
             Workload::RenderFrame => crate::render::WORKLOAD,
+            Workload::Inference => crate::inference::WORKLOAD,
         }
     }
     /// Reject a spec no worker could run before auctioning it. `workflow.step`
@@ -87,6 +91,7 @@ impl Workload {
             Workload::OcrExtract => crate::ocr::parse_spec(spec).map(|_| ()),
             Workload::EmbedText => crate::embed::parse_spec(spec).map(|_| ()),
             Workload::RenderFrame => crate::render::parse_spec(spec).map(|_| ()),
+            Workload::Inference => crate::inference::parse_spec(spec).map(|_| ()),
         }
     }
     fn required_capabilities(self, spec: &Value) -> Vec<String> {
@@ -104,6 +109,7 @@ impl Workload {
                 ]
             }
             Workload::RenderFrame => crate::render::required_capabilities_for(spec),
+            Workload::Inference => crate::inference::required_capabilities(spec),
         }
     }
     fn max_result_bytes(self) -> usize {
@@ -112,6 +118,7 @@ impl Workload {
             Workload::OcrExtract => crate::ocr::MAX_RESULT_BYTES,
             Workload::EmbedText => crate::embed::MAX_RESULT_BYTES,
             Workload::RenderFrame => crate::render::MAX_RESULT_BYTES,
+            Workload::Inference => crate::inference::MAX_RESULT_BYTES,
         }
     }
     fn valid_result(self, spec: &Value, value: &Value) -> bool {
@@ -126,6 +133,7 @@ impl Workload {
             }),
             Workload::RenderFrame => crate::render::parse_spec(spec)
                 .is_ok_and(|parsed| crate::render::valid_result(&parsed, value)),
+            Workload::Inference => crate::inference::valid_result(value),
         }
     }
 }

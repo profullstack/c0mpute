@@ -362,6 +362,29 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Chat completions from the operator's own OpenAI-compatible
+            // runtime. Probe it now and every minute; bid only while it lists
+            // chat models (the offer filter re-checks), advertise likewise.
+            if workload_type == crate::inference::WORKLOAD {
+                let Some(base) = crate::inference::runtime_url() else {
+                    info!(%workload_type, "not subscribing: {} is off", crate::inference::RUNTIME_URL_ENV);
+                    continue;
+                };
+                tokio::spawn(crate::inference::refresh_loop(base.clone()));
+                let load = crate::inference::worker_load();
+                let runner_tx = crate::inference::spawn_inference_runner(net.clone(), self.store.clone(), base, load.clone());
+                info!(%workload_type, "subscribing to job topic");
+                dispatch::run_worker_subscriber_with_load(
+                    net.clone(),
+                    workload_type,
+                    tags.clone(),
+                    Some(runner_tx),
+                    Some(crate::inference::offer_filter()),
+                    Some(self.config.pricing.clone()),
+                    Some(load),
+                );
+                continue;
+            }
             // Embeddings: provision fastembed in the background (never blocks
             // the worker), subscribe once a model answers. Same shape as TTS.
             if workload_type == crate::embed::WORKLOAD {
@@ -776,7 +799,8 @@ pub fn which_ffmpeg() -> Option<std::path::PathBuf> {
     None
 }
 
-struct StoreSource(ChunkStore);
+/// Serves chunk fetches from a [`ChunkStore`].
+pub struct StoreSource(pub ChunkStore);
 
 #[async_trait::async_trait]
 impl ChunkSource for StoreSource {

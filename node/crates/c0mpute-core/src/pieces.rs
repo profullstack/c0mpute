@@ -334,6 +334,56 @@ impl InputRef {
         }
     }
 
+    /// The ref for stored [`Pieces`] (one piece: a single chunk).
+    pub fn of(p: &Pieces) -> Result<Self> {
+        let whole = Hash::from_hex(&p.hash).context("piece hash")?;
+        if p.pieces.len() <= 1 {
+            return Ok(Self::Single(whole));
+        }
+        Ok(Self::Pieces {
+            whole,
+            size: p.size,
+            pieces: p
+                .pieces
+                .iter()
+                .map(|h| Hash::from_hex(h))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("piece hash")?,
+        })
+    }
+
+    /// Fetch and verify the whole input into `dest` (streamed for pieces:
+    /// never whole in memory), renamed into place only once every check passed.
+    pub async fn fetch_to_file(
+        &self,
+        net: &Arc<Libp2pNetwork>,
+        provider: Option<PeerId>,
+        max_bytes: usize,
+        dest: &Path,
+    ) -> Result<()> {
+        match self {
+            Self::Single(_) => {
+                let bytes = self.fetch(net, provider, max_bytes).await?;
+                let tmp = dest.with_extension(format!("part-{}", uuid::Uuid::new_v4()));
+                tokio::fs::write(&tmp, &bytes).await?;
+                tokio::fs::rename(&tmp, dest).await?;
+                Ok(())
+            }
+            Self::Pieces {
+                whole,
+                size,
+                pieces,
+            } => {
+                if *size as usize > max_bytes {
+                    bail!("the input is over the {max_bytes}-byte limit");
+                }
+                fetch_pieces_to_file(net, provider, pieces, *size, *whole, INPUT_PIECE_BYTES, dest)
+                    .await
+                    .context("fetch the input pieces")
+            }
+        }
+    }
+
     /// Fetch and verify the whole input into memory.
     pub async fn fetch(
         &self,

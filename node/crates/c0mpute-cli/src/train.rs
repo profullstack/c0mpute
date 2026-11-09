@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use c0mpute_core::temporal::node::{NetOptions, spawn_node};
+use c0mpute_core::temporal::node::{NetOptions, spawn_node_with_store};
+use c0mpute_store::ChunkStore;
 use c0mpute_core::text::{self, TrainRequest};
 use c0mpute_core::train::{LoraOptions, normalize_dataset};
 use clap::{Args, Parser, Subcommand};
@@ -39,8 +40,10 @@ enum Sub {
     /// Train a LoRA adapter on a remote worker and download it.
     ///
     /// The dataset is JSONL: {"text"} (optionally "title"), {"prompt","completion"}
-    /// or {"messages":[{role,content}]}. Workers run `infernet model train`
-    /// (peft, fp32 LoRA on CPU or CUDA); keep the base model small.
+    /// or {"messages":[{role,content}]} (multi-turn chats train on every turn,
+    /// loss on the assistant's). Workers run `infernet model train` (peft, fp32
+    /// LoRA on CPU or CUDA); keep the base model small. The dataset and the
+    /// adapter move peer to peer over libp2p.
     Lora {
         /// Base model, a Hugging Face id (e.g. Qwen/Qwen2.5-0.5B-Instruct).
         #[arg(long)]
@@ -81,7 +84,11 @@ enum Sub {
         gpu: bool,
         #[arg(long)]
         min_ram_gb: Option<u64>,
-        /// How the worker reaches this machine's transfer server (needed off-LAN: an https URL that forwards to --bind).
+        /// Also serve workers older than the peer-to-peer transport: the corpus and adapter then go
+        /// over HTTP from this machine (the worker must reach it: same LAN, or --public-url).
+        #[arg(long)]
+        legacy_http: bool,
+        /// With --legacy-http: how an old worker reaches this machine's transfer server (an https URL forwarding to --bind).
         #[arg(long)]
         public_url: Option<String>,
         #[arg(long, default_value = "0.0.0.0:0")]
@@ -125,6 +132,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         max_price,
         gpu,
         min_ram_gb,
+        legacy_http,
         public_url,
         bind,
         timeout_s,
@@ -161,6 +169,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         max_price_usd: max_price,
         gpu,
         min_ram_gb,
+        legacy_http,
         public_url,
         bind,
         timeout_s,
@@ -189,18 +198,23 @@ pub async fn run(args: &[String]) -> Result<()> {
         std::process::exit(3);
     }
 
-    let node = spawn_node(&NetOptions {
-        identity_dir: data_dir().join("client"),
-        listen: net.listen.clone(),
-        bootstrap: net.bootstrap.clone(),
-        default_bootstrap: !net.no_default_bootstrap,
-    })
+    // The corpus goes out as pieces from this store, served over libp2p.
+    let store = ChunkStore::open(data_dir().join("store")).await?;
+    let node = spawn_node_with_store(
+        &NetOptions {
+            identity_dir: data_dir().join("client"),
+            listen: net.listen.clone(),
+            bootstrap: net.bootstrap.clone(),
+            default_bootstrap: !net.no_default_bootstrap,
+        },
+        store.clone(),
+    )
     .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    eprintln!("looking for a worker advertising infernet:text:train ...");
+    eprintln!("looking for a worker advertising {} ...", text::required_tags(&corpus).join(" + "));
     let mut total = None;
     let mut on_step = false;
-    let result = text::train(node, &req, |ev| {
+    let result = text::train(node, &store, &req, |ev| {
         if as_json {
             println!("{ev}");
             return;

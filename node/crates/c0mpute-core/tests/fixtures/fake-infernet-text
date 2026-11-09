@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Stand-in for the `infernet` CLI's peft text commands in c0mpute tests.
+
+Same command lines and JSON shapes as Infernet's peft backend
+(`model runtime status --peft --json`, `model train --json --job <job.json>`),
+no PyTorch. The "adapter" is deterministic bytes derived from the corpus the
+worker handed over (a few MiB, so it travels as several pieces), so the
+buyer's hash checks are real. Like the real runner it reads only local paths
+and refuses a corpus whose sha256 differs from the job's.
+"""
+import hashlib, json, os, sys, time
+
+args = sys.argv[1:]
+
+if args[:3] == ["model", "runtime", "status"]:
+    print(json.dumps({"installed": True, "cuda": False, "torch": "fake", "transformers": "fake", "peft": "fake",
+                      "formats": ["text", "messages"]}))
+    sys.exit(0)
+
+def flag(name):
+    return args[args.index(name) + 1] if name in args else None
+
+if args[:2] == ["model", "generate"]:
+    if "--input" not in args:
+        # What Infernet >= 0.1.80 prints for a bare call (c0mpute probes it).
+        print("usage: infernet model generate --adapter <dir> | --input <request.json>", file=sys.stderr)
+        sys.exit(2)
+    req = json.load(open(flag("--input")))
+    weights = open(os.path.join(req["adapter_dir"], "adapter_model.safetensors"), "rb").read()
+    turns = " | ".join(f"{m['role']}={m['content']}" for m in req["messages"])
+    print(json.dumps({"v": 1, "type": "answer", "adapter": "sha256:" + hashlib.sha256(weights).hexdigest(),
+                      "text": f"[{req['base_model']}] {turns}", "tokens": 7, "seconds": 0.1}))
+    sys.exit(0)
+
+def emit(**ev):
+    print(json.dumps({"v": 1, **ev}), flush=True)
+
+if args[:2] == ["model", "train"]:
+    job_path = flag("--job")
+    base = os.path.dirname(os.path.abspath(job_path))
+    job = json.load(open(job_path))
+    url = job["dataset"]["url"]
+    if "://" in url:
+        emit(type="error", message="dataset.url must be a local path"); emit(type="done", reason="error"); sys.exit(1)
+    raw = open(os.path.join(base, url), "rb").read()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != job["dataset"].get("sha256", digest):
+        emit(type="error", message="dataset sha256 mismatch"); emit(type="done", reason="error"); sys.exit(1)
+    docs = [json.loads(l) for l in raw.decode().splitlines() if l.strip()]
+    turns = sum(len(d.get("messages", [])) for d in docs)
+    emit(type="meta", base_model=job["base_model"], device="cpu", total_steps=3, documents=len(docs), conversation_turns=turns)
+    for s in (1, 2, 3):
+        emit(type="step", step=s, total_steps=3, loss=round(2.0 / s, 3), throughput=10.0)
+        time.sleep(0.3)
+    out = os.path.join(base, job["output"]["destination_url"])
+    os.makedirs(out, exist_ok=True)
+    seed = hashlib.sha256(raw).digest()
+    weights = (seed * (2_621_440 // len(seed) + 1))[:2_621_440]
+    open(os.path.join(out, "adapter_model.safetensors"), "wb").write(weights)
+    open(os.path.join(out, "adapter_config.json"), "w").write(json.dumps({"r": job["hyperparams"]["lora_r"]}))
+    open(os.path.join(out, "manifest.json"), "w").write(json.dumps({
+        "base_model": job["base_model"], "dataset_sha256": digest, "documents": len(docs),
+        "conversation_turns": turns, "system_prompt": job.get("system_prompt")}))
+    emit(type="checkpoint", step=3, model="sha256:" + hashlib.sha256(weights).hexdigest(), size_bytes=len(weights))
+    emit(type="done", reason="complete")
+    sys.exit(0)
+
+print("fake-infernet-text: unsupported " + " ".join(args), file=sys.stderr)
+sys.exit(2)
