@@ -256,7 +256,7 @@ pub fn open_spec(
                     aad: &aad,
                 },
             )
-            .map_err(|_| anyhow!("sealed spec does not open (wrong key, wrong job or tampered)"))?,
+            .map_err(|_| anyhow!("{SPEC_KEY_MISMATCH} (wrong key, wrong job or tampered)"))?,
     );
     let (salt, spec) = plain.split_at(32);
     if commit_hash(salt, spec) != commitment {
@@ -710,6 +710,16 @@ pub fn opened_offer(offer: &JobOffer, spec: Value) -> JobOffer {
 
 // ─── buyer ───────────────────────────────────────────────────────────────
 
+/// What [`open_spec`] says when the spec was sealed to another key: on a
+/// worker that bid, almost always a twin (another process with this peer id)
+/// whose bid the buyer kept.
+pub const SPEC_KEY_MISMATCH: &str = "sealed spec does not open";
+
+/// Whether an error from opening a won job's spec is a key mismatch.
+pub fn is_key_mismatch(err: &str) -> bool {
+    err.contains(SPEC_KEY_MISMATCH)
+}
+
 /// The buyer's half of one e2e auction.
 pub struct BuyerSession {
     secret: StaticSecret,
@@ -887,6 +897,12 @@ fn payloads() -> &'static Mutex<HashMap<String, PendingPayload>> {
     P.get_or_init(Default::default)
 }
 
+/// Key of one held sealed spec: a job re-awarded after a twin fault holds one
+/// per winner.
+fn payload_key(job_id: &str, winner: &PeerId) -> String {
+    format!("{job_id}/{winner}")
+}
+
 /// Removes a job's sealed spec when the auction ends.
 pub struct PayloadGuard(String);
 
@@ -910,7 +926,7 @@ pub fn hold_payload(
         let now = Instant::now();
         p.retain(|_, v| v.until > now);
         p.insert(
-            job_id.to_string(),
+            payload_key(job_id, &winner),
             PendingPayload {
                 winner,
                 sealed: Arc::new(sealed),
@@ -918,7 +934,7 @@ pub fn hold_payload(
             },
         );
     }
-    PayloadGuard(job_id.to_string())
+    PayloadGuard(payload_key(job_id, &winner))
 }
 
 /// Serves sealed specs, each only to the peer that won it. The caller's peer
@@ -930,7 +946,7 @@ impl RpcHandler for PayloadHandler {
     async fn handle(&self, peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
         let job_id = std::str::from_utf8(&body).map_err(|_| "bad job id".to_string())?;
         let p = payloads().lock().map_err(|_| "unavailable".to_string())?;
-        match p.get(job_id) {
+        match p.get(&payload_key(job_id, &peer)) {
             Some(x) if x.winner == peer && x.until > Instant::now() => {
                 Ok(x.sealed.as_ref().clone())
             }

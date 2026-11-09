@@ -172,6 +172,8 @@ async fn receipt(net: &Libp2pNetwork, accept: &JobAccept, hash: String) {
         completed_at_ms: 0,
         signature: None,
         external_ref: None,
+        instance: None,
+        fault: None,
     };
     let topic = job_topic(&accept.workload_type);
     let bytes = serde_json::to_vec(&r).unwrap();

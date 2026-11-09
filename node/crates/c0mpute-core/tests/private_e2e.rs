@@ -72,6 +72,8 @@ async fn private_worker_serves_only_trusted_buyers() {
                 completed_at_ms: 0,
                 signature: None,
                 external_ref: job.accept.external_ref.clone(),
+                instance: None,
+                fault: None,
             };
             tokio::time::sleep(Duration::from_millis(100)).await;
             w.publish(

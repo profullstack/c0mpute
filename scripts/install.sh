@@ -809,14 +809,29 @@ Environment=PATH=$C0MPUTE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$C0MPUTE_HOME/bin/c0mpute worker start
 Restart=on-failure
 RestartSec=5
+# 90: replaced by a newer worker start of this identity; 91: a duplicate that
+# stood down. Restarting either would fight the worker that replaced it.
+RestartPreventExitStatus=90 91
 
 [Install]
 WantedBy=$1
 UNIT
 }
 
+# One identity, one worker: a user unit next to the system unit would start a
+# second worker with the same identity at every boot.
+remove_user_service() {
+  unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/c0mpute-worker.service"
+  [ -f "$unit" ] || return 0
+  systemctl --user disable --now c0mpute-worker >/dev/null 2>&1
+  rm -f "$unit"
+  systemctl --user daemon-reload >/dev/null 2>&1
+  ok "removed the c0mpute-worker user service (the system service runs this worker now)"
+}
+
 start_system_service() {
   { [ -n "$SUDO" ] || [ "$(id -u)" = "0" ]; } || return 1
+  remove_user_service
   tmp=$(mktemp)
   worker_unit multi-user.target "User=$(id -un)" > "$tmp"
   if $SUDO cp "$tmp" /etc/systemd/system/c0mpute-worker.service 2>/dev/null; then

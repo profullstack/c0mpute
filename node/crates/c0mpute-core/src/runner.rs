@@ -626,20 +626,7 @@ pub async fn publish_receipt(
     if crate::job_control::cancelled(&accept.job_id) {
         return;
     }
-    let receipt = JobReceipt {
-        job_id: accept.job_id.clone(),
-        worker_peer_id: net.peer_id().to_base58(),
-        worker_did: None,
-        buyer_peer_id: accept.buyer_peer_id.clone(),
-        output_hash,
-        status,
-        completed_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-        signature: None,
-        external_ref: accept.external_ref.clone(),
-    };
+    let receipt = receipt_for(net, accept, output_hash, status, None);
     // Kept for a buyer that restarts before it hears this (`job_control`).
     crate::job_control::done(&accept.job_id, &receipt);
     // Reach back to the buyer first: it can fetch the result only over a
@@ -660,8 +647,55 @@ pub async fn publish_receipt(
             reach_buyer(net, &accept.buyer_peer_id).await;
         }
     }
+    send_receipt(net, accept, &receipt).await;
+}
+
+fn receipt_for(
+    net: &Libp2pNetwork,
+    accept: &JobAccept,
+    output_hash: Option<String>,
+    status: JobStatus,
+    fault: Option<&str>,
+) -> JobReceipt {
+    JobReceipt {
+        job_id: accept.job_id.clone(),
+        worker_peer_id: net.peer_id().to_base58(),
+        worker_did: None,
+        buyer_peer_id: accept.buyer_peer_id.clone(),
+        output_hash,
+        status,
+        completed_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        signature: None,
+        external_ref: accept.external_ref.clone(),
+        instance: Some(net.instance_id().to_string()),
+        fault: fault.map(str::to_string),
+    }
+}
+
+/// Tell the buyer that `accept` went to another process running this
+/// identity (a twin), not to this one: a Failed receipt marked
+/// [`c0mpute_net::topics::FAULT_IDENTITY_TWIN`]. Buyers that know the mark
+/// re-award the job and do not count it against the node; this process's
+/// own failure backoff is not touched either.
+pub async fn publish_twin_fault(net: &Libp2pNetwork, accept: &JobAccept) {
+    crate::activity::job_finished(&accept.job_id);
+    crate::job_control::forget(&accept.job_id);
+    let receipt = receipt_for(
+        net,
+        accept,
+        None,
+        JobStatus::Failed,
+        Some(c0mpute_net::topics::FAULT_IDENTITY_TWIN),
+    );
+    send_receipt(net, accept, &receipt).await;
+}
+
+async fn send_receipt(net: &Libp2pNetwork, accept: &JobAccept, receipt: &JobReceipt) {
     let topic = job_topic(&accept.workload_type);
-    if let Ok(payload) = serde_json::to_vec(&receipt) {
+    if let Ok(payload) = serde_json::to_vec(receipt) {
         // Straight to the buyer as well as on the topic (the aggregator and
         // old buyers read it there): a receipt lost on the mesh left the
         // buyer waiting out its whole receipt timeout for a finished job.

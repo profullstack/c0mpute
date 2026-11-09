@@ -55,7 +55,7 @@
 [module]
 id          = "gameserver"
 name        = "Game server — Minecraft / Factorio / Valheim"
-version     = "0.3.17"
+version     = "0.3.18"
 kind        = "workload"
 category    = "infrastructure"
 status      = "available"

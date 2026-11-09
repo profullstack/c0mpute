@@ -41,6 +41,11 @@ Type=simple
 ExecStart=%h/.c0mpute/bin/c0mpute worker start
 Restart=on-failure
 RestartSec=5
+# One worker per identity: a newer `c0mpute worker start` replaces a running
+# one, which exits 90; one that cannot take over exits 91. systemd must not
+# restart either, or the two would fight. Never run this as both a user and a
+# system unit (`c0mpute doctor` lists every worker unit on the machine).
+RestartPreventExitStatus=90 91
 # Give in-flight jobs a moment to wind down on stop before SIGKILL.
 TimeoutStopSec=30
 # Peer CLIs (coinpay, infernet) also install under ~/.c0mpute/bin.

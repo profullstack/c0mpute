@@ -344,6 +344,29 @@ journalctl --user -u c0mpute-worker -f
 
 Under systemd the worker runs in the foreground (no `-d`) — systemd owns the
 lifecycle. See the unit header for GPU/role customization via `systemctl --user edit`.
+`c0mpute worker install` writes the same unit for you (`--system` for a root-managed
+one) and refuses when another unit already runs a worker for your user.
+
+#### Troubleshooting: one identity, two workers
+
+Run one worker per identity (`~/.config/c0mpute/identity.key`). A second
+`c0mpute worker start` on the same machine replaces the running worker: it stops
+bidding, finishes its jobs (up to 10 min) and exits with code 90 (91: a duplicate that
+stood down). Every unit c0mpute installs has `RestartPreventExitStatus=90 91`, so
+systemd does not restart it, and older units get that as a drop-in. The usual cause is
+a system unit (`/etc/systemd/system/c0mpute-worker.service`, `User=you`) next to the
+user unit:
+
+```sh
+c0mpute doctor          # every worker process, unit and identity lock on this machine
+c0mpute doctor --fix    # disables the extra unit (prints the sudo command for system units)
+sudo systemctl disable --now c0mpute-worker.service   # remove a system unit by hand
+```
+
+An identity copied to a second machine runs as two "twins" under one peer id: buyers
+keep the newer process's bid, re-award a job the other one answers for at once, the
+older twin stops bidding, and c0mpute.com/nodes marks the node *duplicate identity*.
+Delete `identity.key` in the copy before starting it.
 
 ## Architecture at a glance
 
