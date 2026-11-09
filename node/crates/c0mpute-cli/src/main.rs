@@ -749,6 +749,10 @@ enum AppsCmd {
         /// `_c0mpute-app.<domain>` = `app=<app_id>`.
         #[arg(long = "domain")]
         domains: Vec<String>,
+        /// Peer id allowed to hold and run the app (repeatable). Without it
+        /// any apps node may, and every holder receives the app's secrets.
+        #[arg(long = "host")]
+        hosts: Vec<String>,
         /// Give up waiting for a healthy primary after this many seconds.
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
@@ -3859,6 +3863,7 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             cpus,
             replicas,
             domains,
+            hosts,
             wait_secs,
         } => {
             let wait = std::time::Duration::from_secs(wait_secs);
@@ -3883,6 +3888,7 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
                     millicpus: 500,
                     replicas: c0mpute_core::apps::record::DEFAULT_REPLICAS,
                     domains: vec![],
+                    hosts: vec![],
                     wait,
                 },
             };
@@ -3924,6 +3930,7 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
                 opts.replicas = r;
             }
             opts.domains.extend(domains);
+            opts.hosts.extend(hosts);
             opts.wait = wait;
             let rec = deploy::deploy(opts).await?;
             println!("{}", rec.app_id);

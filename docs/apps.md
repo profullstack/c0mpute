@@ -97,6 +97,12 @@ Every gateway routes to apps whether or not it runs any.
   snapshot are lost. This is a replicated single-node database, not a
   distributed one (no Raft yet; rqlite/dqlite as an app needs node-to-node
   links, which come next).
+- **Pin your hosts for anything private.** By default any `apps` node may
+  hold an app, and every holder receives its secrets and app key. `--host
+  <peer-id>` (repeatable; `hosts = [...]` in `c0mpute.toml`) signs an allowlist
+  into the record: holders seal secrets only to, and take snapshots only from,
+  those peers, and nodes off the list never take a copy. Operators can
+  likewise limit whose apps they run with `[apps] owners`.
 - **Operators can read a running app.** The node running the container sees
   its memory and its state volume, as with any VPS host. Snapshots at rest on
   standbys are encrypted.

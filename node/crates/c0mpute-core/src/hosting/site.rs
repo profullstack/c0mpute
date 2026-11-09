@@ -308,7 +308,7 @@ pub struct HostingTerms {
     pub payer: Option<String>,
 }
 
-fn valid_peer_id(p: &str) -> bool {
+pub fn valid_peer_id(p: &str) -> bool {
     p.len() <= 64 && p.parse::<c0mpute_net::PeerId>().is_ok()
 }
 
