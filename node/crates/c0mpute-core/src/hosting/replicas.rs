@@ -14,7 +14,7 @@
 //! on its own, and once preferred hosts hold copies the surplus free copies
 //! are released one at a time. A site never drops below three copies.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use c0mpute_proto::Hash;
@@ -35,6 +35,20 @@ pub struct Holding {
     pub price: Option<Micros>,
     /// Where it wants marketplace payments, when it says.
     pub payout: Option<Payee>,
+    /// It hosts but cannot take another copy right now; left out of the
+    /// rendezvous fill (its existing copies still count).
+    pub full: bool,
+    /// Free disk above its floor, GiB, when it says. More room ranks higher
+    /// in the fill (see [`space_tier`]).
+    pub room_gib: Option<u64>,
+    /// Striped sites it holds only some groups of: site id -> groups. A site
+    /// in `sites` but not here is held whole.
+    pub groups: HashMap<String, BTreeSet<u32>>,
+    /// Bytes it can still take. Present only from nodes that place striped
+    /// sites, so older nodes are never counted on for a group.
+    pub room: Option<u64>,
+    /// Where to dial it (announced multiaddrs).
+    pub addrs: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +104,23 @@ impl ReplicaMap {
         price: Option<Micros>,
         payout: Option<Payee>,
     ) {
+        self.apply_holding_full(peer, sites, HashMap::new(), now, hosts, price, payout, None, Vec::new());
+    }
+
+    /// A holding list with everything a current node announces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_holding_full(
+        &mut self,
+        peer: &str,
+        sites: HashMap<String, (String, u64)>,
+        groups: HashMap<String, BTreeSet<u32>>,
+        now: Instant,
+        hosts: bool,
+        price: Option<Micros>,
+        payout: Option<Payee>,
+        room: Option<u64>,
+        addrs: Vec<String>,
+    ) {
         self.peers.insert(
             peer.to_string(),
             Holding {
@@ -98,8 +129,99 @@ impl ReplicaMap {
                 hosts,
                 price,
                 payout,
+                full: false,
+                room_gib: None,
+                groups,
+                room,
+                addrs,
             },
         );
+    }
+
+    /// Record how much room `peer` says it has (see [`Holding::room_gib`]).
+    pub fn set_room(&mut self, peer: &str, room_gib: Option<u64>) {
+        if let Some(h) = self.peers.get_mut(peer) {
+            h.room_gib = room_gib;
+        }
+    }
+
+    /// Mark whether `peer` can take new copies (see [`Holding::full`]).
+    pub fn set_full(&mut self, peer: &str, full: bool) {
+        if let Some(h) = self.peers.get_mut(peer) {
+            h.full = full;
+        }
+    }
+
+    /// Live hosting peers that place striped sites (they announce `room`),
+    /// sorted.
+    pub fn striping_peers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, h)| h.hosts && h.room.is_some())
+            .map(|(p, _)| p.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The room a peer announced.
+    pub fn room_of(&self, peer: &str) -> Option<u64> {
+        self.peers.get(peer).and_then(|h| h.room)
+    }
+
+    /// For each of a striped site's `n` groups, the peers holding it in the
+    /// current version, sorted. `hosting_only` = copies that count (else
+    /// every source, seeding publishers included). A peer that holds the site
+    /// whole holds every group.
+    pub fn group_holders(&self, site_id: &str, n: usize, hosting_only: bool) -> Vec<Vec<String>> {
+        let mut out = vec![Vec::new(); n];
+        let Some(rec) = self.records.get(site_id) else {
+            return out;
+        };
+        let mut peers: Vec<(&String, &Holding)> = self.peers.iter().collect();
+        peers.sort_by(|a, b| a.0.cmp(b.0));
+        for (p, h) in peers {
+            if hosting_only && !h.hosts {
+                continue;
+            }
+            if !h.sites.get(site_id).is_some_and(|(m, _)| *m == rec.manifest) {
+                continue;
+            }
+            match h.groups.get(site_id) {
+                Some(gs) => {
+                    for g in gs {
+                        if let Some(v) = out.get_mut(*g as usize) {
+                            v.push(p.clone());
+                        }
+                    }
+                }
+                None => {
+                    for v in out.iter_mut() {
+                        v.push(p.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every source of one group of a striped site (holders and seeding
+    /// publishers), sorted.
+    pub fn group_sources(&self, site_id: &str, g: u32) -> Vec<String> {
+        self.sources(site_id)
+            .into_iter()
+            .filter(|p| {
+                self.peers
+                    .get(p)
+                    .is_some_and(|h| h.groups.get(site_id).is_none_or(|gs| gs.contains(&g)))
+            })
+            .collect()
+    }
+
+    /// Announced addresses of a peer.
+    pub fn addrs_of(&self, peer: &str) -> &[String] {
+        self.peers.get(peer).map(|h| h.addrs.as_slice()).unwrap_or(&[])
     }
 
     /// Keep a verified receipt (deduplicated, newest [`proof::KEEP_PER_HOLDER`]
@@ -166,6 +288,18 @@ impl ReplicaMap {
     pub fn prune(&mut self, now: Instant, ttl: Duration) {
         self.peers
             .retain(|_, h| h.seen.is_some_and(|t| now.duration_since(t) <= ttl));
+    }
+
+    /// Live hosting peers that can take a new copy, sorted.
+    pub fn candidate_peers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, h)| h.hosts && !h.full)
+            .map(|(p, _)| p.clone())
+            .collect();
+        v.sort();
+        v
     }
 
     /// Live hosting peers, sorted.
@@ -274,6 +408,26 @@ pub fn chosen(site_id: &str, candidates: &[String], need: usize) -> Vec<String> 
     ranked.into_iter().take(need).map(|(p, _)| p.clone()).collect()
 }
 
+/// A peer's priority tier from the room it reports: the bit length of its
+/// free GiB, so a node with about twice the room ranks one tier higher. A
+/// peer that does not say (an older node) sits at the 64 GiB tier. Integer
+/// only, so every node computes the same tiers.
+pub fn space_tier(room_gib: Option<u64>) -> u32 {
+    let gib = room_gib.unwrap_or(64);
+    64 - gib.leading_zeros()
+}
+
+/// Like [`chosen`], but nodes with more free disk come first: candidates are
+/// ordered by [`space_tier`], then by rendezvous score within a tier, so the
+/// biggest disks take copies first while load still spreads among equals.
+pub fn chosen_by_space(map: &ReplicaMap, site_id: &str, candidates: &[String], need: usize) -> Vec<String> {
+    let tier = |p: &String| space_tier(map.peers.get(p).and_then(|h| h.room_gib));
+    let mut ranked: Vec<(&String, u32, [u8; 32])> =
+        candidates.iter().map(|p| (p, tier(p), score(site_id, p))).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(b.0)));
+    ranked.into_iter().take(need).map(|(p, _, _)| p.clone()).collect()
+}
+
 /// When a site has more than `max` live copies, the lowest-ranked holder
 /// lets its copy go. Returns that holder.
 pub fn surplus(site_id: &str, holders: &[String], max: usize) -> Option<String> {
@@ -331,15 +485,25 @@ pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: u
     // The rendezvous fill. Preferred hosts that do not hold yet are left out:
     // they replicate on their own, and counting on them would leave the site
     // short if one never manages to.
+    // Full peers are left out too: one that ranks first but cannot take the
+    // copy would otherwise hold the slot from the next ranked node forever.
+    // Peers that announced too little room for the site are skipped, so a
+    // full node ranked first cannot leave a site short forever. Older nodes
+    // do not announce room and stay candidates.
+    let size = map.records.get(site_id).map(|r| r.size).unwrap_or(0);
     let mut candidates: Vec<String> = map
-        .live_peers()
+        .candidate_peers()
         .into_iter()
         .filter(|p| !holders.contains(p) && !preferred.contains(p))
+        .filter(|p| map.room_of(p).is_none_or(|r| r >= size))
         .collect();
     if !candidates.iter().any(|p| p == me) {
+        if map.room_of(me).is_some_and(|r| r < size) {
+            return Action::Nothing;
+        }
         candidates.push(me.to_string());
     }
-    if chosen(site_id, &candidates, target - holders.len())
+    if chosen_by_space(map, site_id, &candidates, target - holders.len())
         .iter()
         .any(|p| p == me)
     {
@@ -352,6 +516,63 @@ pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_peer_that_ranks_first_does_not_hold_the_slot() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r);
+        let now = Instant::now();
+        let peers: Vec<String> = (0..6).map(|i| format!("h{i}")).collect();
+        for p in &peers {
+            m.apply_holding_meta(p, HashMap::new(), now, true, None, None);
+        }
+        // Whoever ranks first for this site is full.
+        let first = chosen(&site, &peers, 1)[0].clone();
+        m.set_full(&first, true);
+        let takers: Vec<String> = peers
+            .iter()
+            .filter(|p| decide(&m, &site, p, !m.peers[*p].full, 3, 5) == Action::Replicate)
+            .cloned()
+            .collect();
+        assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
+        assert!(!takers.contains(&first));
+    }
+
+    #[test]
+    fn nodes_with_more_room_take_copies_first() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r);
+        let now = Instant::now();
+        let peers: Vec<String> = (0..8).map(|i| format!("h{i}")).collect();
+        for p in &peers {
+            m.apply_holding_meta(p, HashMap::new(), now, true, None, None);
+            m.set_room(p, Some(20));
+        }
+        // The three that rank LAST by hash have the big disks.
+        let mut by_hash = chosen(&site, &peers, peers.len());
+        let big: Vec<String> = by_hash.split_off(peers.len() - 3);
+        for p in &big {
+            m.set_room(p, Some(3000));
+        }
+        let takers: Vec<String> = peers
+            .iter()
+            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .cloned()
+            .collect();
+        let mut want = big.clone();
+        want.sort();
+        assert_eq!(takers, want, "the roomiest disks fill the site");
+        assert_eq!(space_tier(Some(0)), 0);
+        assert_eq!(space_tier(Some(1)), 1);
+        assert_eq!(space_tier(Some(3000)), 12);
+        assert_eq!(space_tier(None), space_tier(Some(64)));
+    }
 
     fn rec(kp: &c0mpute_net::libp2p::identity::Keypair, seq: u64) -> SiteRecord {
         SiteRecord::sign(kp, "site", &Hash::of(&seq.to_le_bytes()), seq, 10, vec![]).unwrap()
@@ -395,6 +616,24 @@ mod tests {
         assert!(!takers.iter().any(|p| *p == "peer0"));
         // A node that does not host never takes one.
         assert_eq!(decide(&m, &site, "outsider", false, 3, 5), Action::Nothing);
+    }
+
+    #[test]
+    fn full_nodes_are_not_counted_on_for_a_copy() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        let now = Instant::now();
+        for (p, room) in [("a", Some(0)), ("b", Some(0)), ("c", Some(1 << 30)), ("d", None), ("e", Some(1 << 30))] {
+            m.apply_holding_full(p, HashMap::new(), HashMap::new(), now, true, None, None, room, vec![]);
+        }
+        let takers: Vec<&str> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .collect();
+        assert_eq!(takers, vec!["c", "d", "e"], "full a and b are skipped; d (no room field) is not");
     }
 
     #[test]

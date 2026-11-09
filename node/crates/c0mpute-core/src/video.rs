@@ -636,7 +636,7 @@ pub fn spawn_video_runner(
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
             let _long = c0mpute_update::LongJob::start();
-            let result = run_video_job(&net, &store, &cache_root, &workload, &image, &job).await;
+            let result = crate::job_control::cancellable(&job.accept.job_id, run_video_job(&net, &store, &cache_root, &workload, &image, &job)).await;
             crate::runner::cleanup_job_dir(&cache_root, &job_id).await;
             match result {
                 Ok(hash) => {

@@ -9,11 +9,21 @@ c0mpute hosting publish ./public --name my-site            # first version
 c0mpute hosting publish ./public --name my-site            # same name again = new version
 c0mpute hosting publish ./public --name my-site --domain blog.example.org
 c0mpute hosting ls                                         # sites a gateway knows, with copy counts
+c0mpute hosting get <site_id> movies/a.mp4                 # download one file, shows MB/s
+c0mpute hosting rm --name my-site                          # take it down (publishes an empty version)
 ```
 
 `publish` signs the site with this machine's identity (`<data_dir>/buyer/identity.key`),
-seeds it, and stays up until three hosting nodes hold copies (default wait 10 min).
-Only the machine holding that key can publish new versions of the site.
+seeds it, and stays up until three hosting nodes hold copies (default wait 10 min; for a
+large site, 10 min without progress). Only the machine holding that key can publish new
+versions of the site.
+
+The folder is scanned in place: nothing is copied, and the publisher serves chunks
+straight from the files while the network takes its copies, so publishing 50 GiB of
+video does not need another 50 GiB of local disk. Hashes of unchanged files are kept in
+`<data_dir>/hosting/scan-cache.json`, so running the same command again is quick. That
+is also how to resume: if `publish` stops (Ctrl-C, laptop asleep), run it again. The
+record already on the network is reused and holders keep every group they have.
 
 The site is then served by every gateway at `http://<gateway>:7777/s/<site_id>/`.
 Paths resolve like a static host: `/` and directories map to `index.html`, an
@@ -32,17 +42,112 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 | Healing | A site with fewer than 3 live copies: each hosting node ranks the candidates (rendezvous hashing on site id + peer id). The top-ranked ones fetch a copy. A node that stops announcing stops counting after ~200 s and another node takes over. Above 5 copies the lowest-ranked holder lets go. A publisher seeding its own site is a source, not a copy. |
 | Serving | Any gateway: local chunks when it holds them, otherwise fetched over libp2p from the fastest live holder (measured round-trip, round-robin among equally fast ones), failing over to the next and then to the DHT. Every chunk is checked against its hash. |
 
-Limits per site: 1 GiB, 10,000,000 files. Up to 5,000 files the manifest is one chunk;
-above that it is a root listing parts of 4,000 files each (by first path), so a
-gateway fetches only the part a request needs. Nodes before v0.3.0 cannot read
-parted manifests and skip those sites. A node holds at most `hosting.max_bytes`
-(default 5 GiB) of other people's sites, and at most 1 GiB per owner key.
+## Limits
+
+| | |
+|---|---|
+| Site, paid (`--disks`, a v2 record) | 4 TiB |
+| Site, free (v1 record) | 64 GiB |
+| Files per site | 10,000,000 |
+| One file | 128 GiB |
+| Small sites other features publish (ad creatives, app images, podcast shows, git repos) | 1 GiB, built in memory |
+| Node budget | `[hosting] max_bytes`; `0` (default) = what it holds plus 25% of the free space above the free-disk floor |
+| Free-disk floor | a copy must leave max(10 GiB, 5% of the disk), capped at 50 GiB, free |
+| Per owner, per node | 16 GiB of free sites; sites the node is a preferred (paid) host for do not count |
 
 ```toml
 # ~/.config/c0mpute/config.toml
 [hosting]
-max_bytes = 5368709120
+max_bytes = 0            # 0 = follow the disk; or a fixed number of bytes
 ```
+
+The budget advertised to d1sks (`max_gib`) is the same number, so `--disks auto` only
+picks disks with room for their share of the site.
+
+Errors say which limit was hit and what to do (`--disks auto` for a free site over
+64 GiB, split the folder above 4 TiB). A hosting node logs the limit that made it
+refuse a copy (`over this node's hosting budget`, `disk nearly full`, `per-owner limit`).
+
+## Large sites: striped placement
+
+A site up to 1 GiB is replicated whole, exactly as before. Above that it is
+**striped**: its chunks are bucketed by hash into groups, one group per 64 MiB of the
+site up to 8,192 groups (512 GiB); a bigger site keeps 8,192 groups and makes each one
+bigger (512 MiB at the 4 TiB cap), so a group bitmap on the gossip stays at most 1 KiB.
+The count comes from the size in the signed record, and every group is placed on its own:
+
+* The hosting nodes that rank highest for `(site, group)` (rendezvous hashing, the same
+  answer on every node) take that group until it has three copies. No node needs the
+  whole site; a 50 GiB folder spreads over the whole network.
+* Hosting nodes gossip which groups they hold (a bitmap per site) and how many bytes
+  they can still take (`room`). Only nodes that announce `room` are counted on for a
+  group, and only when they have room for it. A group that stays short for 3 minutes
+  brings in the next-ranked node, so a chosen node that cannot take it never stalls it.
+* Healing, copy counting, garbage collection, proof-of-storage challenges (a chunk of a
+  group the holder says it holds), budgets and the free-disk floor all work per group.
+  A node holds each group as soon as it is complete, so a restart resumes group by group.
+* Paid sites: preferred hosts take every group when there are at most three of them (a
+  paid host holds the whole site), else the three that rank highest per group; each is
+  paid for its share (`size x 3 / preferred`). A multi-TiB site therefore needs disks
+  with that much room each; `--copies 5` cuts each host's share to 60% of the site.
+* `c0mpute hosting ls` and `/hosting/v1/sites` show, for a striped site, `copies` = the
+  fewest copies of any group, plus `groups`, `short_groups` and `missing_groups`.
+
+Manifests: up to 5,000 files and 1 GiB the manifest is one chunk, byte for byte what
+older nodes read. Above either, it is a root listing parts (by first path) of at most
+4,000 files and 65,536 chunk hashes each, so every part is one chunk fetch even for a
+4 TiB site; a gateway fetches only the part a request needs. Every holder of any group
+keeps the root and all parts.
+
+Groups are defined over chunk hashes only (the group of a chunk is its hash modulo the
+group count), never file contents. A gateway finds the holders of any chunk from the
+record alone, and the same layout works for a site whose chunks are ciphertext.
+
+**Older nodes** refuse records over their own cap (256 MiB before v0.3.0, 1 GiB in
+v0.3.0 to v0.3.2), so they never see a striped site: they neither hold nor serve it (a
+gateway that old answers 404 for it), and they are never counted on for a group because
+they do not announce `room`. Sites up to 1 GiB are unchanged and those nodes keep holding
+and serving them.
+
+## Streaming and Range requests
+
+Gateways answer `Range` requests on `/s/<id>/...` and on custom domains: `206 Partial
+Content` with `Content-Range`, only the chunks the range covers are fetched, and
+`Accept-Ranges: bytes` is on every file, so `<video>` seeks. Single ranges of every form
+work (`bytes=a-b`, `bytes=a-`, `bytes=-n`); a range past the end is `416`; several ranges
+in one request get the whole file. `If-Range` and `If-None-Match` (`304`) use the file's
+ETag. Large files stream with 8 chunks of read-ahead instead of being loaded whole first.
+Video types: `.mp4`/`.m4v` `video/mp4`, `.webm`, `.mkv` `video/x-matroska`, `.mov`,
+`.ogv`, `.m3u8`, `.vtt`, `.srt`, plus the audio types. Media is cached for an hour (the
+ETag changes with a new version), HTML for a minute.
+
+## Fast replication
+
+Replication and gateway reads fetch many chunks at once (32 in flight for a copy, 8 of
+read-ahead for a stream), each from the holder with the lowest expected wait (its measured
+time per chunk times the requests already queued on it), so every holder of a group serves
+part of a copy at the rate it can. A request slow for that peer is hedged to the next best
+holder and the first answer wins; a failed holder is retried elsewhere and sorts last until
+it answers again. Requests ride the existing libp2p connection (one yamux stream each). A
+new holder of a group pulls from all of its holders and the publisher at once; holders that
+finish a group become sources for it straight away.
+
+Chunks travel on `/c0mpute/chunk-fetch/2.0.0`, which sends them as CBOR byte strings.
+Version 1 sent an array of integers, about 1.9x the bytes, and is still used with peers
+that do not speak 2. Chunk reads no longer run on the swarm's event loop.
+
+c0mpute has no relay, so a node behind NAT (or a firewall that drops its random p2p
+port) cannot be dialled. Every hosting node and publisher now keeps itself connected to
+the hosting peers that announced a public address, so those peers can fetch the copies it
+holds, or the site it is publishing, over that connection. Two nodes that both cannot be
+dialled still cannot exchange chunks: give at least some hosting nodes a fixed, open p2p
+port (`C0MPUTE_P2P_LISTEN=/ip4/0.0.0.0/tcp/<port>` and `C0MPUTE_P2P_EXTERNAL`).
+
+Placement skips nodes that announced less room than a copy needs (whole sites too), so a
+full node ranked first no longer leaves a site at zero copies.
+
+`c0mpute hosting get <site> <path>` downloads one file the way a gateway does and prints
+the rate (`--sequential` fetches the old way, one chunk at a time, to compare).
 
 `--roles` without `hosting` means the node holds no copies; a gateway still serves
 sites by proxying.

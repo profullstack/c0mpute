@@ -23,7 +23,7 @@ use c0mpute_proto::Hash;
 use tracing::info;
 
 use super::site::{BuiltSite, MAX_SITE_BYTES, Manifest, SiteManifest};
-use super::{Hosting, MAX_BYTES_PER_OWNER, TARGET_REPLICAS};
+use super::{Hosting, TARGET_REPLICAS};
 use crate::git::{self, RepoDoc, RepoState};
 
 static ACCEPT_PUSHES: AtomicBool = AtomicBool::new(true);
@@ -228,26 +228,23 @@ impl Hosting {
         )
         .map_err(|e| Refused(StatusCode::CONFLICT, format!("{e:#}")))?;
 
-        // Budgets, as a hosting node applies them to any site it holds.
-        let (held, owner_held) = {
-            let cat = self.0.catalog.read().await;
-            let others = cat.sites.values().filter(|r| r.site_id != rec.site_id);
-            let (mut all, mut mine) = (0u64, 0u64);
-            for r in others {
-                all += r.size;
-                if r.owner == rec.owner {
-                    mine += r.size;
-                }
-            }
-            (all, mine)
-        };
-        if rec.size > MAX_SITE_BYTES
-            || held + rec.size > self.0.max_bytes
-            || owner_held + rec.size > MAX_BYTES_PER_OWNER
+        // Budgets, as a hosting node applies them to any copy it takes: the
+        // node's budget (automatic unless `[hosting] max_bytes` is set), the
+        // free-disk floor and the per-owner limit.
+        if rec.size > MAX_SITE_BYTES {
+            return Err(Refused(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "over the hosting site size limit".into(),
+            ));
+        }
+        let already = old.as_ref().map(|(r, _, _)| r.size).unwrap_or(0);
+        if let Err(e) = self
+            .check_room(&rec, rec.size.saturating_sub(already), 0)
+            .await
         {
             return Err(Refused(
                 StatusCode::INSUFFICIENT_STORAGE,
-                "over this gateway's hosting budget".into(),
+                format!("{e:#}"),
             ));
         }
 

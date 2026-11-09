@@ -196,7 +196,9 @@ pub struct HostingConfig {
     /// --no-hosting`) is the opt-out.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Most bytes of other people's sites this node will hold.
+    /// Most bytes of other people's sites this node will hold. `0` (the
+    /// default) follows the disk: what it holds plus a quarter of the free
+    /// space above the free-disk floor (see `hosting::auto_budget`).
     #[serde(default = "default_hosting_max_bytes")]
     pub max_bytes: u64,
     /// What this node asks to be a preferred (paid) host, USD per GiB-month.
@@ -745,6 +747,11 @@ impl Default for StorageConfig {
 pub struct GatewayConfig {
     pub bind: String,
     pub announce: Option<String>,
+    /// With no `announce`, find this node's public IPv4 and announce
+    /// `http://<ip>:<port>` once the gateway answers there
+    /// (`gateway_announce`). Opt out: false, or `C0MPUTE_GATEWAY_AUTO=0`.
+    #[serde(default = "default_true")]
+    pub auto_announce: bool,
 }
 
 impl Default for GatewayConfig {
@@ -752,6 +759,7 @@ impl Default for GatewayConfig {
         Self {
             bind: "0.0.0.0:7777".into(),
             announce: None,
+            auto_announce: true,
         }
     }
 }

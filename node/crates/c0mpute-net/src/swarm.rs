@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use c0mpute_proto::{ChunkRequest, Hash};
 use futures::StreamExt;
@@ -33,6 +33,11 @@ use crate::{ChunkSource, Network, identity as id_mod};
 
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/kad/1.0.0");
 const FETCH_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/chunk-fetch/1.0.0");
+/// Same request, but the chunk travels as a CBOR byte string. Version 1 sends
+/// it as an array of integers: about 1.9x the bytes on the wire and slow to
+/// decode, which halved every chunk transfer. Peers that do not speak 2 are
+/// asked over 1.
+const FETCH2_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/chunk-fetch/2.0.0");
 const RPC_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/rpc/1.0.0");
 /// Largest RPC request body accepted.
 pub const RPC_MAX_REQUEST: u64 = 1024 * 1024;
@@ -160,6 +165,14 @@ enum Cmd {
         channel: request_response::ResponseChannel<RpcResponse>,
         resp: RpcResponse,
     },
+    FetchRespond {
+        channel: request_response::ResponseChannel<FetchResponse>,
+        resp: FetchResponse,
+    },
+    Fetch2Respond {
+        channel: request_response::ResponseChannel<FetchResponse2>,
+        resp: FetchResponse2,
+    },
     ConnectedPeers {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
@@ -179,6 +192,11 @@ enum Cmd {
     KadFindNode {
         key: Vec<u8>,
         reply: oneshot::Sender<()>,
+    },
+    /// Look `peer` up in the DHT and learn its addresses.
+    FindPeer {
+        peer: PeerId,
+        reply: oneshot::Sender<Vec<Multiaddr>>,
     },
 }
 
@@ -239,6 +257,9 @@ pub struct Libp2pNetwork {
     /// The node identity, kept to sign statements other peers check against
     /// our peer id ([`Self::sign`]).
     keypair: identity::Keypair,
+    /// Root of the per-job keys this node derives as a buyer
+    /// ([`Self::derive_job_secret`]). Never leaves this struct.
+    job_secret: Arc<zeroize::Zeroizing<[u8; 32]>>,
 }
 
 impl Libp2pNetwork {
@@ -246,6 +267,7 @@ impl Libp2pNetwork {
     /// returned `Libp2pNetwork` is dropped.
     pub async fn spawn(config: NetworkConfig) -> Result<Self> {
         let keypair = id_mod::load_or_create(&config.identity_dir)?;
+        let job_secret = Arc::new(id_mod::load_or_create_job_secret(&config.identity_dir)?);
         let peer_id = keypair.public().to_peer_id();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
@@ -292,7 +314,19 @@ impl Libp2pNetwork {
             peer_id,
             rpc_handlers,
             keypair,
+            job_secret,
         })
+    }
+
+    /// A 32-byte secret for `context`, derived from this node's job-key
+    /// secret with HKDF-SHA256 (domain `c0mpute/job-secret/v1`). The same
+    /// node and context always give the same bytes, across restarts; nothing
+    /// about the root secret can be learned from them.
+    pub fn derive_job_secret(&self, context: &[u8]) -> zeroize::Zeroizing<[u8; 32]> {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"c0mpute/job-secret/v1"), &**self.job_secret);
+        let mut out = zeroize::Zeroizing::new([0u8; 32]);
+        hk.expand(context, &mut *out).expect("32-byte okm");
+        out
     }
 
     /// Sign `msg` with this node's identity key. Anyone can check it against
@@ -422,6 +456,59 @@ impl Libp2pNetwork {
         self.peer_id
     }
 
+    /// Ask the DHT for `peer`'s addresses (a Kademlia lookup of its id) and
+    /// teach them to the routing table, so a dial by peer id works for a peer
+    /// we only ever heard of through gossip relayed by others. Returns the
+    /// addresses found (empty when the lookup found none within `timeout`).
+    pub async fn find_peer(&self, peer: PeerId, timeout: Duration) -> Vec<Multiaddr> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::FindPeer { peer, reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        tokio::time::timeout(timeout, rx).await.ok().and_then(|r| r.ok()).unwrap_or_default()
+    }
+
+    /// Make sure there is a connection to `peer`: already connected, or a
+    /// dial with the addresses we know, or a DHT lookup for its addresses and
+    /// a dial with those. Used before point-to-point exchanges with a peer
+    /// heard of only through gossip.
+    pub async fn reach(&self, peer: PeerId, timeout: Duration) -> Result<()> {
+        if peer == self.peer_id || self.is_connected(peer).await {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let wait_connected = |deadline: tokio::time::Instant| async move {
+            while tokio::time::Instant::now() < deadline {
+                if self.is_connected(peer).await {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        };
+        // Dial with what we know; failing that, ask the DHT (a routing table
+        // still filling right after start may need another round) and dial
+        // again, until the deadline.
+        loop {
+            let dialed = self.connect(peer).await;
+            debug!(%peer, dial = ?dialed.as_ref().err(), "reach: dial by peer id");
+            let step = (tokio::time::Instant::now() + Duration::from_millis(1500)).min(deadline);
+            if dialed.is_ok() && wait_connected(step).await {
+                return Ok(());
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
+            if self.find_peer(peer, left.min(Duration::from_secs(3))).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(500).min(left)).await;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("could not reach {peer} within {timeout:?}");
+            }
+        }
+    }
+
     /// Fetch a chunk directly from a peer already identified by a job offer
     /// or receipt. This avoids waiting for a DHT provider record to propagate.
     pub async fn fetch_from_peer(&self, peer: PeerId, req: &ChunkRequest) -> Result<Vec<u8>> {
@@ -543,6 +630,7 @@ struct C0mputeBehaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     fetch: request_response::cbor::Behaviour<FetchRequest, FetchResponse>,
+    fetch2: request_response::cbor::Behaviour<FetchRequest, FetchResponse2>,
     rpc: request_response::Behaviour<request_response::cbor::codec::Codec<RpcRequest, RpcResponse>>,
     gossipsub: gossipsub::Behaviour,
     mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
@@ -556,6 +644,15 @@ struct FetchRequest {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum FetchResponse {
     Ok { bytes: Vec<u8> },
+    NotFound,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+enum FetchResponse2 {
+    Ok {
+        #[serde(with = "cbor_bytes")]
+        bytes: Vec<u8>,
+    },
     NotFound,
 }
 
@@ -627,8 +724,15 @@ struct SwarmTask {
     /// Track which chunk a fetch is for, so we can re-issue against another
     /// provider if the first one says NotFound.
     fetch_targets: HashMap<request_response::OutboundRequestId, Hash>,
+    /// Version-2 fetches in flight: who was asked, so a peer that does not
+    /// speak version 2 can be asked again over version 1.
+    pending_fetches2: HashMap<request_response::OutboundRequestId, (PeerId, Hash, oneshot::Sender<Result<Vec<u8>>>)>,
+    /// Peers that answered "unsupported protocol" to version 2.
+    fetch_v1_only: std::collections::HashSet<PeerId>,
     /// Pending outbound RPC calls.
     pending_rpcs: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
+    /// Pending `find_peer` lookups: the peer sought and who to tell.
+    pending_find_peers: HashMap<kad::QueryId, (PeerId, oneshot::Sender<Vec<Multiaddr>>)>,
     rpc_handlers: RpcHandlers,
     /// For handler tasks to hand their answer back to the swarm loop (weak,
     /// so the loop still ends when the last `Libp2pNetwork` drops).
@@ -670,6 +774,10 @@ impl SwarmTask {
                     [(FETCH_PROTOCOL, request_response::ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );
+                let fetch2 = request_response::cbor::Behaviour::<FetchRequest, FetchResponse2>::new(
+                    [(FETCH2_PROTOCOL, request_response::ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                );
                 let rpc = request_response::Behaviour::with_codec(
                     request_response::cbor::codec::Codec::<RpcRequest, RpcResponse>::default()
                         .set_request_size_maximum(RPC_MAX_REQUEST)
@@ -705,6 +813,7 @@ impl SwarmTask {
                     identify,
                     ping,
                     fetch,
+                    fetch2,
                     rpc,
                     gossipsub,
                     mdns,
@@ -720,7 +829,10 @@ impl SwarmTask {
             pending_kad_lookups: HashMap::new(),
             pending_fetches: HashMap::new(),
             fetch_targets: HashMap::new(),
+            pending_fetches2: HashMap::new(),
+            fetch_v1_only: std::collections::HashSet::new(),
             pending_rpcs: HashMap::new(),
+            pending_find_peers: HashMap::new(),
             rpc_handlers,
             cmd_weak,
             gossip_tx,
@@ -827,6 +939,16 @@ impl SwarmTask {
                 self.pending_kad_lookups.insert(qid, reply);
                 debug!(chunk = %req.chunk_hash, "kad get_providers issued");
             }
+            Cmd::FetchFrom { peer, req, reply } if !self.fetch_v1_only.contains(&peer) => {
+                let request_id = self.swarm.lock().await.behaviour_mut().fetch2.send_request(
+                    &peer,
+                    FetchRequest {
+                        chunk_hash: req.chunk_hash,
+                    },
+                );
+                self.pending_fetches2.insert(request_id, (peer, req.chunk_hash, reply));
+                debug!(%peer, chunk = %req.chunk_hash, "direct chunk fetch issued (v2)");
+            }
             Cmd::FetchFrom { peer, req, reply } => {
                 let request_id = self.swarm.lock().await.behaviour_mut().fetch.send_request(
                     &peer,
@@ -855,6 +977,12 @@ impl SwarmTask {
             }
             Cmd::RpcRespond { channel, resp } => {
                 let _ = self.swarm.lock().await.behaviour_mut().rpc.send_response(channel, resp);
+            }
+            Cmd::FetchRespond { channel, resp } => {
+                let _ = self.swarm.lock().await.behaviour_mut().fetch.send_response(channel, resp);
+            }
+            Cmd::Fetch2Respond { channel, resp } => {
+                let _ = self.swarm.lock().await.behaviour_mut().fetch2.send_response(channel, resp);
             }
             Cmd::ConnectedPeers { reply } => {
                 let peers = self.swarm.lock().await.connected_peers().copied().collect();
@@ -889,6 +1017,10 @@ impl SwarmTask {
                     .map(|_| ())
                     .map_err(|e| anyhow!("gossipsub subscribe: {e}"));
                 let _ = reply.send(r);
+            }
+            Cmd::FindPeer { peer, reply } => {
+                let id = self.swarm.lock().await.behaviour_mut().kad.get_closest_peers(peer);
+                self.pending_find_peers.insert(id, (peer, reply));
             }
             Cmd::KadFindNode { key, reply } => {
                 let _ = self
@@ -940,6 +1072,62 @@ impl SwarmTask {
                 if let Some(reply) = self.pending_fetches.remove(&request_id) {
                     self.fetch_targets.remove(&request_id);
                     let _ = reply.send(Err(anyhow!("fetch failed: {error}")));
+                }
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Fetch2(request_response::Event::Message {
+                message, ..
+            })) => match message {
+                request_response::Message::Request { request, channel, .. } => {
+                    // Read off the event loop: a disk read per chunk inline
+                    // here stalled every other peer's traffic behind it.
+                    let src = self.local_source.clone();
+                    let weak = self.cmd_weak.clone();
+                    tokio::spawn(async move {
+                        let resp = match src {
+                            Some(src) => match src.read_chunk(&request.chunk_hash).await {
+                                Ok(bytes) => FetchResponse2::Ok { bytes },
+                                Err(_) => FetchResponse2::NotFound,
+                            },
+                            None => FetchResponse2::NotFound,
+                        };
+                        if let Some(tx) = weak.upgrade() {
+                            let _ = tx.send(Cmd::Fetch2Respond { channel, resp }).await;
+                        }
+                    });
+                }
+                request_response::Message::Response {
+                    request_id, response, ..
+                } => {
+                    if let Some((_, _, reply)) = self.pending_fetches2.remove(&request_id) {
+                        let _ = reply.send(match response {
+                            FetchResponse2::Ok { bytes } => Ok(bytes),
+                            FetchResponse2::NotFound => Err(anyhow!("provider returned NotFound for chunk")),
+                        });
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Fetch2(request_response::Event::OutboundFailure {
+                request_id,
+                error,
+                ..
+            })) => {
+                if let Some((peer, hash, reply)) = self.pending_fetches2.remove(&request_id) {
+                    if matches!(error, request_response::OutboundFailure::UnsupportedProtocols) {
+                        // An older peer: ask again over version 1, and
+                        // remember not to try version 2 with it.
+                        self.fetch_v1_only.insert(peer);
+                        let id = self
+                            .swarm
+                            .lock()
+                            .await
+                            .behaviour_mut()
+                            .fetch
+                            .send_request(&peer, FetchRequest { chunk_hash: hash });
+                        self.pending_fetches.insert(id, reply);
+                        self.fetch_targets.insert(id, hash);
+                    } else {
+                        let _ = reply.send(Err(anyhow!("fetch failed: {error}")));
+                    }
                 }
             }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Rpc(request_response::Event::Message {
@@ -1049,6 +1237,27 @@ impl SwarmTask {
     }
 
     async fn handle_kad_progress(&mut self, id: kad::QueryId, result: kad::QueryResult) {
+        if let kad::QueryResult::GetClosestPeers(r) = &result
+            && let Some((target, reply)) = self.pending_find_peers.remove(&id)
+        {
+            let peers = match r {
+                Ok(ok) => &ok.peers,
+                Err(kad::GetClosestPeersError::Timeout { peers, .. }) => peers,
+            };
+            let addrs: Vec<Multiaddr> = peers
+                .iter()
+                .filter(|p| p.peer_id == target)
+                .flat_map(|p| p.addrs.iter().cloned())
+                .collect();
+            let mut sw = self.swarm.lock().await;
+            for a in &addrs {
+                sw.behaviour_mut().kad.add_address(&target, a.clone());
+            }
+            let table: usize = sw.behaviour_mut().kad.kbuckets().map(|b| b.num_entries()).sum();
+            debug!(%target, found = addrs.len(), peers_seen = peers.len(), routing_table = table, ok = r.is_ok(), "find_peer: DHT lookup done");
+            let _ = reply.send(addrs);
+            return;
+        }
         match result {
             kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
                 key,
@@ -1104,15 +1313,20 @@ impl SwarmTask {
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let resp = match &self.local_source {
-                    Some(src) => match src.read_chunk(&request.chunk_hash).await {
-                        Ok(bytes) => FetchResponse::Ok { bytes },
-                        Err(_) => FetchResponse::NotFound,
-                    },
-                    None => FetchResponse::NotFound,
-                };
-                let mut sw = self.swarm.lock().await;
-                let _ = sw.behaviour_mut().fetch.send_response(channel, resp);
+                let src = self.local_source.clone();
+                let weak = self.cmd_weak.clone();
+                tokio::spawn(async move {
+                    let resp = match src {
+                        Some(src) => match src.read_chunk(&request.chunk_hash).await {
+                            Ok(bytes) => FetchResponse::Ok { bytes },
+                            Err(_) => FetchResponse::NotFound,
+                        },
+                        None => FetchResponse::NotFound,
+                    };
+                    if let Some(tx) = weak.upgrade() {
+                        let _ = tx.send(Cmd::FetchRespond { channel, resp }).await;
+                    }
+                });
             }
             request_response::Message::Response {
                 request_id,
@@ -1353,6 +1567,40 @@ mod tests {
     /// A direct send arrives on the receiver's gossip stream, attributed to
     /// the sender, with no topic subscription or mesh at all; non-job topics
     /// and sends to ourselves are refused.
+    /// Two peers that only share a third (both bootstrapped to it, never
+    /// told each other's address) find and reach each other through the DHT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peers_known_only_through_a_third_reach_each_other() {
+        // SAFETY: set before any node starts; the test owns its process env.
+        unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
+        let hub = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("reach-hub")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        let hub_addr = wait_for_listen(&hub).await.with(libp2p::multiaddr::Protocol::P2p(hub.peer_id()));
+        let mk = |name: &'static str, boot: Multiaddr| async move {
+            Libp2pNetwork::spawn(
+                NetworkConfig::for_dir(tempdir(name))
+                    .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
+                    .with_bootstrap(vec![boot]),
+            )
+            .await
+            .unwrap()
+        };
+        let a = mk("reach-a", hub_addr.clone()).await;
+        let b = mk("reach-b", hub_addr).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The hub's routing table knows b: a DHT lookup from a finds it.
+        let found = a.find_peer(b.peer_id(), Duration::from_secs(10)).await;
+        assert!(!found.is_empty(), "find_peer found b's addresses through the hub");
+        a.reach(b.peer_id(), Duration::from_secs(10)).await.expect("a reaches b through the hub's routing table");
+        assert!(a.is_connected(b.peer_id()).await);
+        let topic = "c0mpute/jobs/diffusion.txt2img";
+        b.reach(a.peer_id(), Duration::from_secs(10)).await.unwrap();
+        a.send_direct(b.peer_id(), topic, b"x", Duration::from_secs(5)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn direct_send_reaches_the_peer_without_a_mesh() {
         let net_a = Libp2pNetwork::spawn(

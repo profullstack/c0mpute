@@ -50,6 +50,20 @@ pub struct Due {
     pub key: String,
 }
 
+/// Bytes each preferred host of `rec` is paid for. A striped site with more
+/// preferred hosts than the copy target spreads its groups over them, so each
+/// holds (and is paid for) `target / preferred` of it; otherwise each holds
+/// the whole site.
+pub fn paid_share(rec: &SiteRecord) -> u64 {
+    let n = rec.preferred_hosts.len() as u64;
+    let t = super::TARGET_REPLICAS as u64;
+    if super::stripe::is_striped(rec.size) && n > t {
+        rec.size / n * t
+    } else {
+        rec.size
+    }
+}
+
 /// Everything `payer` owes for `[from, to)` (unix seconds).
 pub fn dues(
     records: &[SiteRecord],
@@ -88,7 +102,7 @@ pub fn dues(
                     }
                 }
             }
-            let amount = owed(terms.price_per_gib_month, rec.size, to - from, passed, challenged);
+            let amount = owed(terms.price_per_gib_month, paid_share(rec), to - from, passed, challenged);
             out.push(Due {
                 site_id: rec.site_id.clone(),
                 holder: holder.clone(),

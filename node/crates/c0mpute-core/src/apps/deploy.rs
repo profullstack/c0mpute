@@ -48,6 +48,8 @@ pub struct DeployOptions {
     pub millicpus: u32,
     pub replicas: u8,
     pub domains: Vec<String>,
+    /// Peer ids allowed to hold the app (empty = any apps node).
+    pub hosts: Vec<String>,
     pub wait: Duration,
 }
 
@@ -207,12 +209,12 @@ pub async fn deploy(opts: DeployOptions) -> Result<AppRecord> {
             let tmp = std::env::temp_dir().join(format!("c0mpute-deploy-{}-{seq}", opts.name));
             std::fs::create_dir_all(&tmp)?;
             let size = save_image(&tag, &tmp).await?;
-            if size > site::MAX_SITE_BYTES {
+            if size > site::MAX_SMALL_SITE_BYTES {
                 let _ = std::fs::remove_dir_all(&tmp);
                 bail!(
                     "the image is {} MiB gzipped; the limit is {} MiB (use a slim base image, or --pull a pinned registry image)",
                     size >> 20,
-                    site::MAX_SITE_BYTES >> 20
+                    site::MAX_SMALL_SITE_BYTES >> 20
                 );
             }
             let site_name = format!("app-{}", opts.name);
@@ -256,6 +258,7 @@ pub async fn deploy(opts: DeployOptions) -> Result<AppRecord> {
         millicpus: opts.millicpus,
         replicas: opts.replicas,
         domains: opts.domains.clone(),
+        hosts: opts.hosts.clone(),
     };
     let rec = AppRecord::sign(&keypair, spec, seq)?;
     if let Some(s) = &secrets {
@@ -396,6 +399,9 @@ pub struct AppSection {
     pub replicas: u8,
     #[serde(default)]
     pub domains: Vec<String>,
+    /// Peer ids allowed to hold the app (empty = any apps node).
+    #[serde(default)]
+    pub hosts: Vec<String>,
     /// A pinned registry image instead of building the repository.
     pub image: Option<String>,
     #[serde(default)]
@@ -438,6 +444,7 @@ impl AppSection {
             millicpus: (self.cpus * 1000.0).round() as u32,
             replicas: self.replicas,
             domains: self.domains.clone(),
+            hosts: self.hosts.clone(),
             wait,
         }
     }

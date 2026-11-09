@@ -34,6 +34,26 @@ pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     Ok(kp)
 }
 
+const JOB_SECRET_FILE: &str = "job-e2e.secret";
+
+/// The node's job-key secret (`<dir>/job-e2e.secret`, 32 random bytes, mode
+/// 600 like the identity key), created on first use. A buyer derives each
+/// job's X25519 key from it and the job id (DIP-0032), so after a restart
+/// it can re-derive the key of a job still running on a worker. Deleting
+/// the file rotates it (in-flight jobs then cannot be resumed).
+pub fn load_or_create_job_secret(dir: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    let path = dir.join(JOB_SECRET_FILE);
+    if let Ok(bytes) = std::fs::read(&path) {
+        let b: [u8; 32] = bytes.as_slice().try_into().with_context(|| format!("{} must hold 32 bytes", path.display()))?;
+        return Ok(zeroize::Zeroizing::new(b));
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut b = zeroize::Zeroizing::new([0u8; 32]);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut *b);
+    write_locked_down(&path, &*b)?;
+    Ok(b)
+}
+
 /// The peer-id of the identity already stored in `<dir>/identity.key`,
 /// without generating one. `None` when there is no (readable) key.
 pub fn existing_peer_id(dir: &Path) -> Option<libp2p::PeerId> {

@@ -155,6 +155,7 @@ pub fn run_worker_subscriber_with_load(
             return;
         }
         info!(%topic, "dispatch: subscribed for workload");
+        crate::job_control::serve(&net);
 
         let our_peer_id = net.peer_id().to_base58();
         // This node's bench score rides on every bid for smart routing;
@@ -209,6 +210,12 @@ pub fn run_worker_subscriber_with_load(
                     debug!(job_id = %offer.job_id, "dispatch: no runner wired, not bidding");
                     continue;
                 };
+                // This node's recent jobs of this workload failed: let other
+                // nodes take it for a while (see `activity::note_outcome`).
+                if let Some(left) = crate::activity::bid_paused(&workload_type) {
+                    debug!(job_id = %offer.job_id, left_secs = left.as_secs(), "dispatch: recent jobs failed here, backing off");
+                    continue;
+                }
                 // Restarting into an update: finish what we hold, take nothing new.
                 if c0mpute_update::draining() {
                     debug!(job_id = %offer.job_id, "dispatch: draining for an update, not bidding");
@@ -330,6 +337,9 @@ pub fn run_worker_subscriber_with_load(
                     "dispatch: we won — forwarding to runner"
                 );
                 crate::activity::job_started(&accept.job_id);
+                // Its buyer can ask where it stands (or cancel it) after a
+                // restart (`job_control`).
+                crate::job_control::running(&accept.job_id, &accept.buyer_peer_id);
                 if let Some((session, offer)) = bid.e2e {
                     // Fetching the sealed spec takes a round trip to the
                     // buyer: never in the loop that reads offers.
@@ -623,7 +633,11 @@ async fn handle_offer(
     // A fresh X25519 key for this one job, signed by our identity.
     let (session, e2e) = match offer.e2e.as_ref() {
         Some(_) => match crate::job_e2e::WorkerSession::for_offer(net, offer) {
-            Ok((s, e)) => (Some(s), Some(e)),
+            Ok((s, mut e)) => {
+                // So the buyer can push the sealed spec to us directly.
+                e.addrs = crate::reachability::own_hint_addrs(net).await;
+                (Some(s), Some(e))
+            }
             Err(e) => {
                 debug!(job_id = %offer.job_id, err = %e, "dispatch: cannot bid on this e2e offer");
                 return None;
@@ -782,6 +796,7 @@ mod tests {
             external_ref: Some("infernet:job_42".into()),
             buyer_addrs: Vec::new(),
             e2e: None,
+            sealed_spec: None,
             result_key: None,
         }
     }
