@@ -223,6 +223,10 @@ pub enum Role {
     /// Blender (Cycles on CPU, or on a GPU Blender finds). On by default;
     /// advertised only where `blender --version` works.
     Render,
+    /// `infernet.inference`: chat completions from the box's own
+    /// OpenAI-compatible runtime (Ollama by default, or llama-server). On by
+    /// default; advertised only while the runtime lists chat models.
+    Inference,
 }
 
 #[cfg(test)]

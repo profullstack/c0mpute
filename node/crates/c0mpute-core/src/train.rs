@@ -2,22 +2,27 @@
 //! training c0mpute already runs as `infernet.text.train` ([`crate::text`]).
 //!
 //! It does not train anything itself. It checks the buyer's dataset, turns
-//! the common JSONL shapes into the `{title, text}` corpus the worker's peft
-//! runner reads, writes the job config from a handful of flags, and hands
-//! both to [`crate::text::train`], which auctions the job, relays progress,
-//! and keeps the adapter only if its sha256 matches the receipt.
+//! the common JSONL shapes into the corpus the worker's peft runner reads,
+//! writes the job config from a handful of flags, and hands both to
+//! [`crate::text::train`], which auctions the job peer to peer, relays
+//! progress, and keeps the adapter only if its sha256 matches.
 //!
 //! Accepted record shapes (one JSON object per line, mixing allowed):
 //!
-//! - `{"text": "...", "title"?: "..."}`: used as is.
-//! - `{"prompt": "...", "completion": "..."}`: `title` = prompt, `text` = completion.
-//! - `{"messages": [{"role", "content"}, ...]}`: the last user turn becomes
-//!   `title`, the last assistant turn `text`; a system turn (the same in every
-//!   record) becomes the job's `system_prompt`.
+//! - `{"text": "...", "title"?: "..."}`: kept as `{title, text}`; the worker
+//!   trains it as one `user: "Brief me on: <title>"` / `assistant: <text>`
+//!   exchange, loss on the whole exchange (as before).
+//! - `{"prompt": "...", "completion": "..."}`: a one-exchange conversation,
+//!   the prompt verbatim as the user turn.
+//! - `{"messages": [{"role", "content"}, ...]}`: kept whole, every turn in
+//!   order. The worker renders it with the base model's chat template and
+//!   computes the loss on the assistant turns only. A system turn the same in
+//!   every record also becomes the job's `system_prompt` (the adapter's
+//!   default for chat); records without one get that prompt at train time.
 //!
-//! The worker formats each record as one chat exchange
-//! (`system`, `user: "Brief me on: <title>"`, `assistant: <text>`), so
-//! multi-turn conversations train on their final exchange only.
+//! Conversations need a runner that reports the `messages` dataset format
+//! (Infernet with peft `formats: ["text", "messages"]`), so a corpus holding
+//! any requires [`crate::text::MESSAGES_FORMAT_TAG`] of the worker.
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -69,15 +74,18 @@ pub fn normalize_dataset(bytes: &[u8]) -> Result<(Vec<u8>, DatasetReport)> {
         if !v.is_object() {
             bail!("line {n}: each line must be a JSON object");
         }
-        let (title, body) = if let Some(t) = str_field(&v, "text") {
+        let (record, bytes) = if let Some(t) = str_field(&v, "text") {
             report.text += 1;
-            (str_field(&v, "title").unwrap_or("").to_string(), t.to_string())
+            let title = str_field(&v, "title").unwrap_or("");
+            (json!({"title": title, "text": t}), title.len() + t.len())
         } else if let (Some(p), Some(c)) = (str_field(&v, "prompt"), str_field(&v, "completion")) {
+            // The prompt verbatim as the user turn (not a "Brief me on:" title).
             report.prompt_completion += 1;
-            (p.to_string(), c.to_string())
+            (json!({"messages": [{"role": "user", "content": p}, {"role": "assistant", "content": c}]}), p.len() + c.len())
         } else if let Some(msgs) = v.get("messages").and_then(Value::as_array) {
-            let mut user = None;
-            let mut assistant = None;
+            let mut turns = Vec::with_capacity(msgs.len());
+            let mut bytes = 0;
+            let mut learns = false;
             for m in msgs {
                 let role = m.get("role").and_then(Value::as_str).unwrap_or("");
                 let content = m.get("content").and_then(Value::as_str);
@@ -90,27 +98,31 @@ pub fn normalize_dataset(bytes: &[u8]) -> Result<(Vec<u8>, DatasetReport)> {
                         Some(s) if s != content => system_conflict = true,
                         _ => {}
                     },
-                    "user" => user = Some(content),
-                    "assistant" => assistant = Some(content),
+                    "user" => {}
+                    "assistant" => learns |= !content.trim().is_empty(),
                     other => bail!("line {n}: message role must be system, user or assistant, got {other:?}"),
                 }
+                bytes += content.len();
+                turns.push(json!({"role": role, "content": content}));
             }
-            let Some(a) = assistant.filter(|a| !a.trim().is_empty()) else {
+            if !learns {
                 bail!("line {n}: messages need an assistant turn to learn from");
-            };
+            }
             report.messages += 1;
-            (user.unwrap_or("").to_string(), a.to_string())
+            // Every turn, in order: the worker trains the whole conversation
+            // (loss on the assistant turns).
+            (json!({"messages": turns}), bytes)
         } else {
             bail!("line {n}: expected {{\"text\"}}, {{\"prompt\",\"completion\"}} or {{\"messages\"}}");
         };
-        if title.len() + body.len() > MAX_RECORD_BYTES {
+        if bytes > MAX_RECORD_BYTES {
             bail!("line {n}: record is over {} KiB", MAX_RECORD_BYTES >> 10);
         }
         report.records += 1;
         if report.records > MAX_RECORDS {
             bail!("dataset has more than {MAX_RECORDS} records");
         }
-        serde_json::to_writer(&mut out, &json!({"title": title, "text": body}))?;
+        serde_json::to_writer(&mut out, &record)?;
         out.push(b'\n');
     }
     if report.records < MIN_RECORDS {
@@ -247,8 +259,48 @@ mod tests {
         assert_eq!(r.system_prompt.as_deref(), Some("be brief"));
         let lines: Vec<Value> = std::str::from_utf8(&out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
         assert_eq!(lines[0], json!({"title": "A", "text": "a body"}));
-        assert_eq!(lines[1], json!({"title": "Q?", "text": "Ans."}));
-        assert_eq!(lines[2], json!({"title": "hi", "text": "hello"}));
+        assert_eq!(lines[1], json!({"messages": [{"role": "user", "content": "Q?"}, {"role": "assistant", "content": "Ans."}]}));
+        assert_eq!(
+            lines[2],
+            json!({"messages": [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]})
+        );
+        assert!(crate::text::corpus_has_conversations(&out));
+    }
+
+    #[test]
+    fn multi_turn_chats_keep_every_turn_in_order() {
+        let chat = json!({"messages": [
+            {"role": "system", "content": "You are a pricing coach."},
+            {"role": "user", "content": "I sell a SaaS."},
+            {"role": "assistant", "content": "What does it replace?"},
+            {"role": "user", "content": "Spreadsheets."},
+            {"role": "assistant", "content": "Price against the hours it saves."},
+        ]});
+        let src = format!("{chat}\n{chat}\n");
+        let (out, r) = normalize_dataset(src.as_bytes()).unwrap();
+        assert_eq!((r.records, r.messages), (2, 2));
+        let first: Value = serde_json::from_str(std::str::from_utf8(&out).unwrap().lines().next().unwrap()).unwrap();
+        // Nothing dropped, nothing reordered: both exchanges are there.
+        assert_eq!(first, chat);
+        assert_eq!(r.system_prompt.as_deref(), Some("You are a pricing coach."));
+        // A record whose only assistant turn is empty teaches nothing.
+        let empty = b"{\"messages\":[{\"role\":\"user\",\"content\":\"q\"},{\"role\":\"assistant\",\"content\":\" \"}]}\n{\"text\":\"x\"}\n";
+        assert!(normalize_dataset(empty).unwrap_err().to_string().contains("assistant"));
+        // Extra fields on a message are not carried to the worker.
+        let extra = b"{\"messages\":[{\"role\":\"user\",\"content\":\"q\",\"name\":\"n\"},{\"role\":\"assistant\",\"content\":\"a\"}]}\n{\"text\":\"x\"}\n";
+        let (out, _) = normalize_dataset(extra).unwrap();
+        assert!(!std::str::from_utf8(&out).unwrap().contains("\"name\""));
+        // Text-only corpora stay {title, text} and need no format tag.
+        let (out, _) = normalize_dataset(b"{\"text\":\"a\"}\n{\"text\":\"b\",\"title\":\"t\"}\n").unwrap();
+        assert!(!crate::text::corpus_has_conversations(&out));
+    }
+
+    #[test]
+    fn a_long_conversation_counts_toward_the_record_cap() {
+        let turn = "a".repeat(MAX_RECORD_BYTES / 4);
+        let msgs: Vec<Value> = (0..5).map(|i| json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": turn})).collect();
+        let src = format!("{}\n{{\"text\":\"x\"}}\n", json!({"messages": msgs}));
+        assert!(normalize_dataset(src.as_bytes()).unwrap_err().to_string().contains("KiB"));
     }
 
     #[test]
@@ -299,10 +351,15 @@ mod tests {
         // The same spec validation the worker runs.
         let spec = crate::text::TextTrainSpec {
             job: job.clone(),
-            dataset_url: "http://127.0.0.1:1/d".into(),
+            dataset_url: String::new(),
             dataset_hash: format!("sha256:{}", "a".repeat(64)),
-            artifact_upload_url: "http://127.0.0.1:1/u".into(),
+            artifact_upload_url: String::new(),
             events_url: None,
+            corpus_hash: Some(c0mpute_proto::Hash::of(b"corpus").to_hex()),
+            corpus_size: None,
+            corpus_pieces: None,
+            adapter_pieces: true,
+            run_id: Some("r1".into()),
         };
         spec.validate().unwrap();
         let o2 = LoraOptions { system_prompt: Some("flag".into()), ..o.clone() };

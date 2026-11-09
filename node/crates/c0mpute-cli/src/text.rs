@@ -57,7 +57,10 @@ enum Sub {
         worker: Vec<String>,
         #[arg(long, default_value_t = 0.05)]
         max_price: f64,
-        /// How the worker reaches this machine's transfer server (use https off-LAN).
+        /// Also serve workers older than the peer-to-peer transport over HTTP from this machine.
+        #[arg(long)]
+        legacy_http: bool,
+        /// With --legacy-http: how an old worker reaches this machine's transfer server (use https off-LAN).
         #[arg(long)]
         public_url: Option<String>,
         #[arg(long, default_value = "0.0.0.0:0")]
@@ -91,7 +94,10 @@ enum Sub {
         gpu: bool,
         #[arg(long)]
         min_ram_gb: Option<u64>,
-        /// How the worker reaches this machine's transfer server (use https off-LAN).
+        /// Also serve workers older than the peer-to-peer transport over HTTP from this machine.
+        #[arg(long)]
+        legacy_http: bool,
+        /// With --legacy-http: how an old worker reaches this machine's transfer server (use https off-LAN).
         #[arg(long)]
         public_url: Option<String>,
         #[arg(long, default_value = "0.0.0.0:0")]
@@ -148,7 +154,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {
+        Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, legacy_http, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {
             let question = question.join(" ");
             anyhow::ensure!(!question.trim().is_empty(), "ask a question: c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"");
             let req = text::ChatRequest {
@@ -158,15 +164,18 @@ pub async fn run(args: &[String]) -> Result<()> {
                 max_new_tokens,
                 workers: worker,
                 max_price_usd: max_price,
+                legacy_http,
                 public_url,
                 bind,
                 timeout_s,
                 bid_window: Duration::from_secs(bid_window_s),
             };
-            let n = c0mpute_core::temporal::node::spawn_node(&net_opts(&net, "client")).await?;
+            // The adapter goes out as pieces from this store, served over libp2p.
+            let store = c0mpute_store::ChunkStore::open(data_dir().join("store")).await?;
+            let n = c0mpute_core::temporal::node::spawn_node_with_store(&net_opts(&net, "client"), store.clone()).await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             eprintln!("asking a c0mpute worker ...");
-            let out = text::chat(n, &req).await?;
+            let out = text::chat(n, &store, &req).await?;
             if as_json {
                 println!("{}", serde_json::to_string(&out)?);
             } else {
@@ -178,8 +187,8 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, public_url, bind, timeout_s, retries, bid_window_s, yes, json: as_json, net } => {
-            let req = TrainRequest { job_path: job, dataset_path: dataset, output, workers: worker, max_price_usd: max_price, gpu, min_ram_gb, public_url, bind, timeout_s, retries, bid_window: Duration::from_secs(bid_window_s) };
+        Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window_s, yes, json: as_json, net } => {
+            let req = TrainRequest { job_path: job, dataset_path: dataset, output, workers: worker, max_price_usd: max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window: Duration::from_secs(bid_window_s) };
             let (_, _, p) = text::load(&req)?;
             if !yes {
                 eprintln!(
@@ -198,12 +207,14 @@ pub async fn run(args: &[String]) -> Result<()> {
                 }
                 std::process::exit(3);
             }
-            let n = c0mpute_core::temporal::node::spawn_node(&net_opts(&net, "client")).await?;
+            // The corpus goes out as pieces from this store, served over libp2p.
+            let store = c0mpute_store::ChunkStore::open(data_dir().join("store")).await?;
+            let n = c0mpute_core::temporal::node::spawn_node_with_store(&net_opts(&net, "client"), store.clone()).await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             eprintln!("looking for a worker for {} ...", p.name);
             let mut total = None;
             let mut on_step = false;
-            let out = text::train(n, &req, |ev| {
+            let out = text::train(n, &store, &req, |ev| {
                 if as_json {
                     println!("{ev}");
                     return;

@@ -113,7 +113,8 @@ async fn transform_step_round_trips_through_the_bridge() {
             "crawl.fetch",
             "ocr.extract",
             "embed.text",
-            "blender.render-frame"
+            "blender.render-frame",
+            "infernet.inference"
         ])
     );
 
