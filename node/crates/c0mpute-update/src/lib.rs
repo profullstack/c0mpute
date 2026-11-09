@@ -398,6 +398,57 @@ fn extract_and_swap(tarball: &[u8], artifact: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- drain before re-exec ------------------------------------------------
+//
+// A re-exec replaces the process, so whatever it was doing dies with it: a
+// song or image half rendered on a worker, a song a gateway was waiting on.
+// Long jobs hold a `LongJob` guard; the poller re-execs only when none is
+// running (or after MAX_DRAIN, so a stuck job cannot pin an old binary).
+
+static LONG_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held for the life of a job a restart would kill (see `poll_loop`).
+#[must_use = "the job only counts while the guard is alive"]
+pub struct LongJob(());
+
+impl LongJob {
+    pub fn start() -> Self {
+        LONG_JOBS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        LongJob(())
+    }
+}
+
+impl Drop for LongJob {
+    fn drop(&mut self) {
+        LONG_JOBS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// How many long jobs this process is running now.
+pub fn long_jobs_running() -> usize {
+    LONG_JOBS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Longest the poller waits for running jobs before re-executing anyway.
+pub const MAX_DRAIN: Duration = Duration::from_secs(30 * 60);
+
+/// Wait (up to `max`) until no long job runs; returns how many still run.
+pub async fn drain(max: Duration, every: Duration) -> usize {
+    let started = std::time::Instant::now();
+    let mut logged = false;
+    loop {
+        let running = long_jobs_running();
+        if running == 0 || started.elapsed() >= max {
+            return running;
+        }
+        if !logged {
+            info!(running, "auto-upgrade: waiting for running jobs to finish before re-executing");
+            logged = true;
+        }
+        tokio::time::sleep(every).await;
+    }
+}
+
 /// Long-running background poller. Every `interval` it checks the feed and, if
 /// a newer release exists, downloads + verifies + swaps the binary, then
 /// re-executes into it so the update applies without an operator restart.
@@ -427,6 +478,10 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
                 info!(%from, %to, "auto-upgrade: installed new binary");
                 #[cfg(unix)]
                 if let Some(exe) = &exe {
+                    let still = drain(MAX_DRAIN, Duration::from_secs(10)).await;
+                    if still > 0 {
+                        warn!(still, "auto-upgrade: jobs still running after the drain limit; re-executing anyway");
+                    }
                     info!("auto-upgrade: re-executing into the new binary");
                     // reexec only returns on failure (success replaces us).
                     let e = reexec(exe);
@@ -444,6 +499,25 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
                 warn!(err = %e, "auto-upgrade: poll failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn drain_waits_for_long_jobs_and_gives_up_at_the_limit() {
+        assert_eq!(drain(Duration::from_millis(50), Duration::from_millis(5)).await, 0);
+        let job = LongJob::start();
+        assert_eq!(long_jobs_running(), 1);
+        let t = std::time::Instant::now();
+        assert_eq!(drain(Duration::from_millis(60), Duration::from_millis(5)).await, 1, "gives up at the limit");
+        assert!(t.elapsed() >= Duration::from_millis(60));
+        let waiter = tokio::spawn(drain(Duration::from_secs(5), Duration::from_millis(5)));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(job);
+        assert_eq!(waiter.await.unwrap(), 0, "returns once the job ends");
     }
 }
 
