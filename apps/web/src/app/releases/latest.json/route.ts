@@ -104,6 +104,25 @@ let cachedRelease: { version: string; at: number } | null = null;
 async function publishedVersion(): Promise<string | null> {
   const now = Date.now();
   if (cachedRelease && now - cachedRelease.at < RELEASE_CACHE_MS) return cachedRelease.version;
+  // github.com/<repo>/releases/latest redirects to .../releases/tag/<tag>.
+  // It is not the REST API, so it does not spend the 60/hour unauthenticated
+  // quota that every process on the box shares (2026-11-09: quota at 0 kept
+  // this feed on 0.3.13 while v0.3.15 was out, stalling every node's update).
+  try {
+    const r = await fetch("https://github.com/profullstack/c0mpute/releases/latest", {
+      method: "HEAD",
+      redirect: "manual",
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+    const tag = (r.headers.get("location") ?? "").match(/\/releases\/tag\/(v?\d+\.\d+\.\d+)$/)?.[1];
+    if (tag) {
+      cachedRelease = { version: tag.replace(/^v/, ""), at: now };
+      return cachedRelease.version;
+    }
+  } catch {
+    // Fall through to the API.
+  }
   try {
     const headers: Record<string, string> = { accept: "application/vnd.github+json" };
     if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
