@@ -338,11 +338,36 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             );
                             continue;
                         }
-                        // The same bid arrives directly and over gossip.
-                        if bids.iter().chain(fallback.iter()).any(|b| b.bidder_peer_id == bid.bidder_peer_id) {
+                        // The same bid arrives directly and over gossip. A
+                        // second bid under one peer id with another instance
+                        // id is a twin (one identity running twice): keep the
+                        // newer process's bid, the older one stops bidding.
+                        if let Some(held) = bids
+                            .iter_mut()
+                            .chain(fallback.iter_mut())
+                            .find(|b| b.bidder_peer_id == bid.bidder_peer_id)
+                        {
+                            if is_twin_bid(held, &bid) {
+                                warn!(
+                                    %job_id,
+                                    bidder = %bid.bidder_peer_id,
+                                    held = ?held.instance,
+                                    other = ?bid.instance,
+                                    "buyer: two processes bid under one peer id (duplicate identity); keeping the newer"
+                                );
+                                if bid.instance > held.instance
+                                    && session
+                                        .check_bid(&job_id, &auction.workload_type, &offer.buyer_peer_id, &bid)
+                                        .is_ok()
+                                {
+                                    *held = bid;
+                                }
+                            }
                             continue;
                         }
-                        if auction.fallback_bidders.contains(&bid.bidder_peer_id) {
+                        if auction.fallback_bidders.contains(&bid.bidder_peer_id)
+                            || identity_faulty(&bid.bidder_peer_id)
+                        {
                             debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a benched worker kept as a fallback");
                             fallback.push(bid);
                             continue;
@@ -406,7 +431,131 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         let offset = NEXT_EQUAL_PRICE_BID.fetch_add(1, Ordering::Relaxed) % tied;
         bids[..tied].rotate_left(offset);
     }
-    let winner = bids.remove(0);
+    let mut winner = bids.remove(0);
+    // Not the same peer as the winner: a twin of it can never stand in.
+    bids.retain(|b| b.bidder_peer_id != winner.bidder_peer_id);
+
+    // ── award: seal the spec to the winner alone, publish the accept ──
+    let mut awards: Vec<Award> = vec![award(&net, &auction, &offer, &session, &topic, &job_id, &winner).await?];
+
+    // ── wait for receipt ────────────────────────────────────────────
+    // A twin fault (the accept reached another process running the winner's
+    // identity) is not a result: the job goes to the next bidder at once, and
+    // a valid receipt from any awarded worker ends the auction.
+    let mut recv_deadline = Instant::now() + receipt_wait(auction.receipt_timeout, &winner);
+    while Instant::now() < recv_deadline {
+        let remaining = recv_deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(msg)) if msg.topic == topic => {
+                let Ok(receipt) = serde_json::from_slice::<JobReceipt>(&msg.data) else {
+                    continue;
+                };
+                if receipt.job_id != job_id {
+                    continue;
+                }
+                let Some(i) = awards.iter().position(|a| a.bid.bidder_peer_id == receipt.worker_peer_id) else {
+                    continue;
+                };
+                if !source_matches_claim(&msg, &receipt.worker_peer_id) {
+                    warn!(
+                        %job_id,
+                        claimed = %receipt.worker_peer_id,
+                        "buyer: discarding receipt, gossip source does not match claimed worker_peer_id"
+                    );
+                    continue;
+                }
+                if !receipt_ref_matches(auction.external_ref.as_deref(), receipt.external_ref.as_deref()) {
+                    warn!(%job_id, "buyer: discarding receipt with a different external_ref");
+                    continue;
+                }
+                if is_twin_receipt(&receipt, &awards[i].bid) {
+                    // The same answer arrives directly and over gossip.
+                    if awards[i].twin_reported {
+                        continue;
+                    }
+                    awards[i].twin_reported = true;
+                    let peer = receipt.worker_peer_id.clone();
+                    let strikes = note_identity_fault(&peer);
+                    warn!(
+                        %job_id,
+                        worker = %peer,
+                        won = ?awards[i].bid.instance,
+                        answered = ?receipt.instance,
+                        strikes,
+                        "buyer: the accept reached a twin of the winner (one identity running twice); not a compute fault, re-awarding"
+                    );
+                    match bids.first().cloned() {
+                        Some(next) => {
+                            bids.remove(0);
+                            info!(%job_id, winner = %next.bidder_peer_id, "buyer: job re-awarded to the next bidder");
+                            match award(&net, &auction, &offer, &session, &topic, &job_id, &next).await {
+                                Ok(a) => {
+                                    recv_deadline =
+                                        recv_deadline.max(Instant::now() + receipt_wait(auction.receipt_timeout, &next));
+                                    winner = next;
+                                    awards.push(a);
+                                }
+                                Err(e) => warn!(%job_id, err = %e, "buyer: re-award failed"),
+                            }
+                        }
+                        None => {
+                            info!(%job_id, "buyer: no other bidder to re-award to; waiting for the process that holds the key")
+                        }
+                    }
+                    continue;
+                }
+                let a = awards.swap_remove(i);
+                info!(
+                    %job_id,
+                    status = ?receipt.status,
+                    output_hash = ?receipt.output_hash,
+                    "buyer: receipt received"
+                );
+                return Ok(AuctionOutcome {
+                    job_id,
+                    accepted_bid: a.bid,
+                    receipt,
+                    external_ref: auction.external_ref.clone(),
+                    result_key: a.result_key,
+                });
+            }
+            Ok(Ok(_)) => continue,
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                warn!(skipped = n, "buyer: receipt stream lagged");
+            }
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+
+    Err(AuctionFailure::NoReceipt(format!(
+        "no receipt from winner {} within {:?}",
+        winner.bidder_peer_id,
+        receipt_wait(auction.receipt_timeout, &winner)
+    ))
+    .into())
+}
+
+/// One awarded worker: its bid, the key its result opens with, and its
+/// sealed spec held for it to fetch until the auction ends.
+struct Award {
+    bid: JobBid,
+    result_key: c0mpute_net::topics::JobKey,
+    _payload: crate::job_e2e::PayloadGuard,
+    /// Its twin already answered; a second copy of that answer is ignored.
+    twin_reported: bool,
+}
+
+/// Seal the spec to `winner` alone and tell it (directly and on the topic).
+async fn award(
+    net: &Arc<Libp2pNetwork>,
+    auction: &JobAuction,
+    offer: &JobOffer,
+    session: &crate::job_e2e::BuyerSession,
+    topic: &str,
+    job_id: &str,
+    winner: &JobBid,
+) -> Result<Award> {
     info!(
         %job_id,
         winner = %winner.bidder_peer_id,
@@ -417,25 +566,20 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         policy = ?auction.policy,
         "buyer: winner chosen"
     );
-
-    // ── seal the spec to the winner alone ───────────────────────────
     let winner_peer: c0mpute_net::PeerId = winner
         .bidder_peer_id
         .parse()
         .map_err(|e| anyhow::anyhow!("winner peer id: {e}"))?;
-    let (sealed, result_key) =
-        session.seal_for(&job_id, &auction.workload_type, &offer.buyer_peer_id, &winner)?;
-    drop(session);
+    let (sealed, result_key) = session.seal_for(job_id, &auction.workload_type, &offer.buyer_peer_id, winner)?;
     // Pushed on the direct accept when it fits one request; also held until
-    // this function returns (receipt or timeout) for the winner to fetch over
+    // the auction ends (receipt or timeout) for the winner to fetch over
     // request-response. Never on gossip.
     let sealed_b64 = (sealed.len() <= crate::job_e2e::MAX_PUSHED_SPEC)
         .then(|| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sealed));
-    let _payload = crate::job_e2e::hold_payload(&net, &job_id, winner_peer, sealed);
+    let payload = crate::job_e2e::hold_payload(net, job_id, winner_peer, sealed);
 
-    // ── publish accept ──────────────────────────────────────────────
     let accept = JobAccept {
-        job_id: job_id.clone(),
+        job_id: job_id.to_string(),
         buyer_peer_id: offer.buyer_peer_id.clone(),
         winning_bidder_peer_id: winner.bidder_peer_id.clone(),
         agreed_price_usd: winner.price_usd,
@@ -450,6 +594,9 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         e2e: Some(c0mpute_net::topics::JOB_E2E_VERSION),
         sealed_spec: None,
         result_key: None,
+        // A twin (another process with this peer id) that hears the accept
+        // knows from this that the job is not its own.
+        winning_instance: winner.instance.clone(),
     };
     // Tell the winner directly as well as on the topic: an accept lost on
     // the mesh used to leave the buyer waiting out the whole receipt timeout.
@@ -472,9 +619,9 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         debug!(%job_id, err = %e, "buyer: winner not reachable directly yet");
     }
     let direct = net
-        .send_direct(winner_peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
+        .send_direct(winner_peer, topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
         .await;
-    let gossip = publish_json(&net, &topic, &accept).await;
+    let gossip = publish_json(net, topic, &accept).await;
     match (&direct, gossip) {
         (Ok(()), _) => debug!(%job_id, "buyer: accept delivered to the winner"),
         (Err(e), Ok(())) => debug!(%job_id, err = %e, "buyer: accept on gossip only"),
@@ -484,11 +631,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         }
     }
     if let Some(tx) = &auction.accept_notify {
-        let _ = tx.send((job_id.clone(), winner.clone()));
+        let _ = tx.send((job_id.to_string(), winner.clone()));
     }
     if let (Some(f), Some(e)) = (&auction.on_accept, &winner.e2e) {
         f(&crate::job_e2e::InFlightJob {
-            job_id: job_id.clone(),
+            job_id: job_id.to_string(),
             workload: auction.workload_type.clone(),
             buyer_peer: offer.buyer_peer_id.clone(),
             winner_peer: winner.bidder_peer_id.clone(),
@@ -498,61 +645,54 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             accepted_at_ms: unix_ms(),
         });
     }
+    Ok(Award {
+        bid: winner.clone(),
+        result_key,
+        _payload: payload,
+        twin_reported: false,
+    })
+}
 
-    // ── wait for receipt ────────────────────────────────────────────
-    let receipt_timeout = receipt_wait(auction.receipt_timeout, &winner);
-    let recv_deadline = Instant::now() + receipt_timeout;
-    while Instant::now() < recv_deadline {
-        let remaining = recv_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(msg)) if msg.topic == topic => {
-                if let Ok(receipt) = serde_json::from_slice::<JobReceipt>(&msg.data) {
-                    if receipt.job_id == job_id && receipt.worker_peer_id == winner.bidder_peer_id {
-                        if !source_matches_claim(&msg, &receipt.worker_peer_id) {
-                            warn!(
-                                %job_id,
-                                claimed = %receipt.worker_peer_id,
-                                "buyer: discarding receipt, gossip source does not match claimed worker_peer_id"
-                            );
-                            continue;
-                        }
-                        if !receipt_ref_matches(
-                            auction.external_ref.as_deref(),
-                            receipt.external_ref.as_deref(),
-                        ) {
-                            warn!(%job_id, "buyer: discarding receipt with a different external_ref");
-                            continue;
-                        }
-                        info!(
-                            %job_id,
-                            status = ?receipt.status,
-                            output_hash = ?receipt.output_hash,
-                            "buyer: receipt received"
-                        );
-                        return Ok(AuctionOutcome {
-                            job_id,
-                            accepted_bid: winner,
-                            receipt,
-                            external_ref: auction.external_ref.clone(),
-                            result_key,
-                        });
-                    }
-                }
-            }
-            Ok(Ok(_)) => continue,
-            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
-                warn!(skipped = n, "buyer: receipt stream lagged");
-            }
-            Ok(Err(_)) => break,
-            Err(_) => break,
-        }
-    }
+/// Two bids under one peer id from different processes (instance ids).
+pub(crate) fn is_twin_bid(held: &JobBid, new: &JobBid) -> bool {
+    matches!((&held.instance, &new.instance), (Some(a), Some(b)) if a != b)
+}
 
-    Err(AuctionFailure::NoReceipt(format!(
-        "no receipt from winner {} within {:?}",
-        winner.bidder_peer_id, receipt_timeout
-    ))
-    .into())
+/// A receipt that is not the awarded process's answer: marked as a twin
+/// fault, or from another instance than the bid that won.
+pub(crate) fn is_twin_receipt(receipt: &JobReceipt, won: &JobBid) -> bool {
+    receipt.fault.as_deref() == Some(c0mpute_net::topics::FAULT_IDENTITY_TWIN)
+        || matches!((&receipt.instance, &won.instance), (Some(a), Some(b)) if a != b)
+}
+
+/// Twin faults per peer within [`IDENTITY_FAULT_WINDOW`]. One is a duplicate
+/// that the older twin resolves by itself; [`IDENTITY_FAULT_BENCH`] of them
+/// means it keeps happening, and the peer's bids are kept back like a
+/// benched worker's until the window passes.
+pub const IDENTITY_FAULT_WINDOW: Duration = Duration::from_secs(60 * 60);
+pub const IDENTITY_FAULT_BENCH: usize = 3;
+
+fn identity_faults() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>> {
+    static F: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>> =
+        std::sync::OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// Record a twin fault for `peer`; returns how many it has in the window.
+pub fn note_identity_fault(peer: &str) -> usize {
+    let mut m = identity_faults().lock().unwrap_or_else(|e| e.into_inner());
+    let v = m.entry(peer.to_string()).or_default();
+    v.retain(|t| t.elapsed() < IDENTITY_FAULT_WINDOW);
+    v.push(std::time::Instant::now());
+    v.len()
+}
+
+/// Whether `peer` keeps answering through a twin ([`IDENTITY_FAULT_BENCH`]
+/// faults within the window).
+pub fn identity_faulty(peer: &str) -> bool {
+    let m = identity_faults().lock().unwrap_or_else(|e| e.into_inner());
+    m.get(peer)
+        .is_some_and(|v| v.iter().filter(|t| t.elapsed() < IDENTITY_FAULT_WINDOW).count() >= IDENTITY_FAULT_BENCH)
 }
 
 /// Why [`resume_auction`] could not collect a job: the caller re-auctions.
@@ -610,6 +750,7 @@ pub async fn resume_auction(
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         },
         receipt,
         external_ref: job.external_ref.clone(),
@@ -893,6 +1034,7 @@ mod tests {
             bench_score: None,
             load: None,
             e2e: None,
+            instance: None,
         }
     }
 

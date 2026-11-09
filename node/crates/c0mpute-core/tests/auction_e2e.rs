@@ -73,6 +73,8 @@ async fn auction_round_trip_publishes_receipt() {
                 completed_at_ms: 0,
                 signature: None,
                 external_ref: job.accept.external_ref.clone(),
+                instance: None,
+                fault: None,
             };
             let topic = job_topic(&job.accept.workload_type);
             let payload = serde_json::to_vec(&receipt).unwrap();
@@ -166,6 +168,8 @@ async fn a_benched_worker_still_wins_when_nobody_else_bids() {
                 completed_at_ms: 0,
                 signature: None,
                 external_ref: None,
+                instance: None,
+                fault: None,
             };
             let payload = serde_json::to_vec(&receipt).unwrap();
             w.publish(&job_topic(&job.accept.workload_type), payload).await.ok();
@@ -245,6 +249,8 @@ async fn a_queued_auction_waits_for_a_worker_that_appears_later() {
                     completed_at_ms: 0,
                     signature: None,
                     external_ref: None,
+                    instance: None,
+                    fault: None,
                 };
                 let payload = serde_json::to_vec(&receipt).unwrap();
                 w.publish(&job_topic(&job.accept.workload_type), payload).await.ok();

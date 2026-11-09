@@ -127,6 +127,13 @@ pub fn done(job_id: &str, receipt: &impl Serialize) {
     }
 }
 
+/// Drop a job this process will not run after all (its twin won it).
+pub fn forget(job_id: &str) {
+    if let Ok(mut m) = jobs().lock() {
+        m.remove(job_id);
+    }
+}
+
 /// Whether the buyer cancelled this job (its receipt is then not sent).
 pub fn cancelled(job_id: &str) -> bool {
     jobs().lock().ok().is_some_and(|m| m.get(job_id).is_some_and(|j| matches!(j.entry, Entry::Cancelled)))

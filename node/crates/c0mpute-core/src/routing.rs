@@ -136,6 +136,7 @@ mod tests {
             bench_score: bench,
             load,
             e2e: None,
+            instance: None,
         }
     }
 

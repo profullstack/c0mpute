@@ -170,6 +170,7 @@ pub fn run_worker_subscriber_with_load(
             std::collections::HashMap::new();
         let mut seen_accepts: std::collections::VecDeque<String> =
             std::collections::VecDeque::new();
+        let mut twin_yielding = false;
         loop {
             let msg: GossipMessage = match rx.recv().await {
                 Ok(m) => m,
@@ -214,6 +215,13 @@ pub fn run_worker_subscriber_with_load(
                 // nodes take it for a while (see `activity::note_outcome`).
                 if let Some(left) = crate::activity::bid_paused(&workload_type) {
                     debug!(job_id = %offer.job_id, left_secs = left.as_secs(), "dispatch: recent jobs failed here, backing off");
+                    continue;
+                }
+                // Another process runs this identity and is newer: let it
+                // take the work, so no job is split between the two.
+                crate::twin::log_resume_if_cleared(net.instance_id(), &mut twin_yielding);
+                if twin_yielding {
+                    debug!(job_id = %offer.job_id, "dispatch: a newer twin runs this identity, not bidding");
                     continue;
                 }
                 // Restarting into an update: finish what we hold, take nothing new.
@@ -297,11 +305,14 @@ pub fn run_worker_subscriber_with_load(
                     continue;
                 }
                 let won = accept.winning_bidder_peer_id == our_peer_id;
-                // The same accept arrives directly and over gossip.
-                if seen_accepts.contains(&accept.job_id) {
+                // The same accept arrives directly and over gossip. A job can
+                // be accepted twice: re-awarded to the next bidder when the
+                // first winner's twin answered (see `buyer`).
+                let accept_key = format!("{}/{}", accept.job_id, accept.winning_bidder_peer_id);
+                if seen_accepts.contains(&accept_key) {
                     continue;
                 }
-                let Some(bid) = open_bids.remove(&accept.job_id) else {
+                let Some(bid) = open_bids.get(&accept.job_id) else {
                     if won {
                         warn!(job_id = %accept.job_id, "dispatch: discarding accept for a job we never bid on");
                     }
@@ -314,15 +325,35 @@ pub fn run_worker_subscriber_with_load(
                 if seen_accepts.len() >= MAX_SEEN_ACCEPTS {
                     seen_accepts.pop_front();
                 }
-                seen_accepts.push_back(accept.job_id.clone());
-                market.observe(bid.cap, bid.price, accept.agreed_price_usd, won);
-                debug!(job_id = %accept.job_id, won, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
+                seen_accepts.push_back(accept_key);
                 if !won {
+                    // Lost: the bid stops holding capacity, but stays
+                    // honourable for a re-award until it expires.
+                    if let Some(bid) = open_bids.get_mut(&accept.job_id)
+                        && bid.reserve_until_ms != 0
+                    {
+                        bid.reserve_until_ms = 0;
+                        market.observe(bid.cap, bid.price, accept.agreed_price_usd, false);
+                    }
                     debug!(
                         job_id = %accept.job_id,
                         winner = %accept.winning_bidder_peer_id,
                         "dispatch: accept for someone else"
                     );
+                    continue;
+                }
+                let Some(bid) = open_bids.remove(&accept.job_id) else { continue };
+                market.observe(bid.cap, bid.price, accept.agreed_price_usd, true);
+                debug!(job_id = %accept.job_id, cleared = accept.agreed_price_usd, share = market.share, "dispatch: market price learned");
+                // The buyer kept another process's bid under our peer id:
+                // that process runs the job, not this one. Say so at once, so
+                // the buyer re-awards instead of waiting or failing the job.
+                if let Some(theirs) = accept.winning_instance.as_deref()
+                    && theirs != net.instance_id()
+                {
+                    crate::twin::note(net.instance_id(), Some(theirs), "accept named another instance");
+                    warn!(job_id = %accept.job_id, twin = theirs, "dispatch: accept is for a twin running this identity, not running it");
+                    crate::runner::publish_twin_fault(&net, &accept).await;
                     continue;
                 }
                 let Some(tx) = runner_tx.as_ref() else {
@@ -657,6 +688,7 @@ async fn handle_offer(
         bench_score,
         load: Some(bid_load),
         e2e,
+        instance: Some(net.instance_id().to_string()),
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,
@@ -704,7 +736,26 @@ fn spawn_open_e2e(
                 }
                 "the sealed spec does not pass this workload's checks".to_string()
             }
-            Err(e) => format!("{e:#}"),
+            Err(e) => {
+                let reason = format!("{e:#}");
+                // Sealed to a key this process never made: a twin with our
+                // peer id bid too and the buyer kept its bid. Not our job and
+                // not a compute fault. Old buyers name no instance on the
+                // accept: stay silent so they wait for the twin's receipt
+                // rather than take ours as the result.
+                if crate::job_e2e::is_key_mismatch(&reason) {
+                    crate::twin::note(net.instance_id(), accept.winning_instance.as_deref(), "sealed spec did not open");
+                    warn!(job_id = %accept.job_id, "dispatch: sealed spec is for another process with this identity (twin); not running it");
+                    if accept.winning_instance.is_some() {
+                        crate::runner::publish_twin_fault(&net, &accept).await;
+                    } else {
+                        crate::activity::job_finished(&accept.job_id);
+                        crate::job_control::forget(&accept.job_id);
+                    }
+                    return;
+                }
+                reason
+            }
         };
         warn!(job_id = %accept.job_id, reason = %refused, "dispatch: won e2e job refused");
         crate::runner::publish_receipt(&net, &accept, None, c0mpute_net::topics::JobStatus::Failed).await;
@@ -798,6 +849,7 @@ mod tests {
             e2e: None,
             sealed_spec: None,
             result_key: None,
+            winning_instance: None,
         }
     }
 

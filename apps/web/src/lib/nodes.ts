@@ -31,6 +31,13 @@ export interface NodeRow {
   /** Projects the node donates idle compute to (e.g. `crowdgpt`); absent when none. */
   donates?: string[];
   last_seen_s: number;
+  /**
+   * One identity running as more than one process (a copied identity dir, or
+   * two services on one box). `instances`: processes the aggregator heard;
+   * `reported`: the node detected it itself; `yielding`: this is the older
+   * process and it stopped bidding. Absent when there is no duplicate.
+   */
+  duplicate?: { instances: number; reported: boolean; yielding: boolean } | null;
 }
 
 export interface BenchSample {

@@ -63,6 +63,15 @@ $ c0mpute uninstall --purge   # also remove ~/.config/c0mpute`}</CodeBlock>
 
       <Section number="7" label="check the stack">
         <CodeBlock>{`$ c0mpute doctor`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          Also lists every c0mpute worker, unit and identity on the machine. Run
+          one worker per identity: starting a second one replaces the first, and{" "}
+          <code>c0mpute doctor --fix</code> removes a leftover second unit (a
+          system unit next to your user unit is the usual one). Copying{" "}
+          <code>~/.config/c0mpute</code> to another machine copies the node&apos;s
+          identity too; delete <code>identity.key</code> in the copy first.{" "}
+          <a href="/docs#duplicate-workers">troubleshooting</a>
+        </p>
       </Section>
 
       <Section number="8" label="host a site on c0mpute and point a Moshpit name at it">

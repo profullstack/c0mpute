@@ -448,6 +448,12 @@ pub fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Stop taking new work for good: this process is about to exit (a newer
+/// worker with the same identity is taking over). Running jobs finish.
+pub fn begin_drain() {
+    set_draining(true);
+}
+
 fn set_draining(on: bool) {
     DRAINING.store(on, std::sync::atomic::Ordering::SeqCst);
 }
