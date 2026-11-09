@@ -536,17 +536,26 @@ pub async fn announce_settlements(ads: &Ads, ledger: &Ledger) {
     }
 }
 
+/// The shared payments ledger for a local campaign: every transfer key paid
+/// through [`crate::payments`], so a line is never paid twice even if the ads
+/// ledger was not saved after a payment.
+pub fn payments_ledger_path(name: &str) -> PathBuf {
+    campaign_dir(name).join("payments.json")
+}
+
 /// `c0mpute ads settle`: boot a buyer node, collect claims and receipts,
-/// verify, and (with `pay`) settle and pay through `rail`.
+/// verify, and (with a rail) settle and pay through the shared payments path,
+/// at most `cap` this round.
 pub async fn settle(
     record: &CampaignRecord,
     fee_payout: &str,
-    rail: Option<&dyn billing::PaymentRail>,
+    rail: Option<&dyn crate::payments::Rail>,
+    cap: crate::payments::Micros,
     wait: Duration,
 ) -> Result<(SettleRound, Ledger)> {
-    let budget = record
+    record
         .budget
-        .clone()
+        .as_ref()
         .context("this campaign has no budget: c0mpute ads campaign update <name> --budget <usd>")?;
     let path = ledger_path(&record.name);
     let mut ledger = Ledger::load(&path, &record.campaign_id)?;
@@ -562,7 +571,8 @@ pub async fn settle(
     let round = settle_round(&ads, &h, record, &bids, &mut ledger, owner, fee_payout, wait).await;
     if let Some(rail) = rail {
         ledger.save(&path)?;
-        ledger.pay(rail, budget.payer.as_deref());
+        let shared = crate::payments::Ledger::open(payments_ledger_path(&record.name));
+        ledger.pay(rail, &shared, &record.owner, cap).await;
         ledger.save(&path)?;
         for _ in 0..3 {
             announce_settlements(&ads, &ledger).await;

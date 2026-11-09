@@ -49,7 +49,7 @@ pub struct ShowAds {
     /// Longest creative the show runs, seconds.
     #[serde(default = "default_max_ad_secs")]
     pub max_ad_secs: u64,
-    /// Where the show's share of ad revenue goes, `<CHAIN>:<address>`
+    /// Where the show's share of ad revenue goes, `<COIN>:<address>`
     /// ([`super::billing`]). Without one the show's impressions are not paid
     /// (and not charged to advertisers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ impl ShowAds {
         if let Some(p) = &s.payout
             && !super::billing::valid_payout(p)
         {
-            bail!("ads payout must be <CHAIN>:<address>");
+            bail!("ads payout must be <COIN>:<address>");
         }
         Ok(s)
     }

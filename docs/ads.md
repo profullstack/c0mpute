@@ -11,7 +11,7 @@ Code: `node/crates/c0mpute-core/src/ads/`.
 
 Billing is built (see [Billing and payouts](#billing-and-payouts)): a
 campaign with a budget pays gateways and shows for verified impressions at
-the second price, from the advertiser's own CoinPay wallet. Real payouts are
+the second price, through the node's one payment rail. Real payouts are
 **off by default**. There is no OpenRTB auction.
 
 ## Advertisers
@@ -89,13 +89,17 @@ the ad. Settlement is built on these chains (next section).
 
 ## Billing and payouts
 
-The rail is CoinPay, the settlement adapter c0mpute already names everywhere,
-through the `coinpay` CLI the `coinpay` plugin delegates to. Nothing in
-c0mpute holds anyone's money; there is no clearing house and no ad server.
-Code: `ads/billing.rs`.
+Money moves through c0mpute's one payment path, `payments.rs` (shared with
+hosting settlement): CoinPay payouts from the operator's own CoinPay business
+account, with an idempotent ledger and a per-round cap. Nothing in c0mpute
+holds anyone's money; there is no clearing house and no ad server. The fee
+and split logic is ads-specific: `ads/billing.rs`.
+
+Payout addresses are `<COIN>:<address>`, where `COIN` is the CoinPay currency
+code the payout is made in (`USDC_POL`, `SOL`, ...).
 
 1. **Budget.** `--budget` (total, USD), `--daily-budget`, `--payer
-   <CHAIN>:<address>` (your paying wallet) and `--funding-ref` (a CoinPay
+   <COIN>:<address>` (your paying wallet) and `--funding-ref` (a CoinPay
    escrow or payment id as proof of funds) are signed into the campaign
    record. A campaign without a budget runs unpaid, as before.
 2. **Cleared price.** Every impression receipt carries the price it cleared
@@ -123,8 +127,11 @@ Code: `ads/billing.rs`.
    the running total spent), pays each line, and gossips the settlements so
    gateways learn the budget left and where their next claim starts. A
    gateway stops serving a campaign once settled spend plus its own
-   unsettled spend reaches the budget. Lines are idempotent: a paid line is
-   never sent again, a failed one is retried by the next `settle --pay`.
+   unsettled spend reaches the budget. Lines are idempotent: each is a
+   transfer keyed `ads:<settlement hash>:<line>` in the shared payments
+   ledger (`payments.json` next to the campaign), so a paid line is never
+   sent again; a failed one, or one over `[payments] max_usd_per_round`, is
+   retried by the next `settle --pay`.
 
 Split of each paid impression: **5% network fee** (the single fee c0mpute's
 market and Infernet take; operators keep 95%), **75% to the show** that
@@ -139,18 +146,25 @@ min_claim_usd = "1.00"
 
 # Advertiser
 [ads]
-payouts = true            # allow `c0mpute ads settle --pay` to send money
-fee_payout = "SOL:..."    # network fee address; without it the fee is owed, not sent
+payouts = true            # allow `c0mpute ads settle --pay` to send money...
+fee_payout = "USDC_POL:0x..."  # network fee address; without it the fee is owed, not sent
+
+[payments]                # ...through the node's payment rail, also off by default
+enabled = true
+rail = "coinpay"
+max_usd_per_round = "10"
+coinpay.recipient_email = "you@example.org"
+# plus a CoinPay business API key with payouts:create in $C0MPUTE_COINPAY_PAYOUT_KEY
 ```
 
 Shows add `payout = "SOL:..."` to `[ads]` in `show.toml` (or
 `c0mpute podcasting publish --ads pre --ads-payout SOL:...`). It lives in
 the signed `c0mpute-ads.json`, so no gateway can redirect a show's money.
 
-What is not proven: `--pay` runs `coinpay wallet send --chain <CHAIN> --to
-<address> --amount-fiat <usd> --fiat USD` from your wallet. Every test uses
-an in-memory rail; real transfers have not been exercised, and they stay off
-until `[ads] payouts = true`. A receipt is still a gateway's claim, not
+What is not proven: `--pay` calls CoinPay `POST /api/payouts/create` once
+per line. Every test uses the in-memory `payments::FakeRail`; real transfers
+have not been exercised, and they stay off until both `[ads] payouts = true`
+and `[payments] enabled = true`. A receipt is still a gateway's claim, not
 proof a person heard the ad: caps, dedupe and the self-dealing rules limit
 what a dishonest gateway can bill, they do not eliminate it.
 
