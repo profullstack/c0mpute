@@ -542,6 +542,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::Diffusion) {
         types.push(crate::diffusion::WORKLOAD_TXT2IMG.to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::Music) {
+        types.push(crate::music::WORKLOAD_TXT2MUSIC.to_string());
+    }
     if roles.contains(&c0mpute_proto::Role::Crawl) {
         types.push(crate::crawl::WORKLOAD.to_string());
     }

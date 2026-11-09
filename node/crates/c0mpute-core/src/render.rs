@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::{JobOffer, JobStatus};
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_proto::Hash;
 use tokio::io::AsyncReadExt;
 use c0mpute_store::ChunkStore;
@@ -1169,11 +1169,9 @@ async fn run_render_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("render result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    let hash = store.put(&bytes).await.context("store render result")?;
-    net.announce(&hash)
+    crate::pieces::publish_result_bytes(net, store, &bytes)
         .await
-        .context("announce render result")?;
-    Ok(hash.to_hex())
+        .context("publish render result")
 }
 
 // ─── buyer ───────────────────────────────────────────────────────────────
@@ -1419,7 +1417,7 @@ async fn collect_batch(
         .output_hash
         .as_deref()
         .context("worker returned no output hash")?;
-    let bytes = crate::gateway_util::fetch_verified(
+    let bytes = crate::gateway_util::fetch_result(
         net,
         hash,
         worker,

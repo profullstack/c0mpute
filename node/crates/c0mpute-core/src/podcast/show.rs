@@ -76,6 +76,9 @@ pub struct AdsMeta {
     /// Lowest CPM in USD, e.g. "1.50".
     pub min_cpm: Option<String>,
     pub max_ad_secs: Option<u64>,
+    /// Where the show's ad revenue goes, `<CHAIN>:<address>` (e.g.
+    /// "SOL:9xQe..."). Without it the show runs ads unpaid.
+    pub payout: Option<String>,
 }
 
 impl AdsMeta {
@@ -112,6 +115,12 @@ impl AdsMeta {
         }
         if let Some(m) = self.max_ad_secs {
             s.max_ad_secs = m;
+        }
+        if let Some(p) = &self.payout {
+            if !crate::ads::billing::valid_payout(p.trim()) {
+                bail!("[ads] payout must be <CHAIN>:<address>, e.g. \"SOL:9xQe...\"");
+            }
+            s.payout = Some(p.trim().to_string());
         }
         Ok(Some(s))
     }
@@ -853,7 +862,7 @@ episode = 2
         std::fs::write(src.path().join("a.mp3"), vec![0u8; 10]).unwrap();
         std::fs::write(
             src.path().join("show.toml"),
-            "category = \"Technology\"\n[ads]\nplacements = [\"pre\", \"mid\"]\nmin_cpm = \"1.50\"\nmid_at_secs = 300\n",
+            "category = \"Technology\"\n[ads]\nplacements = [\"pre\", \"mid\"]\nmin_cpm = \"1.50\"\nmid_at_secs = 300\npayout = \"SOL:9xQeWvG816bUx9\"\n",
         )
         .unwrap();
         let out = tempfile::tempdir().unwrap();
@@ -868,6 +877,7 @@ episode = 2
         assert_eq!(o.categories, vec!["technology"]);
         assert_eq!(o.floor_cpm_micros, 1_500_000);
         assert_eq!(o.mid_at_secs, Some(300));
+        assert_eq!(o.payout.as_deref(), Some("SOL:9xQeWvG816bUx9"));
         let index = std::fs::read_to_string(out.path().join("s/index.html")).unwrap();
         assert!(index.contains("src=\"episodes/a.mp3?ads=1\""));
         // The built folder is still a valid hosting site (the opt-in is a file in it).

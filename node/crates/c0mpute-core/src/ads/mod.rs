@@ -13,10 +13,11 @@
 //! * [`stitch`] — `podcast-ads`: dynamic ad insertion into c0mpute-hosted
 //!   episodes (`?ads=1`), only for shows whose signed site opts in.
 //! * [`vast`] — `ctv-ads`: VAST 4.2 and VMAP 1.0 for video players.
-//!
-//! Not here yet: billing and settlement. Bids are a ranking signal only; no
-//! money moves and nothing is escrowed.
+//! * [`billing`] — budgets, second-price receipts, gateway claims over their
+//!   receipt chains, deterministic verification, advertiser-signed
+//!   settlements, and payouts through the CoinPay rail (off by default).
 
+pub mod billing;
 pub mod campaign;
 pub mod manage;
 pub mod receipt;
@@ -45,6 +46,7 @@ use tracing::{debug, info, warn};
 
 use crate::hosting::site::SiteRecord;
 use crate::hosting::{Hosting, ServeHook};
+use billing::{Claim, Settlement};
 use campaign::{CampaignRecord, Creative, Placement};
 use receipt::{Event, Receipt, ReceiptBatch, ReceiptLog};
 use select::{AdContext, Explained, FreqLedger};
@@ -85,6 +87,12 @@ pub enum AdsMsg {
     Receipts { batch: ReceiptBatch },
     /// An advertiser asks gateways to re-gossip their receipts for a campaign.
     ReportWant { campaign_id: String, since: u64 },
+    /// A gateway's signed claim to be paid for a range of its receipt chain.
+    Claim { claim: Claim },
+    /// An advertiser asks gateways to re-gossip their open claims.
+    ClaimWant { campaign_id: String },
+    /// The advertiser's signed settlement of a claim.
+    Settlement { record: Settlement },
 }
 
 /// How often things happen. Tests shrink these.
@@ -97,6 +105,8 @@ pub struct Timing {
     /// How long a stitched episode is reused for the same listener.
     pub stitch_ttl: Duration,
     pub stitch_timeout: Duration,
+    /// How often a gateway claims payment for its unsettled receipts.
+    pub claim_every: Duration,
 }
 
 impl Default for Timing {
@@ -107,6 +117,7 @@ impl Default for Timing {
             flush_every: Duration::from_secs(60),
             stitch_ttl: Duration::from_secs(600),
             stitch_timeout: Duration::from_secs(300),
+            claim_every: Duration::from_secs(300),
         }
     }
 }
@@ -122,6 +133,11 @@ pub struct Options {
     pub ffprobe: Option<PathBuf>,
     /// Absolute origin for URLs in VAST (else from the request's Host).
     pub public_origin: Option<String>,
+    /// Where this gateway is paid for the ads it serves, `<CHAIN>:<address>`.
+    /// Without one it serves and signs receipts but never claims.
+    pub payout: Option<String>,
+    /// Smallest claim worth making, USD millionths.
+    pub min_claim_micros: u64,
     pub timing: Timing,
 }
 
@@ -134,6 +150,8 @@ impl Default for Options {
             ffmpeg: None,
             ffprobe: None,
             public_origin: None,
+            payout: None,
+            min_claim_micros: billing::DEFAULT_MIN_CLAIM_MICROS,
             timing: Timing::default(),
         }
     }
@@ -169,6 +187,27 @@ struct Inner {
     answered: Mutex<HashMap<String, Instant>>,
     stitched: Mutex<HashMap<String, Stitched>>,
     stitch_slots: Semaphore,
+    payout: Option<String>,
+    min_claim_micros: u64,
+    /// What gossiped settlements say, per campaign.
+    settled: Mutex<HashMap<String, SettledView>>,
+    /// This gateway's unsettled impressions per campaign, in CPM units
+    /// (micros x 1000).
+    accrued: Mutex<HashMap<String, u128>>,
+    /// Our open claim per campaign.
+    claims: Mutex<HashMap<String, Claim>>,
+    /// Claims heard for campaigns we watch: campaign -> gateway -> claim.
+    heard_claims: Mutex<HashMap<String, HashMap<String, Claim>>>,
+}
+
+/// What a node knows from a campaign's gossiped settlements.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledView {
+    /// Total the campaign has paid (the highest running total seen).
+    pub spent_micros: u64,
+    /// This gateway's last settled batch and its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<(u64, String)>,
 }
 
 /// The ads service: one per node. Cheap to clone.
@@ -199,6 +238,19 @@ impl Ads {
             }
         }
         let log = ReceiptLog::open(opts.data_dir.as_ref().map(|d| d.join("receipts")));
+        let settled: HashMap<String, SettledView> = opts
+            .data_dir
+            .as_ref()
+            .and_then(|d| std::fs::read(d.join("settled.json")).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let payout = opts.payout.filter(|p| {
+            let ok = billing::valid_payout(p);
+            if !ok {
+                warn!(payout = %p, "ads: payout is not <CHAIN>:<address>; this gateway will not claim");
+            }
+            ok
+        });
         let inner = Inner {
             net: net.clone(),
             hosting,
@@ -222,8 +274,15 @@ impl Ads {
             answered: Mutex::new(HashMap::new()),
             stitched: Mutex::new(HashMap::new()),
             stitch_slots: Semaphore::new(2),
+            payout,
+            min_claim_micros: opts.min_claim_micros,
+            settled: Mutex::new(settled),
+            accrued: Mutex::new(HashMap::new()),
+            claims: Mutex::new(HashMap::new()),
+            heard_claims: Mutex::new(HashMap::new()),
         };
         let ads = Ads(Arc::new(inner));
+        ads.recompute_accrued();
         net.subscribe(TOPIC).await.context("subscribe to ads topic")?;
         ads.spawn_gossip_reader();
         ads.spawn_ticker();
@@ -378,15 +437,241 @@ impl Ads {
                     self.publish(&AdsMsg::Receipts { batch }).await;
                 }
             }
+            AdsMsg::Claim { claim } => {
+                let watching = self.0.watching.lock().unwrap().contains(&claim.campaign_id);
+                if watching && claim.verify() {
+                    let mut heard = self.0.heard_claims.lock().unwrap();
+                    let slot = heard.entry(claim.campaign_id.clone()).or_default();
+                    // Keep the newest claim per gateway.
+                    if slot.get(&claim.gateway).is_none_or(|c| (claim.to_seq, claim.ts) > (c.to_seq, c.ts)) {
+                        slot.insert(claim.gateway.clone(), claim);
+                    }
+                }
+            }
+            AdsMsg::ClaimWant { campaign_id } => {
+                let open = self.0.claims.lock().unwrap().get(&campaign_id).cloned();
+                if let Some(claim) = open {
+                    self.publish(&AdsMsg::Claim { claim }).await;
+                }
+            }
+            AdsMsg::Settlement { record } => {
+                self.apply_settlement(&record).await;
+            }
         }
     }
+
+    /// Learn from an advertiser's signed settlement: how much the campaign
+    /// has spent and, when it settles our claim, where our next claim starts.
+    pub async fn apply_settlement(&self, s: &Settlement) -> bool {
+        let Some(c) = self.campaign(&s.campaign_id).await else {
+            return false;
+        };
+        if s.owner != c.owner || !s.verify() {
+            return false;
+        }
+        let mine = !self.0.gateway_key.is_empty() && s.gateway == self.0.gateway_key;
+        let changed = {
+            let mut settled = self.0.settled.lock().unwrap();
+            let v = settled.entry(s.campaign_id.clone()).or_default();
+            let mut changed = false;
+            if s.spent_micros > v.spent_micros {
+                v.spent_micros = s.spent_micros;
+                changed = true;
+            }
+            if mine && v.through.as_ref().is_none_or(|(t, _)| s.to_seq > *t) {
+                v.through = Some((s.to_seq, s.head.clone()));
+                changed = true;
+            }
+            changed
+        };
+        if changed {
+            if mine {
+                let mut claims = self.0.claims.lock().unwrap();
+                if claims.get(&s.campaign_id).is_some_and(|c| c.from_seq <= s.to_seq) {
+                    claims.remove(&s.campaign_id);
+                }
+            }
+            self.recompute_accrued();
+            self.save_settled();
+        }
+        changed
+    }
+
+    fn save_settled(&self) {
+        if let Some(d) = &self.0.data_dir {
+            let snapshot = self.0.settled.lock().unwrap().clone();
+            let _ = std::fs::create_dir_all(d);
+            let tmp = d.join("settled.json.tmp");
+            if std::fs::write(&tmp, serde_json::to_vec(&snapshot).unwrap_or_default()).is_ok() {
+                let _ = std::fs::rename(&tmp, d.join("settled.json"));
+            }
+        }
+    }
+
+    /// Unsettled impressions per campaign: priced impressions in our batches
+    /// after the last settled one, plus those not yet signed.
+    fn recompute_accrued(&self) {
+        let through: HashMap<String, u64> = self
+            .0
+            .settled
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, v)| v.through.as_ref().map(|(t, _)| (k.clone(), *t + 1)))
+            .collect();
+        let log = self.0.log.lock().unwrap();
+        let mut acc: HashMap<String, u128> = HashMap::new();
+        let mut ids = log.campaigns();
+        ids.extend(log.pending_campaigns());
+        ids.sort();
+        ids.dedup();
+        for cid in ids {
+            let since = through.get(&cid).copied().unwrap_or(0);
+            let signed: u128 = log
+                .batches(&cid, since)
+                .iter()
+                .flat_map(|b| b.receipts.iter())
+                .filter(|r| r.event == Event::Impression)
+                .map(|r| r.cpm_micros as u128)
+                .sum();
+            let pending: u128 = log
+                .pending(&cid)
+                .iter()
+                .filter(|r| r.event == Event::Impression)
+                .map(|r| r.cpm_micros as u128)
+                .sum();
+            if signed + pending > 0 {
+                acc.insert(cid, signed + pending);
+            }
+        }
+        drop(log);
+        *self.0.accrued.lock().unwrap() = acc;
+    }
+
+    /// Billed campaigns whose settled spend plus our own unsettled spend has
+    /// reached the budget.
+    fn exhausted<'a, I: IntoIterator<Item = &'a CampaignRecord>>(&self, campaigns: I) -> Vec<String> {
+        let settled = self.0.settled.lock().unwrap();
+        let accrued = self.0.accrued.lock().unwrap();
+        campaigns
+            .into_iter()
+            .filter_map(|c| {
+                let b = c.budget.as_ref()?;
+                let spent = settled.get(&c.campaign_id).map(|v| v.spent_micros).unwrap_or(0)
+                    + (accrued.get(&c.campaign_id).copied().unwrap_or(0) / 1000) as u64;
+                (spent >= b.total_micros).then(|| c.campaign_id.clone())
+            })
+            .collect()
+    }
+
+    /// What gossiped settlements say about a campaign.
+    pub fn settled(&self, campaign_id: &str) -> SettledView {
+        self.0.settled.lock().unwrap().get(campaign_id).cloned().unwrap_or_default()
+    }
+
+    /// Claim payment for unsettled receipts, one claim per billed campaign,
+    /// and gossip them. Needs a signer and a payout address.
+    pub async fn make_claims(&self) -> Vec<Claim> {
+        let (Some(kp), Some(payout)) = (self.0.signer.clone(), self.0.payout.clone()) else {
+            return vec![];
+        };
+        self.flush_receipts().await;
+        let campaigns: Vec<CampaignRecord> = self
+            .0
+            .index
+            .read()
+            .await
+            .values()
+            .filter(|c| c.budget.is_some())
+            .cloned()
+            .collect();
+        let now = now_unix();
+        let mut out = Vec::new();
+        for c in campaigns {
+            let view = self.settled(&c.campaign_id);
+            let from = view.through.as_ref().map(|(t, _)| t + 1).unwrap_or(0);
+            let batches = self.0.log.lock().unwrap().batches(&c.campaign_id, from);
+            if batches.is_empty() {
+                continue;
+            }
+            let remaining = c
+                .budget
+                .as_ref()
+                .map(|b| b.total_micros.saturating_sub(view.spent_micros))
+                .unwrap_or(0);
+            let Some(claim) = Claim::build(
+                &kp,
+                &c,
+                view.through.as_ref().map(|(t, h)| (*t, h.as_str())),
+                &batches,
+                remaining,
+                &payout,
+                now,
+            ) else {
+                continue;
+            };
+            if claim.gross_micros < self.0.min_claim_micros {
+                continue;
+            }
+            // Re-gossip the open claim for the same range rather than a new one.
+            let claim = {
+                let mut open = self.0.claims.lock().unwrap();
+                match open.get(&c.campaign_id) {
+                    Some(o) if o.from_seq == claim.from_seq && o.to_seq == claim.to_seq => o.clone(),
+                    _ => {
+                        open.insert(c.campaign_id.clone(), claim.clone());
+                        claim
+                    }
+                }
+            };
+            self.publish(&AdsMsg::Claim { claim: claim.clone() }).await;
+            out.push(claim);
+        }
+        out
+    }
+
+    /// Ask gateways for their open claims on a campaign; they arrive in
+    /// [`Self::heard_claims`].
+    pub async fn request_claims(&self, campaign_id: &str) {
+        self.0.watching.lock().unwrap().insert(campaign_id.to_string());
+        self.publish(&AdsMsg::ClaimWant {
+            campaign_id: campaign_id.to_string(),
+        })
+        .await;
+    }
+
+    /// The newest claim heard from each gateway, by gateway key.
+    pub fn heard_claims(&self, campaign_id: &str) -> Vec<Claim> {
+        let mut v: Vec<Claim> = self
+            .0
+            .heard_claims
+            .lock()
+            .unwrap()
+            .get(campaign_id)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.gateway.cmp(&b.gateway));
+        v
+    }
+
+    /// Gossip a settlement (and apply it here).
+    pub async fn publish_settlement(&self, s: &Settlement) {
+        self.apply_settlement(s).await;
+        self.publish(&AdsMsg::Settlement { record: s.clone() }).await;
+    }
+
 
     fn spawn_ticker(&self) {
         let ads = self.clone();
         tokio::spawn(async move {
             let mut last_flush = Instant::now();
+            let mut last_claim = Instant::now();
             loop {
                 tokio::time::sleep(ads.0.timing.tick).await;
+                if ads.0.serve && last_claim.elapsed() >= ads.0.timing.claim_every {
+                    ads.make_claims().await;
+                    last_claim = Instant::now();
+                }
                 ads.regossip_due().await;
                 let pending = ads.0.log.lock().unwrap().pending_len();
                 if pending >= receipt::MAX_RECEIPTS_PER_BATCH || (pending > 0 && last_flush.elapsed() >= ads.0.timing.flush_every) {
@@ -474,8 +759,10 @@ impl Ads {
     /// Pick an ad for `ctx` from this node's index.
     pub async fn select(&self, ctx: &AdContext) -> Explained {
         let index = self.0.index.read().await;
+        let mut ctx = ctx.clone();
+        ctx.exhausted = self.exhausted(index.values());
         let freq = self.0.freq.lock().unwrap();
-        select::select(index.values(), ctx, &freq)
+        select::select(index.values(), &ctx, &freq)
     }
 
     // ── creatives ────────────────────────────────────────────────────────
@@ -509,6 +796,9 @@ impl Ads {
     pub fn record(&self, r: Receipt) {
         if r.event == Event::Impression && !r.listener.is_empty() {
             self.0.freq.lock().unwrap().record(&r.listener, &r.campaign_id, r.ts);
+        }
+        if r.event == Event::Impression && r.cpm_micros > 0 {
+            *self.0.accrued.lock().unwrap().entry(r.campaign_id.clone()).or_default() += r.cpm_micros as u128;
         }
         self.0.log.lock().unwrap().add(r);
     }
@@ -597,6 +887,8 @@ impl Ads {
             serving_id: b.s.clone(),
             site: b.site.clone(),
             country: b.cc.clone(),
+            cpm_micros: b.px,
+            campaign_seq: b.cs,
         });
         true
     }
@@ -645,6 +937,8 @@ impl Ads {
             s: uuid::Uuid::new_v4().simple().to_string(),
             site,
             cc: ctx.country.clone(),
+            px: d.cleared_cpm_micros,
+            cs: d.campaign.seq,
             exp: now_unix() + BEACON_TTL_SECS,
         }
     }
@@ -663,6 +957,11 @@ struct Beacon {
     site: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cc: Option<String>,
+    /// Cleared CPM (USD millionths) and campaign version.
+    #[serde(default)]
+    px: u64,
+    #[serde(default)]
+    cs: u64,
     exp: i64,
 }
 
@@ -726,6 +1025,7 @@ impl Ads {
             slot_key: q.slot.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             exclude: vec![],
             max_duration_ms: None,
+            exhausted: vec![],
         }
     }
 }
@@ -762,6 +1062,8 @@ async fn http_campaigns(State(ads): State<Ads>) -> Response {
                 "max_cpm_usd": c.max_cpm_micros as f64 / campaign::MICROS as f64,
                 "creatives": c.creatives.len(),
                 "landing_url": c.landing_url,
+                "budget_usd": c.budget.as_ref().map(|b| b.total_micros as f64 / campaign::MICROS as f64),
+                "spent_usd": ads.settled(&c.campaign_id).spent_micros as f64 / campaign::MICROS as f64,
             })
         })
         .collect();
@@ -782,6 +1084,7 @@ async fn http_select(State(ads): State<Ads>, Query(q): Query<AdQuery>, headers: 
             "campaign_id": d.campaign.campaign_id,
             "name": d.campaign.name,
             "bid_cpm_usd": d.bid_micros as f64 / campaign::MICROS as f64,
+            "cleared_cpm_usd": d.cleared_cpm_micros as f64 / campaign::MICROS as f64,
             "rank": d.rank,
             "creative": d.creative,
             "creative_url": format!("{origin}/ads/v1/creative/{}/{}", d.campaign.campaign_id, d.creative.hash),
@@ -1100,6 +1403,7 @@ impl Ads {
             slot_key: String::new(),
             exclude: vec![],
             max_duration_ms: Some(opt.max_ad_secs.saturating_mul(1000)),
+            exhausted: vec![],
         };
         let mut chosen: Vec<(Placement, select::Decision)> = Vec::new();
         for p in [Placement::PodcastPre, Placement::PodcastMid, Placement::PodcastPost] {
@@ -1295,5 +1599,63 @@ mod tests {
         }
         let w = serde_json::to_vec(&AdsMsg::ReportWant { campaign_id: "c".into(), since: 0 }).unwrap();
         assert!(matches!(serde_json::from_slice::<AdsMsg>(&w).unwrap(), AdsMsg::ReportWant { .. }));
+
+        // A campaign signed before billing (no budget field) still verifies.
+        let mut old = serde_json::to_value(&rec).unwrap();
+        assert!(old.get("budget").is_none());
+        old.as_object_mut().unwrap().remove("budget");
+        assert!(serde_json::from_value::<CampaignRecord>(old).unwrap().verify());
+
+        // Claims and settlements fit a gossip message.
+        let mut billed = campaign::tests::sample(&kp, "billed", 1);
+        billed.budget = Some(billing::Budget {
+            total_micros: 1_000_000,
+            daily_micros: None,
+            rail: "coinpay".into(),
+            payer: None,
+            funding_ref: None,
+        });
+        let billed = billed.sign(&kp).unwrap();
+        let gw = Keypair::generate_ed25519();
+        let mut log = ReceiptLog::open(None);
+        log.add(Receipt {
+            campaign_id: billed.campaign_id.clone(),
+            creative: billed.creatives[0].hash.clone(),
+            placement: Placement::PodcastPre,
+            event: Event::Impression,
+            ts: now_unix(),
+            listener: "l".into(),
+            serving_id: "s".into(),
+            site: None,
+            country: None,
+            cpm_micros: 2_000_000,
+            campaign_seq: 1,
+        });
+        let batches = log.flush(&gw);
+        let claim = Claim::build(&gw, &billed, None, &batches, u64::MAX, "SOL:gatewaywallet1", now_unix()).unwrap();
+        let bytes = serde_json::to_vec(&AdsMsg::Claim { claim: claim.clone() }).unwrap();
+        assert!(bytes.len() < 4 * 1024);
+        match serde_json::from_slice::<AdsMsg>(&bytes).unwrap() {
+            AdsMsg::Claim { claim: c } => assert!(c.verify() && c == claim),
+            _ => panic!(),
+        }
+        let v = billing::verify_claim(
+            &billed,
+            &std::collections::BTreeMap::from([(1, 2_000_000)]),
+            &billing::Ledger::new(&billed.campaign_id),
+            &claim,
+            &batches,
+            &HashMap::new(),
+            "",
+            now_unix(),
+        )
+        .unwrap();
+        let s = billing::Ledger::new(&billed.campaign_id).settle(&billed, v, Some(&kp), now_unix()).unwrap();
+        let bytes = serde_json::to_vec(&AdsMsg::Settlement { record: s }).unwrap();
+        assert!(bytes.len() < 4 * 1024);
+        match serde_json::from_slice::<AdsMsg>(&bytes).unwrap() {
+            AdsMsg::Settlement { record } => assert!(record.verify()),
+            _ => panic!(),
+        }
     }
 }

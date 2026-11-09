@@ -426,8 +426,8 @@ enum WorkerCmd {
     /// Start the worker daemon and accept jobs.
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
-        /// verifier, workflow-step, video, diffusion. Default: the config's
-        /// roles plus tts, stt, workflow-step and diffusion.
+        /// verifier, workflow-step, video, diffusion, music. Default: the config's
+        /// roles plus tts, stt, workflow-step, diffusion and music.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -508,6 +508,10 @@ enum TranscodeCmd {
         /// that is not overloaded, the default) or `cheapest` (lowest bid).
         #[arg(long, default_value = "smart")]
         policy: c0mpute_core::routing::SelectionPolicy,
+        /// Download the transcoded output to this file (streamed to disk,
+        /// checked against the receipt). Without it only the hash is printed.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
     },
     /// Manage transcode presets.
     Preset {
@@ -695,6 +699,11 @@ enum PodcastingCmd {
         /// Without it (or [ads]) no gateway ever inserts ads.
         #[arg(long, value_name = "BREAKS")]
         ads: Option<String>,
+        /// Where the show's share of ad revenue goes, <CHAIN>:<address>
+        /// (e.g. SOL:9xQe...). Same as `payout` in [ads]. Without it the show
+        /// runs ads unpaid.
+        #[arg(long, value_name = "CHAIN:ADDRESS")]
+        ads_payout: Option<String>,
         /// Build the show folder only; do not publish.
         #[arg(long)]
         dry_run: bool,
@@ -719,6 +728,21 @@ enum AdsCmd {
         #[arg(long = "gateway")]
         gateways: Vec<String>,
         /// How long to collect receipts over gossip.
+        #[arg(long, default_value_t = 20)]
+        wait_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify gateways' payment claims for a campaign and (with --pay) settle
+    /// and pay them from your CoinPay wallet. Without --pay it only reports.
+    Settle {
+        /// Campaign name (local) or id.
+        campaign: String,
+        /// Sign settlements and send payouts. Also needs `[ads] payouts =
+        /// true` in config.toml: real money leaves your wallet.
+        #[arg(long)]
+        pay: bool,
+        /// How long to collect claims and receipts over gossip.
         #[arg(long, default_value_t = 20)]
         wait_secs: u64,
         #[arg(long)]
@@ -751,9 +775,25 @@ struct AdsTargetArgs {
     /// ctv_midroll, ctv_postroll, display.
     #[arg(long)]
     placement: Option<String>,
-    /// Highest CPM in USD, e.g. 2.50. A ranking signal: no billing yet.
+    /// Highest CPM in USD, e.g. 2.50. The winner pays the second price (best
+    /// losing bid or the show's floor), never more than this.
     #[arg(long)]
     max_cpm: Option<String>,
+    /// Total budget in USD. With a budget, gateways claim payment for
+    /// verified impressions and `c0mpute ads settle` pays them; without one
+    /// the campaign runs unpaid.
+    #[arg(long)]
+    budget: Option<String>,
+    /// Most the campaign pays for one UTC day of impressions, USD.
+    #[arg(long)]
+    daily_budget: Option<String>,
+    /// Your paying CoinPay wallet, <CHAIN>:<address> (claims paying out to it
+    /// are refused as self-dealing).
+    #[arg(long, value_name = "CHAIN:ADDRESS")]
+    payer: Option<String>,
+    /// A CoinPay escrow or payment id that shows the budget is funded.
+    #[arg(long)]
+    funding_ref: Option<String>,
     /// Where a click goes.
     #[arg(long)]
     landing: Option<String>,
@@ -1547,6 +1587,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Stt,
                     Role::WorkflowStep,
                     Role::Diffusion,
+                    Role::Music,
                     Role::Crawl,
                     Role::Hosting,
                     Role::Ocr,
@@ -1587,7 +1628,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if default_speech_roles {
                 eprintln!(
-                    "TTS, STT, workflow-step and diffusion (CPU images, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
+                    "TTS, STT, workflow-step, diffusion and music (CPU images and songs, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
                 );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
@@ -2214,6 +2255,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             max_price,
             external_ref,
             policy,
+            output,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -2246,7 +2288,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 .with_max_price_usd(max_price.unwrap_or(1.0))
                 .with_external_ref(external_ref)
                 .with_policy(policy);
-            let outcome = run_auction(net, auction).await?;
+            let outcome = run_auction(net.clone(), auction).await?;
             println!("job_id        : {}", outcome.job_id);
             if let Some(r) = &outcome.external_ref {
                 println!("external_ref  : {r}");
@@ -2258,6 +2300,22 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 // The worker stored the output in its chunk store under this
                 // hash and announced it on the DHT.
                 println!("output_hash   : {h}");
+                if let Some(path) = &output {
+                    // Pieced outputs (anything over 1 MiB from a current
+                    // worker) are written a piece at a time.
+                    let written = c0mpute_core::gateway_util::fetch_result_to_file(
+                        &net,
+                        h,
+                        &outcome.accepted_bid.bidder_peer_id,
+                        c0mpute_core::runner::MAX_OUTPUT_BYTES as usize,
+                        std::time::Duration::from_secs(30),
+                        path,
+                    )
+                    .await?;
+                    println!("output        : {} ({written} bytes)", path.display());
+                }
+            } else if output.is_some() {
+                anyhow::bail!("the worker returned no output to download");
             }
             Ok(())
         }
@@ -2537,6 +2595,7 @@ async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
             value_type,
             value_method,
             ads,
+            ads_payout,
             dry_run,
             wait_secs,
         } => {
@@ -2545,6 +2604,12 @@ async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
                 let meta = input.show.ads.get_or_insert_with(Default::default);
                 meta.enabled = Some(true);
                 meta.placements = breaks.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
+            if let Some(p) = ads_payout {
+                let Some(meta) = input.show.ads.as_mut() else {
+                    bail!("--ads-payout needs --ads (or an [ads] table in show.toml)");
+                };
+                meta.payout = Some(p);
             }
             let m = &mut input.show;
             m.title = title.or(m.title.take());
@@ -2923,6 +2988,32 @@ fn apply_ads_args(spec: &mut c0mpute_core::ads::manage::CampaignSpec, t: &AdsTar
     if let Some(f) = &t.freq_cap {
         spec.freq_cap = Some(parse_freq_cap(f)?);
     }
+    if t.budget.is_some() || t.daily_budget.is_some() || t.payer.is_some() || t.funding_ref.is_some() {
+        let mut b = spec.budget.clone().unwrap_or(c0mpute_core::ads::billing::Budget {
+            total_micros: 0,
+            daily_micros: None,
+            rail: "coinpay".into(),
+            payer: None,
+            funding_ref: None,
+        });
+        if let Some(v) = &t.budget {
+            b.total_micros = campaign::parse_usd_micros(v)?;
+        }
+        if let Some(v) = &t.daily_budget {
+            b.daily_micros = Some(campaign::parse_usd_micros(v)?);
+        }
+        if let Some(v) = &t.payer {
+            b.payer = Some(v.clone());
+        }
+        if let Some(v) = &t.funding_ref {
+            b.funding_ref = Some(v.clone());
+        }
+        if b.total_micros == 0 {
+            bail!("give --budget <usd> for a billed campaign");
+        }
+        b.check()?;
+        spec.budget = Some(b);
+    }
     Ok(())
 }
 
@@ -2942,7 +3033,28 @@ fn print_campaign(r: &c0mpute_core::ads::campaign::CampaignRecord) {
         "placements: {}",
         r.targeting.placements.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(",")
     );
-    println!("max cpm:    {} (ranking only; no billing yet)", fmt_usd(r.max_cpm_micros));
+    println!("max cpm:    {} (pays the second price, never more)", fmt_usd(r.max_cpm_micros));
+    match &r.budget {
+        Some(b) => {
+            let spent = c0mpute_core::ads::billing::Ledger::load(&c0mpute_core::ads::manage::ledger_path(&r.name), &r.campaign_id)
+                .map(|l| l.spent_micros)
+                .unwrap_or(0);
+            println!(
+                "budget:     {} total, {} spent{}  rail {}",
+                fmt_usd(b.total_micros),
+                fmt_usd(spent),
+                b.daily_micros.map(|d| format!(", {} per day", fmt_usd(d))).unwrap_or_default(),
+                b.rail
+            );
+            if let Some(p) = &b.payer {
+                println!("payer:      {p}");
+            }
+            if let Some(f) = &b.funding_ref {
+                println!("funding:    {f}");
+            }
+        }
+        None => println!("budget:     none (runs unpaid; add one with --budget)"),
+    }
     println!("landing:    {}", r.landing_url);
     if !r.targeting.categories.is_empty() {
         println!("categories: {}", r.targeting.categories.join(","));
@@ -3042,6 +3154,7 @@ async fn run_ads(cmd: AdsCmd) -> Result<()> {
                     freq_cap: current.freq_cap,
                     max_cpm_micros: current.max_cpm_micros,
                     landing_url: current.landing_url.clone(),
+                    budget: current.budget.clone(),
                 };
                 apply_ads_args(&mut spec, &t)?;
                 let site_dir = manage::campaign_dir(&current.name).join("site");
@@ -3149,6 +3262,109 @@ async fn run_ads(cmd: AdsCmd) -> Result<()> {
                     "  gap: gateway {} is missing batch {seq} (offline, or not yet re-gossiped)",
                     &g[..16.min(g.len())]
                 );
+            }
+            Ok(())
+        }
+        AdsCmd::Settle {
+            campaign: which,
+            pay,
+            wait_secs,
+            json,
+        } => {
+            use c0mpute_core::ads::billing;
+            let record = manage::load_local(&which)?;
+            let cfg = Config::load_or_default(&config::default_config_path())?;
+            let fee_payout = cfg.ads.fee_payout.clone().unwrap_or_default();
+            if !fee_payout.is_empty() && !billing::valid_payout(&fee_payout) {
+                bail!("[ads] fee_payout must be <CHAIN>:<address>");
+            }
+            let coinpay;
+            let rail: Option<&dyn billing::PaymentRail> = if pay {
+                if !cfg.ads.payouts {
+                    bail!(
+                        "--pay sends real money from your CoinPay wallet; turn it on with `[ads] payouts = true` in {}",
+                        config::default_config_path().display()
+                    );
+                }
+                coinpay = billing::CoinpayCliRail::find()
+                    .context("`coinpay` is not installed: c0mpute update installs it, then `c0mpute coinpay login`")?;
+                Some(&coinpay)
+            } else {
+                None
+            };
+            let (round, ledger) = manage::settle(&record, &fee_payout, rail, wait(wait_secs)).await?;
+            if json {
+                let settled: Vec<_> = round
+                    .settled
+                    .iter()
+                    .map(|(s, v)| serde_json::json!({"settlement": s, "verified": v}))
+                    .collect();
+                let refused: Vec<_> = round
+                    .refused
+                    .iter()
+                    .map(|(c, e)| serde_json::json!({"claim": c, "error": e}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "campaign_id": record.campaign_id,
+                        "paid": pay,
+                        "claims": round.claims,
+                        "batches": round.batches,
+                        "settled": settled,
+                        "refused": refused,
+                        "spent_micros": ledger.spent_micros,
+                        "unpaid_micros": ledger.unpaid_micros(),
+                        "lines": ledger.lines,
+                    }))?
+                );
+                return Ok(());
+            }
+            let budget = record.budget.as_ref().map(|b| b.total_micros).unwrap_or(0);
+            println!("campaign:   {} ({})", record.name, record.campaign_id);
+            println!("heard:      {} claims, {} receipt batches", round.claims, round.batches);
+            for (s, v) in &round.settled {
+                println!(
+                    "{} gateway {} batches {}-{}: {} impressions, {}",
+                    if pay { "settled" } else { "would pay" },
+                    &s.gateway[..16.min(s.gateway.len())],
+                    s.from_seq,
+                    s.to_seq,
+                    v.impressions,
+                    campaign::fmt_usd(s.gross_micros)
+                );
+                for (why, n) in &v.excluded {
+                    println!("    not paid: {n} {}", serde_json::to_string(why)?.trim_matches('"'));
+                }
+                for p in &s.payouts {
+                    println!(
+                        "    {:<9} {:>10}  {}",
+                        serde_json::to_string(&p.role)?.trim_matches('"'),
+                        format!("${}", billing::usd_decimal(p.micros)),
+                        if p.address.is_empty() { "(owed: no address)" } else { &p.address }
+                    );
+                }
+            }
+            for (c, e) in &round.refused {
+                println!("refused gateway {}: {e}", &c.gateway[..16.min(c.gateway.len())]);
+            }
+            let spent = if pay {
+                ledger.spent_micros
+            } else {
+                ledger.spent_micros + round.settled.iter().map(|(s, _)| s.gross_micros).sum::<u64>()
+            };
+            println!(
+                "budget:     {} of {} spent{}",
+                campaign::fmt_usd(spent),
+                campaign::fmt_usd(budget),
+                if pay { "" } else { " (if paid)" }
+            );
+            if pay {
+                for l in ledger.lines.iter().filter(|l| l.error.is_some()) {
+                    println!("  unpaid line {}/{}: {}", l.settlement, l.line, l.error.as_deref().unwrap_or(""));
+                }
+            } else if !round.settled.is_empty() {
+                println!("dry run: nothing signed or paid. Pay with --pay ([ads] payouts = true).");
             }
             Ok(())
         }
@@ -3891,6 +4107,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         "video" => Some(Role::Video),
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
+        "music" | "song" | "songs" => Some(Role::Music),
         "crawl" | "fetch" => Some(Role::Crawl),
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),

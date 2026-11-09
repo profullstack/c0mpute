@@ -23,26 +23,35 @@
 #     JSONL log, serves them at /ads/v1/receipts and re-gossips them when an
 #     advertiser asks. `c0mpute ads report` verifies the chains and counts.
 #
-# Not built: billing. Bids only rank campaigns; nothing is escrowed or paid,
-# and there is no OpenRTB auction or CoinPay settlement yet.
+#   - Billing (ads/billing.rs): a budget signed into the campaign; receipts
+#     carry the cleared second price; gateways sign claims over contiguous
+#     ranges of their own receipt chains; verify_claim is a pure function
+#     (signatures, hash chain, replay/gap, dedupe by play, frequency and
+#     daily caps, self-dealing, overspend); the advertiser signs chained
+#     settlements and pays each line (5% network fee, 75% show, 20% gateway;
+#     95% gateway without a show) through the CoinPay rail (`coinpay wallet
+#     send`), off by default. `c0mpute ads settle` dry-runs; --pay settles.
+#
+# Not built: OpenRTB auction. Real payouts are implemented but off by default
+# and untested with real funds (see status_note).
 
 [module]
 id          = "ads-manager"
 name        = "Ads Manager — shared ad operations layer"
-version     = "0.2.79"
+version     = "0.2.81"
 kind        = "service"
 category    = "applications"
 status      = "partial"
-status_note = "Campaigns, creatives, ad selection and signed impression receipts work peer to peer; billing does not exist yet (bids only rank campaigns, nothing is escrowed, charged or paid out)."
+status_note = "Campaigns, selection, receipts and billing work peer to peer and are tested end to end on a fake payment rail (budgets, second-price receipts, gateway claims, verified settlements, payouts and overspend refusal). Only the switch to real money remains: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
 builtin     = true
-description = "Peer-to-peer ad operations: advertisers sign campaigns that gossip to every gateway, creatives live on self-healing hosting copies, each gateway picks ads with an explainable, deterministic rule, and gateways sign chained impression receipts that advertisers count with their own CLI. No ad server."
+description = "Peer-to-peer ad operations: advertisers sign campaigns with a budget that gossip to every gateway, creatives live on self-healing hosting copies, each gateway picks ads with an explainable second-price rule, gateways sign chained impression receipts and claim payment over them, and the advertiser verifies and pays gateways and shows from its own CoinPay wallet. No ad server, no clearing house."
 author      = "Profullstack"
 license     = "MIT"
 source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/ads"
-keywords    = ["ads", "advertising", "campaigns", "p2p", "receipts", "publisher", "creative"]
+keywords    = ["ads", "advertising", "campaigns", "p2p", "receipts", "publisher", "creative", "billing", "coinpay"]
 
 [module.requirements]
-c0mpute      = ">=0.2.78"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:ingress?", "network:egress", "disk"]
@@ -68,3 +77,9 @@ cli = "c0mpute ads"
 serve             = true    # [ads] serve: answer ad requests on this gateway
 regossip_secs     = 600
 receipt_flush_secs = 60
+claim_secs        = 300     # gateways claim unsettled receipts this often
+min_claim_usd     = "1.00"  # [ads] min_claim_usd
+payouts           = false   # [ads] payouts: settle --pay may send real money
+fee_bps           = 500     # network fee (same 5% as the market and Infernet)
+publisher_bps     = 7500    # show share of each paid impression
+gateway_bps       = 2000    # gateway share (95% when there is no show)

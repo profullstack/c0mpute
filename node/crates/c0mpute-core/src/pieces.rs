@@ -182,7 +182,7 @@ pub async fn fetch_chunk(
         .await
         .context("timed out fetching a piece")??;
     if Hash::of(&bytes) != hash || bytes.len() > max_bytes {
-        bail!("piece does not match its hash or is too big");
+        return Err(Mismatch("piece does not match its hash or is too big").into());
     }
     Ok(bytes)
 }
@@ -205,7 +205,7 @@ async fn fetch_pieces_with(
     mut sink: Sink<'_>,
 ) -> Result<()> {
     if pieces.len() != piece_count(size, piece_bytes) {
-        bail!("{} pieces cannot make {size} bytes", pieces.len());
+        return Err(Mismatch("the piece count does not fit the size").into());
     }
     let mut hasher = blake3::Hasher::new();
     let mut written = 0u64;
@@ -229,7 +229,7 @@ async fn fetch_pieces_with(
             written += bytes.len() as u64;
             let last = written >= size;
             if (!last && bytes.len() != piece_bytes) || written > size {
-                bail!("pieces do not add up to {size} bytes");
+                return Err(Mismatch("pieces do not add up to the size").into());
             }
             hasher.update(&bytes);
             match &mut sink {
@@ -239,7 +239,7 @@ async fn fetch_pieces_with(
         }
     }
     if written != size || Hash(*hasher.finalize().as_bytes()) != whole {
-        bail!("reassembled file does not match its hash");
+        return Err(Mismatch("reassembled file does not match its hash").into());
     }
     Ok(())
 }
@@ -427,9 +427,301 @@ impl InputRef {
     }
 }
 
+/// A piece check failed: the holder sent bytes that are not what was named.
+/// Callers downcast to tell bad bytes from an unreachable holder.
+#[derive(Debug, Clone, Copy)]
+pub struct Mismatch(pub &'static str);
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Mismatch {}
+
+// ─── worker results ──────────────────────────────────────────────────────
+//
+// A worker's result goes back to the buyer by the hash its receipt names.
+// Results up to [`RESULT_SINGLE_CHUNK_MAX`] are that one chunk, exactly as
+// before pieces existed, so every buyer version can fetch them. A bigger
+// result is stored as [`RESULT_PIECE_BYTES`] pieces and the receipt names a
+// small manifest chunk instead: [`MANIFEST_MAGIC`] followed by JSON
+// `{v, size, hash, piece_bytes, pieces}`. The magic cannot begin a JSON,
+// WAV, PNG or MP4 result, so a buyer tells the two apart from the first
+// bytes. Buyers that predate this fetch the manifest and reject it as a
+// malformed result.
+
+/// Largest result a worker still returns as one chunk.
+pub const RESULT_SINGLE_CHUNK_MAX: usize = 1024 * 1024;
+/// Piece size for results over [`RESULT_SINGLE_CHUNK_MAX`].
+pub const RESULT_PIECE_BYTES: usize = 1024 * 1024;
+/// First bytes of a result manifest chunk.
+pub const MANIFEST_MAGIC: &[u8] = b"C0MPUTE-PIECES/1\n";
+/// Largest manifest a buyer accepts (a 2 GiB transcode output in 1 MiB
+/// pieces is about 140 KiB of manifest).
+pub const MAX_MANIFEST_BYTES: usize = 512 * 1024;
+/// Smallest and largest piece size a manifest may name.
+const MIN_MANIFEST_PIECE_BYTES: usize = 64 * 1024;
+const MAX_MANIFEST_PIECE_BYTES: usize = 4 * 1024 * 1024;
+
+/// A pieced result, as the manifest chunk describes it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResultManifest {
+    pub v: u32,
+    /// Bytes in the whole result.
+    pub size: u64,
+    /// Hex hash of the whole result.
+    pub hash: String,
+    pub piece_bytes: u64,
+    /// Hex piece hashes, in order.
+    pub pieces: Vec<String>,
+}
+
+/// A manifest after its checks: what to fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedManifest {
+    pub whole: Hash,
+    pub size: u64,
+    pub piece_bytes: usize,
+    pub pieces: Vec<Hash>,
+}
+
+impl ResultManifest {
+    fn of(pieces: &Pieces, piece_bytes: usize) -> Self {
+        Self {
+            v: 1,
+            size: pieces.size,
+            hash: pieces.hash.clone(),
+            piece_bytes: piece_bytes as u64,
+            pieces: pieces.pieces.clone(),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = MANIFEST_MAGIC.to_vec();
+        out.extend_from_slice(&serde_json::to_vec(self).expect("manifest serializes"));
+        out
+    }
+
+    /// `None` when `bytes` is not a manifest at all (a plain single-chunk
+    /// result); `Some(Err)` when it claims to be one but is malformed.
+    pub fn decode(bytes: &[u8]) -> Option<Result<Self>> {
+        let body = bytes.strip_prefix(MANIFEST_MAGIC)?;
+        Some(
+            serde_json::from_slice::<Self>(body)
+                .map_err(|_| anyhow::Error::from(Mismatch("result manifest is not valid JSON"))),
+        )
+    }
+
+    /// Check every field against the buyer's `max_bytes` cap.
+    pub fn check(&self, max_bytes: usize) -> Result<CheckedManifest> {
+        let bad = |why: &'static str| -> anyhow::Error { Mismatch(why).into() };
+        if self.v != 1 {
+            return Err(bad("unknown result manifest version"));
+        }
+        if self.size == 0 {
+            return Err(bad("result manifest names an empty result"));
+        }
+        if self.size > max_bytes as u64 {
+            return Err(bad("result is over the size limit"));
+        }
+        let piece_bytes = self.piece_bytes as usize;
+        if !(MIN_MANIFEST_PIECE_BYTES..=MAX_MANIFEST_PIECE_BYTES).contains(&piece_bytes) {
+            return Err(bad("result manifest piece size is out of range"));
+        }
+        if self.pieces.len() != piece_count(self.size, piece_bytes) {
+            return Err(bad("the piece count does not fit the size"));
+        }
+        let whole =
+            Hash::from_hex(&self.hash).map_err(|_| bad("result manifest hash is not hex"))?;
+        let pieces = self
+            .pieces
+            .iter()
+            .map(|h| Hash::from_hex(h))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| bad("result manifest piece hashes are not hex"))?;
+        Ok(CheckedManifest {
+            whole,
+            size: self.size,
+            piece_bytes,
+            pieces,
+        })
+    }
+}
+
+async fn store_manifest(
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
+    pieces: &Pieces,
+) -> Result<String> {
+    let manifest = ResultManifest::of(pieces, RESULT_PIECE_BYTES).encode();
+    let hash = store
+        .put(&manifest)
+        .await
+        .context("store result manifest")?;
+    net.announce(&hash)
+        .await
+        .context("announce result manifest")?;
+    Ok(hash.to_hex())
+}
+
+/// Store and announce a worker result held in memory; returns the hash the
+/// receipt names. Up to [`RESULT_SINGLE_CHUNK_MAX`] it is the result's own
+/// hash (one chunk, readable by every buyer); above that it is a manifest
+/// over [`RESULT_PIECE_BYTES`] pieces.
+pub async fn publish_result_bytes(
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
+    bytes: &[u8],
+) -> Result<String> {
+    if bytes.is_empty() {
+        bail!("cannot publish an empty result");
+    }
+    if bytes.len() <= RESULT_SINGLE_CHUNK_MAX {
+        let hash = store.put(bytes).await.context("store result")?;
+        net.announce(&hash).await.context("announce result")?;
+        return Ok(hash.to_hex());
+    }
+    let mut pieces = Vec::with_capacity(piece_count(bytes.len() as u64, RESULT_PIECE_BYTES));
+    for piece in bytes.chunks(RESULT_PIECE_BYTES) {
+        let hash = store.put(piece).await.context("store result piece")?;
+        net.announce(&hash).await.context("announce result piece")?;
+        pieces.push(hash.to_hex());
+    }
+    let pieces = Pieces {
+        hash: Hash::of(bytes).to_hex(),
+        size: bytes.len() as u64,
+        pieces,
+    };
+    store_manifest(net, store, &pieces).await
+}
+
+/// [`publish_result_bytes`] for a result on disk, streamed: a multi-GiB
+/// transcode output is never in memory whole. Empty or over-`max_bytes`
+/// files are refused. The file is left in place.
+pub async fn publish_result_file(
+    net: &Libp2pNetwork,
+    store: &ChunkStore,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<String> {
+    let size = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("result file {} is missing", path.display()))?
+        .len();
+    if size == 0 {
+        bail!("result {} is empty", path.display());
+    }
+    if size > max_bytes {
+        bail!("result is {size} bytes, over the {max_bytes}-byte result limit");
+    }
+    if size as usize <= RESULT_SINGLE_CHUNK_MAX {
+        let bytes = tokio::fs::read(path).await?;
+        return publish_result_bytes(net, store, &bytes).await;
+    }
+    let pieces = put_file_pieces(net, store, path, max_bytes, RESULT_PIECE_BYTES).await?;
+    store_manifest(net, store, &pieces).await
+}
+
+/// Fetch the pieces a checked manifest names into memory.
+pub async fn fetch_manifest_pieces(
+    net: &Arc<Libp2pNetwork>,
+    provider: Option<PeerId>,
+    m: &CheckedManifest,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(m.size as usize);
+    fetch_pieces_with(
+        net,
+        provider,
+        &m.pieces,
+        m.size,
+        m.whole,
+        m.piece_bytes,
+        Sink::Memory(&mut out),
+    )
+    .await?;
+    Ok(out)
+}
+
+/// Fetch the pieces a checked manifest names straight to `dest`, a piece at
+/// a time (renamed into place only once every check passed).
+pub async fn fetch_manifest_pieces_to_file(
+    net: &Arc<Libp2pNetwork>,
+    provider: Option<PeerId>,
+    m: &CheckedManifest,
+    dest: &Path,
+) -> Result<()> {
+    fetch_pieces_to_file(
+        net,
+        provider,
+        &m.pieces,
+        m.size,
+        m.whole,
+        m.piece_bytes,
+        dest,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_manifests_round_trip_and_check() {
+        let p = Pieces {
+            hash: hex(b"whole"),
+            size: RESULT_PIECE_BYTES as u64 + 1,
+            pieces: vec![hex(b"a"), hex(b"b")],
+        };
+        let m = ResultManifest::of(&p, RESULT_PIECE_BYTES);
+        let bytes = m.encode();
+        assert!(bytes.starts_with(MANIFEST_MAGIC));
+        let back = ResultManifest::decode(&bytes).unwrap().unwrap();
+        assert_eq!(back, m);
+        let c = back.check(16 * 1024 * 1024).unwrap();
+        assert_eq!(c.pieces.len(), 2);
+        assert_eq!(c.whole, Hash::of(b"whole"));
+        // Over the buyer's cap.
+        assert!(back.check(RESULT_PIECE_BYTES).is_err());
+        // Plain results are not manifests: JSON, WAV, PNG, MP4.
+        for plain in [
+            &b"{\"ok\":true}"[..],
+            b"RIFF....WAVE",
+            b"\x89PNG\r\n\x1a\n",
+            b"\0\0\0\x18ftypmp42",
+        ] {
+            assert!(ResultManifest::decode(plain).is_none());
+        }
+        // Claims to be one but is not JSON.
+        let mut junk = MANIFEST_MAGIC.to_vec();
+        junk.extend_from_slice(b"nope");
+        assert!(ResultManifest::decode(&junk).unwrap().is_err());
+        // Wrong count, bad piece size, bad version, empty, bad hex.
+        let mut w = m.clone();
+        w.pieces.pop();
+        assert!(w.check(usize::MAX).is_err());
+        let mut w = m.clone();
+        w.piece_bytes = 1;
+        assert!(w.check(usize::MAX).is_err());
+        let mut w = m.clone();
+        w.v = 2;
+        assert!(w.check(usize::MAX).is_err());
+        let mut w = m.clone();
+        w.size = 0;
+        assert!(w.check(usize::MAX).is_err());
+        let mut w = m.clone();
+        w.pieces[0] = "zz".into();
+        assert!(w.check(usize::MAX).is_err());
+        // A 2 GiB result's manifest fits the manifest cap.
+        let big = Pieces {
+            hash: hex(b"x"),
+            size: 2 * 1024 * 1024 * 1024,
+            pieces: vec![hex(b"x"); 2048],
+        };
+        assert!(ResultManifest::of(&big, RESULT_PIECE_BYTES).encode().len() < MAX_MANIFEST_BYTES);
+    }
 
     fn hex(b: &[u8]) -> String {
         Hash::of(b).to_hex()

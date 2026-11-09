@@ -141,6 +141,13 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.push(crate::diffusion::MODEL_TAG.to_string());
                 }
             }
+            Role::Music => {
+                // Same rule as diffusion: installed, idle and with free memory now.
+                if crate::music::can_serve(&config.music) {
+                    tags.push(crate::music::ROLE_TAG.to_string());
+                    tags.push(crate::music::MODEL_TAG.to_string());
+                }
+            }
         }
     }
     tags

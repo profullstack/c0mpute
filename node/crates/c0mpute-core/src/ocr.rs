@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::{JobOffer, JobStatus};
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -505,9 +505,9 @@ async fn run_ocr_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("OCR result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    let hash = store.put(&bytes).await.context("store OCR result")?;
-    net.announce(&hash).await.context("announce OCR result")?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_bytes(net, store, &bytes)
+        .await
+        .context("publish OCR result")
 }
 
 #[cfg(test)]

@@ -191,6 +191,10 @@ pub enum Role {
     /// Z-Image-Turbo). On by default; the node installs it only when it has
     /// the RAM and disk, and bids only while it has free memory.
     Diffusion,
+    /// `music.txt2music`: songs from a prompt and optional lyrics (ACE-Step
+    /// 1.5, CPU bf16 or GPU). On by default; installed only on boxes with the
+    /// RAM and disk, and bids only while it has free memory.
+    Music,
     /// `crawl.fetch`: fetch one public web page for a buyer (static, robots
     /// aware, SSRF-guarded). On by default; it needs nothing but a network.
     Crawl,
