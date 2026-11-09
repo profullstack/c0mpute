@@ -375,6 +375,27 @@ impl Supervisor {
             None
         };
 
+        // Live streams: every `live-stream` node relays (verifies records,
+        // holds and re-serves the segments it fetched); a gateway also serves
+        // the playlists and segments over HTTP.
+        let live = if self.config.roles.contains(&c0mpute_proto::Role::LiveStream) {
+            match crate::live::LiveStream::start(
+                self.libp2p.clone(),
+                self.store.clone(),
+                crate::live::Timing::default(),
+            )
+            .await
+            {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!(err = %e, "live-stream: not started");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if self.config.roles.contains(&c0mpute_proto::Role::Gateway) {
             let bind: std::net::SocketAddr = self.config.gateway.bind.parse()?;
             let state = c0mpute_gateway::GatewayState {
@@ -384,6 +405,9 @@ impl Supervisor {
             let mut app = c0mpute_gateway::router(state);
             if self.config.roles.contains(&c0mpute_proto::Role::Storage) {
                 app = app.merge(self.storage_router());
+            }
+            if let Some(l) = &live {
+                app = app.merge(l.router());
             }
             if let Some(h) = &hosting {
                 app = app.merge(h.router());

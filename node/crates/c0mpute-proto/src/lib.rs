@@ -205,6 +205,11 @@ pub enum Role {
     /// default; the node provisions the runtime in the background and
     /// advertises the role once it works.
     Embed,
+    /// p2p HLS live streaming: relay and serve live streams from every
+    /// gateway, swarming segments between peers. On by default; relays need
+    /// nothing (the broadcaster needs ffmpeg). Config/CLI spelling: `live-stream`.
+    #[serde(rename = "live-stream", alias = "livestream")]
+    LiveStream,
 }
 
 #[cfg(test)]
