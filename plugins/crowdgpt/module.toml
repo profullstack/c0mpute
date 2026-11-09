@@ -57,7 +57,7 @@ keywords    = ["donation", "idle", "training", "llm", "crowdgpt", "volunteer"]
 earns       = false
 
 [module.requirements]
-c0mpute      = ">=0.2.90"
+c0mpute      = ">=0.2.91"
 os           = ["linux"]
 arch         = ["x86_64"]
 capabilities = ["container-runtime", "gpu:cuda?"]
