@@ -153,7 +153,8 @@ export function looksLikeQuestion(s) {
  * @param {number} [opts.timeoutMs]  default 90 s
  */
 export function createSolver(opts = {}) {
-  const base = (opts.url || env("C0MPUTE_CAPTCHA_URL") || DEFAULT_URL).replace(/\/+$/, "");
+  let base = opts.url || env("C0MPUTE_CAPTCHA_URL") || DEFAULT_URL;
+  while (base.endsWith("/")) base = base.slice(0, -1);
   const token = opts.token || env("C0MPUTE_CAPTCHA_TOKEN") || env("C0MPUTE_SPEECH_TOKEN");
   const fetchImpl = opts.fetch || globalThis.fetch.bind(globalThis);
   const timeoutMs = opts.timeoutMs ?? 90_000;
