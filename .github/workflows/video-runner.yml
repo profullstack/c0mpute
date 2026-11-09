@@ -6,8 +6,19 @@
 # torch image is several GB and not worth building to learn that a validation
 # rule changed.
 #
-# The image the node pulls is the tag in plugins/video/module.toml under
-# [module.dispatch]; keep the two in step.
+# Tags on every master build: :stable (what operators pull by hand),
+# :candidate (kept for older nodes) and :<sha>. Nodes pull by DIGEST, the one
+# pinned in plugins/video/module.toml [module.dispatch] and RUNNER_DIGEST in
+# node/crates/c0mpute-core/src/video.rs (a unit test keeps those two equal).
+# The job summary prints the new digest; bump both pins to it after a runner
+# change.
+#
+# Visibility: the package must be PUBLIC for outside operators to pull it.
+# GHCR creates org packages private and has no API to change that, so it is
+# one manual click by an org admin: github.com/orgs/profullstack/packages ->
+# c0mpute-video-runner -> Package settings -> Change visibility -> Public.
+# The last step below checks an anonymous pull and warns until it works.
+# Until then `c0mpute video setup` builds the same image from source.
 name: video runner
 
 on:
@@ -81,15 +92,21 @@ jobs:
           EXTRA: ${{ inputs.tag }}
         run: |
           set -eu
-          tags="${IMAGE}:candidate,${IMAGE}:${GITHUB_SHA}"
+          tags="${IMAGE}:stable,${IMAGE}:candidate,${IMAGE}:${GITHUB_SHA}"
           if [ -n "${EXTRA:-}" ]; then
             tags="${tags},${IMAGE}:${EXTRA}"
           fi
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@v6
         with:
+          # Links the package to this public repo (and its README/license).
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=c0mpute video runner (Wan 2.2, LTX-2.3)
+            org.opencontainers.image.licenses=MIT
           # The context is plugins/video so module.toml — the runner's model
           # registry — is part of the image.
           context: plugins/video
@@ -103,3 +120,25 @@ jobs:
         # Proves the thing we just pushed can parse the manifest, encode and
         # probe. Needs no GPU, so a hosted runner can do it.
         run: docker run --rm "${IMAGE}:${GITHUB_SHA}" selftest
+
+      - name: Digest to pin, and can a stranger pull it?
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -u
+          {
+            echo "### video runner published"
+            echo ""
+            echo "Pin this in plugins/video/module.toml and RUNNER_DIGEST in video.rs:"
+            echo ""
+            echo "    ${IMAGE}@${DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Anonymous pull: a fresh docker config with no credentials.
+          export DOCKER_CONFIG="$(mktemp -d)"
+          if docker manifest inspect "${IMAGE}@${DIGEST}" >/dev/null 2>&1; then
+            echo "Anonymous pull: OK (package is public)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            msg="ghcr.io package c0mpute-video-runner is not publicly pullable. An org admin must set it Public once: github.com/orgs/profullstack/packages -> c0mpute-video-runner -> Package settings -> Change visibility. Until then nodes build the runner from source."
+            echo "::warning::${msg}"
+            echo "Anonymous pull: FAILED. ${msg}" >> "$GITHUB_STEP_SUMMARY"
+          fi

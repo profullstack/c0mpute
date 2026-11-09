@@ -1,26 +1,47 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
 # Built in: workloads `gameserver.start` and `gameserver.stop`
-# (node/crates/c0mpute-core/src/gameserver.rs, CLI c0mpute-cli/src/gameserver.rs).
+# (node/crates/c0mpute-core/src/gameserver.rs and handoff.rs, CLI
+# c0mpute-cli/src/gameserver.rs).
 #
 # Start is an ordinary auction with a short job: the winning worker runs
 # `docker create` (argv only, no shell) on a pinned image with --memory,
-# --memory-swap, --cpus, --pids-limit 1024, no-new-privileges and --restart no,
-# a named volume for the world and a published port block from its range,
-# restores a world if asked, starts it and returns address:port plus the
-# expiry. The server then runs for the reserved hours; the worker's reaper
-# stops it at expiry. Images (multi-arch index digests):
+# --memory-swap, --cpus, --pids-limit 1024, no-new-privileges, --restart no,
+# --rm and --init, a named volume for the world and a published port block
+# from its range, restores a world if asked, starts it and returns
+# address:port plus the expiry. Images (multi-arch index digests):
 #   minecraft  itzg/minecraft-server:java21   (EULA=TRUE only with the buyer's --accept-eula)
 #   factorio   factoriotools/factorio:stable-2.1.24
 #   valheim    lloesche/valheim-server        (x86_64 only; buyer sets the password)
 #
+# Secrets: nothing secret is in the offer (spec v2). The offer carries the
+# buyer's fresh X25519 key; after the accept the winner announces its own and
+# the buyer seals the Valheim password and any restore key to it
+# (X25519 -> HKDF-SHA256 -> AES-256-GCM, gossip-signed both ways).
+#
 # Stop: the start spec carries sha256(stop token); the token stays on the
 # buyer's machine until `gameserver stop`, and only the worker holding that
-# server bids. On stop or expiry the worker tars the world out of the volume
-# (`docker cp`), stores it as 1 MiB content-addressed chunks plus a manifest,
-# announces them, and returns the manifest hash; the buyer downloads the tar
-# (verified chunk by chunk and by sha256). `start --world <hash>` serves it
-# from the buyer's node and any worker restores it. No coordinator anywhere.
+# server bids.
+#
+# Backups: every `backup_mins` (default 30) and at stop or expiry the worker
+# tars the world out of the volume, encrypts it to the buyer's long-term
+# X25519 backup key in 1 MiB AES-GCM chunks, and stores and announces the
+# chunks plus a manifest. The manifest hash is in the stop receipt and in the
+# worker's status record; only the buyer can read what it names.
+#
+# Health and failover: workers gossip a status record per server (container
+# running, latest backup) on c0mpute/gameserver/v1, signed by their peer key.
+# `c0mpute gameserver watch` probes the game port (Minecraft status ping,
+# Valheim Steam A2S query, Factorio UDP reachability plus a fresh "running"
+# record), logs every probe (`gameserver health`), mirrors each backup to the
+# buyer's machine, and after `--fail-after-secs` (default 300) of failed checks
+# starts the same world on another worker from the newest backup. No
+# coordinator anywhere.
+#
+# Expiry: the server runs under `timeout <reservation>` behind --init and
+# --rm, so it stops itself at expiry even if the worker is offline then. At
+# boot and on every sweep the worker kills any labelled container past its
+# expiry, then backs the world up from the volume and removes it.
 #
 # Worker: opt-in role (`c0mpute worker start --roles ...,gameserver`), never
 # default. Advertised only when `docker info` works, the node knows a public
@@ -28,11 +49,8 @@
 # C0MPUTE_P2P_EXTERNAL) and a pinned image has been pulled. The operator opens
 # [gameserver] port_min..port_max (default 27500-27599, TCP and UDP).
 #
-# Not built: replicas / live failover, proof-of-serve (RCON or player
-# heartbeat) and per-epoch settlement: a reservation is paid once, up front,
-# at the price the auction cleared. Backups are readable by anyone who has the
-# manifest hash (it is in the stop receipt), and a Valheim password rides in
-# the public offer.
+# Billing: one payment up front at the price the auction cleared. A failover
+# is a new rental, paid the same way.
 
 [module]
 id          = "gameserver"
@@ -40,19 +58,19 @@ name        = "Game server — Minecraft / Factorio / Valheim"
 version     = "0.2.81"
 kind        = "workload"
 category    = "infrastructure"
-status      = "partial"
-status_note = "Start, stop, expiry and world backup/restore work. Only opt-in workers with docker and a public IP whose firewall opens the port range can host, and few do yet. No replicas or proof-of-serve: one worker, paid once up front; if it goes offline the server is gone until it returns, and the world survives only in its last backup."
+status      = "available"
 builtin     = true
-description = "Rent a Minecraft, Factorio or Valheim server on a c0mpute worker for 1-72 hours: pinned docker images with RAM and CPU limits, address:port back in seconds, auto-stop at expiry, and the world backed up p2p by hash so any worker can restore it."
+description = "Rent a Minecraft, Factorio or Valheim server on a c0mpute worker for 1-72 hours: pinned docker images with RAM and CPU limits, address:port back in seconds, a hard stop at expiry, world backups every 30 minutes encrypted to your key, and a watcher that probes the server and fails over to another worker from the latest backup."
 author      = "Profullstack"
 license     = "MIT"
 keywords    = ["gameserver", "minecraft", "factorio", "valheim", "hosting", "docker"]
 
 [module.requirements]
-c0mpute      = ">=0.2.77"
+c0mpute      = ">=NEXT"
 os           = ["linux"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["container-runtime", "network:public-ip", "network:ingress"]
+hardware     = "opt-in worker role: docker + a public IP with the port range open (TCP and UDP)"
 
 [module.workloads]
 "gameserver.start" = { command = "start", validation = "result_schema" }
@@ -72,3 +90,4 @@ max_total_ram_gb    = 0
 max_hours           = 24
 min_usd_per_gb_hour = 0.0
 games               = ["minecraft", "factorio", "valheim"]
+backup_mins         = 30

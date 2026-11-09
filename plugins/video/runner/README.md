@@ -4,8 +4,12 @@ The container the `video` plugin dispatches to. One job per process: read
 `job.json`, generate a clip, encode an MP4, write a sidecar, exit non-zero on
 any failure.
 
-Published as `ghcr.io/profullstack/c0mpute-video-runner`. The tag a node pulls
-is the one in [`../module.toml`](../module.toml) under `[module.dispatch]`.
+Published as `ghcr.io/profullstack/c0mpute-video-runner` with the tags
+`:stable`, `:candidate` and `:<commit sha>` on every master build. A node
+pulls by digest: the one in [`../module.toml`](../module.toml) under
+`[module.dispatch]` (and `RUNNER_DIGEST` in `video.rs`), then tags it locally
+as `c0mpute/video-runner:stable`, the name the worker runs. After a runner
+change, copy the digest from the workflow's job summary into both pins.
 
 **The registry is a convenience, not a dependency.** `c0mpute video setup`
 pulls the image, and if the registry will not serve it — private package,

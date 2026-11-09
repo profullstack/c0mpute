@@ -34,12 +34,16 @@ enum Sub {
         /// Restore a world: the hash `gameserver stop` printed, or a .tar of the game's data dir.
         #[arg(long)]
         world: Option<String>,
-        /// Valheim server password (5-32 letters/digits; peers on the job topic can see it).
+        /// Valheim server password (5-32 letters/digits). Sent sealed to the
+        /// winning worker after the auction, never in the public offer.
         #[arg(long)]
         password: Option<String>,
         /// Server name / MOTD.
         #[arg(long)]
         name: Option<String>,
+        /// Minutes between live world backups, sealed to your key (0 = only at stop/expiry).
+        #[arg(long, default_value_t = gameserver::DEFAULT_BACKUP_MINS)]
+        backup_mins: u32,
         /// Most you pay for the whole reservation, USD.
         #[arg(long, default_value_t = 1.0)]
         max_price: f64,
@@ -53,6 +57,32 @@ enum Sub {
     },
     /// List the servers rented from this machine.
     Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Watch a server: probe its port, mirror its backups, and if it stays
+    /// down for --fail-after-secs, start the same world on another worker.
+    Watch {
+        id: String,
+        #[arg(long, default_value_t = 30)]
+        probe_every_secs: u64,
+        #[arg(long, default_value_t = 300)]
+        fail_after_secs: u64,
+        /// Only probe and mirror backups; never start a replacement.
+        #[arg(long)]
+        no_failover: bool,
+        /// Most you pay for a replacement, USD.
+        #[arg(long, default_value_t = 1.0)]
+        max_price: f64,
+        /// Only accept replacement bids from these worker peer ids. Repeatable.
+        #[arg(long)]
+        worker: Vec<String>,
+    },
+    /// Show a server's probe log (what `watch` recorded).
+    Health {
+        id: String,
+        #[arg(long, default_value_t = 20)]
+        last: usize,
         #[arg(long)]
         json: bool,
     },
@@ -85,7 +115,7 @@ fn left(expires_at: u64) -> String {
 pub async fn run(args: &[String]) -> Result<()> {
     let cli = GameserverCli::try_parse_from(std::iter::once("c0mpute gameserver".to_string()).chain(args.iter().cloned())).unwrap_or_else(|e| e.exit());
     match cli.cmd {
-        Sub::Start { game, hours, ram, cpus, accept_eula, world, password, name, max_price, worker, timeout_secs, json } => {
+        Sub::Start { game, hours, ram, cpus, accept_eula, world, password, name, backup_mins, max_price, worker, timeout_secs, json } => {
             let game = Game::parse(&game).with_context(|| format!("unknown game {game:?}: minecraft, factorio or valheim"))?;
             let req = StartRequest {
                 game,
@@ -96,8 +126,10 @@ pub async fn run(args: &[String]) -> Result<()> {
                 world,
                 password,
                 server_name: name,
+                backup_mins,
                 max_price_usd: max_price,
                 workers: worker,
+                exclude: Vec::new(),
                 timeout: Duration::from_secs(timeout_secs.clamp(60, 3600)),
             };
             eprintln!("looking for a worker that hosts {} ...", game.name());
@@ -107,6 +139,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             } else {
                 println!("{} {} is up at {}", r.game.name(), r.id, r.address);
                 println!("  worker {}  ${}  stops in {}", r.worker, r.price_usd, left(r.expires_at));
+                println!("  keep it healthy (probe, mirror backups, fail over): c0mpute gameserver watch {}", r.id);
                 println!("  stop early (and keep the world): c0mpute gameserver stop {}", r.id);
             }
             Ok(())
@@ -121,12 +154,47 @@ pub async fn run(args: &[String]) -> Result<()> {
                 println!("no servers rented from this machine");
             }
             for r in all {
-                let status = match (r.stopped_at, &r.backup) {
-                    (Some(_), Some(b)) => format!("stopped  world {b}"),
-                    (Some(_), None) => "stopped".into(),
-                    (None, _) => left(r.expires_at),
+                let status = match (r.stopped_at, &r.backup, &r.superseded_by) {
+                    (_, _, Some(next)) => format!("failed over to {next}"),
+                    (Some(_), Some(b), _) => format!("stopped  world {b}"),
+                    (Some(_), None, _) => "stopped".into(),
+                    (None, _, _) => match &r.latest_backup {
+                        Some(b) => format!("{}  backup {}", left(r.expires_at), &b[..12.min(b.len())]),
+                        None => left(r.expires_at),
+                    },
                 };
                 println!("{:20} {:10} {:28} {}", r.id, r.game.name(), r.address, status);
+            }
+            Ok(())
+        }
+        Sub::Watch { id, probe_every_secs, fail_after_secs, no_failover, max_price, worker } => {
+            let opts = gameserver::WatchOptions {
+                probe_every: Duration::from_secs(probe_every_secs.clamp(5, 3600)),
+                fail_after: Duration::from_secs(fail_after_secs.clamp(30, 86_400)),
+                failover: !no_failover,
+                max_price_usd: max_price,
+                workers: worker,
+                ..Default::default()
+            };
+            eprintln!("watching {id} (probe every {}s, fail over after {}s down)", opts.probe_every.as_secs(), opts.fail_after.as_secs());
+            match gameserver::watch(&id, opts).await? {
+                gameserver::WatchEnd::Ended(r) => println!("{} ended (reservation over or stopped)", r.id),
+                gameserver::WatchEnd::FailedOver { from, to } => println!("{} failed over to {} at {}", from.id, to.id, to.address),
+            }
+            Ok(())
+        }
+        Sub::Health { id, last, json } => {
+            let log = gameserver::health_log(&gameserver::buyer_dir(), &id);
+            let tail = &log[log.len().saturating_sub(last)..];
+            if json {
+                println!("{}", serde_json::to_string(tail)?);
+                return Ok(());
+            }
+            if tail.is_empty() {
+                println!("no probes recorded for {id} (run `c0mpute gameserver watch {id}`)");
+            }
+            for p in tail {
+                println!("{} {} {:16} {:>5}ms {}", p.ts, if p.ok { "up  " } else { "DOWN" }, p.method, p.rtt_ms, p.detail);
             }
             Ok(())
         }

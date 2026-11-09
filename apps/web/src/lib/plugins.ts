@@ -113,6 +113,8 @@ export interface PluginManifest {
     os?: string[];
     arch?: string[];
     capabilities?: string[];
+    /** What a node needs to serve it, in words (GPU, docker, public IP). */
+    hardware?: string;
   };
   workloads?: Record<string, { command?: string; validation?: string }>;
   models?: Record<string, ModelOption>;
