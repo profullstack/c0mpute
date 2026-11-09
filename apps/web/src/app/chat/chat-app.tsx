@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
 import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodeProgress, type MusicCommand } from "@/lib/chat/music";
+import { describePromoProgress, detectPromoRequest, parsePromoCommand, type PromoCommand, type PromoScene } from "@/lib/chat/promo";
 
 // An image turn keeps its picture only for this session (a blob: URL); what is
 // saved to localStorage is the text placeholder, and the model never sees it.
@@ -17,6 +18,8 @@ type Msg = {
   audioType?: string;
   /** The music job a song message came from, so late cover art finds it. */
   musicJob?: string;
+  /** A promo video: storyboard frames while it renders, then the MP4 (served by /api/v1/promo/<id>). */
+  promo?: { id: string; scenes: PromoScene[]; vertical: boolean; video?: string; captions?: string; duration?: number; title?: string; motion?: string };
 };
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
@@ -343,6 +346,82 @@ export function ChatApp({ error }: { error: string | null }) {
     }
   }
 
+  async function makePromo(convo: Convo, text: string, req: PromoCommand) {
+    const id = convo.id;
+    const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
+    setInput("");
+    setFailure(null);
+    setBusy(true);
+    const started = Date.now();
+    const setLast = (patch: Partial<Msg>) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    setConvos((all) => {
+      const exists = all.some((c) => c.id === id);
+      const base = exists ? all : [convo, ...all];
+      const next = base.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              title,
+              messages: [
+                ...c.messages,
+                { role: "user" as const, content: text, imageTurn: true },
+                { role: "assistant" as const, content: `// starting a ${req.style} promo for ${req.url}…`, imageTurn: true },
+              ],
+              updated: Date.now(),
+            }
+          : c,
+      );
+      save(next);
+      return next;
+    });
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    try {
+      const res = await fetch("/api/v1/promo", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: req.url, style: req.style, vertical: req.vertical, brief: req.brief }),
+        signal: ctrl.signal,
+      });
+      const start = await res.json().catch(() => ({}));
+      if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
+      const deadline = Date.now() + 60 * 60_000;
+      while (true) {
+        if (Date.now() > deadline) throw new Error("promo timed out");
+        await new Promise((r) => setTimeout(r, 4000));
+        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
+        const p = await poll.json().catch(() => ({}));
+        if (poll.status !== 200 && poll.status !== 202) throw new Error(p.error?.message ?? `HTTP ${poll.status}`);
+        const secs = Math.round((Date.now() - started) / 1000);
+        const head = `// ${p.title ?? `${req.style} promo`}${p.brand?.name ? ` for ${p.brand.name}` : ""} · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+        const promo = { id: start.id as string, scenes: (p.scenes ?? []) as PromoScene[], vertical: Boolean(p.vertical), title: p.title };
+        if (poll.status === 202) {
+          setLast({ content: `${head}\n${describePromoProgress(p)}`, promo });
+          continue;
+        }
+        setLast({
+          content: `"${p.title ?? "promo"}" (${Math.round(p.duration ?? 0)}s ${req.style} promo for ${p.brand?.host ?? req.url}; made in ${secs}s on c0mpute workers${p.motion === "kenburns" ? ", keyframes with camera moves" : ", img2vid motion"})`,
+          promo: { ...promo, video: p.video, captions: p.captions, duration: p.duration, motion: p.motion },
+        });
+        break;
+      }
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+      setLast({ content: "// promo not made" });
+    } finally {
+      setBusy(false);
+      abort.current = null;
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
@@ -358,6 +437,11 @@ export function ChatApp({ error }: { error: string | null }) {
       setActiveId(c.id);
     }
     const id = convo.id;
+    const promo = parsePromoCommand(text) ?? detectPromoRequest(text);
+    if (promo) {
+      await makePromo(convo, text, promo);
+      return;
+    }
     const music = parseMusicCommand(text);
     if (music) {
       await composeMusic(convo, text, music);
@@ -549,7 +633,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals).</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -566,6 +650,49 @@ export function ChatApp({ error }: { error: string | null }) {
                     <a href={m.image} download="c0mpute-image.png" className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
                       download
                     </a>
+                  </figure>
+                )}
+                {m.promo && (
+                  <figure className="mt-2">
+                    {m.promo.video && (
+                      <video
+                        controls
+                        playsInline
+                        preload="metadata"
+                        src={m.promo.video}
+                        className={`w-full border border-[var(--color-rule)] bg-black ${m.promo.vertical ? "max-w-[360px]" : "max-w-[640px]"}`}
+                      >
+                        {m.promo.captions && <track kind="captions" src={m.promo.captions} srcLang="en" label="English" />}
+                      </video>
+                    )}
+                    {m.promo.scenes.some((s) => s.frame) && (
+                      <div className={`mt-2 grid grid-cols-4 gap-1 ${m.promo.vertical ? "max-w-[360px]" : "max-w-[640px]"}`}>
+                        {m.promo.scenes.map((s, n) =>
+                          s.frame ? (
+                            // eslint-disable-next-line @next/next/no-img-element -- same-origin keyframe
+                            <img
+                              key={n}
+                              src={`/api/v1/promo/${m.promo!.id}/frame/${n}`}
+                              alt={s.caption}
+                              title={`${n + 1}. ${s.narration}`}
+                              className={`w-full object-cover border border-[var(--color-rule)] ${m.promo!.vertical ? "aspect-[9/16]" : "aspect-video"}`}
+                            />
+                          ) : null,
+                        )}
+                      </div>
+                    )}
+                    {m.promo.video && (
+                      <p className="text-xs text-[var(--color-dim)] flex gap-3">
+                        <a href={`${m.promo.video}?download=1`} className="underline hover:text-[var(--color-fg)]">
+                          download mp4
+                        </a>
+                        {m.promo.captions && (
+                          <a href={m.promo.captions} className="underline hover:text-[var(--color-fg)]">
+                            captions .srt
+                          </a>
+                        )}
+                      </p>
+                    )}
                   </figure>
                 )}
                 {m.audio && (
@@ -602,7 +729,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, or /music <style> (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, /image <prompt>, /music <style>, or /promo <url> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (

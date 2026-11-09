@@ -26,6 +26,7 @@ mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
 mod peers;
+mod promo;
 mod storage;
 mod temporal;
 mod text;
@@ -347,6 +348,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Make a 20-40 s cartoon promo video (MP4 with narration, music and
+    /// captions) of a website on the c0mpute network:
+    /// `c0mpute promo https://example.com --style pixar [--vertical]`.
+    /// Needs `c0mpute chat login`.
+    Promo(promo::PromoArgs),
 
     /// Secure DMs — E2E encrypted p2p messaging (DIP-0018). Was `c0mpute chat`.
     Dm {
@@ -1410,6 +1417,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             run_chat(dm.cmd).await
         }
         Cmd::Chat { args } => ai_chat::run(&args).await,
+        Cmd::Promo(args) => promo::run(args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),

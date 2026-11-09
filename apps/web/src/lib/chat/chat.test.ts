@@ -111,7 +111,7 @@ describe("mcp", () => {
     const list = (await handleRpc({ id: 2, method: "tools/list" }, { user, upstream })) as {
       result: { tools: { name: string }[] };
     };
-    expect(list.result.tools.map((t) => t.name)).toEqual(["chat", "list_models", "whoami"]);
+    expect(list.result.tools.map((t) => t.name)).toEqual(["chat", "list_models", "promo_video", "promo_status", "whoami"]);
     expect(await handleRpc({ method: "notifications/initialized" }, { user, upstream })).toBeNull();
   });
 
