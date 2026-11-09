@@ -10,6 +10,7 @@ pub mod config;
 pub mod crawl;
 pub mod diffusion;
 pub mod hosting;
+pub mod live;
 pub mod dispatch;
 pub mod embed;
 pub mod gameserver;

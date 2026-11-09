@@ -108,6 +108,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.extend(models.into_iter().map(crate::embed::model_tag));
                 }
             }
+            Role::LiveStream => tags.push(crate::live::ROLE_TAG.to_string()),
             Role::Render => {
                 // Only where `blender` runs. The probe (a few seconds) runs
                 // once at worker start; until it finishes, nothing is shown.

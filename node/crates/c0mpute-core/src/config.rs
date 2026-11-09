@@ -287,6 +287,7 @@ impl Default for Config {
                 Role::Hosting,
                 Role::Ocr,
                 Role::Embed,
+                Role::LiveStream,
                 Role::Render,
             ],
             update_channel: default_update_channel(),

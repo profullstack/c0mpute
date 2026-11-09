@@ -210,6 +210,11 @@ pub enum Role {
     /// role: it holds a port and RAM for the whole reservation, and needs a
     /// public address and docker.
     Gameserver,
+    /// p2p HLS live streaming: relay and serve live streams from every
+    /// gateway, swarming segments between peers. On by default; relays need
+    /// nothing (the broadcaster needs ffmpeg). Config/CLI spelling: `live-stream`.
+    #[serde(rename = "live-stream", alias = "livestream")]
+    LiveStream,
     /// `blender.render-frame`: render `.blend` frames with the box's own
     /// Blender (Cycles on CPU, or on a GPU Blender finds). On by default;
     /// advertised only where `blender --version` works.
