@@ -20,7 +20,7 @@
 # impression receipt per ad. No ffmpeg, no fill or any failure: the clean
 # episode, with x-c0mpute-ads saying why.
 #
-# Payout: a show names `payout = "<CHAIN>:<address>"` in [ads] (or
+# Payout: a show names `payout = "<COIN>:<address>"` in [ads] (or
 # --ads-payout); it is inside the signed opt-in, so no gateway can redirect
 # it. Each paid impression on the show pays it 75% of the cleared price
 # (ads-manager billing). A show without a payout runs ads unpaid.
@@ -35,7 +35,7 @@ version     = "0.2.81"
 kind        = "service"
 category    = "applications"
 status      = "partial"
-status_note = "Dynamic ad insertion into opted-in podcasts works on gateways with ffmpeg, and shows that name a payout address earn 75% of each paid impression through ads-manager billing (tested end to end on a fake rail). Not built: a DAAST endpoint. Remaining switch: real payouts run `coinpay wallet send` from the advertiser's wallet and stay off until the advertiser sets `[ads] payouts = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
+status_note = "Dynamic ad insertion into opted-in podcasts works on gateways with ffmpeg, and shows that name a payout address earn 75% of each paid impression through ads-manager billing (tested end to end on a fake rail). Not built: a DAAST endpoint. Remaining switch: real payouts go through the node's one payment rail (`payments.rs`: CoinPay payouts API, key in `$C0MPUTE_COINPAY_PAYOUT_KEY`) and stay off until the advertiser sets both `[ads] payouts = true` and `[payments] enabled = true` and runs `c0mpute ads settle --pay` (never exercised with real funds; moving third-party money needs Anthony's approval), and the 5% network fee is only owed, not sent, until `[ads] fee_payout` names c0mpute's fee wallet."
 builtin     = true
 description = "Dynamic ad insertion for c0mpute-hosted podcasts: shows opt in with a signed flag (and payout address) in their own site, any gateway with ffmpeg splices a matching audio ad before, inside or after the episode, and the show is paid for each verified impression."
 author      = "Profullstack"

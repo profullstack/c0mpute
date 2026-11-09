@@ -22,7 +22,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use c0mpute_core::ads::billing::{Budget, ClaimError, FakeRail, Ledger, Role};
+use c0mpute_core::ads::billing::{Budget, ClaimError, Ledger, Role};
+use c0mpute_core::payments::{FakeRail, Ledger as PayLedger, PaymentsConfig, Rail};
 use c0mpute_core::ads::campaign::{MICROS, Placement};
 use c0mpute_core::ads::manage::{self, CampaignSpec};
 use c0mpute_core::ads::receipt::{Event, Receipt};
@@ -252,8 +253,11 @@ async fn funded_campaign_two_gateways_claims_payouts_and_overspend() {
     let record = manage::record_from_spec(&spec, &adv_owner, creatives, 1).sign(&adv_key).unwrap();
     let cid = record.campaign_id.clone();
     let bids = BTreeMap::from([(record.seq, record.max_cpm_micros)]);
-    let rail = FakeRail::default();
-    rail.fund(PAYER, MICROS); // the advertiser's wallet holds $1
+    let rail = FakeRail::new();
+    let shared = PayLedger::in_memory();
+    let cap = PaymentsConfig::default().round_cap();
+    let got = |payout: &str| rail.received(payout.split_once(':').unwrap().1);
+    rail.fund(&adv_owner, MICROS); // the advertiser holds $1 on the rail
     adv_ads.publish_campaign(record.clone()).await.unwrap();
     {
         let (a, r) = (adv_ads.clone(), record.clone());
@@ -365,14 +369,19 @@ async fn funded_campaign_two_gateways_claims_payouts_and_overspend() {
     assert_eq!((line(&sb, Role::Gateway), line(&sb, Role::Network), line(&sb, Role::Publisher)), (4_600, 400, 3_000));
     assert_eq!(sb.payouts.iter().find(|p| p.role == Role::Publisher).unwrap().key, pod_owner);
 
-    assert_eq!(ledger.pay(&rail, Some(PAYER)), 5);
+    assert_eq!(ledger.pay(&rail, &shared, &adv_owner, cap).await, 5);
     assert_eq!(ledger.unpaid_micros(), 0);
-    assert_eq!(rail.balance(PAYER), MICROS - 14_000, "budget spent = money moved");
-    assert_eq!(rail.balance(GW_A), 5_700);
-    assert_eq!(rail.balance(GW_B), 4_600);
-    assert_eq!(rail.balance(SHOW), 3_000);
-    assert_eq!(rail.balance(FEE), 700);
-    assert_eq!(ledger.pay(&rail, Some(PAYER)), 0, "nothing is paid twice");
+    assert_eq!(rail.balance(&adv_owner).await.unwrap().unwrap(), MICROS - 14_000, "budget spent = money moved");
+    assert_eq!(got(GW_A), 5_700);
+    assert_eq!(got(GW_B), 4_600);
+    assert_eq!(got(SHOW), 3_000);
+    assert_eq!(got(FEE), 700);
+    assert_eq!(ledger.pay(&rail, &shared, &adv_owner, cap).await, 0, "nothing is paid twice");
+    // Every line went through the one shared payments path and its ledger.
+    assert_eq!(shared.entries().len(), 5);
+    assert!(shared.entries().keys().all(|k| k.starts_with("ads:")));
+    // With payments off (the default) there is no rail at all.
+    assert!(c0mpute_core::payments::rail_from_config(&PaymentsConfig::default()).unwrap().is_none());
 
     // ── 4. gateways learn the budget left; overspend is refused ──────────
     {
@@ -417,10 +426,10 @@ async fn funded_campaign_two_gateways_claims_payouts_and_overspend() {
         }
     );
     assert_eq!(ledger.spent_micros, budget_total);
-    ledger.pay(&rail, Some(PAYER));
-    assert_eq!(rail.balance(PAYER), MICROS - budget_total, "never more than the budget");
+    ledger.pay(&rail, &shared, &adv_owner, cap).await;
+    assert_eq!(rail.balance(&adv_owner).await.unwrap().unwrap(), MICROS - budget_total, "never more than the budget");
     assert_eq!(
-        rail.balance(GW_A) + rail.balance(GW_B) + rail.balance(SHOW) + rail.balance(FEE),
+        got(GW_A) + got(GW_B) + got(SHOW) + got(FEE),
         budget_total
     );
     // The settlement chain links and every node can check it.

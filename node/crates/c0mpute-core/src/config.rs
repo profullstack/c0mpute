@@ -77,18 +77,19 @@ pub struct AdsConfig {
     #[serde(default = "default_true")]
     pub podcast_insertion: bool,
     /// Gateway: where this gateway is paid for ads it serves on billed
-    /// campaigns, `<CHAIN>:<address>` (e.g. "SOL:9xQe..."). Without it the
+    /// campaigns, `<COIN>:<address>` (e.g. "SOL:9xQe..."). Without it the
     /// gateway serves and signs receipts but never claims payment.
     #[serde(default)]
     pub payout: Option<String>,
     /// Gateway: smallest claim worth making, USD.
     #[serde(default = "default_min_claim_usd")]
     pub min_claim_usd: String,
-    /// Advertiser: let `c0mpute ads settle --pay` send real money from your
-    /// CoinPay wallet. Off by default: settle only reports what it would pay.
+    /// Advertiser: let `c0mpute ads settle --pay` send real money through
+    /// the node's payment rail (also needs `[payments] enabled = true`). Off
+    /// by default: settle only reports what it would pay.
     #[serde(default)]
     pub payouts: bool,
-    /// Advertiser: where the 5% network fee is sent, `<CHAIN>:<address>`.
+    /// Advertiser: where the 5% network fee is sent, `<COIN>:<address>`.
     /// Without it the fee is recorded as owed and not sent.
     #[serde(default)]
     pub fee_payout: Option<String>,

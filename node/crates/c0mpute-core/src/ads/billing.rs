@@ -25,7 +25,7 @@
 //!    caps, refuses self-dealing, and refuses a claim that would overspend.
 //! 5. **Settle.** The advertiser's node signs a [`Settlement`] (chained per
 //!    campaign, carrying the running total spent), pays each line through a
-//!    [`PaymentRail`], and gossips the settlement so gateways learn how much
+//!    shared payments path ([`crate::payments`]), and gossips the settlement so gateways learn how much
 //!    budget is left and where their next claim starts.
 //!
 //! Split of every paid impression ([`split`]): the c0mpute network fee is 5%,
@@ -35,11 +35,10 @@
 //! directly), the gateway is the publisher and gets 95%.
 //!
 //! Real money moves only with `[ads] payouts = true` on the advertiser's node
-//! and `c0mpute ads settle --pay`; the default rail refuses to pay.
+//! **and** `[payments] enabled = true` (the shared rail), and `c0mpute ads
+//! settle --pay`. Otherwise settle only reports what it would pay.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
-use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use c0mpute_proto::Hash;
@@ -81,7 +80,7 @@ pub struct Budget {
     pub daily_micros: Option<u64>,
     /// Settlement adapter; "coinpay" is the only one with a rail today.
     pub rail: String,
-    /// The advertiser's paying wallet, `<CHAIN>:<address>`. A gateway or show
+    /// The advertiser's paying wallet, `<COIN>:<address>`. A gateway or show
     /// paid to this address is the advertiser paying itself and is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payer: Option<String>,
@@ -104,7 +103,7 @@ impl Budget {
         if let Some(p) = &self.payer
             && !valid_payout(p)
         {
-            bail!("payer must be <CHAIN>:<address>, e.g. SOL:9xQe...");
+            bail!("payer must be <COIN>:<address>, e.g. SOL:9xQe...");
         }
         if let Some(f) = &self.funding_ref
             && (f.is_empty() || f.len() > 128 || f.chars().any(|c| c.is_control() || c.is_whitespace()))
@@ -119,9 +118,9 @@ fn valid_token(s: &str, max: usize) -> bool {
     !s.is_empty() && s.len() <= max && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// A payout address: `<CHAIN>:<address>`, e.g. `SOL:9xQe...`, `ETH:0xabc...`,
-/// `BCH:bitcoincash:q...`. The chain is what `coinpay wallet send --chain`
-/// takes.
+/// A payout address: `<COIN>:<address>`, e.g. `USDC_POL:0xabc...`,
+/// `SOL:9xQe...`. The coin is the CoinPay currency code the shared payments
+/// rail pays in ([`payee_of`]).
 pub fn valid_payout(s: &str) -> bool {
     let Some((chain, addr)) = s.split_once(':') else {
         return false;
@@ -153,7 +152,7 @@ pub struct Claim {
     pub campaign_id: String,
     /// Gateway key (hex), the same key that signed the batches.
     pub gateway: String,
-    /// Where the gateway's share goes, `<CHAIN>:<address>`.
+    /// Where the gateway's share goes, `<COIN>:<address>`.
     pub payout: String,
     pub from_seq: u64,
     pub to_seq: u64,
@@ -269,7 +268,7 @@ pub struct Payout {
     pub role: Role,
     /// Recipient key (gateway or show owner); "" for the network fee.
     pub key: String,
-    /// `<CHAIN>:<address>`; "" when no network fee address is configured
+    /// `<COIN>:<address>`; "" when no network fee address is configured
     /// (the fee is owed, not sent).
     pub address: String,
     pub micros: u64,
@@ -755,30 +754,68 @@ impl Ledger {
         Ok(s)
     }
 
-    /// Send every unpaid line that has an address. Idempotent per line: a
-    /// line with a reference is never sent again, and the rail gets
-    /// `<settlement hash>:<line>` as an idempotency key. Returns lines sent.
-    pub fn pay(&mut self, rail: &dyn PaymentRail, payer: Option<&str>) -> usize {
-        let mut sent = 0;
-        for st in self.lines.iter_mut().filter(|l| l.reference.is_none()) {
+    /// Send every unpaid line that has an address through the shared
+    /// payments path ([`crate::payments::pay_all`]): one [`Transfer`] per
+    /// line, keyed `ads:<settlement hash>:<line>`, so `shared` (the
+    /// payments ledger) and the rail both refuse to pay a line twice, and
+    /// the round stops at `cap`. `payer` is who pays (the campaign owner's
+    /// key). Returns lines sent.
+    pub async fn pay(
+        &mut self,
+        rail: &dyn crate::payments::Rail,
+        shared: &crate::payments::Ledger,
+        payer: &str,
+        cap: crate::payments::Micros,
+    ) -> usize {
+        use crate::payments::{Outcome, Transfer};
+        let mut transfers = Vec::new();
+        let mut index = Vec::new();
+        for (i, st) in self.lines.iter_mut().enumerate().filter(|(_, l)| l.reference.is_none()) {
             let Some(s) = self.settlements.get(st.settlement as usize) else {
                 continue;
             };
             let Some(p) = s.payouts.get(st.line) else {
                 continue;
             };
-            if p.address.is_empty() {
-                st.error = Some("no address: owed, not sent".into());
+            let Some(payee) = payee_of(&p.address) else {
+                st.error = Some(if p.address.is_empty() {
+                    "no address: owed, not sent".into()
+                } else {
+                    format!("not a payout address: {}", p.address)
+                });
                 continue;
-            }
-            let key = format!("{}:{}", s.hash(), st.line);
-            match rail.pay(payer, &p.address, p.micros, &key) {
-                Ok(r) => {
-                    st.reference = Some(r);
+            };
+            transfers.push(Transfer {
+                key: format!("ads:{}:{}", s.hash(), st.line),
+                payer: payer.to_string(),
+                payee,
+                amount: p.micros,
+                memo: format!("c0mpute ads {} settlement {} line {}", s.campaign_id, s.seq, st.line),
+            });
+            index.push(i);
+        }
+        let outcomes = crate::payments::pay_all(rail, shared, &transfers, cap).await;
+        let by_key: HashMap<String, Outcome> = outcomes.into_iter().map(|(t, o)| (t.key, o)).collect();
+        let entries = shared.entries();
+        let mut sent = 0;
+        for (t, i) in transfers.iter().zip(index) {
+            let st = &mut self.lines[i];
+            match by_key.get(&t.key) {
+                Some(Outcome::Paid(p)) => {
+                    st.reference = Some(p.rail_ref.clone());
                     st.error = None;
                     sent += 1;
                 }
-                Err(e) => st.error = Some(e.to_string()),
+                // Paid in an earlier round whose ads ledger was not saved.
+                Some(Outcome::AlreadyPaid) => {
+                    st.reference = Some(entries.get(&t.key).map(|e| e.rail_ref.clone()).unwrap_or_default());
+                    st.error = None;
+                }
+                Some(Outcome::OverBudget) => {
+                    st.error = Some("over this round's payment cap or the payer's balance; next round retries".into())
+                }
+                Some(Outcome::Failed(e)) => st.error = Some(e.clone()),
+                None => {}
             }
         }
         sent
@@ -819,136 +856,20 @@ impl Ledger {
     }
 }
 
-// ── rails ────────────────────────────────────────────────────────────────
+// ── payouts ──────────────────────────────────────────────────────────────
 
-/// Moves money. `pay` sends `micros` USD millionths to `to`
-/// (`<CHAIN>:<address>`) and returns the rail's transfer id.
-pub trait PaymentRail: Send + Sync {
-    fn name(&self) -> &str;
-    fn pay(&self, from: Option<&str>, to: &str, micros: u64, idempotency_key: &str) -> Result<String>;
-}
-
-/// The default: refuses to move money.
-pub struct DisabledRail;
-
-impl PaymentRail for DisabledRail {
-    fn name(&self) -> &str {
-        "disabled"
+/// `<COIN>:<address>` as a payments [`crate::payments::Payee`]: the part
+/// before the first `:` is the CoinPay currency code (`SOL`, `USDC_POL`,
+/// ...), the rest the wallet address.
+pub fn payee_of(payout: &str) -> Option<crate::payments::Payee> {
+    if !valid_payout(payout) {
+        return None;
     }
-    fn pay(&self, _: Option<&str>, _: &str, _: u64, _: &str) -> Result<String> {
-        bail!("payouts are disabled: set `[ads] payouts = true` and pass --pay to send real money")
-    }
-}
-
-/// An in-memory rail for tests and dry runs: accounts with balances, every
-/// transfer logged, idempotency keys honoured, overdrafts refused.
-#[derive(Default)]
-pub struct FakeRail {
-    pub balances: Mutex<HashMap<String, u64>>,
-    pub transfers: Mutex<Vec<(String, String, u64, String)>>,
-    keys: Mutex<HashMap<String, String>>,
-}
-
-impl FakeRail {
-    pub fn fund(&self, account: &str, micros: u64) {
-        *self.balances.lock().unwrap().entry(account.to_string()).or_default() += micros;
-    }
-    pub fn balance(&self, account: &str) -> u64 {
-        self.balances.lock().unwrap().get(account).copied().unwrap_or(0)
-    }
-}
-
-impl PaymentRail for FakeRail {
-    fn name(&self) -> &str {
-        "fake"
-    }
-    fn pay(&self, from: Option<&str>, to: &str, micros: u64, key: &str) -> Result<String> {
-        if let Some(r) = self.keys.lock().unwrap().get(key) {
-            return Ok(r.clone());
-        }
-        let from = from.context("fake rail needs a payer account")?;
-        let mut bal = self.balances.lock().unwrap();
-        let have = bal.get(from).copied().unwrap_or(0);
-        if have < micros {
-            bail!("insufficient funds: {from} has {have}, needs {micros}");
-        }
-        bal.insert(from.to_string(), have - micros);
-        *bal.entry(to.to_string()).or_default() += micros;
-        let mut t = self.transfers.lock().unwrap();
-        let r = format!("fake-{}", t.len());
-        t.push((from.to_string(), to.to_string(), micros, r.clone()));
-        self.keys.lock().unwrap().insert(key.to_string(), r.clone());
-        Ok(r)
-    }
-}
-
-/// The real rail: `coinpay wallet send --chain <CHAIN> --to <address>
-/// --amount-fiat <usd> --fiat USD` from the advertiser's own CoinPay wallet
-/// (the `coinpay` plugin's CLI; it prompts for the wallet password unless
-/// one is configured there). Nothing in c0mpute holds the funds.
-pub struct CoinpayCliRail {
-    pub bin: PathBuf,
-    pub wallet_file: Option<PathBuf>,
-}
-
-impl CoinpayCliRail {
-    /// `coinpay` on PATH (or `~/.c0mpute/bin`).
-    pub fn find() -> Option<Self> {
-        let bin = crate::ads::stitch::find_tool("coinpay")?;
-        Some(CoinpayCliRail { bin, wallet_file: None })
-    }
-
-    /// The argv for one payout (without the binary).
-    pub fn args(&self, to: &str, micros: u64) -> Result<Vec<String>> {
-        if !valid_payout(to) {
-            bail!("not a payout address: {to:?}");
-        }
-        let (chain, addr) = to.split_once(':').expect("checked");
-        let mut a = vec![
-            "wallet".into(),
-            "send".into(),
-            "--chain".into(),
-            chain.into(),
-            "--to".into(),
-            addr.into(),
-            "--amount-fiat".into(),
-            usd_decimal(micros),
-            "--fiat".into(),
-            "USD".into(),
-        ];
-        if let Some(w) = &self.wallet_file {
-            a.push("--wallet-file".into());
-            a.push(w.display().to_string());
-        }
-        Ok(a)
-    }
-}
-
-impl PaymentRail for CoinpayCliRail {
-    fn name(&self) -> &str {
-        "coinpay"
-    }
-    fn pay(&self, _from: Option<&str>, to: &str, micros: u64, key: &str) -> Result<String> {
-        let out = std::process::Command::new(&self.bin)
-            .args(self.args(to, micros)?)
-            .stdin(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .output()
-            .with_context(|| format!("run {}", self.bin.display()))?;
-        if !out.status.success() {
-            bail!("coinpay wallet send failed ({}) for {key}", out.status);
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        // The CLI prints the transaction hash; keep the last token that looks
-        // like one, else the whole (trimmed) output.
-        let r = text
-            .split_whitespace()
-            .rev()
-            .find(|t| t.len() >= 16 && t.chars().all(|c| c.is_ascii_alphanumeric()))
-            .map(String::from)
-            .unwrap_or_else(|| text.trim().chars().take(200).collect());
-        Ok(r)
-    }
+    let (coin, wallet) = payout.split_once(':')?;
+    Some(crate::payments::Payee {
+        wallet: wallet.to_string(),
+        coin: coin.to_string(),
+    })
 }
 
 /// 1_234_500 -> "1.2345" (USD, trailing zeros dropped).
@@ -1056,8 +977,8 @@ mod tests {
         assert_eq!(FEE_BPS + PUBLISHER_BPS + GATEWAY_BPS, BPS);
     }
 
-    #[test]
-    fn verify_prices_dedupes_and_settles() {
+    #[tokio::test]
+    async fn verify_prices_dedupes_and_settles() {
         let adv = Keypair::generate_ed25519();
         let gw = Keypair::generate_ed25519();
         let show_owner = crate::hosting::site::owner_hex(&Keypair::generate_ed25519()).unwrap();
@@ -1090,16 +1011,32 @@ mod tests {
             verify_claim(&c, &bids(&c), &ledger, &claim, &batches, &shows(&show_owner), "", NOW).unwrap_err(),
             ClaimError::AlreadySettled { next_seq: 3 }
         );
-        // Paying through the fake rail moves exactly the gross.
-        let rail = FakeRail::default();
-        rail.fund("SOL:advertiserwallet1", MICROS);
-        assert_eq!(ledger.pay(&rail, Some("SOL:advertiserwallet1")), 3);
-        assert_eq!(rail.balance("SOL:advertiserwallet1"), MICROS - 8_000);
-        assert_eq!(rail.balance("SOL:showwallet0001"), 6_000);
-        assert_eq!(rail.balance("SOL:gatewaywallet1"), 1_600);
-        assert_eq!(rail.balance("SOL:networkfee0001"), 400);
-        assert_eq!(ledger.pay(&rail, Some("SOL:advertiserwallet1")), 0, "never paid twice");
+        // Paying through the shared fake rail moves exactly the gross.
+        use crate::payments::{FakeRail, Ledger as PayLedger, Rail};
+        let rail = FakeRail::new();
+        let shared = PayLedger::in_memory();
+        rail.fund(&c.owner, MICROS);
+        // A round cap below the gross pays what fits and leaves the rest owed.
+        assert_eq!(ledger.pay(&rail, &shared, &c.owner, 6_000).await, 1);
+        assert_eq!(ledger.unpaid_micros(), 2_000);
+        assert!(ledger.lines.iter().any(|l| l.error.as_deref().is_some_and(|e| e.contains("cap"))));
+        assert_eq!(ledger.pay(&rail, &shared, &c.owner, MICROS).await, 2);
+        assert_eq!(rail.balance(&c.owner).await.unwrap(), Some(MICROS - 8_000));
+        assert_eq!(rail.received("showwallet0001"), 6_000);
+        assert_eq!(rail.received("gatewaywallet1"), 1_600);
+        assert_eq!(rail.received("networkfee0001"), 400);
+        assert!(rail.payments().iter().all(|t| t.payee.coin == "SOL" && t.key.starts_with("ads:")));
+        assert_eq!(ledger.pay(&rail, &shared, &c.owner, MICROS).await, 0, "never paid twice");
         assert_eq!(ledger.unpaid_micros(), 0);
+        // An ads ledger that lost its references (crash before save) is
+        // healed from the shared ledger, not paid again.
+        let mut stale = ledger.clone();
+        for l in &mut stale.lines {
+            l.reference = None;
+        }
+        assert_eq!(stale.pay(&rail, &shared, &c.owner, MICROS).await, 0);
+        assert_eq!(stale.unpaid_micros(), 0);
+        assert_eq!(rail.payments().len(), 3);
 
         // A later batch whose play was already paid in this claim is a duplicate.
         let mut log = ReceiptLog::open(None);
@@ -1123,7 +1060,7 @@ mod tests {
         let s2 = ledger.settle(&c, v, Some(&adv), NOW).unwrap();
         assert_eq!(s2.prev, s.hash());
         assert_eq!(s2.spent_micros, 10_000);
-        ledger.pay(&rail, Some("SOL:advertiserwallet1"));
+        ledger.pay(&rail, &shared, &c.owner, MICROS).await;
         assert_eq!(ledger.unpaid_micros(), 100, "network fee owed, not sent");
     }
 
@@ -1286,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn payouts_budget_and_rail_args() {
+    fn payouts_budget_and_payees() {
         assert!(valid_payout("SOL:9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"));
         assert!(valid_payout("BCH:bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a"));
         assert!(valid_payout("USDC_POL:0x52908400098527886E0F7030069857D2E4169EE7"));
@@ -1304,21 +1241,11 @@ mod tests {
         assert_eq!(usd_decimal(1_234_500), "1.2345");
         assert_eq!(usd_decimal(5 * MICROS), "5");
         assert_eq!(usd_decimal(1), "0.000001");
-        let rail = CoinpayCliRail {
-            bin: "coinpay".into(),
-            wallet_file: None,
-        };
-        assert_eq!(
-            rail.args("SOL:9xQeWvG816bUx9", 2_500_000).unwrap(),
-            ["wallet", "send", "--chain", "SOL", "--to", "9xQeWvG816bUx9", "--amount-fiat", "2.5", "--fiat", "USD"]
-        );
-        assert!(rail.args("not an address", 1).is_err());
-        assert!(DisabledRail.pay(None, "SOL:9xQeWvG816bUx9", 1, "k").is_err());
-        let fake = FakeRail::default();
-        fake.fund("a", 10);
-        assert!(fake.pay(Some("a"), "b", 11, "k1").is_err(), "overdraft refused");
-        assert_eq!(fake.pay(Some("a"), "b", 10, "k2").unwrap(), "fake-0");
-        assert_eq!(fake.pay(Some("a"), "b", 10, "k2").unwrap(), "fake-0", "idempotent");
-        assert_eq!(fake.balance("b"), 10);
+        let p = payee_of("USDC_POL:0xabc0123456789def").unwrap();
+        assert_eq!((p.coin.as_str(), p.wallet.as_str()), ("USDC_POL", "0xabc0123456789def"));
+        assert!(p.valid());
+        assert_eq!(payee_of("SOL:9xQeWvG816bUx9").unwrap().coin, "SOL");
+        assert!(payee_of("not an address").is_none());
+        assert!(payee_of("").is_none());
     }
 }
