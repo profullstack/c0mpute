@@ -225,6 +225,14 @@ pub struct HostingConfig {
     /// sites this node pays for). Payments only move when `[payments]` is on.
     #[serde(default = "default_settle_every")]
     pub settle_every_secs: u64,
+    /// Accept `git push` over HTTP on this gateway (`POST /git/v1/repos/...`,
+    /// owner-signed, within `max_bytes`). Reads and clones are always served.
+    #[serde(default = "default_git_pushes")]
+    pub git_pushes: bool,
+}
+
+fn default_git_pushes() -> bool {
+    true
 }
 
 impl Default for HostingConfig {
@@ -238,6 +246,7 @@ impl Default for HostingConfig {
             challenge: default_challenge(),
             challenge_every_secs: default_challenge_every(),
             settle_every_secs: default_settle_every(),
+            git_pushes: default_git_pushes(),
         }
     }
 }

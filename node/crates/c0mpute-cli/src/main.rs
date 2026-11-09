@@ -27,6 +27,7 @@ mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
+mod git_cli;
 mod peers;
 mod private_storage;
 mod promo;
@@ -213,13 +214,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AppsCmd,
     },
-    /// Git repositories on the network: `c0mpute git install` adds the
-    /// `git-remote-c0mpute` helper, then `git push c0mpute://<name> main`
-    /// stores the repo (and deploys it when c0mpute.toml has an [app]).
-    Git {
-        #[command(subcommand)]
-        cmd: GitCmd,
-    },
     /// Train plugin: fine-tune a LoRA adapter on a c0mpute worker from a
     /// JSONL dataset (`c0mpute train lora --base <model> --dataset <jsonl>`;
     /// runs as infernet.text.train).
@@ -230,6 +224,12 @@ enum Cmd {
     /// Game server plugin: rent a Minecraft, Factorio or Valheim server for a
     /// few hours (`c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula`).
     Gameserver {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Git plugin: repos kept by the network, signed by your key
+    /// (`c0mpute git init my-repo`, then `git push`/`git clone c0mpute://<owner>/<repo>`).
+    Git {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -804,18 +804,6 @@ enum AppsSecretsCmd {
     Unset { app: String, keys: Vec<String> },
     /// Show secret names (never values).
     Ls { app: String },
-}
-
-#[derive(Subcommand, Debug)]
-enum GitCmd {
-    /// Install the `git-remote-c0mpute` helper (a symlink to this binary).
-    Install {
-        /// Directory on PATH to put it in (default: next to this binary).
-        #[arg(long)]
-        dir: Option<std::path::PathBuf>,
-    },
-    /// Print the clone URL of a repo this machine owns.
-    Url { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1515,21 +1503,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Invoked by git as `git-remote-c0mpute <remote> <url>`: speak the
-    // remote-helper protocol and nothing else (stdout belongs to git).
-    let argv0 = std::env::args().next().unwrap_or_default();
-    if std::path::Path::new(&argv0).file_name().and_then(|n| n.to_str()) == Some("git-remote-c0mpute") {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let (remote, url) = match args.as_slice() {
-            [remote, url, ..] => (remote.clone(), url.clone()),
-            [url] => (url.clone(), url.clone()),
-            _ => anyhow::bail!("usage: git-remote-c0mpute <remote> <url> (git runs this for c0mpute:// remotes)"),
-        };
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-        let res = rt.block_on(c0mpute_core::gitremote::remote_helper(&remote, &url));
-        // The swarm keeps tasks alive; do not wait for them.
-        rt.shutdown_timeout(std::time::Duration::from_millis(200));
-        return res;
+    // Run as `git-remote-c0mpute` (a link to this binary): the git remote helper.
+    if let Some(code) = git_cli::as_remote_helper() {
+        std::process::exit(code);
     }
 
     let cli = Cli::parse();
@@ -1689,9 +1665,9 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
         Cmd::Apps { cmd } => run_apps(cmd).await,
-        Cmd::Git { cmd } => run_git(cmd).await,
         Cmd::Train { args } => train::run(&args).await,
         Cmd::Gameserver { args } => gameserver::run(&args).await,
+        Cmd::Git { args } => git_cli::run(&args).await,
         Cmd::Stream { cmd } => run_stream(cmd).await,
         Cmd::Ocr {
             file,
@@ -4040,22 +4016,6 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             }
             let id = deploy::destroy(&name).await?;
             println!("deleted {name} ({id})");
-            Ok(())
-        }
-    }
-}
-
-async fn run_git(cmd: GitCmd) -> Result<()> {
-    match cmd {
-        GitCmd::Install { dir } => {
-            let link = c0mpute_core::gitremote::install(dir.as_deref())?;
-            println!("{}", link.display());
-            eprintln!("git now understands c0mpute:// remotes (make sure {} is on PATH)", link.parent().map(|p| p.display().to_string()).unwrap_or_default());
-            Ok(())
-        }
-        GitCmd::Url { name } => {
-            let t = c0mpute_core::gitremote::parse_url(&name)?;
-            println!("c0mpute://{}", c0mpute_core::gitremote::site_id(&t)?);
             Ok(())
         }
     }

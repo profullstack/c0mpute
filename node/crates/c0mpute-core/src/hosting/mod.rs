@@ -22,6 +22,7 @@
 pub mod dns;
 mod edge_api;
 pub mod fetch;
+pub mod git;
 pub mod market;
 pub mod meta;
 pub mod proof;
@@ -2368,6 +2369,7 @@ impl Hosting {
             .route("/s/{site}/{*path}", get(serve_path))
             .route("/p/{site}", get(redirect_private_root))
             .route("/p/{site}/", get(private_loader))
+            .merge(git::router())
             .fallback(serve_by_host)
             .with_state(self.clone())
     }

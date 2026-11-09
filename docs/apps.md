@@ -23,12 +23,12 @@ and on custom domains (below).
 c0mpute git install                       # adds git-remote-c0mpute next to c0mpute
 git remote add c0 c0mpute://api
 git push c0 main                          # stores the repo; deploys if c0mpute.toml has [app]
-git clone c0mpute://<repo_id>             # anyone; works with the owner offline
+git clone c0mpute://<owner-key>/api       # anyone; works with the owner offline
 ```
 
-A repository is a hosting site (`git-<name>`) signed by your key holding
-`refs.json` and a full `git bundle`, so the network keeps three copies and only
-you can move a ref. Pushes are fast-forward only unless forced. Turn deploys off
+A repository is a hosting site (`git-<name>`) signed by your key (see
+[git hosting](git-hosting.md)), so the network keeps three copies and only you
+can move a ref. Pushes are fast-forward only unless forced. Turn deploys off
 with `git config c0mpute.deploy false`.
 
 `c0mpute.toml`:

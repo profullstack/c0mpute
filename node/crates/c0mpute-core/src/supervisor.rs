@@ -803,6 +803,16 @@ impl Supervisor {
             },
         )
         .await?;
+        // Private mode: pushes only from this machine's own key.
+        let only = if self.config.private.enabled {
+            crate::hosting::publisher_keypair()
+                .ok()
+                .and_then(|k| crate::hosting::site::owner_hex(&k))
+                .or(Some(String::new()))
+        } else {
+            None
+        };
+        crate::hosting::git::set_push_policy(cfg.git_pushes, only);
         self.spawn_settlement(hosting.clone(), dir);
         Ok(hosting)
     }

@@ -50,4 +50,7 @@ default = ["fuse"]
 fuse = ["dep:fuser"]
 
 [dev-dependencies]
+c0mpute-net = { workspace = true }
+libp2p = { workspace = true }
 tempfile = { workspace = true }
+async-trait = { workspace = true }
