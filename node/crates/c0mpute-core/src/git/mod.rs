@@ -44,6 +44,9 @@ pub const REPACK_AFTER: usize = 16;
 pub const PUSH_MAGIC: &[u8] = b"C0GIT1\n";
 /// Default gateway when nothing is configured: the local node.
 pub const DEFAULT_GATEWAY: &str = "http://127.0.0.1:7777";
+/// Largest repo: the size above which hosting stripes a site across nodes.
+/// A push is held whole by the gateway it lands on, so repos stay unstriped.
+pub const MAX_REPO_BYTES: u64 = site::STRIPE_ABOVE;
 /// Tried after the local node when no gateway is configured, so a machine
 /// that runs no node can still push and clone.
 pub const PUBLIC_GATEWAY: &str = "https://gateway.c0mpute.com";

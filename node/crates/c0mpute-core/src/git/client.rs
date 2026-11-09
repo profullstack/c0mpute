@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use c0mpute_proto::Hash;
 
 use super::*;
-use crate::hosting::site::{MAX_SITE_BYTES, SiteManifest, SiteRecord};
+use crate::hosting::site::{SiteManifest, SiteRecord};
 
 /// Gateways to read from and push to, in order of preference.
 #[derive(Clone, Debug)]
@@ -716,8 +716,12 @@ pub async fn push(
         files,
     };
     let total = manifest.total_bytes();
-    if total > MAX_SITE_BYTES {
-        bail!("repo would be {total} bytes, over the {MAX_SITE_BYTES}-byte hosting limit");
+    if total > MAX_REPO_BYTES {
+        bail!(
+            "repo would be {} MiB, over the {} MiB limit for a repo (keep large binaries out of git)",
+            total >> 20,
+            MAX_REPO_BYTES >> 20
+        );
     }
     let mbytes = manifest.to_bytes();
     let seq = now_ms().max(old_seq + 1);

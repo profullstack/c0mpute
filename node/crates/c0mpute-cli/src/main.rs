@@ -225,18 +225,25 @@ enum Cmd {
     /// Train plugin: fine-tune a LoRA adapter on a c0mpute worker from a
     /// JSONL dataset (`c0mpute train lora --base <model> --dataset <jsonl>`;
     /// runs as infernet.text.train).
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Train {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Game server plugin: rent a Minecraft, Factorio or Valheim server for a
     /// few hours (`c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula`).
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Gameserver {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Git plugin: repos kept by the network, signed by your key
-    /// (`c0mpute git init my-repo`, then `git push`/`git clone c0mpute://<owner>/<repo>`).
+    /// Git hosting: repos kept by the network, signed by your key, push to
+    /// deploy (`c0mpute git init my-repo`, `git push origin main`,
+    /// `git clone c0mpute://<owner>/<repo>`). Full guide: `c0mpute git --help`.
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Git {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -397,6 +404,8 @@ enum Cmd {
         cmd: StreamCmd,
     },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Coinpay {
         /// Arguments forwarded to `coinpay`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -404,11 +413,15 @@ enum Cmd {
     },
     /// Paid, end-to-end encrypted webhook delivery on c0mpute workers
     /// (`c0mpute webhook serve|send`, DIP-0028).
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Webhook {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Infernet plugin — delegates to the `infernet` peer CLI.
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Infernet {
         /// Arguments forwarded to `infernet`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -444,6 +457,8 @@ enum Cmd {
     /// Subprocess-launches `c0mpute-tui` (a terminal dashboard on
     /// @profullstack/hqtui, run through Bun). See apps/tui in the repo.
     /// Long-term we move to Perry once their CLI surface ships.
+    // -h/--help go to the plugin's own parser, which prints the real help.
+    #[command(disable_help_flag = true)]
     Tui {
         /// Arguments forwarded to the TUI binary.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

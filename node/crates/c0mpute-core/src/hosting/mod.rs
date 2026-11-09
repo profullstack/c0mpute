@@ -62,7 +62,9 @@ pub const TOPIC: &str = "c0mpute/hosting/v1";
 pub const ROLE_TAG: &str = "c0mpute:role:hosting";
 /// Copies the network keeps of every site.
 pub const TARGET_REPLICAS: usize = 3;
-/// Above this many copies, the lowest-ranked holder lets go.
+/// The hard ceiling: above this many copies the lowest-ranked free holder
+/// lets go at once. Between the target and this, free copies are trimmed back
+/// to the target only after a grace period (see [`replicas::releases`]).
 pub const MAX_REPLICAS: usize = 5;
 /// `[hosting] max_bytes = 0` (the default): the budget follows the disk, see
 /// [`auto_budget`].
@@ -83,6 +85,8 @@ const HOLDING_MESSAGE_BYTES: usize = 40 * 1024;
 /// A group short of copies for this long brings in one more candidate per
 /// period, so a chosen node that cannot take it does not stall the group.
 const WIDEN_AFTER: Duration = Duration::from_secs(180);
+/// The group number [`Hosting::trim_due`] keys a whole (unstriped) site on.
+const WHOLE: u32 = u32::MAX;
 /// Most hosting peers a node keeps itself connected to (see
 /// [`Hosting::connect_hosts`]).
 const CONNECT_HOSTS_MAX: usize = 24;
@@ -218,6 +222,9 @@ struct Inner {
     layouts: RwLock<HashMap<String, Arc<stripe::Layout>>>,
     /// When each short group was first seen short, for widening.
     short_since: std::sync::Mutex<HashMap<(String, u32), Instant>>,
+    /// When each site ([`WHOLE`]) or group was first seen over the target,
+    /// for trimming (see [`Hosting::trim_due`]).
+    over_since: std::sync::Mutex<HashMap<(String, u32), Instant>>,
     dns: dns::Verifier,
     /// Optional handler for requests with a query string (podcast ad
     /// insertion installs one); it may decline and let the plain serve run.
@@ -382,6 +389,7 @@ impl Hosting {
             stats: fetch::Stats::default(),
             layouts: RwLock::new(HashMap::new()),
             short_since: std::sync::Mutex::new(HashMap::new()),
+            over_since: std::sync::Mutex::new(HashMap::new()),
             dns: opts.dns,
             hook: std::sync::OnceLock::new(),
             host_hook: std::sync::OnceLock::new(),
@@ -834,7 +842,13 @@ impl Hosting {
         let can_take = self.0.hosts && !self.is_full().await;
         let (whole, striped): (Vec<(SiteRecord, Action)>, Vec<SiteRecord>) = {
             let mut map = self.0.map.write().await;
-            map.prune(Instant::now(), self.0.timing.holder_ttl);
+            let now = Instant::now();
+            map.prune(now, self.0.timing.holder_ttl);
+            self.0
+                .over_since
+                .lock()
+                .expect("over_since")
+                .retain(|(s, _), _| map.records.contains_key(s));
             let mut whole = Vec::new();
             let mut striped = Vec::new();
             for r in map.records.values() {
@@ -842,6 +856,7 @@ impl Hosting {
                     striped.push(r.clone());
                     continue;
                 }
+                let trim = self.trim_due(&r.site_id, WHOLE, map.holders(&r.site_id).len(), now);
                 let a = replicas::decide(
                     &map,
                     &r.site_id,
@@ -849,6 +864,7 @@ impl Hosting {
                     can_take,
                     TARGET_REPLICAS,
                     MAX_REPLICAS,
+                    trim,
                 );
                 whole.push((r.clone(), a));
             }
@@ -930,6 +946,12 @@ impl Hosting {
                     .map(|t| (now.duration_since(*t).as_secs() / WIDEN_AFTER.as_secs()) as usize)
                     .unwrap_or(0)
             };
+            let trims: Vec<bool> = holders
+                .iter()
+                .enumerate()
+                .map(|(g, hs)| self.trim_due(&rec.site_id, g as u32, hs.len(), now))
+                .collect();
+            let trim = |g: u32| trims.get(g as usize).copied().unwrap_or(false);
             stripe::plan(
                 &map,
                 &rec.site_id,
@@ -939,6 +961,7 @@ impl Hosting {
                 TARGET_REPLICAS,
                 MAX_REPLICAS,
                 &widen,
+                &trim,
             )
         };
         let stale = held.as_ref().is_some_and(|h| h.seq < rec.seq);
@@ -957,6 +980,26 @@ impl Hosting {
         if stale || plan.fetch.iter().any(|g| !mine.contains(g)) {
             self.spawn_replicate_groups(rec, plan.fetch);
         }
+    }
+
+    /// Whether a site ([`WHOLE`]) or one group of a striped site, now at
+    /// `copies` live copies, may shed a free copy down toward the target.
+    ///
+    /// Only once it has been over [`TARGET_REPLICAS`] without a break for one
+    /// holder TTL: by then a holder that went away has stopped counting and
+    /// every node's view has caught up, so the excess is real and the nodes
+    /// agree on who lets go. Dropping back to the target resets the clock,
+    /// so a copy that is extra only for a moment is never released (and the
+    /// fill, which acts only below the target, does not take it back).
+    fn trim_due(&self, site_id: &str, group: u32, copies: usize, now: Instant) -> bool {
+        let mut over = self.0.over_since.lock().expect("over_since");
+        let key = (site_id.to_string(), group);
+        if copies <= TARGET_REPLICAS {
+            over.remove(&key);
+            return false;
+        }
+        let since = *over.entry(key).or_insert(now);
+        now.duration_since(since) >= self.0.timing.holder_ttl
     }
 
     fn spawn_replicate(&self, rec: SiteRecord) {

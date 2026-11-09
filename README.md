@@ -135,6 +135,21 @@ c0mpute coinpay reputation inspect did:coinpay:worker:abc123
 The plugin form mirrors the URL namespace: `c0mpute.com/transcode`,
 `c0mpute.com/coinpay`, `c0mpute.com/infernet`.
 
+### Git hosting
+
+Repos kept by the network: signed by your key, three self-healing copies, cloneable from
+any gateway with your machine offline, and a push can deploy an app.
+
+```sh
+c0mpute git install                  # once: git understands c0mpute:// URLs
+c0mpute git init my-project          # adds remote origin = c0mpute://<your-key>/my-project
+git push origin main
+git clone c0mpute://<owner-key>/my-project
+c0mpute git --help                   # full guide: URLs, push to deploy, gateways
+```
+
+Guide: [docs/git-hosting.md](docs/git-hosting.md).
+
 ### CPU speech inference
 
 TTS (`tts.synthesize`) supports Kokoro, Piper, and Pocket on CPU. Pocket uses
