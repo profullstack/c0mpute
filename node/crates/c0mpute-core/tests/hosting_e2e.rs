@@ -137,6 +137,10 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     std::fs::create_dir_all(site_dir.join("docs")).unwrap();
     std::fs::write(site_dir.join("index.html"), b"<meta property=\"og:image\" content=\"img/hero.png\"><h1>hello from the network</h1>").unwrap();
     std::fs::write(site_dir.join("docs/index.html"), b"docs page").unwrap();
+    // A folder of tracks with no index.html (an album upload).
+    std::fs::create_dir_all(site_dir.join("My Album")).unwrap();
+    std::fs::write(site_dir.join("My Album/01 Intro.mp3"), b"ID3 fake mp3").unwrap();
+    std::fs::write(site_dir.join("My Album/02 <Outro>.mp3"), b"ID3 fake mp3 2").unwrap();
     let big: Vec<u8> = (0..(5 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
     std::fs::write(site_dir.join("big.bin"), &big).unwrap();
     let built = build_from_dir(&site_dir, "demo").unwrap();
@@ -239,6 +243,30 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
         .unwrap();
     assert_eq!(got.len(), big.len());
     assert!(got[..] == big[..], "multi-chunk file reassembles exactly");
+    // A folder with no index.html gets a generated page with players; without
+    // its slash it redirects so relative links resolve.
+    let album = client.get(format!("http://{addr}/s/{site}/My%20Album/")).send().await.unwrap();
+    assert_eq!(album.status(), 200);
+    assert_eq!(album.headers()["x-c0mpute-listing"], "1");
+    let page = album.text().await.unwrap();
+    assert!(page.contains("<audio controls preload=\"none\" src=\"01%20Intro.mp3\">"), "{page}");
+    assert!(page.contains("02 &lt;Outro&gt;.mp3") && page.contains("Play all"), "{page}");
+    let track = client.get(format!("http://{addr}/s/{site}/My%20Album/01%20Intro.mp3")).send().await.unwrap();
+    assert_eq!(track.status(), 200);
+    assert_eq!(track.headers()["content-type"], "audio/mpeg");
+    let bare = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}/s/{site}/My%20Album"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bare.status(), 308);
+    assert_eq!(bare.headers()["location"], "My%20Album/");
+    // The site's own index.html still wins at the root.
+    let root_page = client.get(format!("http://{addr}/s/{site}/")).send().await.unwrap();
+    assert!(root_page.headers().get("x-c0mpute-listing").is_none());
     let missing = client.get(format!("http://{addr}/s/{site}/nope")).send().await.unwrap();
     assert_eq!(missing.status(), 404);
 

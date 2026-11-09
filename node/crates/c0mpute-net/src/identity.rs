@@ -18,8 +18,7 @@ const KEY_FILE: &str = "identity.key";
 pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     let path = dir.join(KEY_FILE);
     if path.exists() {
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| unreadable(&path, e))?;
         let kp = Keypair::from_protobuf_encoding(&bytes)
             .context("decode persisted libp2p identity")?;
         info!(peer_id = %kp.public().to_peer_id(), file = %path.display(), "loaded identity");
@@ -34,6 +33,33 @@ pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     Ok(kp)
 }
 
+/// A read error on an identity file, with the fix when it is a permission
+/// problem: almost always the file was created by `sudo c0mpute ...` (or a
+/// root service with this HOME) and now belongs to root.
+pub fn unreadable(path: &Path, e: std::io::Error) -> anyhow::Error {
+    if e.kind() != std::io::ErrorKind::PermissionDenied {
+        return anyhow::Error::new(e).context(format!("read {}", path.display()));
+    }
+    #[cfg(unix)]
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| format!(" (owned by uid {}, mode {:o})", m.uid(), m.mode() & 0o777))
+            .unwrap_or_default()
+    };
+    #[cfg(not(unix))]
+    let owner = String::new();
+    let dir = path.parent().unwrap_or(path);
+    anyhow::anyhow!(
+        "cannot read {}{owner}: permission denied. It was probably created by running c0mpute \
+         with sudo or by a root service using this home directory. Give it back to your user: \
+         sudo chown -R \"$(id -un):$(id -gn)\" {}",
+        path.display(),
+        dir.display()
+    )
+}
+
 const JOB_SECRET_FILE: &str = "job-e2e.secret";
 
 /// The node's job-key secret (`<dir>/job-e2e.secret`, 32 random bytes, mode
@@ -43,9 +69,14 @@ const JOB_SECRET_FILE: &str = "job-e2e.secret";
 /// the file rotates it (in-flight jobs then cannot be resumed).
 pub fn load_or_create_job_secret(dir: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>> {
     let path = dir.join(JOB_SECRET_FILE);
-    if let Ok(bytes) = std::fs::read(&path) {
-        let b: [u8; 32] = bytes.as_slice().try_into().with_context(|| format!("{} must hold 32 bytes", path.display()))?;
-        return Ok(zeroize::Zeroizing::new(b));
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let b: [u8; 32] = bytes.as_slice().try_into().with_context(|| format!("{} must hold 32 bytes", path.display()))?;
+            return Ok(zeroize::Zeroizing::new(b));
+        }
+        // Present but unreadable: never rotate it behind the user's back.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err(unreadable(&path, e)),
+        Err(_) => {}
     }
     std::fs::create_dir_all(dir)?;
     let mut b = zeroize::Zeroizing::new([0u8; 32]);
@@ -149,6 +180,35 @@ mod tests {
         let kp1 = load_or_create(&dir).unwrap();
         let kp2 = load_or_create(&dir).unwrap();
         assert_eq!(kp1.public().to_peer_id(), kp2.public().to_peer_id());
+    }
+
+    /// A key the user cannot read (root-owned after `sudo c0mpute ...`) is an
+    /// actionable error, and neither file is replaced.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_identity_says_how_to_fix_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        load_or_create(&dir).unwrap();
+        load_or_create_job_secret(&dir).unwrap();
+        let key = dir.join(KEY_FILE);
+        let secret = dir.join(JOB_SECRET_FILE);
+        let before = (std::fs::read(&key).unwrap(), std::fs::read(&secret).unwrap());
+        for f in [&key, &secret] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        if std::fs::read(&key).is_ok() {
+            eprintln!("skipping: running as root, every file is readable");
+            return;
+        }
+        let err = format!("{:#}", load_or_create(&dir).unwrap_err());
+        assert!(err.contains("permission denied") && err.contains("sudo chown"), "{err}");
+        let err = format!("{:#}", load_or_create_job_secret(&dir).unwrap_err());
+        assert!(err.contains("sudo chown"), "{err}");
+        for f in [&key, &secret] {
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!((std::fs::read(&key).unwrap(), std::fs::read(&secret).unwrap()), before, "nothing was rotated");
     }
 
     fn tempdir() -> std::path::PathBuf {

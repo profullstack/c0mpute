@@ -23,6 +23,7 @@ pub mod dns;
 mod edge_api;
 pub mod fetch;
 pub mod git;
+mod listing;
 pub mod market;
 pub mod meta;
 pub mod proof;
@@ -2137,7 +2138,14 @@ impl Hosting {
                 return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
             }
         };
-        let found = match self.resolve_entry(rec, &manifest, path).await {
+        let resolved = self.resolve_entry(rec, &manifest, path).await;
+        // A folder with no index.html: list it (or add its slash).
+        if let Ok(None) = &resolved
+            && let Ok(Some(folder)) = self.folder(rec, &manifest, path).await
+        {
+            return folder_response(rec, folder);
+        }
+        let found = match resolved {
             Ok(Some(e)) => Some((e, StatusCode::OK)),
             Ok(None) => match self.lookup(rec, &manifest, "404.html").await {
                 Ok(Some(e)) => Some((e, StatusCode::NOT_FOUND)),
@@ -2741,6 +2749,32 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
 
+
+/// The response for a generated folder page or a slash redirect.
+fn folder_response(rec: &SiteRecord, folder: listing::Folder) -> Response {
+    match folder {
+        listing::Folder::Redirect(location) => {
+            let mut resp = StatusCode::PERMANENT_REDIRECT.into_response();
+            if let Ok(v) = HeaderValue::from_str(&location) {
+                resp.headers_mut().insert(header::LOCATION, v);
+            }
+            resp
+        }
+        listing::Folder::Page(html) => {
+            let mut resp = (StatusCode::OK, html).into_response();
+            let hdr = resp.headers_mut();
+            hdr.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+            hdr.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=60"));
+            hdr.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+            hdr.insert("x-c0mpute-listing", HeaderValue::from_static("1"));
+            if let Ok(v) = HeaderValue::from_str(&rec.site_id) {
+                hdr.insert("x-c0mpute-site", v);
+            }
+            resp
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3108,6 +3142,10 @@ pub async fn publish_dir_with(
             bail!("invalid domain {d:?}");
         }
     }
+    // Before hashing anything: a big folder takes minutes to scan, and an
+    // unreadable identity (created by `sudo c0mpute ...`) used to fail only
+    // after the scan finished.
+    publisher_keypair()?;
     let cache_path = crate::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hosting")
