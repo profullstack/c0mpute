@@ -3,10 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
+import { audioExtension, parseMusicCommand, type MusicCommand } from "@/lib/chat/music";
 
 // An image turn keeps its picture only for this session (a blob: URL); what is
 // saved to localStorage is the text placeholder, and the model never sees it.
-type Msg = { role: "user" | "assistant" | "system"; content: string; imageTurn?: boolean; image?: string };
+// Music turns work the same way (`audio` is a session blob: URL, `audioType` its MIME type).
+type Msg = {
+  role: "user" | "assistant" | "system";
+  content: string;
+  imageTurn?: boolean;
+  image?: string;
+  audio?: string;
+  audioType?: string;
+};
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
 type Me = { id: string; did: string; name: string | null; balance?: Balance | null };
@@ -58,7 +67,7 @@ function save(c: Convo[]) {
   try {
     const slim = c.slice(0, 100).map((cv) => ({
       ...cv,
-      messages: cv.messages.map(({ image: _image, ...m }) => m),
+      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, ...m }) => m),
     }));
     localStorage.setItem(STORE, JSON.stringify(slim));
   } catch {}
@@ -214,6 +223,85 @@ export function ChatApp({ error }: { error: string | null }) {
     }
   }
 
+  async function composeMusic(convo: Convo, text: string, music: MusicCommand) {
+    const id = convo.id;
+    const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
+    setInput("");
+    setFailure(null);
+    setBusy(true);
+    const started = Date.now();
+    const setLast = (patch: Partial<Msg>) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    setConvos((all) => {
+      const exists = all.some((c) => c.id === id);
+      const base = exists ? all : [convo, ...all];
+      const next = base.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              title,
+              messages: [
+                ...c.messages,
+                { role: "user" as const, content: text, imageTurn: true },
+                { role: "assistant" as const, content: "// composing with ACE-Step 1.5 on a c0mpute worker, a few minutes…", imageTurn: true },
+              ],
+              updated: Date.now(),
+            }
+          : c,
+      );
+      save(next);
+      return next;
+    });
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    try {
+      const res = await fetch("/api/v1/music", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: music.prompt, lyrics: music.lyrics }),
+        signal: ctrl.signal,
+      });
+      const start = await res.json().catch(() => ({}));
+      if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
+      const deadline = Date.now() + 20 * 60_000;
+      let done: Response | null = null;
+      while (!done) {
+        if (Date.now() > deadline) throw new Error("song timed out");
+        await new Promise((r) => setTimeout(r, 5000));
+        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
+        if (poll.status === 202) {
+          setLast({ content: `// composing with ACE-Step 1.5 on a c0mpute worker… ${Math.round((Date.now() - started) / 1000)}s` });
+          continue;
+        }
+        if (!poll.ok) {
+          const j = await poll.json().catch(() => ({}));
+          throw new Error(j.error?.message ?? `HTTP ${poll.status}`);
+        }
+        done = poll;
+      }
+      const blob = await done.blob();
+      const url = URL.createObjectURL(blob);
+      setLast({
+        content: `[music: ${music.prompt}${music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)`,
+        audio: url,
+        audioType: blob.type || "audio/mpeg",
+      });
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+      setLast({ content: "// song not made" });
+    } finally {
+      setBusy(false);
+      abort.current = null;
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
@@ -229,6 +317,11 @@ export function ChatApp({ error }: { error: string | null }) {
       setActiveId(c.id);
     }
     const id = convo.id;
+    const music = parseMusicCommand(text);
+    if (music) {
+      await composeMusic(convo, text, music);
+      return;
+    }
     const imagePrompt = parseImageCommand(text);
     if (imagePrompt) {
       await drawImage(convo, text, imagePrompt);
@@ -415,7 +508,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals).</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -430,6 +523,18 @@ export function ChatApp({ error }: { error: string | null }) {
                     {/* eslint-disable-next-line @next/next/no-img-element -- a session blob: URL */}
                     <img src={m.image} alt={m.content} className="max-w-full w-[640px] border border-[var(--color-rule)]" />
                     <a href={m.image} download="c0mpute-image.png" className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
+                      download
+                    </a>
+                  </figure>
+                )}
+                {m.audio && (
+                  <figure className="mt-2">
+                    <audio controls src={m.audio} className="w-full max-w-[640px]" />
+                    <a
+                      href={m.audio}
+                      download={`c0mpute-music.${audioExtension(m.audioType ?? "")}`}
+                      className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]"
+                    >
                       download
                     </a>
                   </figure>
@@ -456,7 +561,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, or /image <prompt> (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, /image <prompt>, or /music <style> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
