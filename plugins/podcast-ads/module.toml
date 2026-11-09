@@ -31,11 +31,7 @@
 [module]
 id          = "podcast-ads"
 name        = "Podcast Ads — dynamic ad insertion"
-<<<<<<< HEAD
-version     = "0.3.12"
-=======
 version     = "0.3.14"
->>>>>>> origin/master
 kind        = "service"
 category    = "applications"
 status      = "partial"

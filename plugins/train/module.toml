@@ -55,11 +55,7 @@
 [module]
 id          = "train"
 name        = "Fine-tune — LoRA training"
-<<<<<<< HEAD
-version     = "0.3.12"
-=======
 version     = "0.3.14"
->>>>>>> origin/master
 kind        = "workload"
 category    = "ai"
 status      = "available"

@@ -1,10 +1,6 @@
 {
   "name": "c0mpute-monorepo",
-<<<<<<< HEAD
-  "version": "0.3.12",
-=======
   "version": "0.3.14",
->>>>>>> origin/master
   "private": true,
   "workspaces": [
     "apps/*",

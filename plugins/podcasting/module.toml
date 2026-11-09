@@ -24,11 +24,7 @@
 [module]
 id          = "podcasting"
 name        = "Podcasting — p2p podcast publishing"
-<<<<<<< HEAD
-version     = "0.3.12"
-=======
 version     = "0.3.14"
->>>>>>> origin/master
 kind        = "service"
 category    = "media"
 status      = "available"
