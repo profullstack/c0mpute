@@ -3,7 +3,7 @@
 //! A peer id is a key pair on disk. Copy the identity dir to a second machine,
 //! or run a system and a user service on one box, and two processes bid under
 //! one peer id with different per-job keys. The buyer seals the spec to one
-//! of them; the other cannot open it. Before 0.3.17 that one answered with a
+//! of them; the other cannot open it. Before 0.3.18 that one answered with a
 //! Failed receipt, the buyer took it as the result and benched the node.
 //!
 //! Every process now carries a random instance id
