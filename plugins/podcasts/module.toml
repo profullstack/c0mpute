@@ -24,7 +24,7 @@
 [module]
 id          = "podcasts"
 name        = "Podcasts — p2p podcast listener"
-version     = "0.3.18"
+version     = "0.3.19"
 kind        = "service"
 category    = "media"
 status      = "available"

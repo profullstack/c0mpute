@@ -15,7 +15,7 @@
 [module]
 id          = "tts"
 name        = "TTS — text-to-speech"
-version     = "0.3.18"
+version     = "0.3.19"
 kind        = "workload"
 category    = "ai"
 status      = "available"
