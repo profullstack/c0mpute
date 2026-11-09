@@ -133,7 +133,7 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
 
     let site_dir = tmp.path().join("site");
     std::fs::create_dir_all(site_dir.join("docs")).unwrap();
-    std::fs::write(site_dir.join("index.html"), b"<h1>hello from the network</h1>").unwrap();
+    std::fs::write(site_dir.join("index.html"), b"<meta property=\"og:image\" content=\"img/hero.png\"><h1>hello from the network</h1>").unwrap();
     std::fs::write(site_dir.join("docs/index.html"), b"docs page").unwrap();
     let big: Vec<u8> = (0..(5 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
     std::fs::write(site_dir.join("big.bin"), &big).unwrap();
@@ -192,7 +192,38 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
         .text()
         .await
         .unwrap();
-    assert_eq!(body, "<h1>hello from the network</h1>");
+    assert!(body.ends_with("<h1>hello from the network</h1>"), "{body}");
+    // Relative og:image comes back absolute against the URL it was served at.
+    assert!(
+        body.contains(&format!(r#"content="http://{addr}/s/{site}/img/hero.png""#)),
+        "{body}"
+    );
+    // Behind a TLS proxy the forwarded origin wins.
+    let proxied = client
+        .get(format!("http://{addr}/s/{site}/"))
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-host", "gateway.example")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        proxied.contains(&format!(r#"content="https://gateway.example/s/{site}/img/hero.png""#)),
+        "{proxied}"
+    );
+    // `/s/<id>` (no slash) redirects so relative URLs resolve under the site.
+    let no_slash = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}/s/{site}?a=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_slash.status(), 308);
+    assert_eq!(no_slash.headers()["location"], format!("/s/{site}/?a=1").as_str());
     let docs = client.get(format!("http://{addr}/s/{site}/docs")).send().await.unwrap();
     assert_eq!(docs.status(), 200);
     assert_eq!(docs.text().await.unwrap(), "docs page");
@@ -236,7 +267,7 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
         .text()
         .await
         .unwrap();
-    assert_eq!(body, "<h1>hello from the network</h1>");
+    assert!(body.ends_with("<h1>hello from the network</h1>"), "{body}");
 
     let listing: serde_json::Value = client
         .get(format!("http://{addr}/hosting/v1/sites"))
