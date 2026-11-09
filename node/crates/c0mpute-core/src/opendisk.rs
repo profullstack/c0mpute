@@ -1,11 +1,14 @@
 //! OpenDisk: every storage node describes its own disk at
 //! `/.well-known/opendisk.json` on its gateway, and lists itself on an OpenDisk
-//! marketplace (d1sks) when it has a public https origin.
+//! marketplace (d1sks) with a signed heartbeat, NAT or not.
 //!
 //! There is no central registry in this path. A node states its own name,
-//! identity key, free space and price; the marketplace only reads what the
-//! node serves, and re-reads it every hour. A node behind NAT still serves the
-//! descriptor locally, it just has no origin a marketplace can reach yet.
+//! identity key, free space and price, signs that with its libp2p (ed25519)
+//! identity, and pushes it to d1sks every [`HEARTBEAT_EVERY`]. d1sks checks
+//! that the key is the peer id and that the signature holds, and lets the
+//! listing expire [`LISTING_TTL`] after the last heartbeat. A node with a
+//! public https origin says so in the same message; one behind NAT is listed
+//! as reachable through c0mpute (holders and gateways talk over libp2p).
 
 use std::path::Path;
 use std::time::Duration;
@@ -25,9 +28,21 @@ pub const DEFAULT_D1SKS_URL: &str = "https://d1sks.pwa.pit.world";
 /// The descriptor path the OpenDisk spec fixes.
 pub const WELL_KNOWN_PATH: &str = "/.well-known/opendisk.json";
 
-/// How often a node re-submits itself, so a marketplace that lost it (or a
-/// node whose origin changed) catches up without anyone stepping in.
-pub const REREGISTER_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a node re-sends its signed listing.
+pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// How long a listing stays up after its last heartbeat (three missed beats,
+/// plus slack).
+pub const LISTING_TTL: Duration = Duration::from_secs(20 * 60);
+
+/// Where d1sks takes signed listings.
+pub const ANNOUNCE_PATH: &str = "/api/v1/disks/announce";
+
+/// The `type` of a signed listing payload.
+pub const ANNOUNCE_TYPE: &str = "c0mpute.disk.announce/1";
+
+/// Multiaddrs sent per listing.
+pub const MAX_LISTED_ADDRS: usize = 8;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -209,52 +224,181 @@ pub fn public_origin(config: &Config) -> Option<String> {
     Some(url.origin().ascii_serialization())
 }
 
-/// Submit `origin` to the marketplace. Returns the marketplace's answer.
-pub async fn register(d1sks_url: &str, origin: &str) -> anyhow::Result<Value> {
+/// How a marketplace (or a publisher) can reach this disk: `https` (a public
+/// https origin), `direct` (a public IP multiaddr), or `c0mpute` (only over
+/// connections the node opens itself; still a full holder, since hosting and
+/// storage move over libp2p).
+pub fn reachability(origin: Option<&str>, addrs: &[String]) -> &'static str {
+    if origin.is_some() {
+        "https"
+    } else if addrs.iter().any(|a| is_public_multiaddr(a)) {
+        "direct"
+    } else {
+        "c0mpute"
+    }
+}
+
+/// A multiaddr on a public IP (or a DNS name).
+pub fn is_public_multiaddr(addr: &str) -> bool {
+    use c0mpute_net::Protocol;
+    let Ok(ma) = addr.parse::<c0mpute_net::Multiaddr>() else {
+        return false;
+    };
+    ma.iter().any(|p| match p {
+        Protocol::Ip4(ip) => {
+            let o = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64))
+        }
+        Protocol::Ip6(ip) => {
+            let seg = ip.segments();
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80)
+        }
+        Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) => true,
+        _ => false,
+    })
+}
+
+/// The addresses worth listing: no wildcard binds, at most [`MAX_LISTED_ADDRS`],
+/// public ones first.
+pub fn listable_addrs(addrs: Vec<String>) -> Vec<String> {
+    let mut v: Vec<String> = addrs
+        .into_iter()
+        .filter(|a| !a.contains("/ip4/0.0.0.0") && !a.contains("/ip6/::/") && a.len() <= 200)
+        .collect();
+    v.sort_by_key(|a| !is_public_multiaddr(a));
+    v.dedup();
+    v.truncate(MAX_LISTED_ADDRS);
+    v
+}
+
+/// The signed listing d1sks takes at [`ANNOUNCE_PATH`]:
+/// `{ "payload": "<JSON text>", "signature": "<hex ed25519 over the text>" }`.
+///
+/// The payload binds the marketplace host (so a listing cannot be replayed to
+/// another marketplace), the time (d1sks refuses old or reused ones), the
+/// peer id and its key, and the OpenDisk descriptor with the c0mpute block
+/// (roles, version, addrs, reachability).
+pub fn signed_listing(
+    config: &Config,
+    keypair: &c0mpute_net::libp2p::identity::Keypair,
+    market_url: &str,
+    origin: Option<&str>,
+    addrs: Vec<String>,
+    cap: Capacity,
+    unix_secs: u64,
+) -> anyhow::Result<Value> {
+    let peer = keypair.public().to_peer_id();
+    let key_hex = c0mpute_net::identity::ed25519_public_hex(&peer)
+        .ok_or_else(|| anyhow::anyhow!("this identity is not an ed25519 key"))?;
+    let peer_id = peer.to_base58();
+    let addrs = listable_addrs(addrs);
+    let mut doc = descriptor(config, &peer_id, Some(&key_hex), origin, cap);
+    doc["c0mpute"]["addrs"] = json!(addrs);
+    doc["c0mpute"]["reachable"] = json!(reachability(origin, &addrs));
+    if let Some(c) = config.country() {
+        doc["location"] = json!({ "countries": [c] });
+    }
+    let market_host = reqwest::Url::parse(market_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let payload = json!({
+        "type": ANNOUNCE_TYPE,
+        "marketplace": market_host,
+        "peer_id": peer_id,
+        "key": format!("ed25519:{key_hex}"),
+        "ts": unix_secs,
+        "expires_in": LISTING_TTL.as_secs(),
+        "origin": origin,
+        "descriptor": doc,
+    });
+    let text = serde_json::to_string(&payload)?;
+    let sig = keypair
+        .sign(text.as_bytes())
+        .map_err(|e| anyhow::anyhow!("sign listing: {e}"))?;
+    Ok(json!({ "payload": text, "signature": hex::encode(sig) }))
+}
+
+/// Push one signed listing to the marketplace. Returns its answer.
+pub async fn announce(market_url: &str, body: &Value) -> anyhow::Result<Value> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("c0mpute/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let res = client
-        .post(format!("{}/api/v1/disks", d1sks_url.trim_end_matches('/')))
-        .json(&json!({ "url": origin }))
+        .post(format!("{}{ANNOUNCE_PATH}", market_url.trim_end_matches('/')))
+        .json(body)
         .send()
         .await?;
     let status = res.status();
-    let body: Value = res.json().await.unwrap_or(Value::Null);
+    let answer: Value = res.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        anyhow::bail!("d1sks answered {status}: {body}");
+        anyhow::bail!("d1sks answered {status}: {answer}");
     }
-    Ok(body)
+    Ok(answer)
 }
 
-/// Keep this node listed: register now, then once a day. A no-op when the
-/// operator turned OpenDisk off or the gateway has no public https origin.
-pub fn spawn_self_listing(config: &Config) {
-    if !config.storage.opendisk {
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Keep this disk listed on d1sks: a signed heartbeat now and every
+/// [`HEARTBEAT_EVERY`], NAT or not. A no-op when the node does not list
+/// (`Config::lists_on_d1sks`: storage off, OpenDisk off, `list_on_d1sks =
+/// false`, `C0MPUTE_D1SKS=0`, or private mode).
+pub fn spawn_listing(config: &Config, net: std::sync::Arc<c0mpute_net::Libp2pNetwork>) {
+    if !config.lists_on_d1sks() {
+        info!("opendisk: not listing this disk on d1sks (storage, listing or private mode says no)");
         return;
     }
-    if config.private.enabled {
-        info!("opendisk: private mode, not listing this disk on d1sks");
-        return;
-    }
-    let Some(origin) = public_origin(config) else {
-        info!(
-            "opendisk: descriptor served at {WELL_KNOWN_PATH}; not listing on d1sks \
-             (set gateway.announce to this node's public https origin to list it)"
-        );
-        return;
+    let identity_dir = crate::config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let keypair = match c0mpute_net::identity::load_or_create(&identity_dir) {
+        Ok(k) if k.public().to_peer_id() == net.peer_id() => k,
+        Ok(_) => {
+            warn!("opendisk: the identity on disk is not this node's peer id; not listing");
+            return;
+        }
+        Err(e) => {
+            warn!(err = %e, "opendisk: no identity to sign the d1sks listing with");
+            return;
+        }
     };
-    let market = config.storage.d1sks_url.clone();
+    let config = config.clone();
     tokio::spawn(async move {
-        // Let the gateway bind before the marketplace fetches from it.
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        // Let the swarm learn its addresses before the first listing.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let market = config.storage.d1sks_url.clone();
+        let origin = public_origin(&config);
+        let mut logged_ok = false;
         loop {
-            match register(&market, &origin).await {
-                Ok(_) => info!(%origin, %market, "opendisk: listed on d1sks"),
-                Err(e) => warn!(%origin, %market, err = %e, "opendisk: d1sks listing failed"),
+            let addrs: Vec<String> = net.advertised_addrs().await.into_iter().map(|a| a.to_string()).collect();
+            let cap = capacity(&config.storage, 0);
+            match signed_listing(&config, &keypair, &market, origin.as_deref(), addrs, cap, unix_now()) {
+                Ok(body) => match announce(&market, &body).await {
+                    Ok(_) if !logged_ok => {
+                        info!(%market, "opendisk: listed on d1sks (signed heartbeat every {}s)", HEARTBEAT_EVERY.as_secs());
+                        logged_ok = true;
+                    }
+                    Ok(_) => tracing::debug!(%market, "opendisk: d1sks heartbeat"),
+                    Err(e) => warn!(%market, err = %e, "opendisk: d1sks listing failed"),
+                },
+                Err(e) => warn!(err = %e, "opendisk: could not build the d1sks listing"),
             }
-            tokio::time::sleep(REREGISTER_EVERY).await;
+            // A little jitter so a fleet restarted together does not beat in step.
+            let jitter = Duration::from_secs(unix_now() % 30);
+            tokio::time::sleep(HEARTBEAT_EVERY + jitter).await;
         }
     });
 }
@@ -353,6 +497,48 @@ mod tests {
         assert_eq!(public_origin(&cfg), None);
         cfg.gateway.announce = Some("https://disk.example/some/path".into());
         assert_eq!(public_origin(&cfg).as_deref(), Some("https://disk.example"));
+    }
+
+    #[test]
+    fn signed_listing_verifies_with_the_peer_key() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let cfg = Config::default();
+        let body = signed_listing(
+            &cfg,
+            &kp,
+            "https://d1sks.example/",
+            None,
+            vec![
+                "/ip4/0.0.0.0/tcp/1".into(),
+                "/ip4/192.168.1.5/tcp/4001".into(),
+            ],
+            Capacity { free_bytes: 10 * G, total_bytes: 20 * G },
+            1_800_000_000,
+        )
+        .unwrap();
+        let text = body["payload"].as_str().unwrap();
+        let sig = hex::decode(body["signature"].as_str().unwrap()).unwrap();
+        assert!(kp.public().verify(text.as_bytes(), &sig));
+        let p: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(p["type"], ANNOUNCE_TYPE);
+        assert_eq!(p["marketplace"], "d1sks.example");
+        assert_eq!(p["peer_id"], kp.public().to_peer_id().to_base58());
+        assert_eq!(p["ts"], 1_800_000_000u64);
+        assert_eq!(p["descriptor"]["key"], p["key"]);
+        assert_eq!(p["descriptor"]["c0mpute"]["reachable"], "c0mpute");
+        assert_eq!(p["descriptor"]["c0mpute"]["addrs"], json!(["/ip4/192.168.1.5/tcp/4001"]));
+        assert_eq!(p["descriptor"]["capacity"]["free_gib"], 10.0);
+    }
+
+    #[test]
+    fn reachability_reads_origin_then_public_addrs() {
+        let lan = vec!["/ip4/10.0.0.2/tcp/1".to_string(), "/ip4/100.64.1.1/tcp/1".to_string()];
+        assert_eq!(reachability(None, &lan), "c0mpute");
+        assert_eq!(reachability(Some("https://x.example"), &lan), "https");
+        assert_eq!(reachability(None, &["/ip4/203.0.113.9/tcp/1".to_string()]), "c0mpute", "documentation range");
+        assert_eq!(reachability(None, &["/ip4/5.9.10.11/tcp/46341".to_string()]), "direct");
+        assert_eq!(reachability(None, &["/ip6/2a01:4f8::1/tcp/1".to_string()]), "direct");
+        assert_eq!(reachability(None, &["/ip6/fd00::1/tcp/1".to_string()]), "c0mpute");
     }
 
     #[test]

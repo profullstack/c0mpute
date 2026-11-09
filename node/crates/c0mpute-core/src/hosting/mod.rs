@@ -765,6 +765,27 @@ impl Hosting {
         self.0.map.read().await.holders(site_id)
     }
 
+    /// Hosting peers heard announcing themselves on the gossip within the
+    /// holder TTL, sorted (this node included when it hosts).
+    pub async fn live_hosts(&self) -> Vec<String> {
+        let mut map = self.0.map.write().await;
+        map.prune(Instant::now(), self.0.timing.holder_ttl);
+        map.live_peers()
+    }
+
+    /// Listen to the hosting gossip until every peer in `want` has announced
+    /// itself as a hosting node, or `max` passes. Returns the live hosts.
+    pub async fn wait_for_hosts(&self, want: &[String], max: Duration) -> Vec<String> {
+        let started = Instant::now();
+        loop {
+            let live = self.live_hosts().await;
+            if want.iter().all(|w| live.contains(w)) || started.elapsed() >= max {
+                return live;
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+
     /// Every known site: record plus live copy count.
     pub async fn sites(&self) -> Vec<(SiteRecord, usize)> {
         let map = self.0.map.read().await;
@@ -1339,11 +1360,29 @@ pub struct MarketOptions {
     pub d1sks_url: String,
 }
 
-/// Pick preferred hosts from d1sks for a site of `size` bytes. `None` (with
-/// a note on stderr) when d1sks is unreachable or nothing matches: the site
-/// then publishes as a plain free site, which the network still keeps.
-pub async fn pick_terms(m: &MarketOptions, size: u64) -> Option<site::HostingTerms> {
-    let disks = match market::query(&m.d1sks_url, &m.query).await {
+/// How long a publisher listens to the hosting gossip to see which d1sks
+/// disks are live hosts (a hosting node announces once a minute).
+pub const GOSSIP_CHECK: Duration = Duration::from_secs(70);
+
+/// The d1sks hosting disks for `m`, checked against the live hosting gossip
+/// when `hosting` is given: disks that announced themselves are marked live
+/// and rank first. `Err` when d1sks cannot be read.
+pub async fn market_disks(m: &MarketOptions, hosting: Option<&Hosting>) -> Result<Vec<market::HostDisk>> {
+    let mut disks = market::query(&m.d1sks_url, &m.query).await?;
+    if let Some(h) = hosting {
+        let want: Vec<String> = disks.iter().map(|d| d.peer_id.clone()).collect();
+        let live = h.wait_for_hosts(&want, GOSSIP_CHECK).await;
+        market::mark_live(&mut disks, &live);
+    }
+    Ok(disks)
+}
+
+/// Pick preferred hosts from d1sks for a site of `size` bytes, preferring
+/// disks seen live on the hosting gossip. `None` (with a note on stderr)
+/// when d1sks is unreachable or nothing matches: the site then publishes as
+/// a plain free site, which the network still keeps.
+pub async fn pick_terms(m: &MarketOptions, size: u64, hosting: Option<&Hosting>) -> Option<site::HostingTerms> {
+    let disks = match market_disks(m, hosting).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("d1sks: {e}; publishing without preferred hosts (the network still keeps 3 free copies)");
@@ -1360,10 +1399,11 @@ pub async fn pick_terms(m: &MarketOptions, size: u64) -> Option<site::HostingTer
             );
             for d in &chosen {
                 eprintln!(
-                    "  {}  {}  ${}/GiB-month  {}",
+                    "  {}  {}  ${}/GiB-month  {}  {}",
                     d.peer_id,
                     d.name,
                     crate::payments::format_usd(d.price),
+                    if d.live { "live" } else { d.reachable.as_deref().unwrap_or("listed") },
                     d.countries.join(",")
                 );
             }
@@ -1401,8 +1441,11 @@ pub async fn publish_dir_with(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    // Join the hosting gossip first: picking marketplace hosts checks the
+    // d1sks listing against which hosting nodes are live right now.
+    let hosting = Hosting::start(supervisor.libp2p.clone(), supervisor.store.clone(), Options::default()).await?;
     let terms = match &market {
-        Some(m) => pick_terms(m, built.manifest.total_bytes()).await,
+        Some(m) => pick_terms(m, built.manifest.total_bytes(), Some(&hosting)).await,
         None => None,
     };
     let record = SiteRecord::sign_with_terms(
@@ -1414,7 +1457,6 @@ pub async fn publish_dir_with(
         domains,
         terms,
     )?;
-    let hosting = Hosting::start(supervisor.libp2p.clone(), supervisor.store.clone(), Options::default()).await?;
     // Let the swarm reach peers before the first gossip.
     tokio::time::sleep(Duration::from_secs(5)).await;
     hosting.publish_site(&built, record.clone()).await?;

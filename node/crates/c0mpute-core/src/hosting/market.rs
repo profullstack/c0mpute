@@ -17,6 +17,9 @@ use crate::payments::{Micros, parse_usd};
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
+/// A listing whose last signed heartbeat is older than this ranks last.
+pub const FRESH_SECS: u64 = 15 * 60;
+
 /// What to ask d1sks for. `--disks auto` is the empty query; otherwise a
 /// d1sks-style query string such as `country=DE,FI&max_price=0.01&min_gib=5`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -107,6 +110,39 @@ pub struct HostDisk {
     /// d1sks standing 0-100, when it has one.
     pub standing: Option<f64>,
     pub countries: Vec<String>,
+    /// How d1sks says the disk is reached: `https`, `direct` or `c0mpute`
+    /// (NAT; reached over connections it opens). `None` from older listings.
+    pub reachable: Option<String>,
+    /// Seconds since the disk's last signed heartbeat, when it pushes them.
+    pub heartbeat_age_secs: Option<u64>,
+    /// Seen announcing itself as a hosting node on the live hosting gossip
+    /// (set by [`mark_live`], never by d1sks).
+    pub live: bool,
+}
+
+impl HostDisk {
+    /// Ranking tier, lower first: live on the hosting gossip; then fresh and
+    /// publicly reachable (or an origin-polled listing); then fresh behind
+    /// NAT; then a listing whose heartbeat has gone stale.
+    pub fn tier(&self) -> u8 {
+        if self.live {
+            0
+        } else if self.heartbeat_age_secs.is_some_and(|a| a > FRESH_SECS) {
+            3
+        } else if self.reachable.as_deref() == Some("c0mpute") {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// Mark the disks whose peer ids announced themselves as hosting nodes on
+/// the live hosting gossip (`Hosting::live_hosts`).
+pub fn mark_live(disks: &mut [HostDisk], live: &[String]) {
+    for d in disks.iter_mut() {
+        d.live = live.iter().any(|p| p == &d.peer_id);
+    }
 }
 
 fn usd_micros(v: &Value) -> Option<Micros> {
@@ -173,14 +209,22 @@ pub fn parse_disks(body: &Value) -> Vec<HostDisk> {
             free_bytes: (free_gib.max(0.0) * GIB) as u64,
             standing: row["standing"].as_f64().or_else(|| data["record"]["standing"].as_f64()),
             countries,
+            reachable: row["reachable"]
+                .as_str()
+                .or_else(|| c["reachable"].as_str())
+                .filter(|r| matches!(*r, "https" | "direct" | "c0mpute"))
+                .map(str::to_string),
+            heartbeat_age_secs: row["heartbeat_age_s"].as_f64().filter(|a| *a >= 0.0).map(|a| a as u64),
+            live: false,
         });
     }
     out
 }
 
-/// Disks that fit the query and the site, best first: cheapest, then
-/// highest standing (unrated last), then most free space, then peer id, so
-/// the same listing always gives the same order.
+/// Disks that fit the query and the site, best first: by [`HostDisk::tier`]
+/// (live on gossip, fresh and reachable, fresh behind NAT, stale), then
+/// cheapest, then highest standing (unrated last), then most free space,
+/// then peer id, so the same listing always gives the same order.
 pub fn rank(disks: &[HostDisk], q: &DiskQuery, site_bytes: u64) -> Vec<HostDisk> {
     let mut v: Vec<HostDisk> = disks
         .iter()
@@ -192,8 +236,9 @@ pub fn rank(disks: &[HostDisk], q: &DiskQuery, site_bytes: u64) -> Vec<HostDisk>
         .cloned()
         .collect();
     v.sort_by(|a, b| {
-        a.price
-            .cmp(&b.price)
+        a.tier()
+            .cmp(&b.tier())
+            .then(a.price.cmp(&b.price))
             .then_with(|| {
                 let (x, y) = (a.standing.unwrap_or(-1.0), b.standing.unwrap_or(-1.0));
                 y.total_cmp(&x)
@@ -354,6 +399,29 @@ mod tests {
         let q = DiskQuery::parse("min_standing=50").unwrap();
         let order: Vec<String> = rank(&disks, &q, site).into_iter().map(|d| d.name).collect();
         assert_eq!(order, vec!["a", "d"]);
+    }
+
+    #[test]
+    fn live_and_fresh_reachable_disks_rank_first() {
+        let mut body = fixture();
+        let rows = body["disks"].as_array_mut().unwrap();
+        // a: cheapest but its heartbeat went stale; b: behind NAT, fresh;
+        // c: fresh and directly reachable; d: priciest but live on gossip.
+        rows[0]["heartbeat_age_s"] = serde_json::json!(3600);
+        rows[0]["reachable"] = serde_json::json!("direct");
+        rows[1]["heartbeat_age_s"] = serde_json::json!(60);
+        rows[1]["reachable"] = serde_json::json!("c0mpute");
+        rows[2]["heartbeat_age_s"] = serde_json::json!(30);
+        rows[2]["reachable"] = serde_json::json!("direct");
+        let mut disks = parse_disks(&body);
+        assert_eq!(disks[1].reachable.as_deref(), Some("c0mpute"));
+        assert_eq!(disks[0].heartbeat_age_secs, Some(3600));
+        mark_live(&mut disks, &[pid(4)]);
+        let order: Vec<String> = rank(&disks, &DiskQuery::default(), 1024)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(order, vec!["d", "i", "c", "b", "a"]);
     }
 
     #[test]

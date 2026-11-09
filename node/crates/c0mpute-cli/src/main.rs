@@ -446,11 +446,21 @@ enum WorkerCmd {
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
         /// verifier, workflow-step, video, diffusion, music. Default: the config's
-        /// roles plus tts, stt, workflow-step, diffusion and music.
+        /// roles plus tts, stt, workflow-step, diffusion and music. Every node
+        /// is also a disk provider (storage + hosting, listed on d1sks) on top
+        /// of whatever is listed here, unless turned off below or in config.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
         storage: Option<String>,
+        /// Do not be a disk provider: no storage role, not listed on d1sks
+        /// (same as `[storage] enabled = false` or `C0MPUTE_STORAGE=0`).
+        #[arg(long)]
+        no_storage: bool,
+        /// Do not hold other people's sites (same as `[hosting] enabled =
+        /// false` or `C0MPUTE_HOSTING=0`).
+        #[arg(long)]
+        no_hosting: bool,
         #[arg(long)]
         gpu: bool,
         /// Private mode for this run: only your own buyers, not advertised.
@@ -673,6 +683,10 @@ enum HostingCmd {
         country: Option<String>,
         #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
         d1sks: String,
+        /// Also join the hosting gossip (about a minute) and mark which
+        /// listed disks are announcing themselves as live hosts right now.
+        #[arg(long)]
+        live: bool,
     },
     /// List the sites a gateway knows, with live copy counts.
     Ls {
@@ -1244,6 +1258,8 @@ fn main() -> Result<()> {
                 attach: true,
                 roles,
                 storage,
+                no_storage,
+                no_hosting,
                 gpu,
                 private,
                 daemon: _,
@@ -1253,6 +1269,12 @@ fn main() -> Result<()> {
         let mut passthrough = Vec::new();
         if *private {
             passthrough.push("--private".to_string());
+        }
+        if *no_storage {
+            passthrough.push("--no-storage".to_string());
+        }
+        if *no_hosting {
+            passthrough.push("--no-hosting".to_string());
         }
         if let Some(rs) = roles {
             passthrough.push("--roles".to_string());
@@ -1653,6 +1675,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
         WorkerCmd::Start {
             roles,
             storage: _,
+            no_storage,
+            no_hosting,
             gpu,
             private,
             // Both handled in `main` before the runtime started; at this point
@@ -1708,6 +1732,23 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if gpu && !cfg.roles.contains(&Role::Transcode) {
                 cfg.roles.push(Role::Transcode);
+            }
+            if no_storage {
+                cfg.storage.enabled = false;
+            }
+            if no_hosting {
+                cfg.hosting.enabled = false;
+            }
+            // Every node is a disk provider unless it opted out: storage and
+            // hosting join even an explicit --roles list.
+            cfg.apply_disk_provider_defaults();
+            if cfg.lists_on_d1sks() {
+                eprintln!(
+                    "disk provider: storing shards and holding sites for the network, listed on {} \
+                     (opt out: --no-storage / --no-hosting, [storage] enabled = false, \
+                     [storage] list_on_d1sks = false, C0MPUTE_D1SKS=0)",
+                    cfg.storage.d1sks_url
+                );
             }
             // Speech is a nice-to-have, not a precondition for joining: a box
             // that cannot build a TTS runtime should still serve storage,
@@ -3556,21 +3597,55 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             max_price,
             country,
             d1sks,
+            live,
         } => {
             let q = disk_query(&query, max_price.as_deref(), country.as_deref())?;
-            let disks = c0mpute_core::hosting::market::query(&d1sks, &q).await?;
+            let m = c0mpute_core::hosting::MarketOptions {
+                query: q.clone(),
+                copies: 1,
+                d1sks_url: d1sks.clone(),
+            };
+            let disks = if live {
+                eprintln!(
+                    "listening to the hosting gossip for up to {}s ...",
+                    c0mpute_core::hosting::GOSSIP_CHECK.as_secs()
+                );
+                let sup = c0mpute_core::Supervisor::boot_buyer(c0mpute_core::Config::default()).await?;
+                let h = c0mpute_core::hosting::Hosting::start(
+                    sup.libp2p.clone(),
+                    sup.store.clone(),
+                    c0mpute_core::hosting::Options::default(),
+                )
+                .await?;
+                c0mpute_core::hosting::market_disks(&m, Some(&h)).await?
+            } else {
+                c0mpute_core::hosting::market_disks(&m, None).await?
+            };
             let ranked = c0mpute_core::hosting::market::rank(&disks, &q, 0);
             if ranked.is_empty() {
                 println!("no c0mpute hosting disks on {d1sks} match ({} listed)", disks.len());
+            } else {
+                println!(
+                    "{:<54} {:<10} {:>10}  {:<8} {:<8} {:<8} {:<6} NAME",
+                    "PEER", "$/GiB-MO", "FREE", "REACH", "SEEN", "GOSSIP", "WHERE"
+                );
             }
             for d in ranked {
+                let seen = match d.heartbeat_age_secs {
+                    Some(s) if s < 120 => format!("{s}s"),
+                    Some(s) => format!("{}m", s / 60),
+                    None => "-".into(),
+                };
+                let gossip = if d.live { "live" } else if live { "silent" } else { "-" };
                 println!(
-                    "{:<54} ${:<9} {:>8.1} GiB  standing {:<5} {:<8} {}",
+                    "{:<54} {:<10} {:>6.1} GiB  {:<8} {:<8} {:<8} {:<6} {}",
                     d.peer_id,
                     c0mpute_core::payments::format_usd(d.price),
                     d.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                    d.standing.map(|s| format!("{s:.0}")).unwrap_or_else(|| "-".into()),
-                    d.countries.join(","),
+                    d.reachable.as_deref().unwrap_or("-"),
+                    seen,
+                    gossip,
+                    if d.countries.is_empty() { "-".to_string() } else { d.countries.join(",") },
                     d.name
                 );
             }
