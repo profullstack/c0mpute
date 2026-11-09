@@ -22,7 +22,7 @@ use axum::routing::get;
 use c0mpute_proto::Hash;
 use tracing::info;
 
-use super::site::{BuiltSite, MAX_SITE_BYTES, Manifest, SiteManifest};
+use super::site::{BuiltSite, Manifest, SiteManifest};
 use super::{Hosting, TARGET_REPLICAS};
 use crate::git::{self, RepoDoc, RepoState};
 
@@ -231,10 +231,10 @@ impl Hosting {
         // Budgets, as a hosting node applies them to any copy it takes: the
         // node's budget (automatic unless `[hosting] max_bytes` is set), the
         // free-disk floor and the per-owner limit.
-        if rec.size > MAX_SITE_BYTES {
+        if rec.size > git::MAX_REPO_BYTES {
             return Err(Refused(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "over the hosting site size limit".into(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("repos are limited to {} MiB", git::MAX_REPO_BYTES >> 20),
             ));
         }
         let already = old.as_ref().map(|(r, _, _)| r.size).unwrap_or(0);
@@ -317,7 +317,7 @@ pub fn router() -> Router<Hosting> {
         .route(
             "/git/v1/repos/{owner}/{repo}",
             get(get_repo).post(post_push).layer(DefaultBodyLimit::max(
-                MAX_SITE_BYTES as usize + 64 * 1024 * 1024,
+                git::MAX_REPO_BYTES as usize + 64 * 1024 * 1024,
             )),
         )
         .route("/git/v1/sites/{site_id}", get(get_repo_by_site))
