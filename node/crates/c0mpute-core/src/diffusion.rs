@@ -393,7 +393,25 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
 
 /// Stream a large file to disk while hashing it; never holds it in memory.
 /// A file already present with the right hash is kept.
+///
+/// Multi-GB weights come down home links that drop mid-transfer, so this
+/// resumes: bytes already in `<name>.partial` are kept and re-hashed, the rest
+/// is requested with `Range: bytes=N-`, and a dropped body is retried with
+/// backoff. A server that ignores Range (plain 200) restarts the file; 416
+/// means the partial is already whole.
 pub(crate) async fn download_verified_streaming(url: &str, path: &Path, expected_sha256: &str) -> Result<()> {
+    download_verified_resumable(url, path, expected_sha256, DOWNLOAD_ATTEMPTS, Duration::from_secs(5)).await
+}
+
+const DOWNLOAD_ATTEMPTS: u32 = 8;
+
+pub(crate) async fn download_verified_resumable(
+    url: &str,
+    path: &Path,
+    expected_sha256: &str,
+    attempts: u32,
+    first_backoff: Duration,
+) -> Result<()> {
     if path.is_file() && sha256_file(path).await? == expected_sha256 {
         return Ok(());
     }
@@ -401,22 +419,59 @@ pub(crate) async fn download_verified_streaming(url: &str, path: &Path, expected
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(2 * 60 * 60))
         .build()?;
-    let mut response = client.get(url).send().await?.error_for_status()?;
     let temp = path.with_extension("partial");
-    let mut file = tokio::fs::File::create(&temp).await?;
-    let mut hasher = Sha256::new();
+    let mut backoff = first_backoff;
+    let mut last_err = None;
+    for attempt in 1..=attempts.max(1) {
+        match fetch_into_partial(&client, url, &temp).await {
+            Ok(()) => {
+                let actual = sha256_file(&temp).await?;
+                if actual != expected_sha256 {
+                    let _ = tokio::fs::remove_file(&temp).await;
+                    bail!("SHA-256 mismatch for {url}: got {actual}");
+                }
+                tokio::fs::rename(&temp, path).await?;
+                return Ok(());
+            }
+            Err(err) => {
+                let have = tokio::fs::metadata(&temp).await.map(|m| m.len()).unwrap_or(0);
+                warn!(url, attempt, have_bytes = have, error = %err, "weight download interrupted; will resume");
+                last_err = Some(err);
+                if attempt < attempts {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(120));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("download failed")))
+        .with_context(|| format!("download {url} after {attempts} attempts"))
+}
+
+/// One attempt: append to `temp` from where it stops. Errors leave the bytes
+/// already written in place for the next attempt.
+async fn fetch_into_partial(client: &reqwest::Client, url: &str, temp: &Path) -> Result<()> {
+    let have = tokio::fs::metadata(temp).await.map(|m| m.len()).unwrap_or(0);
+    let mut request = client.get(url);
+    if have > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+    }
+    let mut response = request.send().await?;
+    let status = response.status();
+    let mut file = if have > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
+        tokio::fs::OpenOptions::new().append(true).open(temp).await?
+    } else if have > 0 && status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // Already have every byte; the hash check decides.
+        return Ok(());
+    } else {
+        response = response.error_for_status()?;
+        // No Range support (or nothing yet): start the file over.
+        tokio::fs::File::create(temp).await?
+    };
     while let Some(chunk) = response.chunk().await? {
-        hasher.update(&chunk);
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
-    drop(file);
-    let actual = hex::encode(hasher.finalize());
-    if actual != expected_sha256 {
-        let _ = tokio::fs::remove_file(&temp).await;
-        bail!("SHA-256 mismatch for {url}: got {actual}");
-    }
-    tokio::fs::rename(&temp, path).await?;
     Ok(())
 }
 
@@ -697,6 +752,71 @@ async fn run_job(
 
 #[cfg(test)]
 mod tests {
+
+    /// A server that cuts the first response off halfway, then honours Range.
+    async fn flaky_range_server(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                let from = req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("range: bytes="))
+                    .and_then(|r| r.trim_end_matches('-').trim().trim_end_matches('-').parse::<usize>().ok());
+                if first {
+                    first = false;
+                    let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body[..body.len() / 2]).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                let start = from.unwrap_or(0);
+                let rest = &body[start..];
+                let head = if from.is_some() {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\ncontent-range: bytes {}-{}/{}\r\nconnection: close\r\n\r\n",
+                        rest.len(), start, body.len() - 1, body.len()
+                    )
+                } else {
+                    format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", rest.len())
+                };
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(rest).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/weights.bin")
+    }
+
+    #[tokio::test]
+    async fn weight_download_resumes_after_a_dropped_connection() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let expected = hex::encode(Sha256::digest(&body));
+        let url = flaky_range_server(body.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        download_verified_resumable(&url, &path, &expected, 3, Duration::from_millis(10)).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert!(!path.with_extension("partial").exists());
+    }
+
+    #[tokio::test]
+    async fn weight_download_rejects_a_wrong_hash_and_cleans_up() {
+        let body: Vec<u8> = vec![7u8; 10_000];
+        let url = flaky_range_server(body).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weights.bin");
+        let err = download_verified_resumable(&url, &path, &"0".repeat(64), 3, Duration::from_millis(10)).await.unwrap_err();
+        assert!(format!("{err:#}").contains("SHA-256 mismatch"));
+        assert!(!path.exists() && !path.with_extension("partial").exists());
+    }
     use super::*;
     use crate::config::DiffusionConfig;
 
