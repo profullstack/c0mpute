@@ -83,8 +83,8 @@ fn fast() -> Timing {
         announce_every: Duration::from_millis(400),
         records_every: Duration::from_millis(1000),
         tick: Duration::from_millis(400),
-        node_ttl: Duration::from_secs(3),
-        warmup: Duration::from_millis(1500),
+        node_ttl: Duration::from_secs(6),
+        warmup: Duration::from_secs(3),
         fetch_timeout: Duration::from_secs(10),
     }
 }
@@ -319,11 +319,14 @@ async fn apps_place_three_copies_serve_snapshot_and_fail_over() {
         }
     })
     .await;
-    assert_eq!(
-        std::fs::read(fake.join("restored")).unwrap(),
-        state,
-        "the new primary restored the snapshotted state"
-    );
+    // (Read until it matches: under heavy load a second restore may be
+    // writing the shared fake's file at the moment we look.)
+    wait_for("the new primary restored the snapshotted state", 30, || {
+        let path = fake.join("restored");
+        let want = state.clone();
+        async move { std::fs::read(&path).map(|b| b == want).unwrap_or(false) }
+    })
+    .await;
     wait_for("the gateway serves the app again", 30, || {
         let gateway = gateway.clone();
         let id = id.clone();

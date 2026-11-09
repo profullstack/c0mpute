@@ -120,7 +120,9 @@ pub fn fill(
     }
     let candidates = nodes
         .iter()
-        .filter(|(_, n)| n.hosts && n.accepts(owner) && !n.apps.contains_key(app_id) && n.free_mb >= memory_mb)
+        .filter(|(_, n)| {
+            n.hosts && n.accepts(owner) && !n.apps.contains_key(app_id) && n.free_mb >= memory_mb
+        })
         .map(|(p, _)| p);
     by_rank(app_id, candidates)
         .into_iter()
@@ -302,7 +304,11 @@ mod tests {
             nodes.get_mut(p).unwrap().owners = vec!["alice".into()];
         }
         let f = fill("app1", "bob", 3, 256, &nodes);
-        assert_eq!(f.len(), 2, "nodes that only run alice's apps never take bob's");
+        assert_eq!(
+            f.len(),
+            2,
+            "nodes that only run alice's apps never take bob's"
+        );
         assert!(f.iter().all(|p| p == "peer2" || p == "peer3"));
         assert_eq!(fill("app1", "alice", 3, 256, &nodes).len(), 3);
     }

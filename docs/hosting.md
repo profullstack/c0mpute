@@ -30,7 +30,10 @@ is used for misses.
 | Healing | A site with fewer than 3 live copies: each hosting node ranks the candidates (rendezvous hashing on site id + peer id). The top-ranked ones fetch a copy. A node that stops announcing stops counting after ~200 s and another node takes over. Above 5 copies the lowest-ranked holder lets go. A publisher seeding its own site is a source, not a copy. |
 | Serving | Any gateway: local chunks when it holds them, otherwise fetched over libp2p from the fastest live holder (measured round-trip, round-robin among equally fast ones), failing over to the next and then to the DHT. Every chunk is checked against its hash. |
 
-Limits per site: 256 MiB, 10,000 files. A node holds at most `hosting.max_bytes`
+Limits per site: 1 GiB, 10,000,000 files. Up to 5,000 files the manifest is one chunk;
+above that it is a root listing parts of 4,000 files each (by first path), so a
+gateway fetches only the part a request needs. Nodes before v0.3.0 cannot read
+parted manifests and skip those sites. A node holds at most `hosting.max_bytes`
 (default 5 GiB) of other people's sites, and at most 1 GiB per owner key.
 
 ```toml
