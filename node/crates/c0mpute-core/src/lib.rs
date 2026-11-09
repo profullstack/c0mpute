@@ -15,6 +15,7 @@ pub mod canary;
 pub mod capabilities;
 pub mod captcha;
 pub mod config;
+pub mod gateway_announce;
 pub mod container;
 pub mod crawl;
 pub mod crowdgpt;

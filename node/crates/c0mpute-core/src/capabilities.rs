@@ -363,7 +363,12 @@ pub fn announced_gateway(config: &Config) -> Option<String> {
     if config.private.enabled || !config.roles.contains(&c0mpute_proto::Role::Gateway) {
         return None;
     }
-    gateway_origin(config.gateway.announce.as_deref()?)
+    match config.gateway.announce.as_deref() {
+        Some(raw) => gateway_origin(raw),
+        // Found and checked by `gateway_announce` (a reachable public IPv4).
+        None if crate::gateway_announce::auto_enabled(config) => crate::gateway_announce::auto_gateway(),
+        None => None,
+    }
 }
 
 /// `scheme://host[:port]` of an http(s) URL with a host and no credentials,

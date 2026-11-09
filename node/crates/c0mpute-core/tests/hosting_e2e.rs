@@ -240,6 +240,69 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     let missing = client.get(format!("http://{addr}/s/{site}/nope")).send().await.unwrap();
     assert_eq!(missing.status(), 404);
 
+    // A client that does not trust this gateway can check every byte: the
+    // resolve proof carries the owner-signed record and the manifest bytes,
+    // and each chunk comes back by hash.
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let proof: serde_json::Value = client
+        .get(format!("http://{addr}/hosting/v1/sites/{site}/resolve?path=/big.bin"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rec: SiteRecord = serde_json::from_value(proof["record"].clone()).unwrap();
+    assert!(rec.verify(), "owner signature checks out");
+    assert_eq!(rec.site_id, site);
+    let manifest = b64.decode(proof["manifest"].as_str().unwrap()).unwrap();
+    assert_eq!(Hash::of(&manifest).to_hex(), rec.manifest, "manifest pinned by the record");
+    assert_eq!(proof["path"], "big.bin");
+    assert_eq!(proof["status"], 200);
+    let mut rebuilt = Vec::new();
+    for h in proof["entry"]["chunks"].as_array().unwrap() {
+        let h = h.as_str().unwrap();
+        let bytes = client
+            .get(format!("http://{addr}/hosting/v1/sites/{site}/chunks/{h}"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(Hash::of(&bytes).to_hex(), h, "chunk matches its hash");
+        rebuilt.extend_from_slice(&bytes);
+    }
+    assert!(rebuilt[..] == big[..], "verified chunks rebuild the file");
+    let root: serde_json::Value = client
+        .get(format!("http://{addr}/hosting/v1/sites/{site}/resolve?path=/"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(root["path"], "index.html");
+    let none: serde_json::Value = client
+        .get(format!("http://{addr}/hosting/v1/sites/{site}/resolve?path=/nope"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(none["path"], serde_json::Value::Null);
+    assert_eq!(none["status"], 404);
+    // Not an open relay: a hash that is not this site's is refused.
+    let stranger = Hash::of(b"not part of the site").to_hex();
+    let refused = client
+        .get(format!("http://{addr}/hosting/v1/sites/{site}/chunks/{stranger}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 404);
+
     // A holder leaves: another hosting node takes its place.
     let gone = holders[0].clone();
     let leaver = hosts.iter().find(|h| h.peer_id() == gone).unwrap().clone();
