@@ -37,7 +37,7 @@
 [module]
 id          = "gameserver"
 name        = "Game server — Minecraft / Factorio / Valheim"
-version     = "0.2.76"
+version     = "0.2.77"
 kind        = "workload"
 category    = "infrastructure"
 status      = "partial"
@@ -49,7 +49,7 @@ license     = "MIT"
 keywords    = ["gameserver", "minecraft", "factorio", "valheim", "hosting", "docker"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.77"
 os           = ["linux"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["container-runtime", "network:public-ip", "network:ingress"]

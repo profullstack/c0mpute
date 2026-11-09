@@ -29,7 +29,7 @@
 [module]
 id          = "train"
 name        = "Fine-tune — LoRA training"
-version     = "0.2.76"
+version     = "0.2.77"
 kind        = "workload"
 category    = "ai"
 status      = "partial"
@@ -41,7 +41,7 @@ license     = "MIT"
 keywords    = ["train", "finetune", "lora", "peft", "adapter", "infernet"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.77"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["bin:infernet", "infernet:text:runtime:peft", "gpu:cuda?"]
