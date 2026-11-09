@@ -118,6 +118,12 @@ pub enum HostingMsg {
         /// Where it is paid for marketplace copies.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payout: Option<Payee>,
+        /// It hosts but cannot take another copy (disk at its free floor or
+        /// hosting budget used up). Other nodes leave it out of the
+        /// rendezvous fill, so a site it would rank first for still gets its
+        /// copies from the next ranked nodes. Absent (false) from older nodes.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        full: bool,
     },
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
@@ -395,6 +401,7 @@ impl Hosting {
                         addrs,
                         price,
                         payout,
+                        full,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -416,10 +423,9 @@ impl Hosting {
                             let (_, all) = partial.remove(&source).unwrap_or_default();
                             let price = price.as_deref().and_then(|p| crate::payments::parse_usd(p).ok());
                             let payout = payout.filter(|p| p.valid());
-                            h.0.map
-                                .write()
-                                .await
-                                .apply_holding_meta(&source, all, Instant::now(), hosts, price, payout);
+                            let mut map = h.0.map.write().await;
+                            map.apply_holding_meta(&source, all, Instant::now(), hosts, price, payout);
+                            map.set_full(&source, full);
                         }
                     }
                     HostingMsg::Receipt { receipt } => {
@@ -462,15 +468,11 @@ impl Hosting {
         } else {
             (None, None)
         };
+        let full = self.0.hosts && self.is_full().await;
         if self.0.hosts || !mine.is_empty() {
-            self.0.map.write().await.apply_holding_meta(
-                &self.0.me,
-                mine,
-                Instant::now(),
-                self.0.hosts,
-                price,
-                payout.clone(),
-            );
+            let mut map = self.0.map.write().await;
+            map.apply_holding_meta(&self.0.me, mine, Instant::now(), self.0.hosts, price, payout.clone());
+            map.set_full(&self.0.me, full);
         } else {
             return;
         }
@@ -499,6 +501,7 @@ impl Hosting {
                 addrs: addrs.clone(),
                 price: price.map(crate::payments::format_usd),
                 payout: payout.clone(),
+                full,
             })
             .await;
         }
@@ -546,6 +549,9 @@ impl Hosting {
 
     /// One pass: prune silent peers, then replicate, update or drop.
     pub async fn repair_once(&self) {
+        // A full node does not put itself forward for new copies (it would be
+        // chosen, fail, and hold the slot from the next ranked node).
+        let can_take = self.0.hosts && !self.is_full().await;
         let actions: Vec<(SiteRecord, Action)> = {
             let mut map = self.0.map.write().await;
             map.prune(Instant::now(), self.0.timing.holder_ttl);
@@ -556,7 +562,7 @@ impl Hosting {
                         &map,
                         &r.site_id,
                         &self.0.me,
-                        self.0.hosts,
+                        can_take,
                         TARGET_REPLICAS,
                         MAX_REPLICAS,
                     );
@@ -606,6 +612,14 @@ impl Hosting {
             }
             h.0.replicating.write().await.remove(&id);
         });
+    }
+
+    /// True when this node cannot take another copy: its disk is at the free
+    /// floor (with a little headroom) or its hosting budget is used up.
+    pub async fn is_full(&self) -> bool {
+        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
+        !leaves_free_floor(disk_free, disk_total, FULL_HEADROOM_BYTES)
+            || self.held_bytes().await.saturating_add(FULL_HEADROOM_BYTES) > self.0.max_bytes
     }
 
     async fn held_bytes(&self) -> u64 {
@@ -1429,6 +1443,9 @@ const GIB_BYTES: u64 = 1024 * 1024 * 1024;
 /// whichever is more, capped at 50 GiB. Every node hosts by default, including
 /// busy production boxes, so the 5 GiB hosting budget alone could fill a disk
 /// that was already nearly full.
+/// Room a node must have beyond its floor/budget to call itself not full.
+const FULL_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+
 fn free_disk_floor(disk_total: u64) -> u64 {
     (disk_total / 20).clamp(10 * GIB_BYTES, 50 * GIB_BYTES)
 }
@@ -1646,6 +1663,7 @@ mod tests {
             addrs: vec![],
             price: Some("0.004".into()),
             payout: None,
+            full: false,
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
@@ -1679,6 +1697,7 @@ mod tests {
                 wallet: "0x".to_string() + &"a".repeat(40),
                 coin: "USDC_POL".into(),
             }),
+            full: true,
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());

@@ -35,6 +35,9 @@ pub struct Holding {
     pub price: Option<Micros>,
     /// Where it wants marketplace payments, when it says.
     pub payout: Option<Payee>,
+    /// It hosts but cannot take another copy right now; left out of the
+    /// rendezvous fill (its existing copies still count).
+    pub full: bool,
 }
 
 #[derive(Debug, Default)]
@@ -98,8 +101,16 @@ impl ReplicaMap {
                 hosts,
                 price,
                 payout,
+                full: false,
             },
         );
+    }
+
+    /// Mark whether `peer` can take new copies (see [`Holding::full`]).
+    pub fn set_full(&mut self, peer: &str, full: bool) {
+        if let Some(h) = self.peers.get_mut(peer) {
+            h.full = full;
+        }
     }
 
     /// Keep a verified receipt (deduplicated, newest [`proof::KEEP_PER_HOLDER`]
@@ -166,6 +177,18 @@ impl ReplicaMap {
     pub fn prune(&mut self, now: Instant, ttl: Duration) {
         self.peers
             .retain(|_, h| h.seen.is_some_and(|t| now.duration_since(t) <= ttl));
+    }
+
+    /// Live hosting peers that can take a new copy, sorted.
+    pub fn candidate_peers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, h)| h.hosts && !h.full)
+            .map(|(p, _)| p.clone())
+            .collect();
+        v.sort();
+        v
     }
 
     /// Live hosting peers, sorted.
@@ -331,8 +354,10 @@ pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: u
     // The rendezvous fill. Preferred hosts that do not hold yet are left out:
     // they replicate on their own, and counting on them would leave the site
     // short if one never manages to.
+    // Full peers are left out too: one that ranks first but cannot take the
+    // copy would otherwise hold the slot from the next ranked node forever.
     let mut candidates: Vec<String> = map
-        .live_peers()
+        .candidate_peers()
         .into_iter()
         .filter(|p| !holders.contains(p) && !preferred.contains(p))
         .collect();
@@ -352,6 +377,30 @@ pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_peer_that_ranks_first_does_not_hold_the_slot() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r);
+        let now = Instant::now();
+        let peers: Vec<String> = (0..6).map(|i| format!("h{i}")).collect();
+        for p in &peers {
+            m.apply_holding_meta(p, HashMap::new(), now, true, None, None);
+        }
+        // Whoever ranks first for this site is full.
+        let first = chosen(&site, &peers, 1)[0].clone();
+        m.set_full(&first, true);
+        let takers: Vec<String> = peers
+            .iter()
+            .filter(|p| decide(&m, &site, p, !m.peers[*p].full, 3, 5) == Action::Replicate)
+            .cloned()
+            .collect();
+        assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
+        assert!(!takers.contains(&first));
+    }
 
     fn rec(kp: &c0mpute_net::libp2p::identity::Keypair, seq: u64) -> SiteRecord {
         SiteRecord::sign(kp, "site", &Hash::of(&seq.to_le_bytes()), seq, 10, vec![]).unwrap()
