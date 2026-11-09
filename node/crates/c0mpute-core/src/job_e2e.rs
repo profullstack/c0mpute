@@ -738,12 +738,13 @@ impl BuyerSession {
         self.commitment.hash_hex()
     }
 
-    pub fn offer_part(&self, workload: &str, spec: &Value) -> OfferE2e {
+    pub fn offer_part(&self, workload: &str, spec: &Value, addrs: Vec<String>) -> OfferE2e {
         OfferE2e {
             v: JOB_E2E_VERSION,
             buyer_key: self.public_hex.clone(),
             public_spec: public_view(workload, spec),
             attest_nonce: self.attest_nonce.clone(),
+            addrs,
         }
     }
 
@@ -948,6 +949,7 @@ impl WorkerSession {
                 worker_key: public_hex,
                 sig,
                 attestation,
+                addrs: Vec::new(),
             },
         ))
     }
@@ -973,8 +975,19 @@ impl WorkerSession {
         };
         let sealed = match &accept.sealed_spec {
             // Pushed on the direct accept (its source was checked: the buyer).
-            Some(b64) => B64.decode(b64).map_err(|_| anyhow!("pushed sealed spec is not base64"))?,
-            None => fetch_sealed(net, accept).await?,
+            Some(b64) => B64
+                .decode(b64)
+                .map_err(|_| anyhow!("pushed sealed spec is not base64"))?,
+            None => {
+                // The addresses the buyer gave on its offer (same host or LAN).
+                if let Ok(buyer) = accept.buyer_peer_id.parse::<PeerId>() {
+                    let own = net.listen_addrs().await.unwrap_or_default();
+                    for a in crate::reachability::hint_addrs(&e.addrs, &own) {
+                        net.add_peer_address(buyer, a).await;
+                    }
+                }
+                fetch_sealed(net, accept).await?
+            }
         };
         let keys = derive(&self.secret, &e.buyer_key, &b)?;
         let bytes = open_spec(&keys, &b, &sealed, &offer.spec_hash)?;
