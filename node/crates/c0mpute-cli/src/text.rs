@@ -160,7 +160,11 @@ pub async fn run(args: &[String]) -> Result<()> {
                 eprintln!("  listening {a}/p2p/{}", s.net.peer_id().to_base58());
             }
             eprintln!("  tags {}", s.tags.join(" "));
-            tokio::signal::ctrl_c().await?;
+            text::shutdown_signal().await;
+            let failed = s.fail_in_flight().await;
+            if failed > 0 {
+                eprintln!("shutting down: reported {failed} running job(s) failed so their buyers re-auction");
+            }
             Ok(())
         }
         Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, legacy_http, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {

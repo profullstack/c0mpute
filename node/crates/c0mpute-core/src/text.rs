@@ -71,6 +71,28 @@ const ADAPTER_PIECES_TTL: Duration = Duration::from_secs(6 * 3600);
 pub const EVENT_MSG: &str = "text_train_event";
 /// At most one `step` event per this interval goes on the wire.
 const STEP_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+/// How often a training worker publishes a `heartbeat` event for its run, so
+/// the buyer can tell a quiet stretch (loading, eval) from a dead worker.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// Silence after which a buyer that has heard a heartbeat on its run gives
+/// the worker up (three missed beats plus gossip slack) and re-auctions.
+pub const HEARTBEAT_SILENCE: Duration = Duration::from_secs(120);
+
+/// Jobs a text worker is running now, by job id, with each one's run id, so a
+/// shutdown can fail them out loud instead of leaving the buyer waiting.
+pub type InFlight = Arc<std::sync::Mutex<HashMap<String, (crate::runner::AcceptedJob, Option<String>)>>>;
+
+/// Aborts the task when dropped, so an early return never leaks it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
 
 /// `JobOffer.spec_inline` for `infernet.text.train`.
 ///
@@ -364,6 +386,21 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, ne
         })
     });
 
+    // Heartbeats on the same path as the events, for as long as this call
+    // runs: the buyer arms its silence watchdog on the first one.
+    let _beat = relaying.then(|| {
+        let tx = ev_tx.clone();
+        AbortOnDrop(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
+            loop {
+                tick.tick().await;
+                if tx.send(json!({"v": 1, "type": "heartbeat", "at_ms": unix_ms()})).is_err() {
+                    break;
+                }
+            }
+        }))
+    });
+
     let read = async {
         let mut lines = BufReader::new(stdout).lines();
         let mut checkpoint: Option<Value> = None;
@@ -388,6 +425,7 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, ne
         .await
         .map_err(|_| anyhow::anyhow!("E_TIMEOUT: training exceeded {timeout_s}s"))??;
     let status = child.wait().await?;
+    drop(_beat);
     drop(ev_tx);
     if let Some(r) = relay {
         let _ = tokio::time::timeout(Duration::from_secs(30), r).await;
@@ -450,7 +488,7 @@ pub async fn store_adapter(net: &Arc<Libp2pNetwork>, store: &ChunkStore, dir: &P
     Ok(hash.to_hex())
 }
 
-pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>, in_flight: InFlight) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -458,6 +496,8 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
             let accept = job.accept.clone();
             busy.store(true, Ordering::Relaxed);
             let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
+            let run_id = accept.spec_inline.as_ref().and_then(|v| v["run_id"].as_str()).map(String::from);
+            in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(accept.job_id.clone(), (job.clone(), run_id));
             let result: Result<String> = async {
                 let spec: TextTrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
@@ -471,6 +511,7 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
             }
             .await;
             let _ = tokio::fs::remove_dir_all(&job_dir).await;
+            in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&accept.job_id);
             busy.store(false, Ordering::Relaxed);
             match result {
                 Ok(hash) => {
@@ -733,6 +774,51 @@ pub struct Serving {
     pub tags: Vec<String>,
     pub runtime: Value,
     pub infer: bool,
+    pub in_flight: InFlight,
+}
+
+impl Serving {
+    /// Shutting down: tell every buyer whose job is still running that it
+    /// failed (a `done{reason:"error"}` event on its run, then a Failed
+    /// receipt), so it re-auctions now instead of waiting out its timeout.
+    /// Returns how many jobs were failed.
+    pub async fn fail_in_flight(&self) -> usize {
+        let jobs: Vec<_> = self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, v)| v).collect();
+        let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
+        for (job, run_id) in &jobs {
+            if let Some(run_id) = run_id {
+                for event in [
+                    json!({"v": 1, "type": "error", "message": "worker shutting down", "code": "E_WORKER_SHUTDOWN"}),
+                    json!({"v": 1, "type": "done", "reason": "error"}),
+                ] {
+                    let msg = EventMsg { t: EVENT_MSG.into(), run_id: run_id.clone(), event };
+                    if let Ok(b) = serde_json::to_vec(&msg) {
+                        let _ = self.net.publish(&topic, b).await;
+                    }
+                }
+            }
+            warn!(job_id = %job.accept.job_id, "text: shutting down mid-job; reporting it failed");
+            publish_receipt(&self.net, &job.accept, None, JobStatus::Failed).await;
+        }
+        if !jobs.is_empty() {
+            // Let gossip carry the receipts before the process exits.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        jobs.len()
+    }
+}
+
+/// Resolves on Ctrl-C or SIGTERM (what `systemctl restart` sends).
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// `c0mpute infernet text serve`: advertise and take `infernet.text.train`
@@ -752,7 +838,8 @@ pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf
     tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
     let busy = Arc::new(AtomicBool::new(false));
     let slots = Arc::new(Semaphore::new(1));
-    let tx = spawn_train_runner(net.clone(), store.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots);
+    let in_flight = InFlight::default();
+    let tx = spawn_train_runner(net.clone(), store.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots, in_flight.clone());
     crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy)));
     if infer {
         let ibusy = Arc::new(AtomicBool::new(false));
@@ -761,7 +848,7 @@ pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf
     }
     info!(peer = %net.peer_id().to_base58(), ?tags, "text: serving");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Serving { net, tags, runtime, infer })
+    Ok(Serving { net, tags, runtime, infer, in_flight })
 }
 
 // ── buyer ───────────────────────────────────────────────────────────────
@@ -879,6 +966,45 @@ fn render_one(ev: &Value, total: &mut Option<u64>) -> Option<String> {
     }
 }
 
+/// Resolves once the worker on `run_id` has heartbeated and then said nothing
+/// on its run for `silence`. Never resolves for a worker that predates
+/// heartbeats, so those still run to the buyer's timeout as before. Any event
+/// on the run counts as a sign of life once armed.
+async fn worker_went_silent(mut gossip: tokio::sync::broadcast::Receiver<c0mpute_net::GossipMessage>, run_id: String, silence: Duration) {
+    use tokio::sync::broadcast::error::RecvError;
+    let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
+    let mut last: Option<tokio::time::Instant> = None;
+    loop {
+        let m = match last {
+            Some(t) => match tokio::time::timeout_at(t + silence, gossip.recv()).await {
+                Ok(m) => m,
+                Err(_) => return,
+            },
+            None => gossip.recv().await,
+        };
+        match m {
+            Ok(m) if m.topic == topic => {
+                let Ok(msg) = serde_json::from_slice::<EventMsg>(&m.data) else { continue };
+                if msg.t == EVENT_MSG && msg.run_id == run_id && (last.is_some() || msg.event["type"] == "heartbeat") {
+                    last = Some(tokio::time::Instant::now());
+                }
+            }
+            Ok(_) => {}
+            // Missed messages: it may have spoken, so do not call it dead.
+            Err(RecvError::Lagged(_)) => {
+                if last.is_some() {
+                    last = Some(tokio::time::Instant::now());
+                }
+            }
+            Err(RecvError::Closed) => std::future::pending::<()>().await,
+        }
+    }
+}
+
+fn silent_err() -> anyhow::Error {
+    anyhow::anyhow!("E_WORKER_SILENT: the worker stopped heartbeating for {}s (restarted or crashed)", HEARTBEAT_SILENCE.as_secs())
+}
+
 /// Auction the job, stream its progress through `on_event`, verify and keep the adapter.
 ///
 /// Peer to peer: the corpus goes out as pieces from `store` (served by `net`),
@@ -945,7 +1071,13 @@ pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainReque
             return None;
         }
         let msg: EventMsg = serde_json::from_slice(&m.data).ok()?;
-        (msg.t == EVENT_MSG && msg.run_id == run_id).then_some(msg.event)
+        (msg.t == EVENT_MSG && msg.run_id == run_id && msg.event["type"] != "heartbeat").then_some(msg.event)
+    };
+    // Heartbeats keep the watchdog fed; they are not progress to show.
+    let mut on_event = |ev: &Value| {
+        if ev["type"] != "heartbeat" {
+            on_event(ev)
+        }
     };
     let spec_v = serde_json::to_value(&spec)?;
     let mut last_err = None;
@@ -960,12 +1092,16 @@ pub async fn train(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &TrainReque
                 .with_deadline(Duration::from_secs(req.timeout_s + 600))
                 .with_receipt_timeout(Duration::from_secs(req.timeout_s + 300))
         };
-        // Print progress while the auction waits for the receipt.
+        // Print progress while the auction waits for the receipt; give the
+        // attempt up (and re-auction) if its worker goes silent.
         let auction = auction_with_mesh_retry(net.clone(), make);
         tokio::pin!(auction);
+        let silent = worker_went_silent(net.messages(), run_id.clone(), HEARTBEAT_SILENCE);
+        tokio::pin!(silent);
         let res = loop {
             tokio::select! {
                 r = &mut auction => break r,
+                _ = &mut silent => break Err(silent_err()),
                 Some((_, ev)) = ev_rx.recv() => on_event(&ev),
                 m = gossip.recv() => match m {
                     Ok(m) => if let Some(ev) = p2p_event(&m) { on_event(&ev) },
@@ -1085,9 +1221,12 @@ async fn replica_attempt(net: &Arc<Libp2pNetwork>, spec_v: &Value, tags: &[Strin
     };
     let auction = auction_with_mesh_retry(net.clone(), make);
     tokio::pin!(auction);
+    let silent = worker_went_silent(net.messages(), spec_v["run_id"].as_str().unwrap_or_default().to_string(), HEARTBEAT_SILENCE);
+    tokio::pin!(silent);
     let mut permit = Some(permit);
     loop {
         tokio::select! {
+            _ = &mut silent => return Err(silent_err()),
             r = &mut auction => {
                 if let Ok(o) = &r {
                     take(&o.accepted_bid.bidder_peer_id);
@@ -1157,6 +1296,9 @@ async fn train_replicated(net: &Arc<Libp2pNetwork>, req: &TrainRequest, spec: &T
         let Ok(msg) = serde_json::from_slice::<EventMsg>(&m.data) else { return };
         let Some(k) = run_ids.iter().position(|r| *r == msg.run_id).filter(|_| msg.t == EVENT_MSG) else { return };
         let mut ev = msg.event;
+        if ev["type"] == "heartbeat" {
+            return;
+        }
         if ev["type"] == "eval"
             && let Some(p) = ev["metrics"]["perplexity"].as_f64()
         {
@@ -1446,6 +1588,32 @@ pub async fn chat(net: Arc<Libp2pNetwork>, store: &ChunkStore, req: &ChatRequest
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gossip(run_id: &str, ty: &str) -> c0mpute_net::GossipMessage {
+        let msg = EventMsg { t: EVENT_MSG.into(), run_id: run_id.into(), event: json!({"v": 1, "type": ty}) };
+        c0mpute_net::GossipMessage { topic: c0mpute_net::topics::job_topic(TRAIN_WORKLOAD), source: None, data: serde_json::to_vec(&msg).unwrap() }
+    }
+
+    #[tokio::test]
+    async fn watchdog_arms_on_a_heartbeat_and_fires_on_silence() {
+        let silence = Duration::from_millis(300);
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let w = tokio::spawn(worker_went_silent(rx, "run".into(), silence));
+        // Unarmed: a worker that never heartbeats is left to the old timeout,
+        // even when it sends other events.
+        tx.send(gossip("run", "meta")).unwrap();
+        tokio::time::sleep(silence * 2).await;
+        assert!(!w.is_finished(), "fired before any heartbeat");
+        tx.send(gossip("run", "heartbeat")).unwrap();
+        // Armed: steps keep it alive; another run's heartbeats do not.
+        for _ in 0..3 {
+            tokio::time::sleep(silence / 2).await;
+            tx.send(gossip("run", "step")).unwrap();
+            tx.send(gossip("other", "heartbeat")).unwrap();
+        }
+        assert!(!w.is_finished(), "fired while the worker was talking");
+        tokio::time::timeout(silence * 3, w).await.expect("fires after the worker goes quiet").unwrap();
+    }
 
     fn infer_spec() -> TextInferSpec {
         TextInferSpec {
