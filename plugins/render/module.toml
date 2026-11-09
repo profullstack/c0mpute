@@ -1,14 +1,34 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Distributed 3D rendering, SheepIt-style. Wrap Blender headless
-#   (`blender -b scene.blend -o out_#### -f N`) as a per-frame
-#   subprocess workload. Jobs ship a .blend (content-addressed), a
-#   frame range, and render settings. Outputs are PNG/EXR per frame.
-#   Future: tile-based rendering for very heavy single frames.
-#   Validation: file exists + dimensions match + sample-pixel hash
-#   against a second worker.
+# Built into the c0mpute binary as the `blender.render-frame` workload
+# (node/crates/c0mpute-core/src/render.rs). Workers run the operator's own
+# Blender (`blender` on PATH; `apt install blender` or blender.org). The node
+# installs nothing itself: it advertises c0mpute:role:render only where
+# `blender --version` works, probed once at start, together with the Cycles
+# GPU backends Blender sees (c0mpute:render:gpu, c0mpute:render:device:cuda /
+# optix / hip / metal / oneapi). Cycles renders on that GPU when present and
+# on the CPU otherwise; EEVEE and Workbench jobs go only to GPU workers.
+#
+# Blender always runs with --disable-autoexec before the file loads, so no
+# Python stored in a .blend ever runs; the only Python is a settings line
+# built from validated integers (resolution %, samples, Cycles device).
+#
+# Input: a .blend up to 512 MiB, split by the buyer into 4 MiB
+# content-addressed pieces; a worker fetches them once, verifies every piece
+# and the whole hash, and caches the file by hash for the other frames of the
+# job. One job renders 1-10 contiguous frames with a hard per-frame timeout.
+# Output: PNG, JPEG or EXR frames, returned the same way (pieces by hash) with
+# a JSON result {v, ok, engine, device, blender, frames: [{frame, format,
+# width, height, size, hash, pieces}]}. Buyers check every frame: whole hash,
+# image magic, the dimensions in its header, and the same size as the other
+# frames.
+#
+# Buyers: `c0mpute render scene.blend --frames 1-120 [--engine] [--device]
+# [--format] [--out dir] [--batch] [--max-price] [--mp4]` (parallel auctions,
+# failed jobs retried on other workers, optional local ffmpeg stitch), or the
+# jobs bridge (frames returned base64 inline, up to 64 MiB).
+# Not built yet: tile splitting of one heavy frame, cross-worker pixel spot
+# checks.
 
 [module]
 id          = "render"
@@ -16,28 +36,31 @@ name        = "Render — Blender 3D rendering"
 version     = "0.2.76"
 kind        = "workload"
 category    = "media"
-status      = "coming-soon"
-description = "Decentralized 3D rendering using Blender headless (Cycles/Eevee) across consumer GPUs and CPUs."
+status      = "available"
+builtin     = true
+description = "Distributed Blender rendering: frames of a .blend split across workers running Blender headless, Cycles on CPU or on the worker's GPU (CUDA, OptiX, HIP, Metal) when it has one, EEVEE on GPU workers. PNG, JPEG or EXR frames, each verified, optionally stitched to MP4."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["blender", "3d", "render", "cycles", "eevee", "vfx"]
+keywords    = ["blender", "3d", "render", "cycles", "eevee", "vfx", "animation"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["blender", "gpu:nvidia?", "gpu:amd?", "gpu:apple?"]
+capabilities = ["cpu", "bin:blender", "gpu:nvidia?", "gpu:amd?", "gpu:apple?"]
 
 [module.workloads]
-"blender.render-frame" = { command = "render-frame", validation = "schema_and_pixel_spotcheck" }
+"blender.render-frame" = { command = "render-frame", validation = "result_schema_and_image_header" }
 
 [module.dispatch]
-mode   = "subprocess"
-binary = "c0mpute-render"
+mode = "in-process"
 
 [module.surfaces]
 cli = "c0mpute render"
 
 [module.config.defaults]
-engine = "CYCLES"
-device = "AUTO"
+engine          = "CYCLES"
+device          = "AUTO"
+format          = "PNG"
+max_input_mib   = 512
+frames_per_job  = 10

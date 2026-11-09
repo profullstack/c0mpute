@@ -4,8 +4,10 @@
 //! `POST /v1/jobs` runs one auction for the named workload, waits for the
 //! winner's receipt, fetches the result by the receipt's hash from the
 //! winner, checks the bytes against that hash, and answers with the result.
-//! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash) and
-//! `embed.text`; [`Workload`] is where more go.
+//! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash),
+//! `embed.text` and `blender.render-frame` (input pieces by hash; the bridge
+//! fetches and checks the frames and returns them base64-encoded);
+//! [`Workload`] is where more go.
 //!
 //! Same hardening as `c0mpute speech serve`: a required bearer token
 //! compared in constant time, loopback bind by default, bounded bodies.
@@ -52,6 +54,7 @@ enum Workload {
     CrawlFetch,
     OcrExtract,
     EmbedText,
+    RenderFrame,
 }
 
 impl Workload {
@@ -60,6 +63,7 @@ impl Workload {
         Workload::CrawlFetch,
         Workload::OcrExtract,
         Workload::EmbedText,
+        Workload::RenderFrame,
     ];
 
     fn parse(name: &str) -> Option<Self> {
@@ -71,6 +75,7 @@ impl Workload {
             Workload::CrawlFetch => crate::crawl::WORKLOAD,
             Workload::OcrExtract => crate::ocr::WORKLOAD,
             Workload::EmbedText => crate::embed::WORKLOAD,
+            Workload::RenderFrame => crate::render::WORKLOAD,
         }
     }
     /// Reject a spec no worker could run before auctioning it. `workflow.step`
@@ -81,6 +86,7 @@ impl Workload {
             Workload::CrawlFetch => crate::crawl::parse_spec(spec).map(|_| ()),
             Workload::OcrExtract => crate::ocr::parse_spec(spec).map(|_| ()),
             Workload::EmbedText => crate::embed::parse_spec(spec).map(|_| ()),
+            Workload::RenderFrame => crate::render::parse_spec(spec).map(|_| ()),
         }
     }
     fn required_capabilities(self, spec: &Value) -> Vec<String> {
@@ -97,6 +103,7 @@ impl Workload {
                     crate::embed::model_tag(model),
                 ]
             }
+            Workload::RenderFrame => crate::render::required_capabilities_for(spec),
         }
     }
     fn max_result_bytes(self) -> usize {
@@ -104,6 +111,7 @@ impl Workload {
             Workload::WorkflowStep | Workload::CrawlFetch => workflow::MAX_RESULT_BYTES,
             Workload::OcrExtract => crate::ocr::MAX_RESULT_BYTES,
             Workload::EmbedText => crate::embed::MAX_RESULT_BYTES,
+            Workload::RenderFrame => crate::render::MAX_RESULT_BYTES,
         }
     }
     fn valid_result(self, spec: &Value, value: &Value) -> bool {
@@ -116,6 +124,8 @@ impl Workload {
             Workload::EmbedText => crate::embed::parse_spec(spec).is_ok_and(|(s, model)| {
                 crate::embed::validate_result(value, s.texts.len(), model).is_ok()
             }),
+            Workload::RenderFrame => crate::render::parse_spec(spec)
+                .is_ok_and(|parsed| crate::render::valid_result(&parsed, value)),
         }
     }
 }
@@ -497,6 +507,14 @@ async fn run_job(
             "worker result does not match the result schema",
         ));
     }
+    let result = if workload == Workload::RenderFrame {
+        let budget = timeout.saturating_sub(started.elapsed());
+        attach_render_frames(state, &spec_for_check, result, &worker, budget)
+            .await
+            .map_err(|error| worker_failed(&format!("{error:#}")))?
+    } else {
+        result
+    };
     Ok(json!({
         "job_id": outcome.job_id,
         "worker": worker,
@@ -504,6 +522,35 @@ async fn run_job(
         "output_hash": output_hash,
         "result": result,
     }))
+}
+
+/// Most frame bytes the bridge returns inline in one response.
+const MAX_INLINE_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Fetch a render job's frames from the worker, check each (hash, image
+/// magic, header dimensions), and add them to the result as `data_base64`.
+async fn attach_render_frames(
+    state: &JobsBridge,
+    spec: &Value,
+    mut result: Value,
+    worker: &str,
+    budget: Duration,
+) -> Result<Value> {
+    use base64::Engine;
+    let parsed = crate::render::parse_spec(spec).map_err(anyhow::Error::msg)?;
+    let metas = crate::render::result_frames(&parsed, &result)?;
+    let total: u64 = metas.iter().map(|m| m.size).sum();
+    if total > MAX_INLINE_FRAME_BYTES {
+        bail!("frames total {total} bytes, over the bridge's {MAX_INLINE_FRAME_BYTES}-byte limit; use `c0mpute render`");
+    }
+    let frames = crate::render::fetch_frames(&state.net, worker, &metas, budget).await?;
+    if let Some(list) = result.get_mut("frames").and_then(Value::as_array_mut) {
+        for (entry, (_, bytes)) in list.iter_mut().zip(frames) {
+            entry["data_base64"] =
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+    }
+    Ok(result)
 }
 
 fn internal(error: anyhow::Error) -> ApiError {
@@ -556,6 +603,27 @@ mod tests {
         assert!(Workload::EmbedText.valid_result(&spec, &good));
         let one = json!({"v":1,"ok":true,"dims":768,"vectors":[v]});
         assert!(!Workload::EmbedText.valid_result(&spec, &one));
+    }
+
+    #[test]
+    fn render_workload() {
+        assert_eq!(Workload::parse("blender.render-frame"), Some(Workload::RenderFrame));
+        let hash = c0mpute_proto::Hash::of(b"scene").to_hex();
+        let spec = json!({"v":1,"input_hash":hash,"input_size":5,"input_pieces":[hash],
+            "frame_start":1,"frame_end":1,"device":"GPU"});
+        assert!(Workload::RenderFrame.check_spec(&spec).is_ok());
+        assert!(Workload::RenderFrame
+            .check_spec(&json!({"v":1,"input_hash":hash,"input_size":5,"input_pieces":[hash],
+                "frame_start":1,"frame_end":1,"engine":"LUX"}))
+            .is_err());
+        assert_eq!(
+            Workload::RenderFrame.required_capabilities(&spec),
+            vec!["c0mpute:role:render", "c0mpute:render:engine:cycles", "c0mpute:render:gpu"]
+        );
+        let frame = json!({"frame":1,"format":"PNG","width":64,"height":48,"size":5,
+            "hash":hash,"pieces":[hash]});
+        assert!(Workload::RenderFrame.valid_result(&spec, &json!({"v":1,"ok":true,"frames":[frame]})));
+        assert!(!Workload::RenderFrame.valid_result(&spec, &json!({"v":1,"ok":true,"frames":[]})));
     }
 
     #[test]

@@ -210,6 +210,10 @@ pub enum Role {
     /// nothing (the broadcaster needs ffmpeg). Config/CLI spelling: `live-stream`.
     #[serde(rename = "live-stream", alias = "livestream")]
     LiveStream,
+    /// `blender.render-frame`: render `.blend` frames with the box's own
+    /// Blender (Cycles on CPU, or on a GPU Blender finds). On by default;
+    /// advertised only where `blender --version` works.
+    Render,
 }
 
 #[cfg(test)]

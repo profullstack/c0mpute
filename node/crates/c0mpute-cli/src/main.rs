@@ -45,7 +45,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -202,6 +202,57 @@ enum Cmd {
         /// Print the whole result JSON instead of just the text.
         #[arg(long)]
         json: bool,
+    },
+    /// Render plugin: render frames of a `.blend` across c0mpute workers
+    /// running Blender (`blender.render-frame`). Frames are split into jobs,
+    /// rendered in parallel, retried on other workers when one fails, checked
+    /// (hash, image header, matching dimensions) and written to `--out`.
+    Render {
+        /// The `.blend` scene (up to 512 MiB; pack external textures into it).
+        file: std::path::PathBuf,
+        /// Frames: `1-120`, `7`, or `1-10,20,30-32`.
+        #[arg(long, default_value = "1")]
+        frames: String,
+        /// CYCLES (CPU or GPU), EEVEE or WORKBENCH (GPU workers only).
+        #[arg(long, default_value = "CYCLES")]
+        engine: String,
+        /// AUTO (GPU where the worker has one), CPU, or GPU (GPU workers only).
+        #[arg(long, default_value = "AUTO")]
+        device: String,
+        /// PNG, JPEG or EXR.
+        #[arg(long, default_value = "PNG")]
+        format: String,
+        /// Scale the scene's resolution (1-200 percent).
+        #[arg(long)]
+        resolution: Option<u32>,
+        /// Override the scene's sample count.
+        #[arg(long)]
+        samples: Option<u32>,
+        /// Where frames are written (`frame_0001.png`, ...).
+        #[arg(long, default_value = "frames")]
+        out: std::path::PathBuf,
+        /// Frames per job (1-10). Bigger batches fetch the scene fewer times.
+        #[arg(long, default_value_t = 1)]
+        batch: u32,
+        /// Jobs in flight at once.
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+        /// Tries per job, each on a different worker.
+        #[arg(long, default_value_t = 3)]
+        attempts: usize,
+        /// Highest price in USD you will pay per job.
+        #[arg(long, default_value_t = 0.10)]
+        max_price: f64,
+        /// Hard render limit per frame, in seconds.
+        #[arg(long, default_value_t = 1800)]
+        frame_timeout_secs: u64,
+        /// Also stitch the frames into this MP4 with the local ffmpeg
+        /// (default `<out>/render.mp4`; PNG/JPEG, contiguous frames).
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        mp4: Option<std::path::PathBuf>,
+        /// Frame rate for `--mp4`.
+        #[arg(long, default_value_t = 24)]
+        fps: u32,
     },
     /// Embeddings plugin: embed texts on a c0mpute worker (`embed.text`,
     /// fastembed on CPU) and print `{model, dims, vectors}`.
@@ -1058,6 +1109,42 @@ async fn run_app(cli: Cli) -> Result<()> {
             timeout_secs,
             json,
         } => run_ocr(file, lang, max_price, timeout_secs, json).await,
+        Cmd::Render {
+            file,
+            frames,
+            engine,
+            device,
+            format,
+            resolution,
+            samples,
+            out,
+            batch,
+            concurrency,
+            attempts,
+            max_price,
+            frame_timeout_secs,
+            mp4,
+            fps,
+        } => {
+            run_render(RenderArgs {
+                file,
+                frames,
+                engine,
+                device,
+                format,
+                resolution,
+                samples,
+                out,
+                batch,
+                concurrency,
+                attempts,
+                max_price,
+                frame_timeout_secs,
+                mp4,
+                fps,
+            })
+            .await
+        }
         Cmd::Embed {
             cmd,
             texts,
@@ -1327,6 +1414,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Ocr,
                     Role::Embed,
                     Role::LiveStream,
+                    Role::Render,
                 ] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
@@ -2758,6 +2846,135 @@ async fn run_ocr(
     Ok(())
 }
 
+struct RenderArgs {
+    file: std::path::PathBuf,
+    frames: String,
+    engine: String,
+    device: String,
+    format: String,
+    resolution: Option<u32>,
+    samples: Option<u32>,
+    out: std::path::PathBuf,
+    batch: u32,
+    concurrency: usize,
+    attempts: usize,
+    max_price: f64,
+    frame_timeout_secs: u64,
+    mp4: Option<std::path::PathBuf>,
+    fps: u32,
+}
+
+/// Most frames one `c0mpute render` run takes.
+const MAX_RENDER_FRAMES: usize = 100_000;
+
+async fn run_render(args: RenderArgs) -> Result<()> {
+    use c0mpute_core::render;
+    let frames = render::parse_frames(&args.frames, MAX_RENDER_FRAMES).map_err(anyhow::Error::msg)?;
+    let engine = render::Engine::parse(&args.engine)
+        .context("--engine must be CYCLES, EEVEE or WORKBENCH")?;
+    let device = render::Device::parse(&args.device).context("--device must be AUTO, CPU or GPU")?;
+    let format = render::Format::parse(&args.format).context("--format must be PNG, JPEG or EXR")?;
+    if !args.max_price.is_finite() || args.max_price < 0.0 {
+        anyhow::bail!("--max-price must be a non-negative number");
+    }
+    let mp4 = args.mp4.map(|p| {
+        if p.as_os_str().is_empty() {
+            args.out.join("render.mp4")
+        } else {
+            p
+        }
+    });
+    if mp4.is_some() {
+        if format == render::Format::Exr {
+            anyhow::bail!("--mp4 needs PNG or JPEG frames");
+        }
+        if frames.windows(2).any(|w| w[1] != w[0] + 1) {
+            anyhow::bail!("--mp4 needs a contiguous frame range");
+        }
+        if c0mpute_core::supervisor::which_ffmpeg().is_none() {
+            anyhow::bail!("--mp4 needs ffmpeg on PATH");
+        }
+    }
+    let size = std::fs::metadata(&args.file)
+        .with_context(|| format!("read {}", args.file.display()))?
+        .len();
+    if size == 0 || size > render::MAX_INPUT_BYTES {
+        anyhow::bail!("the .blend must be between 1 byte and 512 MiB");
+    }
+    // Check the per-job spec (resolution, samples, engine/device, timeout)
+    // before the network comes up.
+    let probe = serde_json::json!({
+        "v": 1,
+        "input_hash": c0mpute_proto::Hash::of(b"").to_hex(),
+        "input_size": size,
+        "input_pieces": vec![c0mpute_proto::Hash::of(b"").to_hex(); render::piece_count(size)],
+        "frame_start": frames[0],
+        "frame_end": frames[0],
+        "engine": engine.name(),
+        "device": device.name(),
+        "format": format.name(),
+        "resolution_pct": args.resolution,
+        "samples": args.samples,
+        "frame_timeout_secs": args.frame_timeout_secs,
+    });
+    render::parse_spec(&probe).map_err(anyhow::Error::msg)?;
+
+    let supervisor = c0mpute_core::Supervisor::boot_buyer(c0mpute_core::Config::default()).await?;
+    // Give the swarm a moment to reach peers before the first auction.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let job = render::RenderJob {
+        blend: args.file,
+        frames: frames.clone(),
+        batch: args.batch,
+        engine,
+        device,
+        format,
+        resolution_pct: args.resolution,
+        samples: args.samples,
+        frame_timeout: std::time::Duration::from_secs(args.frame_timeout_secs),
+        max_price_usd: args.max_price,
+        concurrency: args.concurrency.clamp(1, 256),
+        attempts: args.attempts.clamp(1, 10),
+        out_dir: args.out.clone(),
+        allowed_bidders: Vec::new(),
+        bid_window: c0mpute_core::jobs_gateway::DEFAULT_BID_WINDOW,
+    };
+    eprintln!("rendering {} frame(s) across c0mpute workers", frames.len());
+    let report = render::render_frames(supervisor.libp2p.clone(), &supervisor.store, job, |line| {
+        eprintln!("{line}")
+    })
+    .await?;
+    let workers: std::collections::BTreeSet<&str> =
+        report.written.iter().map(|f| f.worker.as_str()).collect();
+    eprintln!(
+        "{} of {} frame(s) written to {} by {} worker(s)",
+        report.written.len(),
+        frames.len(),
+        args.out.display(),
+        workers.len()
+    );
+    if !report.failed.is_empty() {
+        let list: Vec<String> = report.failed.iter().map(|(f, _)| f.to_string()).collect();
+        anyhow::bail!("frames not rendered: {}", list.join(","));
+    }
+    if let Some(mp4) = mp4 {
+        let ffmpeg = c0mpute_core::supervisor::which_ffmpeg().context("ffmpeg not found")?;
+        let status = Command::new(ffmpeg)
+            .args(render::mp4_args(&args.out, frames[0], format, args.fps, &mp4)?)
+            .status()
+            .context("run ffmpeg")?;
+        if !status.success() {
+            anyhow::bail!("ffmpeg failed ({status})");
+        }
+        println!("{}", mp4.display());
+    } else {
+        for f in &report.written {
+            println!("{}", f.path.display());
+        }
+    }
+    Ok(())
+}
+
 async fn run_embed(
     cmd: Option<EmbedCmd>,
     texts: Vec<String>,
@@ -3206,6 +3423,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "ocr" => Some(Role::Ocr),
         "embed" | "embeddings" => Some(Role::Embed),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
+        "render" | "blender" => Some(Role::Render),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

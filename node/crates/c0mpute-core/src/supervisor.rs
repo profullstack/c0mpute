@@ -269,6 +269,44 @@ impl Supervisor {
                 );
                 continue;
             }
+            // Rendering runs the operator's own Blender. Probe it (a few
+            // seconds: version, then which Cycles GPU backends it sees) off the
+            // async threads, then subscribe only if it works.
+            if workload_type == crate::render::WORKLOAD {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    let ready = tokio::task::spawn_blocking(|| crate::render::runtime().ready())
+                        .await
+                        .unwrap_or(false);
+                    if !ready {
+                        info!(
+                            workload_type = crate::render::WORKLOAD,
+                            "not subscribing: blender is not installed (apt install blender, or blender.org)"
+                        );
+                        return;
+                    }
+                    let runner_tx = crate::render::spawn_render_runner(
+                        net.clone(),
+                        store,
+                        cache_root,
+                        load.clone(),
+                    );
+                    info!(workload_type = crate::render::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::render::WORKLOAD.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        Some(crate::render::offer_filter()),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // Embeddings: provision fastembed in the background (never blocks
             // the worker), subscribe once a model answers. Same shape as TTS.
             if workload_type == crate::embed::WORKLOAD {

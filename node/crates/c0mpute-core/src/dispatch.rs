@@ -551,6 +551,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::Embed) {
         types.push(crate::embed::WORKLOAD.to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::Render) {
+        types.push(crate::render::WORKLOAD.to_string());
+    }
     types
 }
 

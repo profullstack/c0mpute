@@ -22,6 +22,7 @@ pub mod penalty_box;
 pub mod podcast;
 pub mod pricing;
 pub mod reachability;
+pub mod render;
 pub mod private;
 pub mod register;
 pub mod resources;
