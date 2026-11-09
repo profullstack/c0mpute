@@ -4,7 +4,8 @@
 //! `POST /v1/jobs` runs one auction for the named workload, waits for the
 //! winner's receipt, fetches the result by the receipt's hash from the
 //! winner, checks the bytes against that hash, and answers with the result.
-//! v1 accepts only `workflow.step`; [`Workload`] is where more go.
+//! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash) and
+//! `embed.text`; [`Workload`] is where more go.
 //!
 //! Same hardening as `c0mpute speech serve`: a required bearer token
 //! compared in constant time, loopback bind by default, bounded bodies.
@@ -43,16 +44,23 @@ pub const MAX_CONCURRENT_JOBS: usize = 32;
 const MAX_REQUEST_BYTES: usize = workflow::MAX_SPEC_BYTES + 64 * 1024;
 const MAX_ALLOW_PEERS: usize = 64;
 
-/// Workloads the bridge runs. Each knows its required capability tags and
-/// how big a result it accepts.
+/// Workloads the bridge runs. Each knows its required capability tags, how
+/// big a result it accepts, and how to check the spec and the result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
     WorkflowStep,
     CrawlFetch,
+    OcrExtract,
+    EmbedText,
 }
 
 impl Workload {
-    const ALL: &'static [Workload] = &[Workload::WorkflowStep, Workload::CrawlFetch];
+    const ALL: &'static [Workload] = &[
+        Workload::WorkflowStep,
+        Workload::CrawlFetch,
+        Workload::OcrExtract,
+        Workload::EmbedText,
+    ];
 
     fn parse(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|w| w.name() == name)
@@ -61,25 +69,53 @@ impl Workload {
         match self {
             Workload::WorkflowStep => workflow::WORKLOAD,
             Workload::CrawlFetch => crate::crawl::WORKLOAD,
+            Workload::OcrExtract => crate::ocr::WORKLOAD,
+            Workload::EmbedText => crate::embed::WORKLOAD,
         }
     }
-    fn required_capabilities(self) -> Vec<String> {
+    /// Reject a spec no worker could run before auctioning it. `workflow.step`
+    /// specs are checked by the worker (they are a small language of their own).
+    fn check_spec(self, spec: &Value) -> Result<(), String> {
+        match self {
+            Workload::WorkflowStep => Ok(()),
+            Workload::CrawlFetch => crate::crawl::parse_spec(spec).map(|_| ()),
+            Workload::OcrExtract => crate::ocr::parse_spec(spec).map(|_| ()),
+            Workload::EmbedText => crate::embed::parse_spec(spec).map(|_| ()),
+        }
+    }
+    fn required_capabilities(self, spec: &Value) -> Vec<String> {
         match self {
             Workload::WorkflowStep => vec![workflow::ROLE_TAG.to_string()],
             Workload::CrawlFetch => vec![crate::crawl::ROLE_TAG.to_string()],
+            Workload::OcrExtract => vec![crate::ocr::ROLE_TAG.to_string()],
+            Workload::EmbedText => {
+                let model = crate::embed::parse_spec(spec)
+                    .map(|(_, m)| m)
+                    .unwrap_or_else(|_| crate::embed::default_model());
+                vec![
+                    crate::embed::ROLE_TAG.to_string(),
+                    crate::embed::model_tag(model),
+                ]
+            }
         }
     }
     fn max_result_bytes(self) -> usize {
         match self {
             Workload::WorkflowStep | Workload::CrawlFetch => workflow::MAX_RESULT_BYTES,
+            Workload::OcrExtract => crate::ocr::MAX_RESULT_BYTES,
+            Workload::EmbedText => crate::embed::MAX_RESULT_BYTES,
         }
     }
-    fn valid_result(self, value: &Value) -> bool {
+    fn valid_result(self, spec: &Value, value: &Value) -> bool {
         match self {
             Workload::WorkflowStep | Workload::CrawlFetch => {
                 value.get("v").and_then(Value::as_u64) == Some(1)
                     && value.get("ok").is_some_and(Value::is_boolean)
             }
+            Workload::OcrExtract => crate::ocr::valid_result(value),
+            Workload::EmbedText => crate::embed::parse_spec(spec).is_ok_and(|(s, model)| {
+                crate::embed::validate_result(value, s.texts.len(), model).is_ok()
+            }),
         }
     }
 }
@@ -134,6 +170,7 @@ impl JobsBridge {
     pub async fn submit_once(&self, workload: &str, spec: Value, timeout: Duration) -> Result<Value> {
         let w = Workload::parse(workload)
             .with_context(|| format!("unsupported workload {workload:?}"))?;
+        w.check_spec(&spec).map_err(anyhow::Error::msg)?;
         let spec_bytes = serde_json::to_vec(&spec)?;
         run_job(
             self,
@@ -151,7 +188,29 @@ impl JobsBridge {
 
 /// Boot a buyer and run one job: what `c0mpute crawl fetch` uses.
 pub async fn submit_once(workload: &str, spec: Value, max_price_usd: f64, timeout: Duration) -> Result<Value> {
+    submit_once_with_input(workload, None, |_| spec, max_price_usd, timeout).await
+}
+
+/// [`submit_once`] for a job that reads an input blob (`c0mpute ocr`): the
+/// buyer stores and announces `input` first, then `build_spec` gets the
+/// blob's hash and this buyer's peer id (the provider the worker fetches from).
+pub async fn submit_once_with_input(
+    workload: &str,
+    input: Option<Vec<u8>>,
+    build_spec: impl FnOnce(Option<(String, String)>) -> Value,
+    max_price_usd: f64,
+    timeout: Duration,
+) -> Result<Value> {
     let supervisor = Supervisor::boot_buyer(Config::default()).await?;
+    let blob = match input {
+        Some(bytes) => {
+            let hash = supervisor.store.put(&bytes).await.context("store job input")?;
+            supervisor.libp2p.announce(&hash).await.context("announce job input")?;
+            Some((hash.to_hex(), supervisor.libp2p.peer_id().to_base58()))
+        }
+        None => None,
+    };
+    let spec = build_spec(blob);
     // Any token: the HTTP layer is not mounted.
     let token: String = std::iter::repeat_n('x', 32).collect();
     let bridge = JobsBridge::new(supervisor.libp2p, supervisor.store, token, max_price_usd, Vec::new())?;
@@ -276,6 +335,7 @@ async fn submit_inner(
     if !req.spec.is_object() {
         return Err(bad_request("spec must be a JSON object"));
     }
+    workload.check_spec(&req.spec).map_err(bad_request)?;
     let spec_bytes = serde_json::to_vec(&req.spec).map_err(|e| bad_request(e.to_string()))?;
     if spec_bytes.len() > workflow::MAX_SPEC_BYTES {
         return Err(bad_request(format!(
@@ -361,6 +421,9 @@ async fn run_job(
         )
     })?;
 
+    let required = workload.required_capabilities(&spec);
+    // Kept for checking the result (embeddings: one vector per text).
+    let spec_for_check = spec.clone();
     // Small specs ride in the gossip offer; large ones are served from this
     // node's store and fetched by the winner by hash.
     let spec_inline = if spec_bytes.len() <= workflow::MAX_INLINE_SPEC_BYTES {
@@ -373,7 +436,7 @@ async fn run_job(
 
     let remaining = timeout.saturating_sub(started.elapsed());
     let auction = JobAuction::new(workload.name(), spec_inline)
-        .with_required_capabilities(workload.required_capabilities())
+        .with_required_capabilities(required)
         .with_allowed_bidders(allowed)
         .with_max_price_usd(max_price)
         .with_bid_window(state.bid_window)
@@ -429,7 +492,7 @@ async fn run_job(
     };
     let result: Value =
         serde_json::from_slice(&bytes).map_err(|_| worker_failed("worker result is not JSON"))?;
-    if !workload.valid_result(&result) {
+    if !workload.valid_result(&spec_for_check, &result) {
         return Err(worker_failed(
             "worker result does not match the result schema",
         ));
@@ -462,9 +525,37 @@ mod tests {
             Some(Workload::WorkflowStep)
         );
         assert_eq!(Workload::parse("ffmpeg.transcode"), None);
-        assert!(Workload::WorkflowStep.valid_result(&json!({"v":1,"ok":true,"output":1})));
-        assert!(!Workload::WorkflowStep.valid_result(&json!({"v":2,"ok":true})));
-        assert!(!Workload::WorkflowStep.valid_result(&json!({"v":1})));
+        let none = json!({});
+        assert!(Workload::WorkflowStep.valid_result(&none, &json!({"v":1,"ok":true,"output":1})));
+        assert!(!Workload::WorkflowStep.valid_result(&none, &json!({"v":2,"ok":true})));
+        assert!(!Workload::WorkflowStep.valid_result(&none, &json!({"v":1})));
+    }
+
+    #[test]
+    fn ocr_and_embed_workloads() {
+        assert_eq!(Workload::parse("ocr.extract"), Some(Workload::OcrExtract));
+        assert_eq!(Workload::parse("embed.text"), Some(Workload::EmbedText));
+
+        let hash = c0mpute_proto::Hash::of(b"page").to_hex();
+        let ocr = json!({"v":1,"input_hash":hash,"format":"pdf","lang":"eng"});
+        assert!(Workload::OcrExtract.check_spec(&ocr).is_ok());
+        assert!(Workload::OcrExtract.check_spec(&json!({"v":1,"input_hash":hash,"format":"bmp"})).is_err());
+        assert_eq!(Workload::OcrExtract.required_capabilities(&ocr), vec!["c0mpute:role:ocr"]);
+        assert!(Workload::OcrExtract.valid_result(&ocr, &json!({"v":1,"ok":true,"text":"x"})));
+        assert!(!Workload::OcrExtract.valid_result(&ocr, &json!({"v":1,"ok":false})));
+
+        let spec = json!({"v":1,"model":"nomic-embed-text-v1.5","texts":["a","b"]});
+        assert!(Workload::EmbedText.check_spec(&spec).is_ok());
+        assert!(Workload::EmbedText.check_spec(&json!({"v":1,"texts":[]})).is_err());
+        assert_eq!(
+            Workload::EmbedText.required_capabilities(&spec),
+            vec!["c0mpute:role:embed", "c0mpute:embed:model:nomic-embed-text-v1.5"]
+        );
+        let v = vec![0.5f64; 768];
+        let good = json!({"v":1,"ok":true,"dims":768,"vectors":[v.clone(), v.clone()]});
+        assert!(Workload::EmbedText.valid_result(&spec, &good));
+        let one = json!({"v":1,"ok":true,"dims":768,"vectors":[v]});
+        assert!(!Workload::EmbedText.valid_result(&spec, &one));
     }
 
     #[test]

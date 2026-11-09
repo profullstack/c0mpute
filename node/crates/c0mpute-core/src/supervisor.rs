@@ -241,6 +241,59 @@ impl Supervisor {
                 });
                 continue;
             }
+            // OCR runs the operator's own Tesseract: subscribe only where it
+            // exists, and bid only on languages/formats this box has.
+            if workload_type == crate::ocr::WORKLOAD {
+                if !crate::ocr::runtime().ready() {
+                    info!(
+                        %workload_type,
+                        "not subscribing: tesseract is not installed (apt install tesseract-ocr poppler-utils)"
+                    );
+                    continue;
+                }
+                let runner_tx = crate::ocr::spawn_ocr_runner(
+                    net.clone(),
+                    self.store.clone(),
+                    cache_root.clone(),
+                    load.clone(),
+                );
+                info!(%workload_type, "subscribing to job topic");
+                dispatch::run_worker_subscriber_with_load(
+                    net.clone(),
+                    workload_type,
+                    tags.clone(),
+                    Some(runner_tx),
+                    Some(crate::ocr::offer_filter()),
+                    Some(self.config.pricing.clone()),
+                    Some(load),
+                );
+                continue;
+            }
+            // Embeddings: provision fastembed in the background (never blocks
+            // the worker), subscribe once a model answers. Same shape as TTS.
+            if workload_type == crate::embed::WORKLOAD {
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::embed::ensure(&config.embed).await {
+                        info!("no embedding model installed; not subscribing to embed.text");
+                        return;
+                    }
+                    let runner_tx = crate::embed::spawn_embed_runner(net.clone(), store, load.clone());
+                    info!(workload_type = crate::embed::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::embed::WORKLOAD.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {

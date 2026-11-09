@@ -88,7 +88,7 @@ fn kokoro_venv_dir() -> PathBuf {
     speech_root().join("venv-kokoro")
 }
 
-fn venv_python(dir: &Path) -> PathBuf {
+pub(crate) fn venv_python(dir: &Path) -> PathBuf {
     #[cfg(windows)]
     let candidate = dir.join("Scripts/python.exe");
     #[cfg(not(windows))]
@@ -130,7 +130,7 @@ fn python_fits_kokoro(version: (u32, u32)) -> bool {
 }
 
 /// `(major, minor)` of an interpreter, or None when it cannot be run.
-fn python_version(python: &Path) -> Option<(u32, u32)> {
+pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
     let output = std::process::Command::new(python)
         .args([
             "-c",
@@ -437,7 +437,7 @@ async fn python_has_pip() -> bool {
     python_has_pip_at(&python_path()).await
 }
 
-async fn python_has_pip_at(python: &Path) -> bool {
+pub(crate) async fn python_has_pip_at(python: &Path) -> bool {
     let mut check = Command::new(python);
     check
         .args(["-m", "pip", "--version"])
@@ -560,7 +560,7 @@ fn kokoro_interpreter() -> Option<std::ffi::OsString> {
         .map(|_| "python3".into())
 }
 
-fn on_path(program: &str) -> bool {
+pub(crate) fn on_path(program: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
@@ -572,7 +572,7 @@ fn on_path(program: &str) -> bool {
 /// A daemon started by systemd inherits a minimal PATH that usually omits
 /// `~/.local/bin`, which is exactly where `astral.sh/uv/install.sh` lands, so
 /// PATH alone would miss an interpreter source the box actually has.
-fn find_uv() -> Option<PathBuf> {
+pub(crate) fn find_uv() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PATH")
         && let Some(found) = std::env::split_paths(&path)
             .map(|dir| dir.join("uv"))
@@ -616,7 +616,12 @@ fn now_secs() -> u64 {
 /// the largest disk when no mount point matches, since an unusual layout
 /// should not block provisioning.
 fn free_bytes_for_speech_root() -> u64 {
-    let root = speech_root();
+    free_bytes_for(&speech_root())
+}
+
+/// Free bytes on the filesystem holding `root` (the deepest matching mount),
+/// or on the largest disk when none matches.
+pub(crate) fn free_bytes_for(root: &Path) -> u64 {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let mut best: Option<(usize, u64)> = None;
     let mut largest = 0u64;
@@ -721,7 +726,7 @@ pub(crate) async fn speech_tmpdir() -> Option<PathBuf> {
     Some(dir)
 }
 
-async fn run_checked(mut command: Command, task: &str) -> Result<()> {
+pub(crate) async fn run_checked(mut command: Command, task: &str) -> Result<()> {
     let status = command
         .stdin(Stdio::null())
         .status()
