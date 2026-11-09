@@ -5,28 +5,64 @@
 //! Capabilities: `fetch` (download the signed packs it needs), `push`
 //! (sign and send a new repo version to a gateway) and `option` (all
 //! declined, which git accepts).
+//!
+//! Private repos (the default for new ones) are opened with this machine's
+//! storage identity, loaded through the [`client::SecretLoader`] the CLI
+//! passes in, only when a repo turns out to be private.
 
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result};
 
-use super::client::{self, Gateways, Local, PushSpec};
+use super::client::{self, Gateways, Local, PushOptions, PushSpec, SecretLoader};
 use super::{RepoUrl, Verified};
 
 /// Run the helper protocol until git closes stdin or sends a blank line.
-pub fn run(remote: &str, url: &str) -> Result<()> {
+pub fn run(remote: &str, url: &str, secret: SecretLoader<'_>) -> Result<()> {
     // Multi-threaded: a push-to-deploy boots a libp2p node.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("tokio runtime")?;
-    let res = serve(&rt, remote, url);
+    let res = serve(&rt, remote, url, secret);
     // A deploy's swarm keeps tasks alive; do not wait for them.
     rt.shutdown_timeout(std::time::Duration::from_millis(200));
     res
 }
 
-fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
+/// The repo's state with a private repo's refs opened.
+fn load(
+    rt: &tokio::runtime::Runtime,
+    gws: &Gateways,
+    owner: &str,
+    repo: &str,
+    secret: SecretLoader<'_>,
+) -> Result<Option<(Verified, String)>> {
+    let mut s = rt.block_on(client::fetch_state(gws, owner, repo))?;
+    if let Some(st) = s.as_mut()
+        && st.0.doc.sealed
+    {
+        let sec = secret()?;
+        rt.block_on(client::unseal(gws, st, owner, repo, &sec))?;
+    }
+    Ok(s)
+}
+
+/// `git config c0mpute.public`: `Some(true)` makes a new repo public.
+fn public_setting(local: &Local) -> Option<bool> {
+    match local.git(&["config", "--bool", "c0mpute.public"]).ok()?.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn serve(
+    rt: &tokio::runtime::Runtime,
+    _remote: &str,
+    url: &str,
+    secret: SecretLoader<'_>,
+) -> Result<()> {
     let target = RepoUrl::parse(url)?;
     let keypair = crate::hosting::publisher_keypair()?;
     let me = crate::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
@@ -53,7 +89,7 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
         } else if line.starts_with("option ") {
             out.write_all(b"unsupported\n")?;
         } else if line == "list" || line == "list for-push" {
-            let s = rt.block_on(client::fetch_state(&gws, &owner, &repo))?;
+            let s = load(rt, &gws, &owner, &repo, secret)?;
             if let Some((v, _)) = &s {
                 for (name, oid) in &v.doc.refs {
                     writeln!(out, "{oid} {name}")?;
@@ -80,7 +116,7 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
             }
             let s = match state.take() {
                 Some(s) => s,
-                None => rt.block_on(client::fetch_state(&gws, &owner, &repo))?,
+                None => load(rt, &gws, &owner, &repo, secret)?,
             };
             let Some(s) = s else {
                 anyhow::bail!("{} does not exist", super::url_for(&owner, &repo));
@@ -109,7 +145,14 @@ fn serve(rt: &tokio::runtime::Runtime, _remote: &str, url: &str) -> Result<()> {
                     specs.push(PushSpec::parse(rest)?);
                 }
             }
-            match rt.block_on(client::push(&local, &gws, &keypair, &owner, &repo, &specs)) {
+            let opts = PushOptions {
+                secret: Some(secret),
+                public: public_setting(&local),
+                ..Default::default()
+            };
+            match rt.block_on(client::push(
+                &local, &gws, &keypair, &owner, &repo, &specs, &opts,
+            )) {
                 Ok(report) => {
                     if let Some(gw) = &report.gateway {
                         eprintln!(

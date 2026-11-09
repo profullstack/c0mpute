@@ -205,6 +205,34 @@ pub struct RepoDoc {
     /// Milliseconds since the epoch.
     #[serde(default)]
     pub pushed_at: u64,
+    /// A private repo (doc version 2): `refs` and `head` are empty here and
+    /// live in [`SEALED_REFS`], and every pack and index is sealed under the
+    /// repo key. Gateways only see pack names (random), sizes and `prev`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sealed: bool,
+}
+
+/// The sealed ref map of a private repo: `c0mpute-sealed` ciphertext of a
+/// [`SealedRefs`], with key slots for the owner and everyone it is shared with.
+pub const SEALED_REFS: &str = "c0mpute-git.sealed";
+
+/// What [`SEALED_REFS`] holds once opened.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedRefs {
+    pub head: Option<String>,
+    pub refs: BTreeMap<String, String>,
+}
+
+/// A random pack name for a private repo (a real one would leak the pack's
+/// checksum, which identifies its content to anyone holding the same objects).
+pub fn random_pack_name() -> String {
+    let b: [u8; 20] = rand::random();
+    format!("pack-{}", hex::encode(b))
+}
+
+/// The stable, unlinkable name a private repo's sealed files are signed under.
+pub fn sealed_name(owner: &c0mpute_sealed::StorageSecret, repo: &str) -> String {
+    owner.named_object(&format!("git:{repo}"))
 }
 
 impl RepoDoc {
@@ -214,8 +242,14 @@ impl RepoDoc {
 
     pub fn from_bytes(b: &[u8]) -> Result<Self> {
         let d: RepoDoc = serde_json::from_slice(b).context("c0mpute-git.json is not a repo doc")?;
-        if d.v != 1 {
-            bail!("unsupported repo doc version {}", d.v);
+        match (d.v, d.sealed) {
+            (1, false) => {}
+            (2, true) => {
+                if !d.refs.is_empty() || d.head.is_some() {
+                    bail!("a private repo doc carries plaintext refs");
+                }
+            }
+            (v, _) => bail!("unsupported repo doc version {v} (update c0mpute)"),
         }
         for (name, oid) in &d.refs {
             if !valid_ref_name(name) || !valid_oid(oid) {
@@ -246,6 +280,7 @@ impl RepoDoc {
             prev: None,
             force: false,
             pushed_at: 0,
+            sealed: false,
         };
         // Same validation as a real doc.
         Self::from_bytes(&d.to_bytes())
@@ -372,7 +407,14 @@ pub struct RepoState {
 pub struct Verified {
     pub record: SiteRecord,
     pub manifest: SiteManifest,
+    /// For a private repo, after [`client::unseal`]: refs and head filled in
+    /// from [`SEALED_REFS`] (in memory only; the published doc has none).
     pub doc: RepoDoc,
+    /// A private repo's key, once unsealed.
+    pub key: Option<std::sync::Arc<c0mpute_sealed::DataKey>>,
+    /// A private repo's sealed ref map as published (its key slots say who
+    /// can read it).
+    pub sealed_refs: Option<Vec<u8>>,
 }
 
 impl RepoState {
@@ -605,6 +647,7 @@ mod tests {
             prev: prev.map(String::from),
             force,
             pushed_at: 0,
+            sealed: false,
         }
     }
 
