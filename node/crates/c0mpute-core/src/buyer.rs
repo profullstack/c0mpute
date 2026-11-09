@@ -461,7 +461,8 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     }
 
     // ── wait for receipt ────────────────────────────────────────────
-    let recv_deadline = Instant::now() + auction.receipt_timeout;
+    let receipt_timeout = receipt_wait(auction.receipt_timeout, &winner);
+    let recv_deadline = Instant::now() + receipt_timeout;
     while Instant::now() < recv_deadline {
         let remaining = recv_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
@@ -510,7 +511,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
 
     Err(AuctionFailure::NoReceipt(format!(
         "no receipt from winner {} within {:?}",
-        winner.bidder_peer_id, auction.receipt_timeout
+        winner.bidder_peer_id, receipt_timeout
     ))
     .into())
 }
@@ -653,6 +654,27 @@ async fn publish_json<T: serde::Serialize>(
     net.publish(topic, bytes).await
 }
 
+/// Bench score a workload's receipt timeout is calibrated for (dev2's image
+/// worker scores ~5,500 and draws a 512x512 image in ~2 min).
+pub const REFERENCE_BENCH_SCORE: u32 = 5_000;
+
+/// How long to wait for `winner`'s receipt: the auction's timeout, longer
+/// for a winner that says it needs longer (2.5x its quoted ETA) or that
+/// benchmarks slower than [`REFERENCE_BENCH_SCORE`] (scaled by how much
+/// slower), never more than 4x the timeout. A slow CPU node (bench 1,606)
+/// needed ~7 min per image against a 6 min timeout: it was benched for
+/// "never delivered", the job re-queued and went straight back to it.
+pub fn receipt_wait(base: Duration, winner: &JobBid) -> Duration {
+    let by_eta = Duration::from_secs(winner.eta_seconds.saturating_mul(5) / 2);
+    let by_bench = match winner.bench_score {
+        Some(score) if score > 0 && score < REFERENCE_BENCH_SCORE => {
+            base.mul_f64(REFERENCE_BENCH_SCORE as f64 / score as f64)
+        }
+        _ => base,
+    };
+    base.max(by_eta).max(by_bench).min(base.saturating_mul(4))
+}
+
 /// Gossipsub gives us a cryptographically-authenticated `source: Option<PeerId>`
 /// (see `c0mpute_net::GossipMessage`) that cannot be forged by another peer —
 /// `capabilities.rs`'s ad registry already keys off it for the same reason.
@@ -742,4 +764,22 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn slow_or_busy_winners_get_longer_to_deliver() {
+        let base = Duration::from_secs(360);
+        let mut b = bid("w", None);
+        b.eta_seconds = 60;
+        b.bench_score = Some(5_560);
+        assert_eq!(receipt_wait(base, &b), base, "a reference-speed node: the plain timeout");
+        b.bench_score = Some(1_606);
+        let slow = receipt_wait(base, &b);
+        assert!(slow > Duration::from_secs(1100) && slow < Duration::from_secs(1200), "{slow:?}");
+        b.bench_score = None;
+        b.eta_seconds = 400;
+        assert_eq!(receipt_wait(base, &b), Duration::from_secs(1000), "2.5x its own ETA");
+        b.eta_seconds = 1_000_000;
+        assert_eq!(receipt_wait(base, &b), base * 4, "capped");
+    }
+
 }
