@@ -19,7 +19,7 @@
 #
 # GPL isolation. The client is GPL-3.0 and is never vendored, linked or
 # imported: it runs unmodified as a separate process in a container built by
-# runner/Dockerfile (MIT) from CrowdGPT's repository at one reviewed commit
+# node/crates/c0mpute-core/crowdgpt-runner/Dockerfile (MIT) from CrowdGPT's repository at one reviewed commit
 # (CROWDGPT_COMMIT in crowdgpt.rs, also the image's
 # org.c0mpute.crowdgpt.commit label, checked before every run). CI publishes
 # it as ghcr.io/profullstack/c0mpute-crowdgpt-runner:crowdgpt-<sha12>

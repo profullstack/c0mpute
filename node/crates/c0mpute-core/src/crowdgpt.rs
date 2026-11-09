@@ -27,7 +27,7 @@
 //! The client is GPL-3.0. c0mpute never vendors, links or imports it: it runs
 //! as a separate process in its own container, built from CrowdGPT's public
 //! repository at the reviewed commit [`CROWDGPT_COMMIT`] by our MIT Dockerfile
-//! (plugins/crowdgpt/runner). c0mpute talks to it only through `docker run` /
+//! (node/crates/c0mpute-core/crowdgpt-runner). c0mpute talks to it only through `docker run` /
 //! `docker stop` and its log lines.
 //!
 //! # Containment
@@ -96,10 +96,11 @@ pub fn pull_ref() -> String {
     format!("{RUNNER_REPOSITORY}:crowdgpt-{}", &CROWDGPT_COMMIT[..12])
 }
 
-/// Our Dockerfile and watchdog, embedded so `c0mpute crowdgpt setup --build`
+/// Our Dockerfile and watchdog (node/crates/c0mpute-core/crowdgpt-runner,
+/// inside the crate so builds that copy only `node/` still compile), embedded so `c0mpute crowdgpt setup --build`
 /// needs only docker (CrowdGPT's source is fetched inside the build).
-pub const DOCKERFILE: &str = include_str!("../../../../plugins/crowdgpt/runner/Dockerfile");
-pub const WATCHDOG: &str = include_str!("../../../../plugins/crowdgpt/runner/c0mpute-crowdgpt-run");
+pub const DOCKERFILE: &str = include_str!("../crowdgpt-runner/Dockerfile");
+pub const WATCHDOG: &str = include_str!("../crowdgpt-runner/c0mpute-crowdgpt-run");
 
 /// `[crowdgpt]` in config.toml. Off by default.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -454,9 +455,16 @@ pub fn decide(running: bool, busy: bool, blocked: bool, idle_for: Duration, idle
     }
 }
 
-fn owner_of(dir: &Path) -> Option<(u32, u32)> {
+/// The uid:gid owning `dir`, which the container runs as (`None` off Unix).
+#[cfg(unix)]
+pub fn owner_of(dir: &Path) -> Option<(u32, u32)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(dir).ok().map(|m| (m.uid(), m.gid()))
+}
+
+#[cfg(not(unix))]
+pub fn owner_of(_dir: &Path) -> Option<(u32, u32)> {
+    None
 }
 
 /// Running crowdgpt containers (by [`LABEL`]).
