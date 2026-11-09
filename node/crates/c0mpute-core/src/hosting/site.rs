@@ -1126,6 +1126,8 @@ pub fn render_listing(
             format!("<audio controls preload=none src=\"{href}\"></audio>")
         } else if e.content_type.starts_with("video/") {
             format!("<video controls preload=none src=\"{href}\"></video>")
+        } else if e.content_type.starts_with("image/") {
+            format!("<a href=\"{href}\"><img loading=lazy decoding=async alt=\"\" src=\"{href}\"></a>")
         } else {
             String::new()
         };
@@ -1142,7 +1144,7 @@ pub fn render_listing(
 <meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{t}</title>\
 <style>:root{{color-scheme:light dark}}body{{font:16px/1.5 system-ui,sans-serif;max-width:56rem;margin:0 auto;padding:1rem}}\
 ul{{list-style:none;padding:0}}li{{padding:.4rem 0;border-bottom:1px solid #8884;overflow-wrap:anywhere}}\
-small{{opacity:.7;margin-left:.5rem}}audio,video{{display:block;width:100%;margin-top:.3rem}}video{{max-height:60vh}}</style>\
+small{{opacity:.7;margin-left:.5rem}}audio,video{{display:block;width:100%;margin-top:.3rem}}video{{max-height:60vh}}img{{display:block;max-width:100%;max-height:40vh;margin-top:.3rem}}</style>\
 </head><body><h1>{t}</h1><ul>\n{rows}</ul>{more}</body></html>",
         t = listing_esc(&title)
     )
@@ -1193,6 +1195,7 @@ mod tests {
         let html = render_listing("brongva", "", &dirs, &fs);
         assert!(html.contains("href=\"After%20the%20Winter/\""), "{html}");
         assert!(html.contains("href=\"cover.jpg\""));
+        assert!(html.contains("<img loading=lazy decoding=async alt=\"\" src=\"cover.jpg\">"), "{html}");
 
         let (dirs, fs) = dir_children(files.iter(), "After the Winter/");
         assert!(dirs.is_empty());
