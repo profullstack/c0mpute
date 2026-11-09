@@ -579,6 +579,7 @@ async fn run_speech_auction(
     spec: serde_json::Value,
     required: Vec<String>,
     excluded_bidders: &[String],
+    fallback_bidders: &[String],
 ) -> Result<crate::AuctionOutcome, (ApiError, Option<String>)> {
     // Learn the winner as soon as it is chosen, so a winner that then goes
     // silent can be benched and the job re-auctioned.
@@ -587,6 +588,7 @@ async fn run_speech_auction(
         .with_accept_notify(winner_tx)
         .with_required_capabilities(required)
         .with_excluded_bidders(excluded_bidders.to_vec())
+        .with_fallback_bidders(fallback_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
         .with_bid_window(bid_window_for(workload))
         .with_deadline(if is_video(workload) {
@@ -670,7 +672,9 @@ async fn run_checked_job(
     valid: &(dyn Fn(&[u8]) -> bool + Send + Sync),
 ) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
     // Workers benched for not delivering earlier stay out of the auction.
-    let mut excluded_bidders = state.penalties.benched();
+    // Workers that failed this request are out; workers benched for earlier
+    // failures are only a fallback when nobody else bids.
+    let mut excluded_bidders: Vec<String> = Vec::new();
     let mut last_error = None;
     let started = std::time::Instant::now();
     let mut attempt = 0;
@@ -696,6 +700,12 @@ async fn run_checked_job(
             spec.clone(),
             required.clone(),
             &excluded_bidders,
+            &state
+                .penalties
+                .benched()
+                .into_iter()
+                .filter(|p| !excluded_bidders.contains(p))
+                .collect::<Vec<_>>(),
         )
         .await
         {
