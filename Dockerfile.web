@@ -15,6 +15,9 @@ FROM rust:1.92-bookworm AS rustbuild
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY node ./node
+# Crates include_str! files from plugins/ (e.g. plugins/video/module.toml), so
+# the Rust stage needs them too or the build fails with "couldn't read".
+COPY plugins ./plugins
 RUN cargo build --release --bin c0mpute
 
 # ── stage 2: build the Next.js site (Bun) ────────────────────────────────
