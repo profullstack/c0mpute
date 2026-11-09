@@ -287,6 +287,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PodcastsCmd,
     },
+    /// Live-stream plugin: p2p HLS live streaming. `go` broadcasts (needs
+    /// ffmpeg); every gateway serves /live/<stream_id>/index.m3u8 and peers
+    /// swarm the segments.
+    Stream {
+        #[command(subcommand)]
+        cmd: StreamCmd,
+    },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
         /// Arguments forwarded to `coinpay`.
@@ -729,6 +736,72 @@ struct PodcastsVia {
 }
 
 #[derive(Subcommand, Debug)]
+enum StreamCmd {
+    /// Broadcast a live stream to the network.
+    ///
+    /// INPUT is a file (played at native speed), an ffmpeg URL (rtmp://,
+    /// srt://, udp://, http://...) or `-` for stdin. Needs ffmpeg on PATH;
+    /// RTMP/SRT ingest is ffmpeg's. The stream is signed with this machine's
+    /// identity, so its id stays the same for the same --name.
+    ///
+    ///   c0mpute stream go show.mp4 --name my-show
+    ///   c0mpute stream go rtmp://0.0.0.0:1935/live/key --listen --name my-show
+    ///   c0mpute stream go testsrc=size=1280x720:rate=30 --format lavfi --name test
+    #[command(verbatim_doc_comment)]
+    Go {
+        input: String,
+        /// Stream name: 1-63 of a-z, 0-9 and '-'.
+        #[arg(long)]
+        name: String,
+        /// ffmpeg input format (-f), e.g. lavfi, flv, mpegts.
+        #[arg(long)]
+        format: Option<String>,
+        /// Target segment length in seconds (2-10).
+        #[arg(long, default_value_t = 4)]
+        segment_secs: u32,
+        /// Segments per rendition in the live window.
+        #[arg(long, default_value_t = 6)]
+        window: usize,
+        /// Also encode a 480p rendition (libx264) next to the source.
+        #[arg(long)]
+        low: bool,
+        /// Source rendition: copy (no re-encode), x264, or auto
+        /// (x264 for lavfi/raw input, copy otherwise).
+        #[arg(long, default_value = "auto")]
+        codec: String,
+        /// Receive a push (ffmpeg -listen 1), e.g. on rtmp://0.0.0.0:1935/live/key.
+        #[arg(long)]
+        listen: bool,
+        /// Also serve the stream locally for a preview, e.g. 127.0.0.1:7778.
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
+        /// After the input ends, stay up this many seconds for relays.
+        #[arg(long, default_value_t = 30)]
+        linger_secs: u64,
+        /// Do not restart ffmpeg when a network input drops.
+        #[arg(long)]
+        no_reconnect: bool,
+    },
+    /// Print a stream's playlist URL on a gateway and play it with mpv or
+    /// ffplay when one is installed.
+    Watch {
+        stream_id: String,
+        /// Gateway to watch through.
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+        /// Only print the URL.
+        #[arg(long)]
+        no_play: bool,
+    },
+    /// List the live streams a gateway knows.
+    Ls {
+        /// Gateway to ask.
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum CrawlCmd {
     /// Fetch one URL from a worker and print the result JSON
     /// (`{v, ok, output: {url, status, headers, body}}`).
@@ -1028,6 +1101,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Stream { cmd } => run_stream(cmd).await,
         Cmd::Ocr {
             file,
             lang,
@@ -1339,6 +1413,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Hosting,
                     Role::Ocr,
                     Role::Embed,
+                    Role::LiveStream,
                     Role::Render,
                 ] {
                     if !cfg.roles.contains(&role) {
@@ -2534,6 +2609,111 @@ async fn run_podcasts(cmd: PodcastsCmd) -> Result<()> {
     }
 }
 
+async fn run_stream(cmd: StreamCmd) -> Result<()> {
+    use c0mpute_core::live::broadcast;
+    match cmd {
+        StreamCmd::Go {
+            input,
+            name,
+            format,
+            segment_secs,
+            window,
+            low,
+            codec,
+            listen,
+            bind,
+            linger_secs,
+            no_reconnect,
+        } => {
+            broadcast::go(broadcast::GoOptions {
+                input,
+                name,
+                format,
+                segment_secs,
+                window,
+                low,
+                codec: codec.parse()?,
+                listen,
+                bind,
+                linger: std::time::Duration::from_secs(linger_secs),
+                reconnect: !no_reconnect,
+            })
+            .await
+        }
+        StreamCmd::Watch {
+            stream_id,
+            gateway,
+            no_play,
+        } => {
+            if !c0mpute_core::live::record::valid_stream_id(&stream_id) {
+                anyhow::bail!("a stream id is 20 lowercase hex characters (from `c0mpute stream ls`)");
+            }
+            let url = format!("{}/live/{stream_id}/index.m3u8", gateway.trim_end_matches('/'));
+            println!("{url}");
+            if no_play {
+                return Ok(());
+            }
+            let player = ["mpv", "ffplay"].into_iter().find(|p| {
+                std::env::var_os("PATH")
+                    .map(|path| std::env::split_paths(&path).any(|d| d.join(p).is_file()))
+                    .unwrap_or(false)
+            });
+            match player {
+                Some(p) => {
+                    let mut cmd = std::process::Command::new(p);
+                    if p == "ffplay" {
+                        cmd.arg("-hide_banner");
+                    }
+                    let status = cmd.arg(&url).status().with_context(|| format!("run {p}"))?;
+                    if !status.success() {
+                        anyhow::bail!("{p} exited with {status}");
+                    }
+                }
+                None => eprintln!("(no mpv or ffplay on PATH; open the URL in any HLS player: VLC, Safari, hls.js)"),
+            }
+            Ok(())
+        }
+        StreamCmd::Ls { gateway } => {
+            let url = format!("{}/live/v1/streams", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url)
+                .await
+                .with_context(|| format!("GET {url}"))?
+                .json()
+                .await?;
+            let streams = v["streams"].as_array().cloned().unwrap_or_default();
+            if streams.is_empty() {
+                println!("no live streams known to {gateway} right now");
+            }
+            for s in streams {
+                let rends: Vec<String> = s["renditions"]
+                    .as_array()
+                    .map(|r| {
+                        r.iter()
+                            .map(|x| {
+                                format!(
+                                    "{}@{}kbps",
+                                    x["name"].as_str().unwrap_or("?"),
+                                    x["bandwidth"].as_u64().unwrap_or(0) / 1000
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "{:<22} {:<24} {:<6} {:>4} holders  {}  {}",
+                    s["stream_id"].as_str().unwrap_or(""),
+                    s["name"].as_str().unwrap_or(""),
+                    if s["ended"].as_bool().unwrap_or(false) { "ended" } else { "live" },
+                    s["holders"],
+                    rends.join(","),
+                    s["path"].as_str().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn run_hosting(cmd: HostingCmd) -> Result<()> {
     match cmd {
         HostingCmd::Publish {
@@ -3242,6 +3422,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),
         "embed" | "embeddings" => Some(Role::Embed),
+        "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
         "render" | "blender" => Some(Role::Render),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
