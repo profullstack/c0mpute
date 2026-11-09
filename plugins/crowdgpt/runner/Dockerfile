@@ -75,5 +75,8 @@ COPY c0mpute-crowdgpt-run /usr/local/bin/c0mpute-crowdgpt-run
 RUN chmod 0755 /usr/local/bin/c0mpute-crowdgpt-run
 
 WORKDIR /app
+# c0mpute runs it as the node user (`--user <uid>:<gid>` of the cache dir);
+# never root, even when started by hand.
+USER 65534:65534
 ENTRYPOINT ["/usr/local/bin/c0mpute-crowdgpt-run"]
 CMD []

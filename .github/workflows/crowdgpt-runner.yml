@@ -102,8 +102,12 @@ jobs:
           [ "${{ github.event_name }}" = "pull_request" ] || docker pull "$ref"
           label=$(docker image inspect --format '{{ index .Config.Labels "org.c0mpute.crowdgpt.commit" }}' "$ref")
           test "$label" = "${{ steps.tags.outputs.pin }}"
-          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --user 1000:1000 -v "$(mktemp -d):/data" "$ref" --version
-          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --user 1000:1000 -v "$(mktemp -d):/data" "$ref" --help | grep -q -- --headless
+          # As c0mpute runs it: the node user's uid owning the one mount.
+          data=$(mktemp -d)
+          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" -v "$data:/data" "$ref" --version
+          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" -v "$data:/data" "$ref" --help | grep -q -- --headless
+          # Default user is not root.
+          test "$(docker image inspect --format '{{ .Config.User }}' "$ref")" = "65534:65534"
 
       - name: Can a stranger pull it?
         if: github.event_name != 'pull_request'

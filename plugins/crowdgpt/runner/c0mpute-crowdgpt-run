@@ -20,6 +20,10 @@ DATA=/data
 HB="$DATA/c0mpute-heartbeat"
 STALE="${C0MPUTE_HEARTBEAT_STALE_S:-90}"
 mkdir -p "$DATA/checkpoints" "$DATA/hf_home" "$DATA/torch_home" "$DATA/cache" "${HOME:-$DATA/home}" 2>/dev/null || true
+if ! [ -w "$DATA/checkpoints" ]; then
+    echo "[c0mpute] $DATA is not writable by uid $(id -u); mount the cache dir owned by that user" >&2
+    exit 70
+fi
 cd /app
 
 if [ "$#" -gt 0 ]; then
