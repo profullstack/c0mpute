@@ -598,6 +598,14 @@ impl Hosting {
         if self.held_bytes().await - already + rec.size > self.0.max_bytes {
             bail!("over this node's hosting budget");
         }
+        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
+        if !leaves_free_floor(disk_free, disk_total, rec.size.saturating_sub(already)) {
+            bail!(
+                "disk nearly full: {} GiB free, a copy must leave at least {} GiB",
+                disk_free / GIB_BYTES,
+                free_disk_floor(disk_total) / GIB_BYTES
+            );
+        }
         let owner_bytes: u64 = self
             .0
             .catalog
@@ -1163,6 +1171,21 @@ fn site_root_redirect(site: &str, query: Option<&str>) -> Response {
     }
 }
 
+const GIB_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Free space a hosting copy must leave on the disk: 10 GiB or 5% of it,
+/// whichever is more, capped at 50 GiB. Every node hosts by default, including
+/// busy production boxes, so the 5 GiB hosting budget alone could fill a disk
+/// that was already nearly full.
+fn free_disk_floor(disk_total: u64) -> u64 {
+    (disk_total / 20).clamp(10 * GIB_BYTES, 50 * GIB_BYTES)
+}
+
+fn leaves_free_floor(disk_free: u64, disk_total: u64, extra: u64) -> bool {
+    // An unknown disk (0/0) is not refused: the budget check still applies.
+    disk_total == 0 || disk_free.saturating_sub(extra) >= free_disk_floor(disk_total)
+}
+
 pub(crate) fn jitter(d: Duration) -> Duration {
     let ms = d.as_millis() as u64;
     let spread = ms / 10;
@@ -1263,6 +1286,24 @@ async fn serve_by_host(State(h): State<Hosting>, headers: HeaderMap, uri: axum::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosting_copy_must_leave_a_free_disk_floor() {
+        let g = GIB_BYTES;
+        // 1.8 TiB disk: floor is capped at 50 GiB.
+        assert_eq!(free_disk_floor(1843 * g), 50 * g);
+        // 100 GiB disk: floor is the 10 GiB minimum.
+        assert_eq!(free_disk_floor(100 * g), 10 * g);
+        // dev2 on 2026-11-09: 20 GiB free on 1.8 TiB, refuse.
+        assert!(!leaves_free_floor(20 * g, 1843 * g, g));
+        // Plenty free: accept.
+        assert!(leaves_free_floor(500 * g, 1843 * g, 5 * g));
+        // Exactly at the floor after the copy: accept; one byte under: refuse.
+        assert!(leaves_free_floor(11 * g, 100 * g, g));
+        assert!(!leaves_free_floor(11 * g, 100 * g, g + 1));
+        // Unknown disk: the hosting budget still guards it.
+        assert!(leaves_free_floor(0, 0, g));
+    }
+
     #[test]
     fn slashless_site_path_redirects_with_query() {
         let r = site_root_redirect("53021d6e8d5a0e1aac48", None);

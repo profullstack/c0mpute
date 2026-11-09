@@ -55,7 +55,7 @@ pub struct Capacity {
 
 /// The filesystem under `root`: (available, total). Picks the deepest mount
 /// that contains the root; falls back to the largest disk.
-fn disk_for(root: &Path) -> (u64, u64) {
+pub(crate) fn disk_for(root: &Path) -> (u64, u64) {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let mut best: Option<(usize, u64, u64)> = None;
     let mut largest = (0u64, 0u64);
