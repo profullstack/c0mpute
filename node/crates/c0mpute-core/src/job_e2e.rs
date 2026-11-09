@@ -995,6 +995,14 @@ async fn fetch_sealed(net: &Libp2pNetwork, accept: &JobAccept) -> Result<Vec<u8>
     }
     let mut last = anyhow!("not tried");
     for attempt in 0..4u32 {
+        // No public address in the accept (a LAN or loopback buyer) and no
+        // connection yet: find the buyer through the DHT rather than fail
+        // with "Failed to dial the requested peer". Addresses come from Kad
+        // and identify, never from the accept, so the public-only filter
+        // above still decides what the accept may make us dial.
+        if !net.is_connected(buyer).await {
+            let _ = tokio::time::timeout(Duration::from_secs(10), net.connect(buyer)).await;
+        }
         match net
             .rpc(buyer, PAYLOAD_SERVICE, accept.job_id.as_bytes().to_vec())
             .await
