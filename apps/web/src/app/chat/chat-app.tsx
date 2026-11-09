@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
-import { audioExtension, parseMusicCommand, type MusicCommand } from "@/lib/chat/music";
+import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodeProgress, type MusicCommand } from "@/lib/chat/music";
 
 // An image turn keeps its picture only for this session (a blob: URL); what is
 // saved to localStorage is the text placeholder, and the model never sees it.
@@ -280,12 +280,14 @@ export function ChatApp({ error }: { error: string | null }) {
           const p = await poll.json().catch(() => ({}));
           const secs = Math.round((Date.now() - started) / 1000);
           if (typeof p.caption === "string") written = { caption: p.caption, lyrics: typeof p.lyrics === "string" ? p.lyrics : "" };
-          setLast({
-            content:
-              p.stage === "writing"
-                ? `// writing lyrics and a style from your brief… ${secs}s`
-                : `// composing with ACE-Step 1.5 on a c0mpute worker… ${secs}s${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
-          });
+          const node = sanitizeNodeProgress(p.node);
+          const head =
+            p.stage === "writing"
+              ? `// writing lyrics and a style from your brief… ${secs}s`
+              : `// ${node ? describeNodeProgress(node) : `composing with ACE-Step 1.5 on a c0mpute worker…`} · ${secs}s total${
+                  typeof p.duration === "number" ? ` · ${p.duration}s song` : ""
+                }`;
+          setLast({ content: `${head}${written?.lyrics ? `\n\n${written.lyrics}` : ""}` });
           continue;
         }
         if (!poll.ok) {

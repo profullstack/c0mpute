@@ -60,6 +60,8 @@ struct GatewayState {
     sessions: crate::speech_session::SessionStore,
     /// Workers that won and did not deliver, benched for a while.
     penalties: crate::penalty_box::PenaltyBox,
+    /// Live stages of long requests (songs), by the caller's x-request-id.
+    progress: crate::job_progress::ProgressBoard,
 }
 
 #[derive(Debug)]
@@ -176,6 +178,7 @@ pub fn router(
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
+        progress: crate::job_progress::ProgressBoard::default(),
         penalties,
     };
     Router::new()
@@ -185,6 +188,7 @@ pub fn router(
         .route("/v1/stt", post(transcribe))
         .route("/v1/images", post(generate_image))
         .route("/v1/music", post(generate_music))
+        .route("/v1/progress/{request}", get(job_progress))
         .route("/v1/videos", post(generate_video))
         // OCR takes a 32 MiB document, above the router-wide audio limit.
         .route(
@@ -521,10 +525,29 @@ async fn run_speech_auction(
         } else {
             Duration::from_secs(15 * 60)
         });
-    run_auction(state.net.clone(), auction)
-        .await
+    // Read the winner as soon as it is chosen (not only on failure), so a
+    // caller polling /v1/progress sees which node is working and its ETA.
+    let auction_run = run_auction(state.net.clone(), auction);
+    tokio::pin!(auction_run);
+    let mut winner_seen: Option<String> = None;
+    let result = loop {
+        tokio::select! {
+            result = &mut auction_run => break result,
+            Some((job_id, bid)) = winner_rx.recv() => {
+                crate::job_progress::set_stage("rendering");
+                crate::job_progress::report(|p| {
+                    p.worker = Some(bid.bidder_peer_id.clone());
+                    p.job_id = Some(job_id);
+                    p.eta_s = Some(bid.eta_seconds);
+                });
+                winner_seen = Some(bid.bidder_peer_id);
+            }
+        }
+    };
+    result
         .map_err(|error| {
-            let winner = winner_rx.try_recv().ok().map(|(_, bid)| bid.bidder_peer_id);
+            let winner = winner_seen
+                .or_else(|| winner_rx.try_recv().ok().map(|(_, bid)| bid.bidder_peer_id));
             tracing::warn!(workload, err = %error, winner = ?winner, "speech auction failed");
             (
                 ApiError(
@@ -572,6 +595,16 @@ async fn run_checked_job(
 
     while attempt < MAX_SPEECH_WORKER_ATTEMPTS {
         attempt += 1;
+        crate::job_progress::report(|p| {
+            p.attempt = attempt as u32;
+            p.worker = None;
+            p.eta_s = None;
+        });
+        crate::job_progress::report(|p| {
+            if p.stage != "queued" {
+                p.stage = "finding_worker";
+            }
+        });
         let outcome = match run_speech_auction(
             state,
             workload,
@@ -599,7 +632,8 @@ async fn run_checked_job(
                 if (workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT)
                     || (workload == crate::music::WORKLOAD_TXT2MUSIC && started.elapsed() < MUSIC_QUEUE_WAIT) =>
             {
-                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free image worker yet; waiting");
+                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free worker yet; waiting");
+                crate::job_progress::set_stage("queued");
                 attempt -= 1;
                 last_error.get_or_insert(error);
                 tokio::time::sleep(Duration::from_secs(15)).await;
@@ -608,6 +642,7 @@ async fn run_checked_job(
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
         };
         let worker = outcome.accepted_bid.bidder_peer_id.clone();
+        crate::job_progress::set_stage("fetching_result");
         let result = if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
             Err(ApiError(
                 StatusCode::BAD_GATEWAY,
@@ -636,6 +671,9 @@ async fn run_checked_job(
             }
             Err(error) => {
                 state.penalties.strike(&worker);
+                let why = error.1.clone();
+                crate::job_progress::set_stage("retrying");
+                crate::job_progress::report(|p| p.detail = Some(why));
                 tracing::warn!(
                     workload,
                     attempt,
@@ -1004,7 +1042,12 @@ async fn generate_music(
         .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "music queue is unavailable".into()))?;
     let spec = serde_json::to_value(input.clip_for_model())
         .map_err(|error| gateway_failure(error.into()))?;
-    let (outcome, bytes) = run_speech_job(
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|k| crate::job_progress::valid_key(k))
+        .map(str::to_string);
+    let job = run_speech_job(
         &state,
         crate::music::WORKLOAD_TXT2MUSIC,
         spec,
@@ -1013,8 +1056,21 @@ async fn generate_music(
             crate::music::MODEL_TAG.to_string(),
         ],
         crate::music::MAX_RESULT_BYTES,
-    )
-    .await?;
+    );
+    let result = match &request_id {
+        Some(key) => {
+            state.progress.start(key);
+            crate::job_progress::CURRENT
+                .scope((state.progress.clone(), key.clone()), async {
+                    let result = job.await;
+                    crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
+                    result
+                })
+                .await
+        }
+        None => job.await,
+    };
+    let (outcome, bytes) = result?;
     let content_type = crate::music::audio_content_type(&bytes).unwrap_or("audio/mpeg");
     let mut response = (StatusCode::OK, bytes).into_response();
     response
@@ -1028,6 +1084,28 @@ async fn generate_music(
         &outcome.job_id,
         &outcome.accepted_bid.bidder_peer_id,
     );
+    Ok(response)
+}
+
+/// `GET /v1/progress/{request}`: the live stage of a request sent with that
+/// `x-request-id` (see `job_progress`). 404 until it starts and 30 min after.
+async fn job_progress(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(request): Path<String>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    if !crate::job_progress::valid_key(&request) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad request id".into()));
+    }
+    let snapshot = state
+        .progress
+        .snapshot(&request)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such request".into()))?;
+    let mut response = Json(snapshot).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 

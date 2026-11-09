@@ -1,5 +1,5 @@
 import { isJobId } from "@/lib/chat/images";
-import { AUDIO_TYPES } from "@/lib/chat/music";
+import { AUDIO_TYPES, sanitizeNodeProgress } from "@/lib/chat/music";
 import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +33,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // Infernet writes lyrics from a brief first; pass what it wrote along.
     const pick = (k: string) => (typeof body[k] === "string" || typeof body[k] === "number" ? body[k] : undefined);
     return json(
-      { id, status: "pending", seconds: body.seconds ?? null, stage: pick("stage"), caption: pick("caption"), lyrics: pick("lyrics"), duration: pick("duration") },
+      { id, status: "pending", seconds: body.seconds ?? null, stage: pick("stage"), caption: pick("caption"), lyrics: pick("lyrics"), duration: pick("duration"), node: sanitizeNodeProgress(body.node) },
       202,
       { "cache-control": "no-store" },
     );
