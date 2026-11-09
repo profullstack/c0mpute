@@ -43,7 +43,7 @@
 [module]
 id          = "crowdgpt"
 name        = "CrowdGPT: donate idle compute"
-version     = "0.2.85"
+version     = "0.2.89"
 kind        = "donation"
 category    = "ai"
 status      = "available"
@@ -57,7 +57,7 @@ keywords    = ["donation", "idle", "training", "llm", "crowdgpt", "volunteer"]
 earns       = false
 
 [module.requirements]
-c0mpute      = ">=0.2.88"
+c0mpute      = ">=0.2.89"
 os           = ["linux"]
 arch         = ["x86_64"]
 capabilities = ["container-runtime", "gpu:cuda?"]
