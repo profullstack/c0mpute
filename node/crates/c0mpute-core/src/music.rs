@@ -179,6 +179,8 @@ pub fn can_serve(config: &crate::config::MusicConfig) -> bool {
             config.max_load_per_cpu,
         )
         && node_slot().available_permits() > 0
+        // An image render holds the same CPU; never run both at once.
+        && !crate::diffusion::busy()
 }
 
 fn now_secs() -> u64 {
@@ -560,6 +562,11 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
 }
 
 /// One song at a time per node: a job holds ~7-9 GB and every core it is given.
+/// True while this node is making a song.
+pub fn busy() -> bool {
+    node_slot().available_permits() == 0
+}
+
 fn node_slot() -> Arc<Semaphore> {
     static SLOT: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
