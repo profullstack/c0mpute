@@ -192,8 +192,8 @@ fn default_diffusion_min_ram_gb() -> u64 {
     16
 }
 fn default_diffusion_min_free_ram_gb() -> u64 {
-    // A job holds ~9 GB; keep ~3 GB for whatever else the box runs.
-    12
+    // A job peaks at ~4 GB with --params-backend disk; keep ~4 GB spare.
+    8
 }
 fn default_diffusion_min_free_disk_gb() -> u64 {
     25

@@ -54,9 +54,19 @@ domain and the domain's TXT names the site, so neither a site owner nor a domain
 owner can hijack the other. TXT answers are looked up over DNS-over-HTTPS and
 cached for 10 minutes (2 minutes for a miss).
 
-**Moshpit names**: the gateway side is the same: a Moshpit name whose DNS answers
-with gateway addresses and the TXT above is served. Having the Moshpit resolver hand
-out live gateway addresses for a site is the next step, in moshcode.
+**Moshpit names**: `moshcode name c0mpute <name> <site_id>` points a Moshpit name at a
+site. The Moshpit registry resolves it to a c0mpute edge (moshpit-proxy
+`bin/moshpit-c0mpute-edge.ts`) that holds a Moshpit CA certificate for the name and
+fetches `/s/<site_id>/` from any healthy gateway, so no DNS check on the gateway is
+involved.
+
+## Finding gateways
+
+A gateway whose operator sets `gateway.announce` (its public origin, e.g.
+`http://203.0.113.7:7777`) advertises it in its capability ad, and the node board
+publishes it as `gateway` on `/api/nodes`. Nothing is advertised without that setting,
+and never in private mode. Clients that are not libp2p peers (the Moshpit edge, for
+one) use this list to find gateways to fetch sites from.
 
 ## Not yet
 

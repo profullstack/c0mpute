@@ -22,6 +22,12 @@ export interface NodeRow {
   name?: string | null;
   /** The operator's listing; absent on nodes older than 0.2.35. */
   pricing?: Pricing | null;
+  /**
+   * The node's gateway origin (`http://host:7777`), only when its operator set
+   * `gateway.announce`. Clients that are not libp2p peers find gateways that
+   * serve hosted sites (`/s/<site_id>/`) here. Absent on older aggregators.
+   */
+  gateway?: string | null;
   last_seen_s: number;
 }
 

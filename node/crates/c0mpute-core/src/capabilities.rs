@@ -210,6 +210,9 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
         blob["name"] = serde_json::Value::String(name);
     }
     blob["pricing"] = config.pricing.listing();
+    if let Some(origin) = announced_gateway(config) {
+        blob["gateway"] = serde_json::Value::String(origin);
+    }
     if config.roles.contains(&c0mpute_proto::Role::Storage) {
         let cap = crate::opendisk::capacity(&config.storage, 0);
         blob["storage"] = serde_json::json!({
@@ -301,6 +304,37 @@ fn handle_setting(env: &str, file: &str) -> Option<String> {
         .ok()
         .or_else(|| std::fs::read_to_string(c0mpute_home()?.join(file)).ok())?;
     sanitize_ref(&raw)
+}
+
+/// The public HTTP origin this node's gateway answers on, when its operator
+/// published one (`gateway.announce`) and the node runs the gateway role.
+///
+/// Opt-in by construction: nothing is advertised unless the operator typed the
+/// address into their config, which they already do to be listed on d1sks or
+/// to front custom domains. Never in private mode. This is what lets a client
+/// that is not a libp2p peer (the Moshpit c0mpute edge, for one) find gateways
+/// to fetch `/s/<site>/` from without a central list of them.
+pub fn announced_gateway(config: &Config) -> Option<String> {
+    if config.private.enabled || !config.roles.contains(&c0mpute_proto::Role::Gateway) {
+        return None;
+    }
+    gateway_origin(config.gateway.announce.as_deref()?)
+}
+
+/// `scheme://host[:port]` of an http(s) URL with a host and no credentials,
+/// at most 200 characters, or nothing. Shared with the status aggregator,
+/// which re-checks every ad before it publishes one.
+pub fn gateway_origin(raw: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let origin = url.origin().ascii_serialization();
+    (origin.len() <= 200).then_some(origin)
 }
 
 /// Lowercase `[a-z0-9_-]`, 1..=32 chars, or nothing.
@@ -542,6 +576,48 @@ mod tests {
         assert_eq!(sanitize_ref("has space"), None);
         assert_eq!(sanitize_ref("<script>"), None);
         assert_eq!(sanitize_ref(&"a".repeat(33)), None);
+    }
+
+    #[test]
+    fn gateway_origins_are_sanitized() {
+        assert_eq!(
+            gateway_origin(" http://1.2.3.4:7777/ ").as_deref(),
+            Some("http://1.2.3.4:7777")
+        );
+        assert_eq!(
+            gateway_origin("https://gw.example.org/some/path?x=1").as_deref(),
+            Some("https://gw.example.org")
+        );
+        assert_eq!(gateway_origin("ftp://gw.example.org"), None);
+        assert_eq!(gateway_origin("javascript:alert(1)"), None);
+        assert_eq!(gateway_origin("http://user:pw@gw.example.org"), None);
+        assert_eq!(gateway_origin("not a url"), None);
+        let long = format!("https://{}.example.org", "a".repeat(250));
+        assert_eq!(gateway_origin(&long), None);
+    }
+
+    #[test]
+    fn gateway_is_advertised_only_when_announced_and_public() {
+        let mut config = Config::default();
+        config.gateway.announce = Some("http://203.0.113.7:7777".into());
+        if !config.roles.contains(&c0mpute_proto::Role::Gateway) {
+            config.roles.push(c0mpute_proto::Role::Gateway);
+        }
+        assert_eq!(
+            announced_gateway(&config).as_deref(),
+            Some("http://203.0.113.7:7777")
+        );
+
+        config.private.enabled = true;
+        assert_eq!(announced_gateway(&config), None, "never in private mode");
+        config.private.enabled = false;
+
+        config.roles.retain(|r| *r != c0mpute_proto::Role::Gateway);
+        assert_eq!(announced_gateway(&config), None, "only gateways");
+        config.roles.push(c0mpute_proto::Role::Gateway);
+
+        config.gateway.announce = None;
+        assert_eq!(announced_gateway(&config), None, "only when the operator set one");
     }
 
     fn tempdir(name: &str) -> std::path::PathBuf {
