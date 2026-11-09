@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use base64::Engine;
 use c0mpute_proto::Hash;
 
-use super::replicas::{ReplicaMap, chosen, score};
+use super::replicas::{ReplicaMap, chosen, releases, score};
 use super::site::{FILE_CHUNK_BYTES, FileEntry, STRIPE_ABOVE, SiteManifest};
 
 /// Chunks per group: 64 MiB of a site.
@@ -207,13 +207,6 @@ pub fn health(holders: &[Vec<String>], target: usize) -> Health {
     }
 }
 
-fn lowest(key: &str, peers: &[String]) -> Option<String> {
-    peers
-        .iter()
-        .min_by(|a, b| score(key, a).cmp(&score(key, b)).then(b.cmp(a)))
-        .cloned()
-}
-
 /// The preferred hosts that take group `g`: all of them when there are at
 /// most `target` (a paid host holds the whole site), else the `target` that
 /// rank highest for the group.
@@ -232,8 +225,9 @@ pub fn preferred_takers(site_id: &str, g: u32, preferred: &[String], target: usi
 /// count; below `target` copies the top-ranked striping hosts with room for
 /// the group take it (`widen(g)` more of them once a group has been short for
 /// a while, so a chosen node that cannot take it does not stall the group);
-/// above `max` copies (or above the paid share) the lowest-ranked holder lets
-/// go.
+/// above `target` the lowest-ranked free holder lets go, at once above `max`
+/// and otherwise only once `trim(g)` says the group has been over `target`
+/// for the grace period (see [`releases`]).
 #[allow(clippy::too_many_arguments)]
 pub fn plan(
     map: &ReplicaMap,
@@ -244,6 +238,7 @@ pub fn plan(
     target: usize,
     max: usize,
     widen: &dyn Fn(u32) -> usize,
+    trim: &dyn Fn(u32) -> bool,
 ) -> Plan {
     let holders = map.group_holders(site_id, layout.len(), true);
     let preferred = map.effective_preferred(site_id);
@@ -256,16 +251,9 @@ pub fn plan(
         let i_hold = hs.iter().any(|p| p == me);
         let takers = preferred_takers(site_id, g, &preferred, target);
         if i_hold {
-            if preferred.is_empty() {
-                if hs.len() > max && lowest(&key, hs).as_deref() == Some(me) {
-                    out.drop.push(g);
-                }
-            } else if !takers.iter().any(|p| p == me) {
-                let free: Vec<String> =
-                    hs.iter().filter(|p| !takers.contains(p)).cloned().collect();
-                let paid = hs.len() - free.len();
-                let allowed = target.saturating_sub(paid);
-                if free.len() > allowed && lowest(&key, &free).as_deref() == Some(me) {
+            if !takers.iter().any(|p| p == me) {
+                let free: Vec<String> = hs.iter().filter(|p| !takers.contains(p)).cloned().collect();
+                if releases(&key, hs.len(), &free, me, target, max, trim(g)) {
                     out.drop.push(g);
                 }
             }
@@ -409,7 +397,7 @@ mod tests {
         let map = map_with(&peers, &rec);
         let mut takers = vec![0usize; layout.len()];
         for p in &peers {
-            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0);
+            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true);
             assert!(plan.drop.is_empty());
             assert!(
                 plan.fetch.len() < layout.len(),
@@ -421,8 +409,8 @@ mod tests {
         }
         assert!(takers.iter().all(|t| *t == 3), "{takers:?}");
         // Same inputs, same plan, on every node.
-        let a = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0);
-        let b = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0);
+        let a = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0, &|_| true);
+        let b = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0, &|_| true);
         assert_eq!(a, b);
     }
 
@@ -441,7 +429,7 @@ mod tests {
             .map(|p| {
                 (
                     p.clone(),
-                    plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0).fetch,
+                    plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true).fetch,
                 )
             })
             .collect();
@@ -470,7 +458,7 @@ mod tests {
             .collect();
         let mut refill = vec![0usize; layout.len()];
         for p in peers.iter().filter(|p| **p != gone) {
-            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0);
+            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true);
             assert!(plan.drop.is_empty());
             for g in plan.fetch {
                 assert!(
@@ -535,13 +523,62 @@ mod tests {
             );
         }
         for p in ["a", "b", "c"] {
-            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0);
+            let plan = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true);
             assert_eq!(
                 plan.fetch.len(),
                 layout.len(),
                 "{p} must take every group: only 3 usable nodes"
             );
         }
+    }
+
+    #[test]
+    fn extra_group_copies_are_trimmed_per_group_after_the_grace() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let m = manifest(64 * 3);
+        let rec = big_record(&kp, &m);
+        let layout = Layout::of(&m);
+        assert!(layout.len() >= 2);
+        let peers: Vec<String> = (0..5).map(|i| format!("peer{i}")).collect();
+        let mut map = map_with(&peers, &rec);
+        // Group 0 has four copies (one extra), every other group exactly three.
+        let all: BTreeSet<u32> = (0..layout.len() as u32).collect();
+        let only0: BTreeSet<u32> = [0].into();
+        let now = Instant::now();
+        for (i, p) in peers.iter().enumerate() {
+            let gs = match i {
+                0..=2 => all.clone(),
+                3 => only0.clone(),
+                _ => BTreeSet::new(),
+            };
+            let mut sites = HashMap::new();
+            if !gs.is_empty() {
+                sites.insert(rec.site_id.clone(), (rec.manifest.clone(), 1));
+            }
+            let mut groups = HashMap::new();
+            groups.insert(rec.site_id.clone(), gs);
+            map.apply_holding_full(p, sites, groups, now, true, None, None, Some(u64::MAX), vec![]);
+        }
+        let holders = map.group_holders(&rec.site_id, layout.len(), true);
+        assert_eq!(holders[0].len(), 4);
+        assert!(holders[1..].iter().all(|h| h.len() == 3));
+        let drops = |trim: &dyn Fn(u32) -> bool| -> Vec<(String, u32)> {
+            peers
+                .iter()
+                .flat_map(|p| {
+                    plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, trim)
+                        .drop
+                        .into_iter()
+                        .map(move |g| (p.clone(), g))
+                })
+                .collect()
+        };
+        assert!(drops(&|_| false).is_empty(), "in grace: nothing goes");
+        // The grace is per group: over for another group changes nothing.
+        assert!(drops(&|g| g != 0).is_empty(), "only group 0 is over");
+        let d = drops(&|g| g == 0);
+        assert_eq!(d.len(), 1, "exactly one holder lets group 0 go: {d:?}");
+        assert_eq!(d[0].1, 0);
     }
 
     #[test]
@@ -555,7 +592,7 @@ mod tests {
         let base = peers
             .iter()
             .filter(|p| {
-                !plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0)
+                !plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true)
                     .fetch
                     .is_empty()
             })
@@ -563,7 +600,7 @@ mod tests {
         let wide = peers
             .iter()
             .filter(|p| {
-                !plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 1)
+                !plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 1, &|_| true)
                     .fetch
                     .is_empty()
             })

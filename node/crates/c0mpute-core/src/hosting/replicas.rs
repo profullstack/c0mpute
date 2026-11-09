@@ -13,6 +13,11 @@
 //! three copies; the rendezvous fill still brings every site to three copies
 //! on its own, and once preferred hosts hold copies the surplus free copies
 //! are released one at a time. A site never drops below three copies.
+//!
+//! Free sites settle at three too: a copy beyond the target (two nodes
+//! filling the same gap from views a moment apart) is released by the
+//! lowest-ranked free holder once the site has been over the target for a
+//! grace period, and at once above the hard ceiling ([`releases`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
@@ -440,34 +445,60 @@ pub fn surplus(site_id: &str, holders: &[String], max: usize) -> Option<String> 
         .cloned()
 }
 
+/// Whether `me`, one of the `free` holders (copies nobody is paid to keep),
+/// lets its copy go. `holders` counts every current copy, paid ones included.
+///
+/// Free copies are released lowest rendezvous rank first, one per round, and
+/// never below `target` copies in total; a paid copy is never released. Above
+/// `max` copies the release is immediate (the hard ceiling). Between `target`
+/// and `max` it waits for `trim`: the caller sets it once the site (or group)
+/// has been over `target` without a break for a grace period, so a copy that
+/// is only briefly extra (two nodes filling the same gap, a view that has not
+/// caught up yet) does not churn.
+pub fn releases(key: &str, holders: usize, free: &[String], me: &str, target: usize, max: usize, trim: bool) -> bool {
+    let paid = holders.saturating_sub(free.len());
+    if free.len() <= target.saturating_sub(paid) {
+        return false;
+    }
+    if holders <= max && !trim {
+        return false;
+    }
+    surplus(key, free, 0).as_deref() == Some(me)
+}
+
 /// What this node should do about one site, given the map.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     Nothing,
     /// Fetch the current version and start holding it.
     Replicate,
-    /// Drop our copy (too many copies, and we rank last).
+    /// Drop our copy (more copies than needed, and ours is the lowest-ranked
+    /// free one).
     Drop,
 }
 
-/// Decide for `me` (which may or may not host).
-pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: usize, max: usize) -> Action {
+/// Decide for `me` (which may or may not host). `trim`: the site has had more
+/// than `target` copies for the whole grace period (see [`releases`]).
+pub fn decide(
+    map: &ReplicaMap,
+    site_id: &str,
+    me: &str,
+    i_host: bool,
+    target: usize,
+    max: usize,
+    trim: bool,
+) -> Action {
     let holders = map.holders(site_id);
     let i_hold = holders.iter().any(|p| p == me);
     let preferred = map.effective_preferred(site_id);
     if i_hold {
-        if preferred.is_empty() {
-            if surplus(site_id, &holders, max).as_deref() == Some(me) {
-                return Action::Drop;
-            }
+        // Free copies make room for paid ones and settle at `target` in
+        // total; a preferred host keeps its copy whatever the count.
+        if preferred.iter().any(|p| p == me) {
             return Action::Nothing;
         }
-        // Marketplace site: free copies make room for paid ones, never below
-        // `target` in total. One release per round, lowest rank first.
         let free: Vec<String> = holders.iter().filter(|p| !preferred.contains(p)).cloned().collect();
-        let paid = holders.len() - free.len();
-        let allowed = target.saturating_sub(paid);
-        if free.len() > allowed && surplus(site_id, &free, 0).as_deref() == Some(me) {
+        if releases(site_id, holders.len(), &free, me, target, max, trim) {
             return Action::Drop;
         }
         return Action::Nothing;
@@ -534,7 +565,7 @@ mod tests {
         m.set_full(&first, true);
         let takers: Vec<String> = peers
             .iter()
-            .filter(|p| decide(&m, &site, p, !m.peers[*p].full, 3, 5) == Action::Replicate)
+            .filter(|p| decide(&m, &site, p, !m.peers[*p].full, 3, 5, true) == Action::Replicate)
             .cloned()
             .collect();
         assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
@@ -562,7 +593,7 @@ mod tests {
         }
         let takers: Vec<String> = peers
             .iter()
-            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .filter(|p| decide(&m, &site, p, true, 3, 5, true) == Action::Replicate)
             .cloned()
             .collect();
         let mut want = big.clone();
@@ -610,12 +641,12 @@ mod tests {
         }
         let takers: Vec<&String> = peers
             .iter()
-            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .filter(|p| decide(&m, &site, p, true, 3, 5, true) == Action::Replicate)
             .collect();
         assert_eq!(takers.len(), 2, "exactly the missing two take a copy: {takers:?}");
         assert!(!takers.iter().any(|p| *p == "peer0"));
         // A node that does not host never takes one.
-        assert_eq!(decide(&m, &site, "outsider", false, 3, 5), Action::Nothing);
+        assert_eq!(decide(&m, &site, "outsider", false, 3, 5, true), Action::Nothing);
     }
 
     #[test]
@@ -631,7 +662,7 @@ mod tests {
         }
         let takers: Vec<&str> = ["a", "b", "c", "d", "e"]
             .into_iter()
-            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Replicate)
+            .filter(|p| decide(&m, &site, p, true, 3, 5, true) == Action::Replicate)
             .collect();
         assert_eq!(takers, vec!["c", "d", "e"], "full a and b are skipped; d (no room field) is not");
     }
@@ -653,7 +684,7 @@ mod tests {
         assert!(m.holders(&site).is_empty());
         assert_eq!(m.sources(&site), vec!["publisher".to_string()]);
         let takers = (0..5)
-            .filter(|i| decide(&m, &site, &format!("h{i}"), true, 3, 5) == Action::Replicate)
+            .filter(|i| decide(&m, &site, &format!("h{i}"), true, 3, 5, true) == Action::Replicate)
             .count();
         assert_eq!(takers, 3, "all three copies come from hosting nodes");
     }
@@ -673,9 +704,102 @@ mod tests {
         }
         let droppers: Vec<String> = (0..7)
             .map(|i| format!("p{i}"))
-            .filter(|p| decide(&m, &site, p, true, 3, 5) == Action::Drop)
+            .filter(|p| decide(&m, &site, p, true, 3, 5, true) == Action::Drop)
             .collect();
         assert_eq!(droppers.len(), 1);
+    }
+
+    /// Holders of `site` at its current version, one map entry each.
+    fn holding(m: &mut ReplicaMap, site: &str, manifest: &str, peers: &[String]) {
+        for p in peers {
+            let mut sites = HashMap::new();
+            sites.insert(site.to_string(), (manifest.to_string(), 1));
+            m.apply_holding(p, sites, Instant::now());
+        }
+    }
+
+    fn droppers(m: &ReplicaMap, site: &str, peers: &[String], trim: bool) -> Vec<String> {
+        peers
+            .iter()
+            .filter(|p| decide(m, site, p, true, 3, 5, trim) == Action::Drop)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn extra_free_copies_wait_for_the_grace_then_trim_to_the_target() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let peers: Vec<String> = (0..5).map(|i| format!("p{i}")).collect();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        // Four and five copies: within the ceiling, nobody lets go before the
+        // grace runs out.
+        for n in [4, 5] {
+            holding(&mut m, &site, &r.manifest, &peers[..n]);
+            assert!(droppers(&m, &site, &peers, false).is_empty(), "{n} copies, in grace");
+        }
+        // After it, exactly one copy goes per round (the lowest-ranked) and
+        // the site settles at three, never below.
+        let mut held: Vec<String> = peers.clone();
+        let mut counts = Vec::new();
+        for _ in 0..6 {
+            let d = droppers(&m, &site, &held, true);
+            assert!(d.len() <= 1, "one release per round: {d:?}");
+            let Some(gone) = d.first() else { break };
+            assert_eq!(surplus(&site, &held, 0).as_ref(), Some(gone), "lowest rank goes first");
+            m.apply_holding(gone, HashMap::new(), Instant::now());
+            held.retain(|p| p != gone);
+            counts.push(m.holders(&site).len());
+        }
+        assert_eq!(counts, vec![4, 3]);
+        // At the target the grace no longer matters.
+        assert!(droppers(&m, &site, &held, true).is_empty());
+    }
+
+    #[test]
+    fn above_the_ceiling_a_free_copy_goes_without_waiting() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let peers: Vec<String> = (0..6).map(|i| format!("p{i}")).collect();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        holding(&mut m, &site, &r.manifest, &peers);
+        let d = droppers(&m, &site, &peers, false);
+        assert_eq!(d.len(), 1, "six copies: one goes now");
+        m.apply_holding(&d[0], HashMap::new(), Instant::now());
+        let rest: Vec<String> = peers.iter().filter(|p| **p != d[0]).cloned().collect();
+        assert!(droppers(&m, &site, &rest, false).is_empty(), "five: wait for the grace");
+    }
+
+    #[test]
+    fn trimming_never_releases_a_preferred_copy() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..7).map(|_| pid()).collect();
+        // Four preferred hosts, more than the target: all of them keep their
+        // copies, and only the free ones are trimmed (down to none).
+        let preferred: Vec<String> = peers[..4].to_vec();
+        let r = paid_rec(&kp, preferred.clone(), 4_000);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        holding(&mut m, &site, &r.manifest, &peers);
+        assert_eq!(m.effective_preferred(&site), preferred);
+        let mut held = peers.clone();
+        loop {
+            let d = droppers(&m, &site, &held, true);
+            assert!(d.iter().all(|p| !preferred.contains(p)), "a preferred copy was released: {d:?}");
+            let Some(gone) = d.first().cloned() else { break };
+            m.apply_holding(&gone, HashMap::new(), Instant::now());
+            held.retain(|p| *p != gone);
+        }
+        let mut holders = m.holders(&site);
+        holders.sort();
+        let mut want = preferred.clone();
+        want.sort();
+        assert_eq!(holders, want, "settles on the preferred hosts alone");
     }
 
     #[test]
@@ -728,7 +852,7 @@ mod tests {
         for _ in 0..20 {
             let actions: Vec<(String, Action)> = peers
                 .iter()
-                .map(|p| (p.clone(), decide(m, site, p, true, 3, 5)))
+                .map(|p| (p.clone(), decide(m, site, p, true, 3, 5, true)))
                 .collect();
             if actions.iter().all(|(_, a)| *a == Action::Nothing) {
                 break;
@@ -770,7 +894,7 @@ mod tests {
         assert_eq!(m.effective_preferred(&r.site_id), preferred);
         // Round one: both preferred hosts replicate, whatever their rank.
         for p in &preferred {
-            assert_eq!(decide(&m, &r.site_id, p, true, 3, 5), Action::Replicate);
+            assert_eq!(decide(&m, &r.site_id, p, true, 3, 5, true), Action::Replicate);
         }
         let counts = settle(&mut m, &r.site_id, &r.manifest, &peers);
         assert!(counts.iter().all(|c| *c >= 3), "never below three copies: {counts:?}");

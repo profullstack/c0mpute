@@ -165,8 +165,34 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
         }
     })
     .await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let holders = hosts[0].holders(&site).await;
+    // Settled: every host sees the same three copies for longer than the trim
+    // grace (one holder TTL), so a copy that was briefly extra is gone and
+    // stays gone. Bounded, not a fixed sleep that races the trim.
+    let stable_for = fast().holder_ttl + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut since: Option<(tokio::time::Instant, Vec<String>)> = None;
+    let holders = loop {
+        let view = hosts[0].holders(&site).await;
+        let mut agree = view.len() == 3;
+        for h in &hosts[1..] {
+            agree &= h.holders(&site).await == view;
+        }
+        since = match since {
+            Some((t, v)) if agree && v == view => Some((t, v)),
+            _ if agree => Some((tokio::time::Instant::now(), view.clone())),
+            _ => None,
+        };
+        if let Some((t, v)) = &since
+            && t.elapsed() >= stable_for
+        {
+            break v.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never settled at three copies on every host: hosts[0] sees {view:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(holders.len(), 3, "settles at exactly the target: {holders:?}");
 
     // The publisher leaves; the site stays up.
