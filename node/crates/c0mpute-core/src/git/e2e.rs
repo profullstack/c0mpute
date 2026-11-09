@@ -225,8 +225,10 @@ mod tests {
     #[test]
     fn sealed_refs_round_trip() {
         let k = RepoKey::from_text(&"11".repeat(32)).unwrap();
-        let mut r = SealedRefs::default();
-        r.head = Some("refs/heads/main".into());
+        let mut r = SealedRefs {
+            head: Some("refs/heads/main".into()),
+            ..Default::default()
+        };
         r.refs.insert("refs/heads/main".into(), "a".repeat(40));
         let s = r.seal(&k, "o", "r");
         assert_eq!(SealedRefs::open(&k, "o", "r", &s).unwrap(), r);

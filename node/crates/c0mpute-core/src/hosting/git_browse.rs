@@ -199,6 +199,7 @@ fn resolve(r: &Repo, segs: &[&str]) -> Option<(String, String, usize)> {
     None
 }
 
+#[allow(clippy::result_large_err)] // the Err is the page to send
 async fn load(h: &Hosting, owner: &str, repo: &str, headers: &HeaderMap) -> Result<Repo, Response> {
     let owner = owner.to_ascii_lowercase();
     let repo = git::strip_dot_git(repo).to_string();
@@ -250,7 +251,7 @@ async fn load(h: &Hosting, owner: &str, repo: &str, headers: &HeaderMap) -> Resu
         ));
     }
     let doc = match h.read_file(&rec, git::DOC_PATH).await {
-        Ok(Some((_, b))) => RepoDoc::from_bytes(&b).map_err(|e| unavailable(e))?,
+        Ok(Some((_, b))) => RepoDoc::from_bytes(&b).map_err(&unavailable)?,
         Ok(None) => return Err(message(StatusCode::NOT_FOUND, "Not a repo", "")),
         Err(e) => return Err(unavailable(e)),
     };
@@ -321,7 +322,7 @@ fn header_html(r: &Repo, at: Option<&str>) -> String {
     );
     // Branches and tags.
     let mut refs = String::new();
-    for (name, _) in &r.doc.refs {
+    for name in r.doc.refs.keys() {
         let (label, cls) = if let Some(b) = name.strip_prefix("refs/heads/") {
             (b, "branch")
         } else if let Some(t) = name.strip_prefix("refs/tags/") {
@@ -546,6 +547,7 @@ fn blob_page(r: &Repo, name: &str, commit: &str, path: &str) -> Response {
     html(StatusCode::OK, &format!("{path} · {}", r.repo), &body)
 }
 
+#[allow(clippy::result_large_err)] // the Err is the page to send
 fn blob_at(r: &Repo, commit: &str, path: &str) -> Result<Vec<u8>, Response> {
     let c = r
         .packs
@@ -638,7 +640,7 @@ fn commit_page(r: &Repo, oid: &str) -> Response {
         esc(&c.author.email),
         ago(c.author.time.max(0) as u64),
     );
-    let rest = c.message.splitn(2, '\n').nth(1).unwrap_or("").trim();
+    let rest = c.message.split_once('\n').map(|x| x.1).unwrap_or("").trim();
     if !rest.is_empty() {
         let _ = write!(body, r#"<pre class="wrap">{}</pre>"#, esc(rest));
     }
