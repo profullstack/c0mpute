@@ -121,6 +121,67 @@ async fn auction_round_trip_publishes_receipt() {
     assert_eq!(outcome.accepted_bid.eta_seconds, 60);
 }
 
+/// A worker on the buyer's bench is used when it is the only bidder: a bench
+/// deprioritizes, it does not turn the auction into "no bids".
+#[tokio::test]
+async fn a_benched_worker_still_wins_when_nobody_else_bids() {
+    let worker_dir = tempdir().expect("tempdir");
+    let worker: Arc<Libp2pNetwork> = Arc::new(
+        Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(worker_dir.path().to_path_buf())
+                .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .expect("spawn worker"),
+    );
+    let worker_full = wait_for_listen(&worker).await.with(Protocol::P2p(worker.peer_id()));
+    let buyer_dir = tempdir().expect("tempdir");
+    let buyer: Arc<Libp2pNetwork> = Arc::new(
+        Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(buyer_dir.path().to_path_buf())
+                .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
+                .with_bootstrap(vec![worker_full]),
+        )
+        .await
+        .expect("spawn buyer"),
+    );
+    let (runner_tx, mut runner_rx) = mpsc::channel::<AcceptedJob>(8);
+    dispatch::run_worker_subscriber(
+        worker.clone(),
+        "ffmpeg.transcode".into(),
+        vec!["c0mpute:role:transcode".to_string()],
+        Some(runner_tx),
+    );
+    let w = worker.clone();
+    tokio::spawn(async move {
+        while let Some(job) = runner_rx.recv().await {
+            let receipt = JobReceipt {
+                job_id: job.accept.job_id.clone(),
+                worker_peer_id: w.peer_id().to_base58(),
+                worker_did: None,
+                buyer_peer_id: job.accept.buyer_peer_id.clone(),
+                output_hash: Some("ab".repeat(32)),
+                status: JobStatus::Completed,
+                completed_at_ms: 0,
+                signature: None,
+                external_ref: None,
+            };
+            let payload = serde_json::to_vec(&receipt).unwrap();
+            w.publish(&job_topic(&job.accept.workload_type), payload).await.ok();
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let me = worker.peer_id().to_base58();
+    let auction = JobAuction::new("ffmpeg.transcode", serde_json::json!({"x": 1}))
+        .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
+        .with_max_price_usd(0.05)
+        .with_bid_window(Duration::from_secs(4))
+        .with_allowed_bidders(vec![me.clone()])
+        .with_fallback_bidders(vec![me.clone()]);
+    let outcome = run_auction(buyer, auction).await.expect("benched worker still wins");
+    assert_eq!(outcome.accepted_bid.bidder_peer_id, me);
+}
+
 async fn wait_for_listen(net: &Libp2pNetwork) -> libp2p::Multiaddr {
     for _ in 0..50 {
         if let Ok(addrs) = net.listen_addrs().await {
