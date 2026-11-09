@@ -211,7 +211,6 @@ async fn post_v1_videos_returns_the_runner_clip() {
 /// A clip over one network message (6 MiB): the worker publishes it as
 /// pieces and the gateway fetches and reassembles them (fix/large-results).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs PR #160 (fix/large-results): results over ~5 MiB travel as pieces"]
 async fn a_clip_over_5_mib_reaches_the_buyer() {
     let tmp = tempdir().unwrap();
     let (url, _) = network(tmp.path()).await;

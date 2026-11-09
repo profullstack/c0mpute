@@ -1,0 +1,53 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Music generation: songs from a style prompt and optional lyrics with
+# ACE-Step 1.5 (MIT code and weights; the model card allows commercial use of
+# what it makes). Every node with >=24 GiB RAM and >=30 GB free disk
+# provisions it itself (node/crates/c0mpute-core/src/music.rs): a Python 3.12
+# environment built by uv (pinned, SHA-256 checked when the box has none),
+# CPU PyTorch, ACE-Step from a pinned commit, and the turbo DiT + text encoder
+# + VAE from Hugging Face pinned to a repo revision (~6 GB; the 5 Hz LM is
+# skipped). Jobs run DiT-only, bf16 on CPU (~7-9 GB RAM) or on a GPU torch
+# can see. MP3 out where ffmpeg exists, else FLAC. Bids only while >=12 GiB
+# RAM is free. Buyers call the speech gateway's POST /v1/music.
+# Opt out: C0MPUTE_MUSIC_AUTO=0 or [music] auto_install = false.
+
+[module]
+id          = "music"
+name        = "Music — song generation (ACE-Step 1.5)"
+version     = "0.2.81"
+kind        = "workload"
+category    = "ai"
+status      = "available"
+builtin     = true
+description = "Decentralized text-to-music on plain CPUs: ACE-Step 1.5 makes full songs, instrumental or with vocals from your lyrics, provisioned by every node with the RAM for it."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["music", "song", "ace-step", "ace-step-1.5", "audio", "txt2music", "lyrics", "cpu"]
+
+[module.requirements]
+c0mpute      = ">=0.2.81"
+os           = ["linux"]
+arch         = ["x86_64"]
+capabilities = ["cpu"]
+
+[module.workloads]
+"music.txt2music" = { command = "txt2music", validation = "audio_magic" }
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+api  = "POST /v1/music (c0mpute speech serve)"
+web  = "/chat: /music <style> (c0mpute.com and infernetprotocol.com)"
+
+[module.models."ace-step-1.5"]
+repo      = "ACE-Step/Ace-Step1.5"
+default   = true
+params    = "2B DiT (turbo) + 0.6B text encoder"
+precision = "bf16 (CPU) / bf16-fp16 (GPU)"
+resolution = "10-120 s songs (default 30 s), 48 kHz stereo"
+workloads = ["music.txt2music"]
+license   = "MIT"
+backend   = "acestep (PyTorch)"
+distilled = true

@@ -1896,7 +1896,7 @@ async fn auction(
         bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
     }
     let hash = o.receipt.output_hash.clone().context("worker returned no result hash")?;
-    let bytes = crate::gateway_util::fetch_verified(&net, &hash, &o.accepted_bid.bidder_peer_id, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow!("fetch result: {e:?}"))?;
+    let bytes = crate::gateway_util::fetch_result(&net, &hash, &o.accepted_bid.bidder_peer_id, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow::anyhow!("fetch result: {e:?}"))?;
     let v: Value = serde_json::from_slice(&bytes)?;
     if v["ok"] != json!(true) {
         bail!("worker result: {v}");
@@ -2497,7 +2497,8 @@ mod tests {
         let mut back = Vec::new();
         for (i, c) in m.chunks.iter().enumerate() {
             let sealed = store.get(&Hash::from_hex(c).unwrap()).await.unwrap();
-            assert_ne!(&sealed[..64], &data[i * CHUNK_BYTES..i * CHUNK_BYTES + 64], "chunks are stored encrypted");
+            let n = (sealed.len() - TAG_BYTES).min(64);
+            assert_ne!(&sealed[..n], &data[i * CHUNK_BYTES..i * CHUNK_BYTES + n], "chunks are stored encrypted");
             assert!(open_chunk(&random_key(), i as u64, &sealed).is_err(), "another key cannot read it");
             assert!(open_chunk(&k, i as u64 + 1, &sealed).is_err(), "a chunk cannot move position");
             back.extend(open_chunk(&k, i as u64, &sealed).unwrap());

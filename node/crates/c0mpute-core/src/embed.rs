@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -498,11 +498,9 @@ async fn run_embed_job(
     if bytes.len() > MAX_RESULT_BYTES {
         bail!("embeddings result is over the {MAX_RESULT_BYTES}-byte limit");
     }
-    let hash = store.put(&bytes).await.context("store embeddings result")?;
-    net.announce(&hash)
+    crate::pieces::publish_result_bytes(net, store, &bytes)
         .await
-        .context("announce embeddings result")?;
-    Ok(hash.to_hex())
+        .context("publish embeddings result")
 }
 
 #[cfg(test)]

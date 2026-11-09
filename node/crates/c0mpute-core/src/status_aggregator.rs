@@ -74,6 +74,7 @@ const KNOWN_WORKLOADS: &[&str] = &[
     "tts.synthesize",
     "stt.transcribe",
     "diffusion.txt2img",
+    "music.txt2music",
     "video.txt2vid",
     "video.img2vid",
 ];

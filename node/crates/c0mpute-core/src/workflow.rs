@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_proto::{ChunkRequest, Hash};
 use c0mpute_store::ChunkStore;
 use serde::Deserialize;
@@ -599,9 +599,9 @@ async fn run_step_job(
     let spec = resolve_spec(net, job).await?;
     let result = execute(&spec).await;
     let bytes = serde_json::to_vec(&result)?;
-    let hash = store.put(&bytes).await.context("store step result")?;
-    net.announce(&hash).await.context("announce step result")?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_bytes(net, store, &bytes)
+        .await
+        .context("publish step result")
 }
 
 #[cfg(test)]

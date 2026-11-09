@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -571,18 +571,25 @@ async fn run_video_job(
     run_container(&run).await?;
 
     let out_path = job_dir.join("out.mp4");
-    let bytes = fs::read(&out_path)
+    let len = fs::metadata(&out_path)
         .await
-        .context("runner produced no out.mp4")?;
-    if bytes.is_empty() || bytes.len() > MAX_RESULT_BYTES {
+        .context("runner produced no out.mp4")?
+        .len();
+    if len == 0 || len > MAX_RESULT_BYTES as u64 {
         bail!("video result is empty or exceeds the 256 MiB result limit");
     }
-    if !is_mp4(&bytes) {
-        bail!("video result is not an MP4");
+    // Only the header is needed to check the container; the file itself is
+    // streamed into the store as pieces.
+    let mut head = [0u8; 16];
+    {
+        use tokio::io::AsyncReadExt;
+        let mut f = fs::File::open(&out_path).await?;
+        let n = f.read(&mut head).await?;
+        if !is_mp4(&head[..n]) {
+            bail!("video result is not an MP4");
+        }
     }
-    let hash = store.put(&bytes).await?;
-    net.announce(&hash).await?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_file(net, store, &out_path, MAX_RESULT_BYTES as u64).await
 }
 
 /// `ftyp` at offset 4 is the ISO-BMFF marker. The runner already ffprobed the

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -280,9 +280,9 @@ async fn run_fetch_job(net: &Libp2pNetwork, store: &ChunkStore, job: &AcceptedJo
     let spec = workflow::resolve_spec(net, job).await?;
     let result = execute(&spec).await;
     let bytes = serde_json::to_vec(&result)?;
-    let hash = store.put(&bytes).await.context("store crawl result")?;
-    net.announce(&hash).await.context("announce crawl result")?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_bytes(net, store, &bytes)
+        .await
+        .context("publish crawl result")
 }
 
 #[cfg(test)]
