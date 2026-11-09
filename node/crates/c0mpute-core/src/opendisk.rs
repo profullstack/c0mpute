@@ -55,7 +55,14 @@ pub struct Capacity {
 
 /// The filesystem under `root`: (available, total). Picks the deepest mount
 /// that contains the root; falls back to the largest disk.
+///
+/// The root is resolved first: a data dir that is a symlink onto a big disk
+/// (`~/.local/share/c0mpute -> /mnt/vdb/c0mpute`) otherwise matches only `/`
+/// by path prefix, and the node offered its small root disk instead (vienna:
+/// 18 GiB instead of 3 TiB).
 pub(crate) fn disk_for(root: &Path) -> (u64, u64) {
+    let resolved = resolve_root(root);
+    let root = resolved.as_path();
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let mut best: Option<(usize, u64, u64)> = None;
     let mut largest = (0u64, 0u64);
@@ -72,6 +79,26 @@ pub(crate) fn disk_for(root: &Path) -> (u64, u64) {
         }
     }
     best.map(|(_, free, total)| (free, total)).unwrap_or(largest)
+}
+
+/// `root` with symlinks resolved. A root that does not exist yet resolves
+/// through its nearest existing ancestor, so a fresh node's data dir under a
+/// symlinked parent still lands on the right disk.
+fn resolve_root(root: &Path) -> std::path::PathBuf {
+    let mut rest = Vec::new();
+    let mut cur = root;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(cur) {
+            return rest.iter().rev().fold(real, |p, c| p.join(c));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return root.to_path_buf(),
+        }
+    }
 }
 
 /// What this node offers: the operator's cap when set (minus what is already
@@ -437,6 +464,20 @@ mod tests {
     use super::*;
 
     const G: u64 = 1024 * 1024 * 1024;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_resolves_to_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(resolve_root(&link), real);
+        // Not created yet: resolved through the existing (symlinked) parent.
+        assert_eq!(resolve_root(&link.join("a/b")), real.join("a/b"));
+    }
 
     #[test]
     fn uncapped_offers_the_disk() {
