@@ -125,13 +125,10 @@ impl ChatKey {
         self.ml_kem_dk.encapsulation_key()
     }
 
-    /// Hex fingerprint of the X25519 public key — 8 colon-separated byte pairs.
+    /// Short fingerprint: the first 8 bytes of the address (which hashes all
+    /// four public keys), as colon-separated hex pairs.
     pub fn fingerprint(&self) -> String {
-        self.x25519_public.as_bytes()[..8]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join(":")
+        self.public_identity().fingerprint()
     }
 
     /// Produce the password-encrypted `KeyFile` (backup blob).
@@ -225,7 +222,7 @@ pub fn save_keyfile(path: &Path, kf: &KeyFile) -> anyhow::Result<()> {
 }
 
 /// Write `content` to `path` with 0o600 permissions (unix) or plain write (other).
-fn write_secret_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_secret_file(path: &Path, content: &[u8]) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;

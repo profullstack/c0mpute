@@ -13,6 +13,7 @@
 //! Protocol IDs:
 //!   /c0mpute/kad/1.0.0          — DHT (peer + content discovery)
 //!   /c0mpute/chunk-fetch/1.0.0  — request/response for chunk bytes
+//!   /c0mpute/rpc/1.0.0          — small named-service request/response
 
 pub mod bootstrap;
 pub mod identity;
@@ -28,7 +29,7 @@ use c0mpute_proto::{ChunkRequest, Hash};
 pub use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 /// The libp2p this crate is built on, for identity and key types.
 pub use libp2p;
-pub use swarm::{GossipMessage, Libp2pNetwork, NetworkConfig};
+pub use swarm::{GossipMessage, Libp2pNetwork, NetworkConfig, RpcHandler};
 
 /// Trait that abstracts the underlying network so the rest of the node can be
 /// developed and tested without booting libp2p.

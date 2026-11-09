@@ -1121,7 +1121,7 @@ impl Hosting {
     }
 }
 
-fn jitter(d: Duration) -> Duration {
+pub(crate) fn jitter(d: Duration) -> Duration {
     let ms = d.as_millis() as u64;
     let spread = ms / 10;
     let nanos = std::time::SystemTime::now()
