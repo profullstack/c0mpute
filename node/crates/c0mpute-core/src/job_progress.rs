@@ -91,6 +91,51 @@ impl ProgressBoard {
     }
 }
 
+/// A finished tracked request, kept so a caller that lost its connection (an
+/// app restarting mid-song) can still collect it: `GET /v1/result/{id}`.
+#[derive(Clone, Debug)]
+pub enum Stored {
+    Done {
+        bytes: Arc<Vec<u8>>,
+        content_type: &'static str,
+        job_id: String,
+        worker: String,
+    },
+    Failed {
+        status: u16,
+        message: String,
+    },
+}
+
+/// How many finished results are held at once (songs are ~2-5 MB each).
+const MAX_RESULTS: usize = 48;
+
+#[derive(Clone, Default)]
+pub struct ResultStore(Arc<Mutex<HashMap<String, (u64, Stored)>>>);
+
+impl ResultStore {
+    pub fn put(&self, key: &str, stored: Stored) {
+        let now = now_ms();
+        let Ok(mut map) = self.0.lock() else { return };
+        map.retain(|_, (at, _)| now.saturating_sub(*at) < KEEP_MS);
+        while map.len() >= MAX_RESULTS {
+            let Some(oldest) = map.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            map.remove(&oldest);
+        }
+        map.insert(key.to_string(), (now, stored));
+    }
+
+    pub fn get(&self, key: &str) -> Option<Stored> {
+        let now = now_ms();
+        let map = self.0.lock().ok()?;
+        map.get(key)
+            .filter(|(at, _)| now.saturating_sub(*at) < KEEP_MS)
+            .map(|(_, s)| s.clone())
+    }
+}
+
 /// A caller-chosen request id: short and URL-safe.
 pub fn valid_key(key: &str) -> bool {
     !key.is_empty()
@@ -143,6 +188,28 @@ mod tests {
         assert_eq!(s["eta_s"], 140);
         assert!(s["elapsed_s"].is_u64());
         assert!(board.snapshot("nope").is_none());
+    }
+
+    #[test]
+    fn finished_results_are_kept_for_a_caller_that_reconnects() {
+        let store = ResultStore::default();
+        assert!(store.get("song-1").is_none());
+        store.put(
+            "song-1",
+            Stored::Done {
+                bytes: Arc::new(vec![1, 2, 3]),
+                content_type: "audio/mpeg",
+                job_id: "j".into(),
+                worker: "w".into(),
+            },
+        );
+        store.put("song-2", Stored::Failed { status: 503, message: "no worker".into() });
+        assert!(matches!(store.get("song-1"), Some(Stored::Done { ref bytes, .. }) if bytes.as_slice() == [1, 2, 3]));
+        assert!(matches!(store.get("song-2"), Some(Stored::Failed { status: 503, .. })));
+        for i in 0..(MAX_RESULTS + 5) {
+            store.put(&format!("k{i}"), Stored::Failed { status: 502, message: String::new() });
+        }
+        assert!(store.0.lock().unwrap().len() <= MAX_RESULTS, "bounded");
     }
 
     #[test]
