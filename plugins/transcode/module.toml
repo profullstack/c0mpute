@@ -7,7 +7,7 @@
 [module]
 id          = "transcode"
 name        = "FFmpeg Transcoding"
-version     = "0.2.83"
+version     = "0.2.84"
 kind        = "workload"
 category    = "media"
 status      = "available"

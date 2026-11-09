@@ -377,8 +377,8 @@ fn default_music_min_ram_gb() -> u64 {
     24
 }
 fn default_music_min_free_ram_gb() -> u64 {
-    // A bf16 DiT-only job peaks around 9 GB; keep some to spare.
-    12
+    // A bf16 DiT-only song peaked at 8.5 GB RSS (measured 2026-11-09).
+    10
 }
 fn default_music_min_free_disk_gb() -> u64 {
     30

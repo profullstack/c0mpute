@@ -43,8 +43,8 @@ pub const MODEL_ID: &str = "ace-step-1.5";
 pub const MODEL_TAG: &str = "c0mpute:music:model:ace-step-1.5";
 
 /// Largest song a worker returns or a buyer accepts. A 2-minute 128 kb/s MP3
-/// is ~2 MB; the FLAC fallback for the same song is up to ~20 MB.
-pub const MAX_RESULT_BYTES: usize = 32 * 1024 * 1024;
+/// is ~2 MB; the FLAC fallback for a 3-minute song is up to ~30 MB.
+pub const MAX_RESULT_BYTES: usize = 48 * 1024 * 1024;
 /// What a buyer may send. Longer than the model reads on purpose: callers
 /// paste whole briefs and songs, and `clip_for_model` trims them.
 pub const MAX_PROMPT_CHARS: usize = 100_000;
@@ -55,10 +55,12 @@ pub const MAX_LYRICS_CHARS: usize = 100_000;
 pub const MODEL_PROMPT_CHARS: usize = 1_000;
 pub const MODEL_LYRICS_CHARS: usize = 4_000;
 pub const MIN_SECONDS: u32 = 10;
-pub const MAX_SECONDS: u32 = 120;
+pub const MAX_SECONDS: u32 = 180;
 pub const DEFAULT_SECONDS: u32 = 30;
-/// Worker-side limit for one song, model load included.
-pub const JOB_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Worker-side limit for one song, model load included. A 30 s song takes
+/// ~130 s on 16 CPU threads and time grows with length, so a 3-minute song
+/// on a busy box needs well over 10 minutes.
+pub const JOB_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 const INSTALL_RETRY_BACKOFF_SECS: u64 = 6 * 60 * 60;
 
 const WORKER: &str = include_str!("music_worker.py");
@@ -657,7 +659,7 @@ async fn run_job(
     let path = generate(&spec, &job_dir).await?;
     let bytes = tokio::fs::read(&path).await?;
     if audio_content_type(&bytes).is_none() || bytes.len() > MAX_RESULT_BYTES {
-        bail!("ACE-Step output is not MP3/FLAC audio under the 32 MiB result limit");
+        bail!("ACE-Step output is not MP3/FLAC audio under the 48 MiB result limit");
     }
     // Over 1 MiB goes back as pieces: one chunk fetch caps out near 5 MiB.
     crate::pieces::publish_result_bytes(net, store, &bytes).await

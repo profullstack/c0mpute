@@ -267,7 +267,9 @@ export function ChatApp({ error }: { error: string | null }) {
       });
       const start = await res.json().catch(() => ({}));
       if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
-      const deadline = Date.now() + 20 * 60_000;
+      // Infernet may write lyrics from the brief first; keep what it wrote.
+      let written: { caption: string; lyrics: string } | null = null;
+      const deadline = Date.now() + 45 * 60_000;
       let done: Response | null = null;
       while (!done) {
         if (Date.now() > deadline) throw new Error("song timed out");
@@ -275,7 +277,15 @@ export function ChatApp({ error }: { error: string | null }) {
         if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
         const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
         if (poll.status === 202) {
-          setLast({ content: `// composing with ACE-Step 1.5 on a c0mpute worker… ${Math.round((Date.now() - started) / 1000)}s` });
+          const p = await poll.json().catch(() => ({}));
+          const secs = Math.round((Date.now() - started) / 1000);
+          if (typeof p.caption === "string") written = { caption: p.caption, lyrics: typeof p.lyrics === "string" ? p.lyrics : "" };
+          setLast({
+            content:
+              p.stage === "writing"
+                ? `// writing lyrics and a style from your brief… ${secs}s`
+                : `// composing with ACE-Step 1.5 on a c0mpute worker… ${secs}s${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
+          });
           continue;
         }
         if (!poll.ok) {
@@ -287,7 +297,7 @@ export function ChatApp({ error }: { error: string | null }) {
       const blob = await done.blob();
       const url = URL.createObjectURL(blob);
       setLast({
-        content: `[music: ${music.prompt}${music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)`,
+        content: `[music: ${(written?.caption ?? music.prompt).slice(0, 300)}${written?.lyrics || music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
         audio: url,
         audioType: blob.type || "audio/mpeg",
       });
