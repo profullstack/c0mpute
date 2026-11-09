@@ -18,6 +18,7 @@ pub mod net_guard;
 pub mod ocr;
 pub mod opendisk;
 pub mod penalty_box;
+pub mod podcast;
 pub mod pricing;
 pub mod reachability;
 pub mod private;

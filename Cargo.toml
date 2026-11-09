@@ -41,9 +41,10 @@ toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 blake3 = "1"
 hex = "0.4"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 jmespath = { version = "0.5", default-features = false }
+quick-xml = "0.37"
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-br", "fs"] }

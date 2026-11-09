@@ -877,6 +877,15 @@ mod tests {
     }
 }
 
+/// The identity sites are published (and owned) with: this machine's buyer
+/// key, `<data_dir>/buyer/identity.key`.
+pub fn publisher_keypair() -> Result<c0mpute_net::libp2p::identity::Keypair> {
+    let id_dir = crate::config::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("buyer");
+    c0mpute_net::identity::load_or_create(&id_dir)
+}
+
 /// `c0mpute hosting publish`: build a site from `dir`, sign it with this
 /// machine's buyer identity, hand it to the network, and stay up until
 /// `TARGET_REPLICAS` other nodes hold copies (or `wait` runs out).
@@ -893,10 +902,7 @@ pub async fn publish_dir(
     }
     let built = site::build_from_dir(dir, name)?;
     let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
-    let id_dir = crate::config::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("buyer");
-    let keypair = c0mpute_net::identity::load_or_create(&id_dir)?;
+    let keypair = publisher_keypair()?;
     let manifest_hash = Hash::of(&built.manifest.to_bytes());
     let seq = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
