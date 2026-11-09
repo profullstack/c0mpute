@@ -19,7 +19,7 @@
 [module]
 id          = "ocr"
 name        = "OCR — document text extraction"
-version     = "0.3.18"
+version     = "0.3.19"
 kind        = "workload"
 category    = "ai"
 status      = "available"
