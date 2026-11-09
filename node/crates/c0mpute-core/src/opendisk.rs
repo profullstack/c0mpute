@@ -118,6 +118,12 @@ pub fn descriptor(
         Some(n) => format!("{n} · c0mpute node {short}"),
         None => format!("c0mpute node {short}"),
     };
+    let hosts = config.roles.contains(&c0mpute_proto::Role::Hosting);
+    let roles: Vec<Value> = config
+        .roles
+        .iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect();
     let mut doc = json!({
         "opendisk": "0.1",
         "name": name,
@@ -133,6 +139,10 @@ pub fn descriptor(
         "accepts": {
             "visibility": ["public", "private"],
             "encrypted_only": false,
+            // A c0mpute hosting node holds static sites for the network and
+            // can be picked as a paid (preferred) host by
+            // `c0mpute hosting publish --disks auto`.
+            "hosting": hosts,
         },
         "updated": chrono_now(),
         // Unknown to OpenDisk, kept by readers: how to reach this disk on
@@ -142,8 +152,16 @@ pub fn descriptor(
             "version": env!("CARGO_PKG_VERSION"),
             "storage_api": origin.map(|o| format!("{}/storage/v1", o.trim_end_matches('/'))),
             "redundancy": "reed-solomon 10/14",
+            "roles": roles,
         },
     });
+    if hosts {
+        doc["c0mpute"]["hosting"] = json!({
+            "price_per_gib_month": config.hosting.price_micros() as f64 / crate::payments::MICROS_PER_USD as f64,
+            "max_gib": gib(config.hosting.max_bytes),
+            "publish": "c0mpute hosting publish <dir> --name <site> --disks auto",
+        });
+    }
     if let Some(k) = key_hex {
         doc["key"] = Value::String(format!("ed25519:{k}"));
     }
@@ -287,6 +305,45 @@ mod tests {
         assert_eq!(d["key"], format!("ed25519:{key}"));
         assert_eq!(d["c0mpute"]["storage_api"], "https://disk.example/storage/v1");
         assert!(d["updated"].as_str().unwrap().ends_with('Z'));
+        // Default roles include hosting: the disk says so, for d1sks to filter on.
+        assert_eq!(d["accepts"]["hosting"], true);
+        assert!(d["c0mpute"]["roles"].as_array().unwrap().iter().any(|r| r == "hosting"));
+        assert_eq!(d["c0mpute"]["hosting"]["price_per_gib_month"], 0.004);
+        assert_eq!(d["c0mpute"]["hosting"]["max_gib"], 5.0);
+    }
+
+    #[test]
+    fn a_node_without_the_hosting_role_does_not_offer_hosting() {
+        let mut cfg = Config::default();
+        cfg.roles.retain(|r| *r != c0mpute_proto::Role::Hosting);
+        let d = descriptor(&cfg, "12D3KooWSFxwveBjrGy4n1Djg3vpQD5aHPCXYCQHZWruffig7P4J", None, None, Capacity {
+            free_bytes: G,
+            total_bytes: G,
+        });
+        assert_eq!(d["accepts"]["hosting"], false);
+        assert!(d["c0mpute"].get("hosting").is_none());
+    }
+
+    #[test]
+    fn the_descriptor_parses_as_a_marketplace_hosting_disk() {
+        // What d1sks stores is the descriptor under `data`; the publisher's
+        // ranking reads it back as a hosting node.
+        let cfg = Config::default();
+        let peer = c0mpute_net::libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_base58();
+        let d = descriptor(&cfg, &peer, None, Some("https://disk.example"), Capacity {
+            free_bytes: 100 * G,
+            total_bytes: 200 * G,
+        });
+        let listing = json!({ "disks": [{ "name": "n", "status": "active", "free_gib": 100.0,
+            "per_gib_month": 0.004, "countries": [], "data": d }] });
+        let disks = crate::hosting::market::parse_disks(&listing);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].peer_id, peer);
+        assert_eq!(disks[0].price, 4_000);
+        assert_eq!(disks[0].free_bytes, 5 * G, "hosting offers its hosting budget, not the whole disk");
     }
 
     #[test]

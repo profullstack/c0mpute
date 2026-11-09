@@ -68,7 +68,141 @@ publishes it as `gateway` on `/api/nodes`. Nothing is advertised without that se
 and never in private mode. Clients that are not libp2p peers (the Moshpit edge, for
 one) use this list to find gateways to fetch sites from.
 
+## Paid hosting: the d1sks marketplace
+
+Free copies are kept by volunteers. To pay hosting nodes to keep your site, pick them
+from the [d1sks](https://d1sks.pwa.pit.world/disks?hosting=1) OpenDisk marketplace when
+you publish:
+
+```sh
+c0mpute hosting disks --country DE,FI                      # what --disks auto would pick
+c0mpute hosting publish ./public --name my-site --disks auto
+c0mpute hosting publish ./public --name my-site --disks auto \
+    --country DE,FI --max-price 0.01 --copies 3
+c0mpute hosting publish ./public --name my-site \
+    --disks 'country=DE&min_standing=50&max_price=0.01'
+```
+
+`--disks` is `auto` or a d1sks query (`country`, `max_price`, `min_gib`, `min_standing`;
+unknown keys are refused). `--copies` is how many preferred hosts to pick (1-5, default 3).
+
+**d1sks is discovery only.** `publish` asks it once. It keeps only disks that are c0mpute
+hosting nodes (the descriptor has a `c0mpute.peer_id` and `accepts.hosting: true` or the
+`hosting` role), drops any that ask more than `--max-price`, sit outside `--country` or
+lack room for the site, and ranks the rest: cheapest first, then highest d1sks standing
+(unrated last), then most free space, then peer id. The first `--copies` become the
+site's **preferred hosts**. The agreed price is the highest ask among them, so each gets
+at least what it asks. If d1sks is unreachable or nothing matches, the site publishes as a
+plain free site. Placement, proofs, serving and settlement never touch d1sks.
+
+### Record v2
+
+The preferred hosts go into the signed site record:
+
+| Field | |
+|---|---|
+| `v` | `2` when the record carries marketplace terms; plain sites stay `1`, byte for byte |
+| `preferred_hosts` | 1-5 base58 peer ids |
+| `price_per_gib_month` | agreed USD price, canonical decimal (`"0.004"`) |
+| `payer` | hex ed25519 key that pays; absent = the owner |
+
+A v2 record signs under its own domain (`c0mpute-hosting-v2`), so terms cannot be
+stripped or added without breaking the signature. New nodes read v1 and v2. Nodes older
+than this release ignore v2 records (they cannot verify them), so a v2 site is held only
+by upgraded nodes.
+
+### Placement
+
+Still leaderless, still computed the same way on every node:
+
+1. A preferred host that is live, asks no more than the agreed price (hosting nodes
+   gossip their price) and has not lost preference replicates whether or not the site
+   already has three copies.
+2. The rendezvous fill runs exactly as before and does not wait for preferred hosts, so
+   the site reaches three copies even if every preferred host is offline.
+3. Once preferred hosts hold copies, free copies above `3 - preferred holders` are
+   released one per round, lowest rank first. The total never drops below three.
+
+Two preferred hosts among five nodes settle at three copies: both preferred plus one free.
+
+### Proof of storage
+
+Any node with `hosting.challenge` on asks each holder for one random chunk of the site,
+straight from that peer, and checks its blake3 hash. The challenger signs a receipt
+(`site, manifest, holder, chunk, ok, rtt, time`) and gossips it on `c0mpute/hosting/v1`.
+
+- `challenge = "own"` (default): the sites this machine's publisher key owns or pays for.
+- `challenge = "all"`: also a random sample of everyone else's (a gateway might); at most
+  32 challenges per round.
+- `challenge = "off"`.
+
+A preferred host loses preference when at least 3 of its latest 5 receipts signed by the
+site's owner or payer are failures. Receipts from anyone else are kept and shown but
+cannot demote anybody. The site's copies are kept up by the normal fill meanwhile.
+
+This proves the peer returned the right bytes for a chunk it could not predict, within the
+timeout. It does not prove the peer keeps its own copy rather than relaying from another
+holder.
+
+### Pricing and settlement
+
+The publishing machine's node is the payer. Keep a c0mpute node running there: it signs
+the receipts and settles once per `hosting.settle_every_secs` (default a day) over the
+window since the last round:
+
+```text
+owed = price_per_gib_month x site GiB x (window / 30 days) x passed / challenged
+```
+
+counting only receipts signed by the owner or payer. Under half passed, or never
+challenged, earns nothing for that window. Amounts are integer micro-USD, rounded down.
+Each transfer has an idempotency key (site, holder, window) recorded in
+`<storage>/hosting/ledger.json`, so nothing is paid twice; windows never overlap.
+
+Hosting nodes say what they ask and where to be paid:
+
+```toml
+[hosting]
+price_usd_per_gib_month = 0.004     # in the OpenDisk descriptor and hosting gossip
+payout_wallet = "0x..."             # where payers send money
+payout_coin   = "USDC_POL"          # CoinPay currency code
+challenge     = "own"               # own | all | off
+challenge_every_secs = 600
+settle_every_secs    = 86400
+```
+
+### Settlement switch (off by default)
+
+With `[payments]` off, which is the default, settlement is a dry run: the node logs what it
+would pay (`hosting settlement (dry run ...)`) and moves nothing. To pay for real, from the
+payer's own CoinPay business wallet:
+
+1. In CoinPay, create a business API key with the `payouts:create` scope on a business
+   whose payout wallet holds the coin your hosts want (e.g. USDC on Polygon).
+2. Put the key in the node's environment, never in config.toml:
+   `export C0MPUTE_COINPAY_PAYOUT_KEY=...` (the variable name is
+   `payments.coinpay.api_key_env`).
+3. Turn payments on in `~/.config/c0mpute/config.toml`:
+
+   ```toml
+   [payments]
+   enabled = true
+   rail = "coinpay"
+   max_usd_per_round = "10"            # hard cap per settlement round
+   [payments.coinpay]
+   url = "https://coinpayportal.com"
+   recipient_email = "you@example.org" # CoinPay files every payout under an email
+   ```
+
+4. Restart the node. Each round then calls CoinPay `POST /api/payouts/create` once per
+   preferred holder that is owed something and has a payout wallet, up to the cap.
+
+`enabled = true` without the key is an error in the log and settlement stays a dry run.
+CoinPay has no balance call for an API key, so the round cap is the spending limit.
+Payments move only between the payer and the hosts it chose; c0mpute holds nothing.
+
 ## Not yet
 
-Paid reservations, epoch settlement and proof-of-serve challenges (DIP-0015) are not
-implemented. Hosting is free while it is in beta.
+Escrow (money held until a window is proven) and proof-of-serve challenges from DIP-0015
+are not implemented: payers pay from their own wallet after the fact. Free hosting stays
+free.

@@ -6,13 +6,22 @@
 //! too few live copies, every node ranks the candidate peers the same way
 //! (rendezvous hashing on site id + peer id) and the top-ranked ones take a
 //! copy. Nobody is elected; everybody computes the same answer.
+//!
+//! Marketplace sites (v2 records) name preferred hosts. A preferred host that
+//! is live, asks no more than the agreed price and has not lost preference
+//! through failed challenges replicates whether or not the site already has
+//! three copies; the rendezvous fill still brings every site to three copies
+//! on its own, and once preferred hosts hold copies the surplus free copies
+//! are released one at a time. A site never drops below three copies.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use c0mpute_proto::Hash;
 
+use super::proof::{self, Receipt};
 use super::site::SiteRecord;
+use crate::payments::{Micros, Payee};
 
 /// What one peer says it holds: site id -> (manifest hash, seq).
 #[derive(Clone, Debug, Default)]
@@ -22,6 +31,10 @@ pub struct Holding {
     /// A hosting node (its copies count toward the target). A publisher that
     /// is only seeding its own site until the network has copies does not.
     pub hosts: bool,
+    /// The hosting price it asks (micro-USD per GiB-month), when it says.
+    pub price: Option<Micros>,
+    /// Where it wants marketplace payments, when it says.
+    pub payout: Option<Payee>,
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +45,8 @@ pub struct ReplicaMap {
     pub peers: HashMap<String, Holding>,
     /// Smoothed fetch round-trip per peer, in ms.
     pub rtt_ms: HashMap<String, f64>,
+    /// Recent availability receipts per (site id, holder), newest last.
+    pub receipts: HashMap<(String, String), Vec<Receipt>>,
 }
 
 impl ReplicaMap {
@@ -62,14 +77,89 @@ impl ReplicaMap {
         now: Instant,
         hosts: bool,
     ) {
+        self.apply_holding_meta(peer, sites, now, hosts, None, None);
+    }
+
+    /// A holding list plus what the peer asks for and where it is paid.
+    pub fn apply_holding_meta(
+        &mut self,
+        peer: &str,
+        sites: HashMap<String, (String, u64)>,
+        now: Instant,
+        hosts: bool,
+        price: Option<Micros>,
+        payout: Option<Payee>,
+    ) {
         self.peers.insert(
             peer.to_string(),
             Holding {
                 sites,
                 seen: Some(now),
                 hosts,
+                price,
+                payout,
             },
         );
+    }
+
+    /// Keep a verified receipt (deduplicated, newest [`proof::KEEP_PER_HOLDER`]
+    /// per holder). Returns true when it was new.
+    pub fn apply_receipt(&mut self, r: Receipt) -> bool {
+        if !r.verify() {
+            return false;
+        }
+        let list = self.receipts.entry((r.site_id.clone(), r.holder.clone())).or_default();
+        if list.iter().any(|x| x.sig == r.sig) {
+            return false;
+        }
+        list.push(r);
+        list.sort_by(|a, b| a.at.cmp(&b.at).then(a.sig.cmp(&b.sig)));
+        if list.len() > proof::KEEP_PER_HOLDER {
+            let extra = list.len() - proof::KEEP_PER_HOLDER;
+            list.drain(..extra);
+        }
+        true
+    }
+
+    /// Receipts kept for one holder of one site, oldest first.
+    pub fn receipts_for(&self, site_id: &str, holder: &str) -> &[Receipt] {
+        self.receipts
+            .get(&(site_id.to_string(), holder.to_string()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// True when `holder` failed too many recent challenges by the site's
+    /// owner or payer (see [`proof::demoted`]).
+    pub fn is_demoted(&self, site_id: &str, holder: &str) -> bool {
+        let Some(rec) = self.records.get(site_id) else {
+            return false;
+        };
+        let trusted = [rec.owner.as_str(), rec.payer_key()];
+        proof::demoted(self.receipts_for(site_id, holder), &trusted)
+    }
+
+    /// The preferred hosts that count right now, in the record's order: live
+    /// hosting peers that ask no more than the agreed price and have not lost
+    /// preference.
+    pub fn effective_preferred(&self, site_id: &str) -> Vec<String> {
+        let Some(rec) = self.records.get(site_id) else {
+            return Vec::new();
+        };
+        let Some(terms) = rec.terms() else {
+            return Vec::new();
+        };
+        terms
+            .preferred_hosts
+            .into_iter()
+            .filter(|p| {
+                self.peers.get(p).is_some_and(|h| {
+                    h.hosts && h.price.is_none_or(|ask| ask <= terms.price_per_gib_month)
+                })
+            })
+            .filter(|p| !self.is_demoted(site_id, p))
+            .take(super::site::MAX_PREFERRED_HOSTS)
+            .collect()
     }
 
     /// Forget peers not heard from within `ttl`.
@@ -210,19 +300,41 @@ pub enum Action {
 pub fn decide(map: &ReplicaMap, site_id: &str, me: &str, i_host: bool, target: usize, max: usize) -> Action {
     let holders = map.holders(site_id);
     let i_hold = holders.iter().any(|p| p == me);
+    let preferred = map.effective_preferred(site_id);
     if i_hold {
-        if surplus(site_id, &holders, max).as_deref() == Some(me) {
+        if preferred.is_empty() {
+            if surplus(site_id, &holders, max).as_deref() == Some(me) {
+                return Action::Drop;
+            }
+            return Action::Nothing;
+        }
+        // Marketplace site: free copies make room for paid ones, never below
+        // `target` in total. One release per round, lowest rank first.
+        let free: Vec<String> = holders.iter().filter(|p| !preferred.contains(p)).cloned().collect();
+        let paid = holders.len() - free.len();
+        let allowed = target.saturating_sub(paid);
+        if free.len() > allowed && surplus(site_id, &free, 0).as_deref() == Some(me) {
             return Action::Drop;
         }
         return Action::Nothing;
     }
-    if !i_host || holders.len() >= target {
+    if !i_host {
         return Action::Nothing;
     }
+    // A preferred host takes its copy whatever the count: it is paid to.
+    if preferred.iter().any(|p| p == me) {
+        return Action::Replicate;
+    }
+    if holders.len() >= target {
+        return Action::Nothing;
+    }
+    // The rendezvous fill. Preferred hosts that do not hold yet are left out:
+    // they replicate on their own, and counting on them would leave the site
+    // short if one never manages to.
     let mut candidates: Vec<String> = map
         .live_peers()
         .into_iter()
-        .filter(|p| !holders.contains(p))
+        .filter(|p| !holders.contains(p) && !preferred.contains(p))
         .collect();
     if !candidates.iter().any(|p| p == me) {
         candidates.push(me.to_string());
@@ -343,6 +455,186 @@ mod tests {
         assert!(m.holders(&site).is_empty(), "holding an old version is not a copy");
         m.prune(t0 + Duration::from_secs(500), Duration::from_secs(200));
         assert!(m.live_peers().is_empty());
+    }
+
+    fn pid() -> String {
+        c0mpute_net::libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_base58()
+    }
+
+    fn paid_rec(kp: &c0mpute_net::libp2p::identity::Keypair, preferred: Vec<String>, price: u64) -> SiteRecord {
+        SiteRecord::sign_with_terms(
+            kp,
+            "paid",
+            &Hash::of(b"paid"),
+            1,
+            10,
+            vec![],
+            Some(super::super::site::HostingTerms {
+                preferred_hosts: preferred,
+                price_per_gib_month: price,
+                payer: None,
+            }),
+        )
+        .unwrap()
+    }
+
+    /// Run repair rounds over a shared map until nothing changes; every peer
+    /// decides from the same map, like the real network once gossip settles.
+    /// Returns the holder count after each round.
+    fn settle(m: &mut ReplicaMap, site: &str, manifest: &str, peers: &[String]) -> Vec<usize> {
+        let mut counts = Vec::new();
+        for _ in 0..20 {
+            let actions: Vec<(String, Action)> = peers
+                .iter()
+                .map(|p| (p.clone(), decide(m, site, p, true, 3, 5)))
+                .collect();
+            if actions.iter().all(|(_, a)| *a == Action::Nothing) {
+                break;
+            }
+            let now = Instant::now();
+            for (p, a) in actions {
+                let mut h = m.peers.get(&p).cloned().unwrap_or_default();
+                match a {
+                    Action::Replicate => {
+                        h.sites.insert(site.to_string(), (manifest.to_string(), 1));
+                    }
+                    Action::Drop => {
+                        h.sites.remove(site);
+                    }
+                    Action::Nothing => {}
+                }
+                m.apply_holding_meta(&p, h.sites, now, true, h.price, h.payout);
+            }
+            counts.push(m.holders(site).len());
+        }
+        counts
+    }
+
+    fn hosting_peers(m: &mut ReplicaMap, peers: &[String]) {
+        for p in peers {
+            m.apply_holding(p, HashMap::new(), Instant::now());
+        }
+    }
+
+    #[test]
+    fn preferred_hosts_replicate_first_and_the_site_settles_at_three() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..5).map(|_| pid()).collect();
+        let preferred = vec![peers[1].clone(), peers[3].clone()];
+        let r = paid_rec(&kp, preferred.clone(), 4_000);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        hosting_peers(&mut m, &peers);
+        assert_eq!(m.effective_preferred(&r.site_id), preferred);
+        // Round one: both preferred hosts replicate, whatever their rank.
+        for p in &preferred {
+            assert_eq!(decide(&m, &r.site_id, p, true, 3, 5), Action::Replicate);
+        }
+        let counts = settle(&mut m, &r.site_id, &r.manifest, &peers);
+        assert!(counts.iter().all(|c| *c >= 3), "never below three copies: {counts:?}");
+        let holders = m.holders(&r.site_id);
+        assert_eq!(holders.len(), 3, "settles at the target: {counts:?}");
+        for p in &preferred {
+            assert!(holders.contains(p), "preferred {p} holds a copy");
+        }
+    }
+
+    #[test]
+    fn preferred_placement_is_the_same_on_every_node() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..7).map(|_| pid()).collect();
+        let r = paid_rec(&kp, vec![peers[6].clone()], 4_000);
+        let run = |order: Vec<String>| {
+            let mut m = ReplicaMap::default();
+            m.apply_record(r.clone());
+            hosting_peers(&mut m, &order);
+            settle(&mut m, &r.site_id, &r.manifest, &order);
+            m.holders(&r.site_id)
+        };
+        let a = run(peers.clone());
+        let mut rev = peers.clone();
+        rev.reverse();
+        let b = run(rev);
+        assert_eq!(a, b, "same inputs, same copies, whatever order peers are seen in");
+        assert_eq!(a.len(), 3);
+        assert!(a.contains(&peers[6]));
+    }
+
+    #[test]
+    fn without_live_preferred_hosts_the_fill_still_keeps_three() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..5).map(|_| pid()).collect();
+        // Both preferred hosts are offline (not in the map).
+        let r = paid_rec(&kp, vec![pid(), pid()], 4_000);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        hosting_peers(&mut m, &peers);
+        assert!(m.effective_preferred(&r.site_id).is_empty());
+        settle(&mut m, &r.site_id, &r.manifest, &peers);
+        assert_eq!(m.holders(&r.site_id).len(), 3);
+    }
+
+    #[test]
+    fn a_preferred_host_asking_more_than_the_agreed_price_is_not_preferred() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..4).map(|_| pid()).collect();
+        let r = paid_rec(&kp, vec![peers[0].clone(), peers[1].clone()], 4_000);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        hosting_peers(&mut m, &peers);
+        m.apply_holding_meta(&peers[0], HashMap::new(), Instant::now(), true, Some(9_000), None);
+        m.apply_holding_meta(&peers[1], HashMap::new(), Instant::now(), true, Some(4_000), None);
+        assert_eq!(m.effective_preferred(&r.site_id), vec![peers[1].clone()]);
+    }
+
+    #[test]
+    fn a_preferred_host_that_fails_challenges_loses_preference() {
+        use super::super::proof::{Challenge, Receipt};
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let peers: Vec<String> = (0..5).map(|_| pid()).collect();
+        let bad = peers[2].clone();
+        let r = paid_rec(&kp, vec![bad.clone()], 4_000);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        hosting_peers(&mut m, &peers);
+        settle(&mut m, &r.site_id, &r.manifest, &peers);
+        assert!(m.holders(&r.site_id).contains(&bad));
+        let chunk = Hash::of(b"c").to_hex();
+        let fail = |signer: &c0mpute_net::libp2p::identity::Keypair, at: u64| {
+            Receipt::sign(
+                signer,
+                Challenge {
+                    site_id: &r.site_id,
+                    manifest: &r.manifest,
+                    holder: &bad,
+                    chunk: &chunk,
+                    ok: false,
+                    rtt_ms: 0,
+                    at,
+                },
+            )
+            .unwrap()
+        };
+        // A stranger's failures change nothing.
+        let stranger = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        for at in 0..5 {
+            assert!(m.apply_receipt(fail(&stranger, at)));
+        }
+        assert_eq!(m.effective_preferred(&r.site_id), vec![bad.clone()]);
+        // Three failures signed by the owner: demoted.
+        for at in 10..13 {
+            assert!(m.apply_receipt(fail(&kp, at)));
+        }
+        assert!(!m.apply_receipt(fail(&kp, 12)), "duplicates are ignored");
+        assert!(m.is_demoted(&r.site_id, &bad));
+        assert!(m.effective_preferred(&r.site_id).is_empty());
+        // The site still has three copies; the demoted host is now an
+        // ordinary holder.
+        settle(&mut m, &r.site_id, &r.manifest, &peers);
+        assert!(m.holders(&r.site_id).len() >= 3);
     }
 
     #[test]

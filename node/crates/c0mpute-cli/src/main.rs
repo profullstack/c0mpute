@@ -619,6 +619,37 @@ enum HostingCmd {
         /// Give up waiting for network copies after this many seconds.
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
+        /// Pay hosting nodes from the d1sks OpenDisk marketplace to hold the
+        /// site: `auto`, or a d1sks query such as
+        /// `country=DE,FI&max_price=0.01&min_standing=50`. Without it the
+        /// site is free and the network keeps 3 copies as usual.
+        #[arg(long)]
+        disks: Option<String>,
+        /// Highest price per GiB-month (USD) a preferred host may ask.
+        #[arg(long)]
+        max_price: Option<String>,
+        /// Only hosts in these countries (ISO codes, comma separated).
+        #[arg(long)]
+        country: Option<String>,
+        /// How many preferred (paid) hosts to pick, 1-5.
+        #[arg(long, default_value_t = 3)]
+        copies: usize,
+        /// The OpenDisk marketplace to pick hosts from (discovery only).
+        #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
+        d1sks: String,
+    },
+    /// Show the c0mpute hosting nodes d1sks lists, ranked the way
+    /// `publish --disks` would pick them.
+    Disks {
+        /// `auto` or a d1sks query (see `publish --disks`).
+        #[arg(long, default_value = "auto")]
+        query: String,
+        #[arg(long)]
+        max_price: Option<String>,
+        #[arg(long)]
+        country: Option<String>,
+        #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
+        d1sks: String,
     },
     /// List the sites a gateway knows, with live copy counts.
     Ls {
@@ -3399,6 +3430,22 @@ async fn run_ads(cmd: AdsCmd) -> Result<()> {
     }
 }
 
+/// `--disks` plus the `--max-price` / `--country` shorthands as one query.
+fn disk_query(
+    spec: &str,
+    max_price: Option<&str>,
+    country: Option<&str>,
+) -> Result<c0mpute_core::hosting::market::DiskQuery> {
+    let mut q = c0mpute_core::hosting::market::DiskQuery::parse(spec)?;
+    if let Some(p) = max_price {
+        q.max_price = Some(c0mpute_core::payments::parse_usd(p).with_context(|| format!("--max-price {p:?}"))?);
+    }
+    if let Some(c) = country {
+        q.add_countries(c)?;
+    }
+    Ok(q)
+}
+
 async fn run_hosting(cmd: HostingCmd) -> Result<()> {
     match cmd {
         HostingCmd::Publish {
@@ -3406,18 +3453,49 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             name,
             domains,
             wait_secs,
+            disks,
+            max_price,
+            country,
+            copies,
+            d1sks,
         } => {
             let domains: Vec<String> = domains.into_iter().map(|d| d.to_ascii_lowercase()).collect();
-            let (record, copies) = c0mpute_core::hosting::publish_dir(
+            let market = match disks {
+                Some(spec) => Some(c0mpute_core::hosting::MarketOptions {
+                    query: disk_query(&spec, max_price.as_deref(), country.as_deref())?,
+                    copies: copies.clamp(1, c0mpute_core::hosting::site::MAX_PREFERRED_HOSTS),
+                    d1sks_url: d1sks,
+                }),
+                None => {
+                    if max_price.is_some() || country.is_some() {
+                        anyhow::bail!("--max-price and --country pick marketplace hosts; add --disks auto");
+                    }
+                    None
+                }
+            };
+            let (record, copies) = c0mpute_core::hosting::publish_dir_with(
                 &dir,
                 &name,
                 domains.clone(),
                 std::time::Duration::from_secs(wait_secs),
+                market,
             )
             .await?;
             println!("site:    {}", record.site_id);
             println!("version: {}", record.seq);
             println!("copies:  {copies}/{}", c0mpute_core::hosting::TARGET_REPLICAS);
+            if !record.preferred_hosts.is_empty() {
+                println!(
+                    "paid:    {} preferred host(s) at ${}/GiB-month, paid by {}",
+                    record.preferred_hosts.len(),
+                    record.price_per_gib_month.as_deref().unwrap_or("?"),
+                    record.payer_key()
+                );
+                println!(
+                    "         keep a c0mpute node running on this machine: it challenges the \
+                     holders and settles (dry run until [payments] is enabled)"
+                );
+            }
             println!("path:    /s/{}/   (on any c0mpute gateway, e.g. http://<gateway>:7777/s/{}/)", record.site_id, record.site_id);
             for d in &domains {
                 println!(
@@ -3432,6 +3510,31 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                      the network keeps replicating as hosting nodes see the record, but \
                      re-run publish (same --name) if no copies appear",
                     c0mpute_core::hosting::TARGET_REPLICAS
+                );
+            }
+            Ok(())
+        }
+        HostingCmd::Disks {
+            query,
+            max_price,
+            country,
+            d1sks,
+        } => {
+            let q = disk_query(&query, max_price.as_deref(), country.as_deref())?;
+            let disks = c0mpute_core::hosting::market::query(&d1sks, &q).await?;
+            let ranked = c0mpute_core::hosting::market::rank(&disks, &q, 0);
+            if ranked.is_empty() {
+                println!("no c0mpute hosting disks on {d1sks} match ({} listed)", disks.len());
+            }
+            for d in ranked {
+                println!(
+                    "{:<54} ${:<9} {:>8.1} GiB  standing {:<5} {:<8} {}",
+                    d.peer_id,
+                    c0mpute_core::payments::format_usd(d.price),
+                    d.free_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                    d.standing.map(|s| format!("{s:.0}")).unwrap_or_else(|| "-".into()),
+                    d.countries.join(","),
+                    d.name
                 );
             }
             Ok(())

@@ -18,8 +18,14 @@
 #     fetched over libp2p from the fastest live holder, round-robin among
 #     equally fast ones, failing over to the next.
 #
-# Not yet: paid reservations, epoch settlement and proof-of-serve challenges
-# from DIP-0015. Hosting is free while it is in beta.
+#   - Paid hosting: `publish --disks auto` picks preferred hosts from the d1sks
+#     OpenDisk marketplace (discovery only) into a signed v2 record; they
+#     replicate first, holders are challenged with random chunk fetches
+#     (signed receipts on gossip), and the payer settles per GiB-month through
+#     CoinPay payouts, OFF by default ([payments] enabled = false).
+#
+# Not yet: escrow, and proof-of-serve challenges from DIP-0015. Free hosting
+# stays free.
 
 [module]
 id          = "hosting"
@@ -29,14 +35,14 @@ kind        = "service"
 category    = "data"
 status      = "available"
 builtin     = true
-description = "Static sites kept alive by the network: three self-healing copies on hosting nodes, served by every gateway at /s/<site_id>/ and on DNS-verified custom domains. Signed, content-addressed, no coordinator. Free in beta."
+description = "Static sites kept alive by the network: three self-healing copies on hosting nodes, served by every gateway at /s/<site_id>/ and on DNS-verified custom domains. Signed, content-addressed, no coordinator. Free by default; optionally pay hosts picked from the d1sks marketplace per GiB-month, with proof-of-storage challenges (settlement off until enabled)."
 author      = "Profullstack"
 license     = "MIT"
 source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/hosting"
-keywords    = ["hosting", "static", "p2p", "censorship-resistant", "self-healing", "dweb"]
+keywords    = ["hosting", "static", "p2p", "censorship-resistant", "self-healing", "dweb", "marketplace", "opendisk"]
 
 [module.requirements]
-c0mpute      = ">=0.2.72"
+c0mpute      = ">=NEXT"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["disk", "network:ingress?"]

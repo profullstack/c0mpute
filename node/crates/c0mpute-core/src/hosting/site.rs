@@ -28,6 +28,12 @@ pub const MAX_NAME_CHARS: usize = 63;
 pub const MAX_DOMAINS: usize = 16;
 
 const SIGNING_DOMAIN: &str = "c0mpute-hosting-v1";
+/// Records that carry marketplace terms (v2) sign under their own domain, so
+/// a v2 signature can never be replayed as a v1 record or the other way round.
+const SIGNING_DOMAIN_V2: &str = "c0mpute-hosting-v2";
+/// Most preferred (paid) hosts one record can name. Equal to the replica
+/// ceiling, so preferred copies alone never push a site over it.
+pub const MAX_PREFERRED_HOSTS: usize = 5;
 
 /// One file: its size, MIME type and the chunks that make it up, in order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,8 +115,37 @@ pub struct SiteRecord {
     /// after DNS confirms it (see `dns`).
     #[serde(default)]
     pub domains: Vec<String>,
+    /// v2: hosting nodes (base58 peer ids) the publisher picked, usually from
+    /// the d1sks marketplace, and pays per GiB-month. They replicate first;
+    /// the normal rendezvous fill still keeps at least three copies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred_hosts: Vec<String>,
+    /// v2: the agreed price per GiB-month, USD decimal ("0.004").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_per_gib_month: Option<String>,
+    /// v2: who pays (hex ed25519 key); the owner when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payer: Option<String>,
     /// ed25519 signature (hex) over [`SiteRecord::signing_bytes`].
     pub sig: String,
+}
+
+/// Marketplace terms a v2 record carries.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct HostingTerms {
+    pub preferred_hosts: Vec<String>,
+    /// Micro-USD per GiB-month.
+    pub price_per_gib_month: crate::payments::Micros,
+    /// Hex ed25519 key of the payer; `None` = the owner pays.
+    pub payer: Option<String>,
+}
+
+fn valid_peer_id(p: &str) -> bool {
+    p.len() <= 64 && p.parse::<c0mpute_net::PeerId>().is_ok()
+}
+
+fn valid_key_hex(k: &str) -> bool {
+    k.len() == 64 && k.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 /// The id a site with this owner and name always has: 20 hex characters of
@@ -156,8 +191,9 @@ pub fn valid_path(p: &str) -> bool {
 
 impl SiteRecord {
     pub fn signing_bytes(&self) -> Vec<u8> {
-        format!(
-            "{SIGNING_DOMAIN}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        let base = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            if self.v >= 2 { SIGNING_DOMAIN_V2 } else { SIGNING_DOMAIN },
             self.site_id,
             self.name,
             self.owner,
@@ -165,18 +201,55 @@ impl SiteRecord {
             self.seq,
             self.size,
             self.domains.join(",")
+        );
+        if self.v < 2 {
+            return base.into_bytes();
+        }
+        format!(
+            "{base}\n{}\n{}\n{}",
+            self.preferred_hosts.join(","),
+            self.price_per_gib_month.as_deref().unwrap_or(""),
+            self.payer.as_deref().unwrap_or("")
         )
         .into_bytes()
     }
 
-    /// Build and sign a record with the owner's libp2p (ed25519) keypair.
-    pub fn sign(
+    /// The marketplace terms, when this is a v2 record.
+    pub fn terms(&self) -> Option<HostingTerms> {
+        if self.v < 2 {
+            return None;
+        }
+        Some(HostingTerms {
+            preferred_hosts: self.preferred_hosts.clone(),
+            price_per_gib_month: self
+                .price_per_gib_month
+                .as_deref()
+                .and_then(|p| crate::payments::parse_usd(p).ok())
+                .unwrap_or(0),
+            payer: self.payer.clone(),
+        })
+    }
+
+    /// Who pays for this site's preferred copies: the payer key, else the owner.
+    pub fn payer_key(&self) -> &str {
+        self.payer.as_deref().unwrap_or(&self.owner)
+    }
+
+    /// True when `peer` is one of the record's preferred hosts.
+    pub fn prefers(&self, peer: &str) -> bool {
+        self.preferred_hosts.iter().any(|p| p == peer)
+    }
+
+    /// Build and sign a record with marketplace terms (v2). `terms = None`
+    /// signs a plain v1 record, exactly as [`SiteRecord::sign`] does.
+    pub fn sign_with_terms(
         keypair: &c0mpute_net::libp2p::identity::Keypair,
         name: &str,
         manifest: &Hash,
         seq: u64,
         size: u64,
         domains: Vec<String>,
+        terms: Option<HostingTerms>,
     ) -> Result<Self> {
         let owner = owner_hex(keypair).context("hosting needs an ed25519 identity")?;
         let mut rec = SiteRecord {
@@ -188,8 +261,17 @@ impl SiteRecord {
             seq,
             size,
             domains,
+            preferred_hosts: Vec::new(),
+            price_per_gib_month: None,
+            payer: None,
             sig: String::new(),
         };
+        if let Some(t) = terms {
+            rec.v = 2;
+            rec.preferred_hosts = t.preferred_hosts;
+            rec.price_per_gib_month = Some(crate::payments::format_usd(t.price_per_gib_month));
+            rec.payer = t.payer;
+        }
         rec.check_fields()?;
         let sig = keypair
             .sign(&rec.signing_bytes())
@@ -198,9 +280,48 @@ impl SiteRecord {
         Ok(rec)
     }
 
+    /// Build and sign a record with the owner's libp2p (ed25519) keypair.
+    pub fn sign(
+        keypair: &c0mpute_net::libp2p::identity::Keypair,
+        name: &str,
+        manifest: &Hash,
+        seq: u64,
+        size: u64,
+        domains: Vec<String>,
+    ) -> Result<Self> {
+        Self::sign_with_terms(keypair, name, manifest, seq, size, domains, None)
+    }
+
     fn check_fields(&self) -> Result<()> {
-        if self.v != 1 {
-            bail!("unsupported site record version {}", self.v);
+        match self.v {
+            1 => {
+                if !self.preferred_hosts.is_empty() || self.price_per_gib_month.is_some() || self.payer.is_some() {
+                    bail!("a v1 site record carries no marketplace terms");
+                }
+            }
+            2 => {
+                if self.preferred_hosts.is_empty() || self.preferred_hosts.len() > MAX_PREFERRED_HOSTS {
+                    bail!("a v2 site record names 1-{MAX_PREFERRED_HOSTS} preferred hosts");
+                }
+                if !self.preferred_hosts.iter().all(|p| valid_peer_id(p)) {
+                    bail!("preferred host is not a peer id");
+                }
+                let mut seen = std::collections::HashSet::new();
+                if !self.preferred_hosts.iter().all(|p| seen.insert(p)) {
+                    bail!("preferred hosts repeat");
+                }
+                match self.price_per_gib_month.as_deref().map(crate::payments::parse_usd) {
+                    // Canonical form only, so every node signs/verifies the same bytes.
+                    Some(Ok(m)) if self.price_per_gib_month.as_deref() == Some(crate::payments::format_usd(m).as_str()) => {}
+                    _ => bail!("price_per_gib_month must be a canonical USD decimal"),
+                }
+                if let Some(p) = &self.payer
+                    && !valid_key_hex(p)
+                {
+                    bail!("payer must be a hex ed25519 key");
+                }
+            }
+            v => bail!("unsupported site record version {v}"),
         }
         if !valid_name(&self.name) {
             bail!("site name must be 1-63 of a-z, 0-9 and '-'");
@@ -444,6 +565,110 @@ mod tests {
         assert_ne!(stolen.site_id, rec.site_id);
         stolen.site_id = rec.site_id.clone();
         assert!(!stolen.verify());
+    }
+
+    fn peer() -> String {
+        c0mpute_net::libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+            .to_base58()
+    }
+
+    #[test]
+    fn v1_records_are_unchanged_and_still_verify() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let rec = SiteRecord::sign(&kp, "old", &Hash::of(b"m"), 1, 10, vec![]).unwrap();
+        assert_eq!(rec.v, 1);
+        let json = serde_json::to_string(&rec).unwrap();
+        // A v1 record serializes with no new keys, so old nodes read it as before.
+        assert!(!json.contains("preferred_hosts") && !json.contains("price_per_gib_month") && !json.contains("payer"));
+        // And a v1 record as an old node wrote it (no new keys) parses and verifies.
+        let back: SiteRecord = serde_json::from_str(&json).unwrap();
+        assert!(back.verify());
+        assert!(back.terms().is_none());
+        assert_eq!(back.payer_key(), back.owner);
+    }
+
+    #[test]
+    fn v2_records_sign_terms_and_reject_tampering() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let (a, b) = (peer(), peer());
+        let terms = HostingTerms {
+            preferred_hosts: vec![a.clone(), b.clone()],
+            price_per_gib_month: 4_000,
+            payer: None,
+        };
+        let rec = SiteRecord::sign_with_terms(&kp, "paid", &Hash::of(b"m"), 1, 10, vec![], Some(terms.clone())).unwrap();
+        assert_eq!(rec.v, 2);
+        assert!(rec.verify());
+        assert_eq!(rec.price_per_gib_month.as_deref(), Some("0.004"));
+        assert_eq!(rec.terms().unwrap(), terms);
+        assert!(rec.prefers(&a) && !rec.prefers("nobody"));
+        let back: SiteRecord = serde_json::from_slice(&serde_json::to_vec(&rec).unwrap()).unwrap();
+        assert!(back.verify());
+
+        let mut t = rec.clone();
+        t.preferred_hosts.reverse();
+        assert!(!t.verify(), "preferred hosts are signed");
+        let mut t = rec.clone();
+        t.price_per_gib_month = Some("0.005".into());
+        assert!(!t.verify(), "price is signed");
+        let mut t = rec.clone();
+        t.payer = Some("b".repeat(64));
+        assert!(!t.verify(), "payer is signed");
+        // Downgrading to v1 (dropping the terms) breaks the signature too.
+        let mut t = rec.clone();
+        t.v = 1;
+        t.preferred_hosts.clear();
+        t.price_per_gib_month = None;
+        assert!(!t.verify(), "a v2 signature is not a v1 signature");
+    }
+
+    #[test]
+    fn v2_terms_are_validated() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let sign = |t: HostingTerms| SiteRecord::sign_with_terms(&kp, "x", &Hash::of(b"m"), 1, 10, vec![], Some(t));
+        assert!(sign(HostingTerms::default()).is_err(), "no preferred hosts");
+        assert!(
+            sign(HostingTerms {
+                preferred_hosts: vec!["not-a-peer".into()],
+                price_per_gib_month: 1,
+                payer: None
+            })
+            .is_err()
+        );
+        let p = peer();
+        assert!(
+            sign(HostingTerms {
+                preferred_hosts: vec![p.clone(), p.clone()],
+                price_per_gib_month: 1,
+                payer: None
+            })
+            .is_err(),
+            "duplicates"
+        );
+        assert!(
+            sign(HostingTerms {
+                preferred_hosts: (0..6).map(|_| peer()).collect(),
+                price_per_gib_month: 1,
+                payer: None
+            })
+            .is_err(),
+            "too many"
+        );
+        assert!(
+            sign(HostingTerms {
+                preferred_hosts: vec![p.clone()],
+                price_per_gib_month: 1,
+                payer: Some("zz".into())
+            })
+            .is_err(),
+            "bad payer"
+        );
+        // A v1 record smuggling terms is rejected.
+        let mut r = SiteRecord::sign(&kp, "x", &Hash::of(b"m"), 1, 10, vec![]).unwrap();
+        r.preferred_hosts = vec![p];
+        assert!(!r.verify());
     }
 
     #[test]
