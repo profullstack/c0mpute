@@ -19,11 +19,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use c0mpute_net::Libp2pNetwork;
-use c0mpute_net::{
-    Network,
-    topics::{JobAccept, JobReceipt, JobStatus, job_topic},
-};
-use c0mpute_proto::{Hash, TranscodeSpec};
+use c0mpute_net::topics::{JobAccept, JobReceipt, JobStatus, job_topic};
+use c0mpute_proto::TranscodeSpec;
 use c0mpute_store::ChunkStore;
 use tokio::fs;
 use tokio::sync::{Semaphore, mpsc};
@@ -274,9 +271,7 @@ async fn run_tts_job(
     {
         bail!("TTS output is not a valid WAV under the 20 MiB result limit");
     }
-    let hash = store.put(&bytes).await?;
-    net.announce(&hash).await?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_bytes(net, store, &bytes).await
 }
 
 /// Largest audio input a worker accepts.
@@ -337,9 +332,7 @@ async fn run_stt_job(
     if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
         bail!("STT result is empty or exceeds the 10 MiB result limit");
     }
-    let hash = store.put(&bytes).await?;
-    net.announce(&hash).await?;
-    Ok(hash.to_hex())
+    crate::pieces::publish_result_bytes(net, store, &bytes).await
 }
 
 pub(crate) fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
@@ -446,42 +439,16 @@ async fn run_transcode_job(
 
     // The input is no longer needed once the output exists.
     let _ = fs::remove_file(&input_path).await;
-    let hash = store_output(store, &output_path, MAX_OUTPUT_BYTES).await?;
-    net.announce(&hash)
+    // Streamed from disk as pieces (a manifest is what the receipt names);
+    // the output is never in memory whole.
+    crate::pieces::publish_result_file(net, store, &output_path, MAX_OUTPUT_BYTES)
         .await
-        .context("announce transcode output")?;
-    Ok(hash.to_hex())
+        .context("publish transcode output")
 }
 
-/// Largest transcode output a worker stores and serves. The output is one
-/// content-addressed chunk (the same key format TTS/STT results use, so
-/// the buyer fetches it by `JobReceipt.output_hash` the same way). Over the
-/// cap the job fails with a clear error rather than filling the disk.
+/// Largest transcode output a worker stores and serves. Over the cap the
+/// job fails with a clear error rather than filling the disk.
 pub const MAX_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Move a finished output into the chunk store (streamed, never loaded
-/// whole into memory) and return its key. Empty or over-`max` outputs are
-/// refused.
-pub(crate) async fn store_output(
-    store: &ChunkStore,
-    output_path: &std::path::Path,
-    max: u64,
-) -> Result<Hash> {
-    let len = fs::metadata(output_path)
-        .await
-        .context("transcode produced no output file")?
-        .len();
-    if len == 0 {
-        bail!("transcode output is empty");
-    }
-    if len > max {
-        bail!("transcode output is {len} bytes, over the {max}-byte result limit");
-    }
-    store
-        .put_file(output_path)
-        .await
-        .context("store transcode output")
-}
 
 /// Largest input a transcode job may download.
 const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -726,44 +693,6 @@ mod tests {
             std::env::temp_dir().join(format!("c0-runner-{name}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[tokio::test]
-    async fn transcode_output_is_stored_under_the_receipt_hash() {
-        let root = scratch("out");
-        let store = ChunkStore::open(root.join("store")).await.unwrap();
-        let out = root.join("output.mp4");
-        fs::write(&out, b"not really an mp4").await.unwrap();
-
-        let hash = store_output(&store, &out, MAX_OUTPUT_BYTES).await.unwrap();
-        let hex = hash.to_hex();
-        // The receipt carries this hex; the buyer parses it with
-        // Hash::from_hex and fetches the chunk by it.
-        assert_eq!(
-            hex,
-            hex::encode(blake3::hash(b"not really an mp4").as_bytes())
-        );
-        assert_eq!(Hash::from_hex(&hex).unwrap(), hash);
-        assert_eq!(store.get(&hash).await.unwrap(), b"not really an mp4");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn oversized_or_empty_output_fails_clearly() {
-        let root = scratch("cap");
-        let store = ChunkStore::open(root.join("store")).await.unwrap();
-        let out = root.join("output.mp4");
-        fs::write(&out, vec![0u8; 64]).await.unwrap();
-        let err = store_output(&store, &out, 63).await.unwrap_err();
-        assert!(format!("{err:#}").contains("result limit"), "{err:#}");
-        fs::write(&out, b"").await.unwrap();
-        assert!(store_output(&store, &out, 63).await.is_err());
-        assert!(
-            store_output(&store, &root.join("missing"), 63)
-                .await
-                .is_err()
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

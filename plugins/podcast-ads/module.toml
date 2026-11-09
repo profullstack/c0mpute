@@ -26,7 +26,7 @@
 [module]
 id          = "podcast-ads"
 name        = "Podcast Ads — dynamic ad insertion"
-version     = "0.2.79"
+version     = "0.2.80"
 kind        = "service"
 category    = "applications"
 status      = "partial"

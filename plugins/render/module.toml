@@ -33,7 +33,7 @@
 [module]
 id          = "render"
 name        = "Render — Blender 3D rendering"
-version     = "0.2.79"
+version     = "0.2.80"
 kind        = "workload"
 category    = "media"
 status      = "available"

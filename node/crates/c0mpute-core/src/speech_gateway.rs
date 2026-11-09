@@ -648,24 +648,28 @@ fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
     }
 }
 
+/// How long a result may take to arrive. The receipt's chunk gets at most
+/// 20 s of it (a worker that never answers fails as fast as before); the
+/// rest is for the 1 MiB pieces of a large result (a 20 MiB WAV, a
+/// hundreds-of-MB video), about 3 s per MiB of the cap, at most 10 min.
+fn result_fetch_budget(max_bytes: usize) -> Duration {
+    let mib = (max_bytes / (1024 * 1024)) as u64;
+    Duration::from_secs((20 + 3 * mib).min(10 * 60))
+}
+
 async fn fetch_result(
     state: &GatewayState,
     hash: &str,
     provider_peer_id: &str,
     max_bytes: usize,
 ) -> ApiResult<Vec<u8>> {
-    use crate::gateway_util::{FetchError, fetch_verified};
-    match fetch_verified(
+    use crate::gateway_util::FetchError;
+    match crate::gateway_util::fetch_result(
         &state.net,
         hash,
         provider_peer_id,
         max_bytes,
-        // A video result can be hundreds of MB; speech and images are small.
-        if max_bytes > MAX_AUDIO_BYTES {
-            Duration::from_secs(10 * 60)
-        } else {
-            Duration::from_secs(20)
-        },
+        result_fetch_budget(max_bytes),
     )
     .await
     {
