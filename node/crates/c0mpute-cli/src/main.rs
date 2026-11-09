@@ -21,6 +21,7 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod apps_mcp;
 mod ai_chat;
 mod crowdgpt;
 mod dm_cli;
@@ -199,6 +200,21 @@ enum Cmd {
     Hosting {
         #[command(subcommand)]
         cmd: HostingCmd,
+    },
+    /// Apps plugin: run a backend (API, MCP server, worker, database app) on
+    /// the network from a container image. Three copies, one primary,
+    /// state snapshotted to the standbys, failover with no coordinator;
+    /// every gateway serves it at /a/<app_id>/ and on custom domains.
+    Apps {
+        #[command(subcommand)]
+        cmd: AppsCmd,
+    },
+    /// Git repositories on the network: `c0mpute git install` adds the
+    /// `git-remote-c0mpute` helper, then `git push c0mpute://<name> main`
+    /// stores the repo (and deploys it when c0mpute.toml has an [app]).
+    Git {
+        #[command(subcommand)]
+        cmd: GitCmd,
     },
     /// Train plugin: fine-tune a LoRA adapter on a c0mpute worker from a
     /// JSONL dataset (`c0mpute train lora --base <model> --dataset <jsonl>`;
@@ -668,6 +684,125 @@ const SECURE_CHAT_CMDS: &[&str] = &[
 struct DmCli {
     #[command(subcommand)]
     cmd: ChatCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum AppsCmd {
+    /// Deploy (or redeploy) an app.
+    ///
+    /// The image is built here (`docker build`), saved, and published to the
+    /// network as a hosting site signed by this machine, so no registry is
+    /// involved; or pass --pull with a digest-pinned registry image. Waits
+    /// until a primary answers on the new version.
+    ///
+    ///   c0mpute apps deploy ./api --name api --port 8080 --state /data
+    ///   c0mpute apps deploy --pull ghcr.io/me/api@sha256:... --name api
+    ///   c0mpute apps deploy ./api        # settings from ./api/c0mpute.toml
+    #[command(verbatim_doc_comment)]
+    Deploy {
+        /// Directory with a Dockerfile (and optionally c0mpute.toml).
+        dir: Option<std::path::PathBuf>,
+        /// App name: 1-59 of a-z, 0-9 and '-'. Same name again = new version.
+        #[arg(long)]
+        name: Option<String>,
+        /// Deploy an image already in the local docker instead of building.
+        #[arg(long, conflicts_with = "pull")]
+        image: Option<String>,
+        /// A registry image pinned by digest (name@sha256:...); holders pull it.
+        #[arg(long)]
+        pull: Option<String>,
+        /// Port the container serves HTTP on.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Health check path (any answer below 500 is healthy).
+        #[arg(long)]
+        health: Option<String>,
+        /// Directory inside the container that holds state (snapshotted to
+        /// the standbys, restored on failover). Encrypted with the app key.
+        #[arg(long)]
+        state: Option<String>,
+        /// Seconds between state snapshots (10-3600). Recovery point on failover.
+        #[arg(long)]
+        snapshot_secs: Option<u32>,
+        /// Public environment variable KEY=VALUE (repeatable). Secrets go
+        /// through `c0mpute apps secrets set`, never here.
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long)]
+        memory_mb: Option<u32>,
+        /// CPU cores (0.1-8).
+        #[arg(long)]
+        cpus: Option<f64>,
+        /// Copies the network keeps (2-5): one primary, the rest standbys.
+        #[arg(long)]
+        replicas: Option<u8>,
+        /// Custom domain (repeatable): point it at gateways and add TXT
+        /// `_c0mpute-app.<domain>` = `app=<app_id>`.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Give up waiting for a healthy primary after this many seconds.
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
+    },
+    /// List the apps a gateway knows, with holders, primary and health.
+    Ls {
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One app's state on a gateway: holders, primary, epoch, last snapshot.
+    Status {
+        /// App name (deployed from here) or app id.
+        app: String,
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
+    /// The primary's container logs (owner only; asked over libp2p).
+    Logs {
+        app: String,
+        #[arg(long, default_value_t = 200)]
+        tail: u32,
+    },
+    /// Secret environment variables, sealed to each holder at the next deploy.
+    Secrets {
+        #[command(subcommand)]
+        cmd: AppsSecretsCmd,
+    },
+    /// MCP server on stdio for agents (`claude mcp add c0mpute-apps -- c0mpute apps mcp`).
+    Mcp {
+        #[arg(long, default_value = "http://127.0.0.1:7777")]
+        gateway: String,
+    },
+    /// Delete an app: holders stop it and drop its copies and snapshots.
+    Destroy {
+        name: String,
+        /// Required: this cannot be undone (the state goes with it).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AppsSecretsCmd {
+    /// Set KEY=VALUE for an app (takes effect on the next deploy).
+    Set { app: String, pairs: Vec<String> },
+    /// Remove secrets by name.
+    Unset { app: String, keys: Vec<String> },
+    /// Show secret names (never values).
+    Ls { app: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum GitCmd {
+    /// Install the `git-remote-c0mpute` helper (a symlink to this binary).
+    Install {
+        /// Directory on PATH to put it in (default: next to this binary).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Print the clone URL of a repo this machine owns.
+    Url { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1284,6 +1419,23 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Invoked by git as `git-remote-c0mpute <remote> <url>`: speak the
+    // remote-helper protocol and nothing else (stdout belongs to git).
+    let argv0 = std::env::args().next().unwrap_or_default();
+    if std::path::Path::new(&argv0).file_name().and_then(|n| n.to_str()) == Some("git-remote-c0mpute") {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let (remote, url) = match args.as_slice() {
+            [remote, url, ..] => (remote.clone(), url.clone()),
+            [url] => (url.clone(), url.clone()),
+            _ => anyhow::bail!("usage: git-remote-c0mpute <remote> <url> (git runs this for c0mpute:// remotes)"),
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let res = rt.block_on(c0mpute_core::gitremote::remote_helper(&remote, &url));
+        // The swarm keeps tasks alive; do not wait for them.
+        rt.shutdown_timeout(std::time::Duration::from_millis(200));
+        return res;
+    }
+
     let cli = Cli::parse();
 
     // Opportunistic self-update on any command (throttled), so c0mpute stays
@@ -1440,6 +1592,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Apps { cmd } => run_apps(cmd).await,
+        Cmd::Git { cmd } => run_git(cmd).await,
         Cmd::Train { args } => train::run(&args).await,
         Cmd::Gameserver { args } => gameserver::run(&args).await,
         Cmd::Stream { cmd } => run_stream(cmd).await,
@@ -3599,6 +3753,200 @@ fn disk_query(
     Ok(q)
 }
 
+fn parse_kv(pairs: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut m = std::collections::BTreeMap::new();
+    for p in pairs {
+        let (k, v) = p.split_once('=').with_context(|| format!("{p:?} is not KEY=VALUE"))?;
+        m.insert(k.trim().to_string(), v.to_string());
+    }
+    Ok(m)
+}
+
+fn app_id_from(app: &str) -> String {
+    match c0mpute_core::apps::deploy::load_owner(app).record {
+        Some(r) => r.app_id,
+        None => app.to_string(),
+    }
+}
+
+async fn run_apps(cmd: AppsCmd) -> Result<()> {
+    use c0mpute_core::apps::deploy;
+    match cmd {
+        AppsCmd::Deploy {
+            dir,
+            name,
+            image,
+            pull,
+            port,
+            health,
+            state,
+            snapshot_secs,
+            env,
+            memory_mb,
+            cpus,
+            replicas,
+            domains,
+            wait_secs,
+        } => {
+            let wait = std::time::Duration::from_secs(wait_secs);
+            let manifest = match &dir {
+                Some(d) => deploy::read_manifest(d)?,
+                None => None,
+            };
+            let mut opts = match (&manifest, &dir) {
+                (Some(m), Some(d)) => m.options(d, wait),
+                _ => deploy::DeployOptions {
+                    name: String::new(),
+                    source: match &dir {
+                        Some(d) => deploy::Source::Build(d.clone()),
+                        None => deploy::Source::Local(String::new()),
+                    },
+                    port: 8080,
+                    health_path: "/".into(),
+                    env: Default::default(),
+                    state_path: None,
+                    snapshot_secs: c0mpute_core::apps::record::DEFAULT_SNAPSHOT_SECS,
+                    memory_mb: 256,
+                    millicpus: 500,
+                    replicas: c0mpute_core::apps::record::DEFAULT_REPLICAS,
+                    domains: vec![],
+                    wait,
+                },
+            };
+            if let Some(n) = name {
+                opts.name = n;
+            }
+            if opts.name.is_empty() {
+                anyhow::bail!("--name is required (or a c0mpute.toml with [app] name)");
+            }
+            if let Some(i) = image {
+                opts.source = deploy::Source::Local(i);
+            }
+            if let Some(p) = pull {
+                opts.source = deploy::Source::Pull(p);
+            }
+            if matches!(&opts.source, deploy::Source::Local(i) if i.is_empty()) {
+                anyhow::bail!("give a directory to build, --image, or --pull");
+            }
+            if let Some(p) = port {
+                opts.port = p;
+            }
+            if let Some(h) = health {
+                opts.health_path = h;
+            }
+            if state.is_some() {
+                opts.state_path = state;
+            }
+            if let Some(s) = snapshot_secs {
+                opts.snapshot_secs = s;
+            }
+            opts.env.extend(parse_kv(&env)?);
+            if let Some(m) = memory_mb {
+                opts.memory_mb = m;
+            }
+            if let Some(c) = cpus {
+                opts.millicpus = (c * 1000.0).round() as u32;
+            }
+            if let Some(r) = replicas {
+                opts.replicas = r;
+            }
+            opts.domains.extend(domains);
+            opts.wait = wait;
+            let rec = deploy::deploy(opts).await?;
+            println!("{}", rec.app_id);
+            for d in &rec.domains {
+                eprintln!("  domain {d}: TXT _c0mpute-app.{d} = \"app={}\"", rec.app_id);
+            }
+            Ok(())
+        }
+        AppsCmd::Ls { gateway, json } => {
+            let url = format!("{}/apps/v1/apps", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url).await.with_context(|| format!("GET {url}"))?.json().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let apps = v["apps"].as_array().cloned().unwrap_or_default();
+            if apps.is_empty() {
+                println!("no apps known to {gateway} yet");
+            }
+            for a in apps {
+                let holders = a["holders"].as_array().map(|h| h.len()).unwrap_or(0);
+                println!(
+                    "{:<22} {:<24} {}/{} copies  primary {}  epoch {}  {}",
+                    a["app_id"].as_str().unwrap_or(""),
+                    a["name"].as_str().unwrap_or(""),
+                    holders,
+                    a["replicas"],
+                    a["primary"].as_str().map(|p| &p[p.len().saturating_sub(8)..]).unwrap_or("none"),
+                    a["epoch"],
+                    if a["healthy"].as_bool() == Some(true) { "healthy" } else { "down" }
+                );
+            }
+            Ok(())
+        }
+        AppsCmd::Status { app, gateway } => {
+            let id = app_id_from(&app);
+            let url = format!("{}/apps/v1/apps/{id}", gateway.trim_end_matches('/'));
+            let v: serde_json::Value = reqwest::get(&url).await.with_context(|| format!("GET {url}"))?.json().await?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
+        AppsCmd::Logs { app, tail } => {
+            print!("{}", deploy::logs(&app, tail).await?);
+            Ok(())
+        }
+        AppsCmd::Secrets { cmd } => match cmd {
+            AppsSecretsCmd::Set { app, pairs } => {
+                for (k, v) in parse_kv(&pairs)? {
+                    deploy::set_secret(&app, &k, Some(&v))?;
+                }
+                eprintln!("saved; run `c0mpute apps deploy` to hand them to the holders");
+                Ok(())
+            }
+            AppsSecretsCmd::Unset { app, keys } => {
+                for k in keys {
+                    deploy::set_secret(&app, &k, None)?;
+                }
+                Ok(())
+            }
+            AppsSecretsCmd::Ls { app } => {
+                if let Some(s) = deploy::load_owner(&app).secrets {
+                    for k in s.env.keys() {
+                        println!("{k}");
+                    }
+                }
+                Ok(())
+            }
+        },
+        AppsCmd::Mcp { gateway } => apps_mcp::serve(gateway).await,
+        AppsCmd::Destroy { name, yes } => {
+            if !yes {
+                anyhow::bail!("this deletes {name} and its state everywhere; pass --yes to confirm");
+            }
+            let id = deploy::destroy(&name).await?;
+            println!("deleted {name} ({id})");
+            Ok(())
+        }
+    }
+}
+
+async fn run_git(cmd: GitCmd) -> Result<()> {
+    match cmd {
+        GitCmd::Install { dir } => {
+            let link = c0mpute_core::gitremote::install(dir.as_deref())?;
+            println!("{}", link.display());
+            eprintln!("git now understands c0mpute:// remotes (make sure {} is on PATH)", link.parent().map(|p| p.display().to_string()).unwrap_or_default());
+            Ok(())
+        }
+        GitCmd::Url { name } => {
+            let t = c0mpute_core::gitremote::parse_url(&name)?;
+            println!("c0mpute://{}", c0mpute_core::gitremote::site_id(&t)?);
+            Ok(())
+        }
+    }
+}
+
 async fn run_hosting(cmd: HostingCmd) -> Result<()> {
     match cmd {
         HostingCmd::Publish {
@@ -4362,6 +4710,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "embed" | "embeddings" => Some(Role::Embed),
         "captcha" | "captchas" => Some(Role::Captcha),
         "gameserver" | "gameservers" | "games" => Some(Role::Gameserver),
+        "apps" | "app" | "backends" | "backend" => Some(Role::Apps),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
         "render" | "blender" => Some(Role::Render),
         "inference" | "chat" | "llm" => Some(Role::Inference),

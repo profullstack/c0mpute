@@ -95,6 +95,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
             Role::Crawl => tags.push(crate::crawl::ROLE_TAG.to_string()),
             Role::Hosting => tags.push(crate::hosting::ROLE_TAG.to_string()),
+            Role::Apps => tags.push(crate::apps::ROLE_TAG.to_string()),
             Role::Ocr => {
                 // Only where `tesseract` actually runs (probed once).
                 if crate::ocr::runtime().ready() {

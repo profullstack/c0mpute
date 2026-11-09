@@ -9,6 +9,7 @@ const LINKS: { href: string; label: string; accent?: boolean }[] = [
   { href: "/protocol", label: "protocol" },
   { href: "/chat", label: "chat", accent: true },
   { href: "/train", label: "train an AI agent", accent: true },
+  { href: "/apps", label: "apps" },
   { href: "/providers", label: "run a node", accent: true },
   { href: "/estimates", label: "GPU earnings", accent: true },
   { href: "/market", label: "market" },

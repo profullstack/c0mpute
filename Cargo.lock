@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,7 +484,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "c0mpute-api"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -493,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-bench"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "blake3",
@@ -504,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "axum",
@@ -534,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -554,6 +560,7 @@ dependencies = [
  "c0mpute-update",
  "c0mpute-verify",
  "directories",
+ "flate2",
  "hex",
  "hkdf",
  "hmac",
@@ -581,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "serde",
@@ -593,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-envelope"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "blake3",
  "bs58",
@@ -606,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "axum",
@@ -628,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-market"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "c0mpute-envelope",
  "serde",
@@ -638,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -655,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-placement"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -676,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "blake3",
  "hex",
@@ -688,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -711,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "blake3",
@@ -729,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -742,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "hex",
@@ -757,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
-version = "0.2.98"
+version = "0.2.99"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1398,6 +1405,8 @@ version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
+ "crc32fast",
+ "miniz_oxide",
  "zlib-rs",
 ]
 
@@ -2699,6 +2708,16 @@ name = "minisign-verify"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
 
 [[package]]
 name = "mio"

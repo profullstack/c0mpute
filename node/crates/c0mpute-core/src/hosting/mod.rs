@@ -166,6 +166,8 @@ struct Inner {
     /// Optional handler for requests with a query string (podcast ad
     /// insertion installs one); it may decline and let the plain serve run.
     hook: std::sync::OnceLock<Arc<dyn ServeHook>>,
+    /// Optional handler for custom domains that are not sites (apps).
+    host_hook: std::sync::OnceLock<Arc<dyn HostHook>>,
     /// Signs challenge receipts (and is the payer identity for settlement).
     challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
     challenger_hex: Option<String>,
@@ -211,6 +213,18 @@ pub trait ServeHook: Send + Sync {
     /// `None` = not mine, serve the file as usual.
     async fn serve(&self, hosting: &Hosting, rec: &SiteRecord, path: &str, query: &str, headers: &HeaderMap) -> Option<Response>;
 }
+
+/// Something else a gateway serves on custom domains (apps), tried before
+/// static sites. It takes the whole request (any method, with its body) and
+/// hands it back when the host is not its own.
+#[async_trait::async_trait]
+pub trait HostHook: Send + Sync {
+    async fn serve_host(&self, host: &str, req: axum::extract::Request) -> std::result::Result<Response, axum::extract::Request>;
+}
+
+/// RPC that answers a site record by id, so a client that just joined need
+/// not wait for the next record gossip.
+pub const RPC_RECORD: &str = "hosting.record";
 
 /// The hosting service: one per node. Cheap to clone.
 #[derive(Clone)]
@@ -297,6 +311,7 @@ impl Hosting {
             fetch_slots: Semaphore::new(8),
             dns: opts.dns,
             hook: std::sync::OnceLock::new(),
+            host_hook: std::sync::OnceLock::new(),
             challenger: opts.challenger,
             challenger_hex,
             challenge: opts.challenge,
@@ -320,6 +335,7 @@ impl Hosting {
         h.spawn_announcer();
         h.spawn_repair();
         h.spawn_challenger();
+        net.register_rpc(RPC_RECORD, Arc::new(RecordRpc(h.clone())));
         Ok(h)
     }
 
@@ -1069,6 +1085,33 @@ impl Hosting {
     }
 
     /// Put a [`ServeHook`] in front of site serving (once per node).
+    /// Install the custom-domain handler that runs before site serving.
+    pub fn set_host_hook(&self, hook: Arc<dyn HostHook>) -> bool {
+        self.0.host_hook.set(hook).is_ok()
+    }
+
+    /// A site record: known locally, else asked of connected peers.
+    pub async fn lookup_record(&self, site_id: &str) -> Option<SiteRecord> {
+        if let Some(r) = self.record_for(site_id).await {
+            return Some(r);
+        }
+        for p in self.0.net.connected_peers().await.into_iter().take(12) {
+            let Ok(Ok(body)) =
+                tokio::time::timeout(Duration::from_secs(5), self.0.net.rpc(p, RPC_RECORD, site_id.as_bytes().to_vec())).await
+            else {
+                continue;
+            };
+            if let Ok(rec) = serde_json::from_slice::<SiteRecord>(&body)
+                && rec.site_id == site_id
+                && rec.verify()
+            {
+                self.0.map.write().await.apply_record(rec);
+                return self.record_for(site_id).await;
+            }
+        }
+        None
+    }
+
     pub fn set_serve_hook(&self, hook: Arc<dyn ServeHook>) -> bool {
         self.0.hook.set(hook).is_ok()
     }
@@ -1304,7 +1347,22 @@ impl Hosting {
 
 /// Any request not matched by another gateway route: serve it when its Host
 /// is a custom domain of a site and DNS agrees.
-async fn serve_by_host(State(h): State<Hosting>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(':').next().unwrap_or("").trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    let req = match h.0.host_hook.get() {
+        Some(hook) if !host.is_empty() && site::valid_domain(&host) => match hook.serve_host(&host, req).await {
+            Ok(resp) => return resp,
+            Err(req) => req,
+        },
+        _ => req,
+    };
+    let headers = req.headers().clone();
+    let uri = req.uri().clone();
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -1416,6 +1474,17 @@ mod tests {
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
+    }
+}
+
+struct RecordRpc(Hosting);
+
+#[async_trait::async_trait]
+impl c0mpute_net::RpcHandler for RecordRpc {
+    async fn handle(&self, _peer: c0mpute_net::PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+        let id = String::from_utf8(body).map_err(|_| "bad id".to_string())?;
+        let rec = self.0.record_for(id.trim()).await.ok_or("unknown site")?;
+        serde_json::to_vec(&rec).map_err(|e| e.to_string())
     }
 }
 
