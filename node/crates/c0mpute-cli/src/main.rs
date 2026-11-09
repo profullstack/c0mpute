@@ -40,7 +40,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use c0mpute_core::{
-    Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing, run_auction,
+    Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing,
     run_register,
 };
 use c0mpute_proto::Role;
@@ -596,6 +596,11 @@ enum TranscodeCmd {
         /// checked against the receipt). Without it only the hash is printed.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// How long to wait in the queue for a free worker before giving up,
+        /// in seconds (default 2 h). While waiting it prints
+        /// "queued, waiting for a worker (12 min)".
+        #[arg(long, default_value_t = 7200)]
+        max_wait: u64,
     },
     /// Manage transcode presets.
     Preset {
@@ -2624,6 +2629,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             external_ref,
             policy,
             output,
+            max_wait,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -2651,12 +2657,26 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             // Tiny grace period so peer discovery (mDNS) sees us.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let auction = JobAuction::new("ffmpeg.transcode", spec_inline)
-                .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
-                .with_max_price_usd(max_price.unwrap_or(1.0))
-                .with_external_ref(external_ref)
-                .with_policy(policy);
-            let outcome = run_auction(net.clone(), auction).await?;
+            // No worker free right now: wait in the queue (up to --max-wait)
+            // instead of failing.
+            let outcome = c0mpute_core::buyer::run_auction_queued(
+                net.clone(),
+                || {
+                    JobAuction::new("ffmpeg.transcode", spec_inline.clone())
+                        .with_required_capabilities(vec!["c0mpute:role:transcode".into()])
+                        .with_max_price_usd(max_price.unwrap_or(1.0))
+                        .with_external_ref(external_ref.clone())
+                        .with_policy(policy)
+                },
+                std::time::Duration::from_secs(max_wait),
+                |waited| {
+                    eprintln!(
+                        "queued, waiting for a worker ({})",
+                        c0mpute_core::buyer_queue::human(waited)
+                    )
+                },
+            )
+            .await?;
             println!("job_id        : {}", outcome.job_id);
             if let Some(r) = &outcome.external_ref {
                 println!("external_ref  : {r}");
@@ -4012,6 +4032,15 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                      re-run publish (same --name) if no copies appear",
                     c0mpute_core::hosting::TARGET_REPLICAS
                 );
+            }
+            // Some copies held = published (the network heals the rest);
+            // none held = nothing is serving the site yet, so fail loudly.
+            if copies == 0 {
+                eprintln!(
+                    "status:  not yet held by any hosting node after {wait_secs}s (exit 1); \
+                     re-run publish with the same --name"
+                );
+                std::process::exit(1);
             }
             Ok(())
         }

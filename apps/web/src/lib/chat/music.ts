@@ -54,6 +54,7 @@ export type NodeProgress = {
   stage_elapsed_s?: number;
   attempt?: number;
   detail?: string;
+  queue_position?: number;
 };
 
 const STAGES = ["starting", "finding_worker", "queued", "rendering", "fetching_result", "retrying", "done", "failed"];
@@ -73,6 +74,7 @@ export function sanitizeNodeProgress(v: unknown): NodeProgress | undefined {
     stage_elapsed_s: num("stage_elapsed_s"),
     attempt: num("attempt"),
     detail: str("detail", 200),
+    queue_position: num("queue_position"),
   };
 }
 
@@ -87,7 +89,8 @@ export function describeNodeProgress(p: NodeProgress): string {
     case "finding_worker":
       return `finding a c0mpute music worker${retry}`;
     case "queued":
-      return `every music worker is busy; queued ${mmss(p.stage_elapsed_s ?? 0)}`;
+      // The gateway holds the song (up to 2 h) until a music worker is free.
+      return `queued for a c0mpute music worker${p.queue_position ? ` (#${p.queue_position} in line)` : ""} · ${mmss(p.stage_elapsed_s ?? 0)}`;
     case "rendering": {
       const left = p.eta_s !== undefined ? Math.max(0, p.eta_s - (p.stage_elapsed_s ?? 0)) : undefined;
       const eta = left === undefined ? "" : left > 0 ? ` · ~${mmss(left)} left (node's estimate)` : " · past the node's estimate, still working";

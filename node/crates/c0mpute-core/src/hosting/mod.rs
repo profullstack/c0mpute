@@ -822,6 +822,37 @@ impl Hosting {
         self.announce_holding().await;
     }
 
+    /// A waiting publisher's self-heal step: re-gossip the record, re-announce
+    /// the manifest on the DHT, and, when the swarm has no peers left (a seed
+    /// or gateway went down), re-dial the bootstrap seeds. Every failure is
+    /// logged and skipped; nothing here aborts a publish.
+    pub async fn reannounce(&self, record: &SiteRecord) {
+        let net = &self.0.net;
+        if net.connected_peers().await.is_empty() {
+            let seeds = c0mpute_net::bootstrap::fetch_or_fallback(
+                c0mpute_net::bootstrap::DEFAULT_BOOTSTRAP_URL,
+                c0mpute_net::bootstrap::default_seeds(),
+            )
+            .await;
+            let mut dialed = 0;
+            for addr in seeds {
+                match net.dial(addr.clone()).await {
+                    Ok(()) => dialed += 1,
+                    Err(e) => {
+                        debug!(%addr, err = %e, "hosting: re-dial seed failed; trying the next")
+                    }
+                }
+            }
+            eprintln!("  no peers connected; re-dialed {dialed} bootstrap seed(s)");
+        }
+        self.regossip(record).await;
+        if let Ok(mh) = Hash::from_hex(&record.manifest)
+            && let Err(e) = net.announce(&mh).await
+        {
+            debug!(err = %e, "hosting: manifest re-announce failed (will retry)");
+        }
+    }
+
     /// Live holders of a site's current version.
     pub async fn holders(&self, site_id: &str) -> Vec<String> {
         self.0.map.read().await.holders(site_id)
@@ -1651,11 +1682,33 @@ pub struct MarketOptions {
 /// disks are live hosts (a hosting node announces once a minute).
 pub const GOSSIP_CHECK: Duration = Duration::from_secs(70);
 
+/// How long a publisher keeps retrying an unreachable d1sks before it
+/// publishes without preferred hosts.
+pub const D1SKS_RETRY: Duration = Duration::from_secs(30);
+
+/// Longest gap between a publisher's re-announcements while it waits for
+/// copies (the Fibonacci schedule grows to this and stays there).
+pub const REANNOUNCE_CAP: Duration = Duration::from_secs(60);
+
+/// How often a publisher checks the replica map while it waits.
+const COPY_POLL: Duration = Duration::from_secs(2);
+
 /// The d1sks hosting disks for `m`, checked against the live hosting gossip
 /// when `hosting` is given: disks that announced themselves are marked live
 /// and rank first. `Err` when d1sks cannot be read.
 pub async fn market_disks(m: &MarketOptions, hosting: Option<&Hosting>) -> Result<Vec<market::HostDisk>> {
-    let mut disks = market::query(&m.d1sks_url, &m.query).await?;
+    // d1sks can blip (a deploy, a gateway restart): retry with Fibonacci
+    // backoff for a short while before giving up on preferred hosts.
+    let mut disks = crate::backoff::retry_until(
+        Instant::now() + D1SKS_RETRY,
+        crate::backoff::Fibonacci::new(Duration::from_secs(8)),
+        |e: &anyhow::Error, next| match next {
+            Some(d) => eprintln!("d1sks: {e:#}; retrying in {}s", d.as_secs()),
+            None => debug!(err = %e, "d1sks: giving up"),
+        },
+        || market::query(&m.d1sks_url, &m.query),
+    )
+    .await?;
     if let Some(h) = hosting {
         let want: Vec<String> = disks.iter().map(|d| d.peer_id.clone()).collect();
         let live = h.wait_for_hosts(&want, GOSSIP_CHECK).await;
@@ -1754,14 +1807,24 @@ pub async fn publish_dir_with(
         record.size,
         record.site_id
     );
+    // Wait for copies, healing as we go: re-announce on a Fibonacci schedule
+    // (1, 1, 2, 3, 5, ... s, capped at REANNOUNCE_CAP) that starts over
+    // whenever a new copy shows up, so a stalled publish keeps knocking
+    // without hammering the mesh.
     let started = Instant::now();
     let mut copies = 0;
+    let mut schedule = crate::backoff::Fibonacci::new(REANNOUNCE_CAP);
+    let mut next_announce = started + schedule.next_delay();
     while started.elapsed() < wait {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        hosting.regossip(&record).await;
+        let left = wait.saturating_sub(started.elapsed());
+        tokio::time::sleep(COPY_POLL.min(left)).await;
         let holders = hosting.holders(&record.site_id).await;
         let others = holders.len();
         if others != copies {
+            if others > copies {
+                schedule.reset();
+                next_announce = Instant::now() + schedule.next_delay();
+            }
             copies = others;
             let paid = holders.iter().filter(|h| record.prefers(h)).count();
             if record.preferred_hosts.is_empty() {
@@ -1779,6 +1842,10 @@ pub async fn publish_dir_with(
         // but never past `wait`.
         if copies >= TARGET_REPLICAS && (paid_done || started.elapsed() > wait / 2) {
             break;
+        }
+        if Instant::now() >= next_announce {
+            hosting.reannounce(&record).await;
+            next_announce = Instant::now() + schedule.next_delay();
         }
     }
     Ok((record, copies))

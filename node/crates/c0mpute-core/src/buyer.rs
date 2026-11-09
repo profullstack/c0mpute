@@ -262,7 +262,12 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         workload = %auction.workload_type,
         "buyer: publishing offer"
     );
-    publish_json(&net, &topic, &offer).await?;
+    // An offer no peer could hear is an auction nobody bid on: report it the
+    // same way, so a queued caller waits and re-offers instead of failing.
+    if let Err(e) = publish_json(&net, &topic, &offer).await {
+        crate::auction_stats::record_auction(&auction.workload_type, 0);
+        return Err(AuctionFailure::NoBids(format!("the offer reached no peer: {e}")).into());
+    }
 
     // ── collect bids ────────────────────────────────────────────────
     let deadline = Instant::now() + auction.bid_window;
@@ -508,6 +513,39 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         winner.bidder_peer_id, auction.receipt_timeout
     ))
     .into())
+}
+
+/// [`run_auction`] that waits in a queue instead of failing when nobody
+/// bids: re-offers with the gateway's backoff ([`crate::buyer_queue`], 5 s
+/// doubling to 30 s) until a worker takes it or `max_wait` runs out, then
+/// fails with `no worker for <workload> within <max_wait>`. `make` builds
+/// each round's auction (a fresh job id each time); `on_wait` is told how
+/// long it has waited before each pause, for a "queued" line.
+pub async fn run_auction_queued(
+    net: Arc<Libp2pNetwork>,
+    make: impl Fn() -> JobAuction,
+    max_wait: Duration,
+    mut on_wait: impl FnMut(Duration),
+) -> Result<AuctionOutcome> {
+    let queue = crate::buyer_queue::QueueConfig::default();
+    let started = Instant::now();
+    let mut round = 0u32;
+    loop {
+        let auction = make();
+        let workload = auction.workload_type.clone();
+        match run_auction(net.clone(), auction).await {
+            Err(e) if matches!(e.downcast_ref::<AuctionFailure>(), Some(AuctionFailure::NoBids(_))) => {
+                let waited = started.elapsed();
+                if waited >= max_wait {
+                    bail!(crate::buyer_queue::expired_message(&workload, None, max_wait));
+                }
+                on_wait(waited);
+                sleep(queue.backoff(round, max_wait - waited)).await;
+                round += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Canary probe: publish an offer for `workload` exactly as a buyer would,

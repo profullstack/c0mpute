@@ -577,14 +577,6 @@ async fn attach_render_frames(
     Ok(result)
 }
 
-fn internal(error: anyhow::Error) -> ApiError {
-    tracing::warn!(err = %error, "jobs bridge operation failed");
-    ApiError(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        json!({ "error": "internal", "detail": "jobs bridge operation failed" }),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
