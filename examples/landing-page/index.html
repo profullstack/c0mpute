@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Future of Hosting</title>
+<meta name="description" content="Your website lives on a network of everyday computers, not a data center. Hosted on c0mpute, disks from d1sks, AI from Infernet.">
+<meta name="theme-color" content="#0f1a33">
+<meta property="og:title" content="The Future of Hosting">
+<meta property="og:description" content="Websites that live on everyone's computers. Three self-healing copies, any gateway serves them, no server of yours.">
+<meta property="og:image" content="img/hero.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fff8ec;
+    --bg-2: #ffeccc;
+    --ink: #1f2440;
+    --ink-soft: #4b5175;
+    --card: #ffffff;
+    --line: #f1dcb6;
+    --green: #2bb673;
+    --green-ink: #0d6b40;
+    --orange: #ff8a3d;
+    --purple: #7a5cff;
+    --blue: #2f8cff;
+    --shadow: 0 10px 0 -2px rgba(31, 36, 64, .10), 0 18px 40px rgba(31, 36, 64, .12);
+    --code-bg: #1f2440;
+    --code-ink: #e9f7ef;
+    --radius: 28px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1a33;
+      --bg-2: #18264a;
+      --ink: #f4f1ea;
+      --ink-soft: #b9c0dd;
+      --card: #1b2a52;
+      --line: #2b3d6e;
+      --green-ink: #7ff0b4;
+      --shadow: 0 10px 0 -2px rgba(0, 0, 0, .35), 0 18px 40px rgba(0, 0, 0, .35);
+      --code-bg: #0a1226;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1a33; --bg-2: #18264a; --ink: #f4f1ea; --ink-soft: #b9c0dd; --card: #1b2a52;
+    --line: #2b3d6e; --green-ink: #7ff0b4; --code-bg: #0a1226;
+    --shadow: 0 10px 0 -2px rgba(0, 0, 0, .35), 0 18px 40px rgba(0, 0, 0, .35);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 85% -10%, color-mix(in srgb, var(--orange) 22%, transparent), transparent 60%),
+      radial-gradient(900px 500px at -10% 20%, color-mix(in srgb, var(--purple) 16%, transparent), transparent 60%),
+      var(--bg);
+    background-color: var(--bg);
+    color: var(--ink);
+    font: 18px/1.6 "Nunito", system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+  h1, h2, h3 { font-family: "Fredoka", "Nunito", system-ui, sans-serif; line-height: 1.1; margin: 0 0 .5em; }
+  a { color: inherit; }
+  .wrap { width: min(1120px, 100% - 32px); margin-inline: auto; }
+
+  /* Nav */
+  nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 22px "Fredoka", sans-serif; text-decoration: none; }
+  .brand-dot { width: 34px; height: 34px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #a6ffd2, var(--green) 55%, var(--green-ink)); box-shadow: inset -4px -6px 0 rgba(0,0,0,.15); }
+  nav .links { display: flex; gap: 18px; flex-wrap: wrap; font-weight: 700; }
+  nav .links a { text-decoration: none; opacity: .8; }
+  nav .links a:hover { opacity: 1; }
+
+  /* Hero */
+  .hero { display: grid; grid-template-columns: 1.05fr 1fr; gap: 40px; align-items: center; padding: 30px 0 70px; }
+  .eyebrow { display: inline-block; background: var(--card); border: 2px solid var(--line); border-radius: 999px; padding: 6px 14px; font-weight: 800; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; color: var(--green-ink); box-shadow: var(--shadow); }
+  .hero h1 { font-size: clamp(44px, 7vw, 84px); margin-top: 18px; letter-spacing: -.01em; }
+  .hero h1 .pop { color: var(--orange); display: inline-block; transform: rotate(-3deg); }
+  .hero p.lead { font-size: clamp(18px, 2.2vw, 22px); color: var(--ink-soft); max-width: 34ch; }
+  .ctas { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 26px; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px; border-radius: 999px; font: 700 18px "Fredoka", sans-serif; text-decoration: none; border: 3px solid var(--ink); transition: transform .15s ease; }
+  .btn:hover { transform: translateY(-3px) rotate(-1deg); }
+  .btn.primary { background: var(--green); color: #06331f; box-shadow: 0 6px 0 var(--ink); }
+  .btn.ghost { background: var(--card); box-shadow: 0 6px 0 var(--ink); }
+  .art { position: relative; aspect-ratio: 3 / 2; border-radius: 36px; overflow: hidden; background: linear-gradient(160deg, #ffd59e, #ff9f6b 55%, #7a5cff); box-shadow: var(--shadow); border: 4px solid var(--card); }
+  .art img, .art svg { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .bob { animation: bob 4s ease-in-out infinite; }
+  @keyframes bob { 50% { transform: translateY(-10px); } }
+  @media (prefers-reduced-motion: reduce) { .bob, .btn { animation: none; transition: none; } }
+
+  /* Sections */
+  section { padding: 60px 0; }
+  .section-head { text-align: center; max-width: 720px; margin: 0 auto 40px; }
+  .section-head h2 { font-size: clamp(32px, 4.5vw, 52px); }
+  .section-head p { color: var(--ink-soft); font-size: 20px; margin: 0; }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; counter-reset: step; }
+  .step { background: var(--card); border: 2px solid var(--line); border-radius: var(--radius); padding: 28px; box-shadow: var(--shadow); position: relative; }
+  .step::before { counter-increment: step; content: counter(step); position: absolute; top: -18px; left: 24px; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font: 700 22px "Fredoka", sans-serif; background: var(--orange); color: #fff; border: 3px solid var(--card); }
+  .step h3 { font-size: 24px; margin-top: 10px; }
+  .step p { color: var(--ink-soft); margin: 0; }
+
+  .trio { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .product { background: var(--card); border: 2px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); display: grid; grid-template-rows: auto 1fr; }
+  .product .pic { aspect-ratio: 4 / 3; display: grid; place-items: center; }
+  .product .pic img, .product .pic svg { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .product .body { padding: 24px 26px 28px; display: flex; flex-direction: column; gap: 10px; }
+  .product h3 { font-size: 30px; margin: 0; }
+  .product .tag { font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: .05em; }
+  .product p { margin: 0; color: var(--ink-soft); }
+  .product ul { margin: 4px 0 0; padding-left: 20px; color: var(--ink-soft); }
+  .product a.more { margin-top: auto; font-weight: 800; text-decoration: none; }
+  .c0 .pic { background: linear-gradient(160deg, #b8ffd9, #2bb673); } .c0 .tag, .c0 a.more { color: var(--green-ink); }
+  .dk .pic { background: linear-gradient(160deg, #ffe0b8, #ff8a3d); } .dk .tag, .dk a.more { color: var(--orange); }
+  .ifn .pic { background: linear-gradient(160deg, #e2d9ff, #7a5cff); } .ifn .tag, .ifn a.more { color: var(--purple); }
+
+  /* Compare */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .col { border-radius: var(--radius); padding: 28px 30px; border: 2px solid var(--line); box-shadow: var(--shadow); }
+  .col.old { background: color-mix(in srgb, var(--card) 80%, #9aa3c7); }
+  .col.new { background: var(--card); border-color: var(--green); }
+  .col h3 { font-size: 26px; }
+  .col ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  .col li { display: flex; gap: 10px; align-items: baseline; }
+  .col li::before { font-weight: 800; flex: none; }
+  .col.old li::before { content: "✕"; color: #c0475f; }
+  .col.new li::before { content: "✓"; color: var(--green); }
+
+  /* Code */
+  .terminal { background: var(--code-bg); color: var(--code-ink); border-radius: var(--radius); padding: 26px 28px; box-shadow: var(--shadow); overflow-x: auto; border: 4px solid var(--card); }
+  .terminal .dots { display: flex; gap: 8px; margin-bottom: 16px; }
+  .terminal .dots i { width: 13px; height: 13px; border-radius: 50%; background: #ff6b6b; } .terminal .dots i:nth-child(2) { background: #ffd166; } .terminal .dots i:nth-child(3) { background: #2bb673; }
+  .terminal pre { margin: 0; font: 15px/1.8 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
+  .terminal .c { color: #8f9bc4; }
+  .terminal .p { color: #7ff0b4; user-select: none; }
+
+  /* Earn */
+  .earn { display: grid; grid-template-columns: 1fr 1.1fr; gap: 40px; align-items: center; background: linear-gradient(135deg, var(--bg-2), var(--card)); border: 2px solid var(--line); border-radius: 40px; padding: 44px; box-shadow: var(--shadow); }
+  .earn h2 { font-size: clamp(30px, 4vw, 46px); }
+  .earn p { color: var(--ink-soft); }
+
+  footer { padding: 50px 0 60px; color: var(--ink-soft); font-size: 15px; text-align: center; }
+  footer .ring { display: flex; justify-content: center; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; font-weight: 800; }
+  footer a { text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  @media (max-width: 900px) {
+    .hero, .earn, .compare { grid-template-columns: 1fr; }
+    .steps, .trio { grid-template-columns: 1fr; }
+    .earn { padding: 28px; }
+    nav .links { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="https://c0mpute.com"><span class="brand-dot" aria-hidden="true"></span>c0mpute</a>
+    <div class="links">
+      <a href="#how">How it works</a>
+      <a href="#family">c0mpute · d1sks · Infernet</a>
+      <a href="#start">Start</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <span class="eyebrow">Hosted on the c0mpute network</span>
+      <h1>The future of <span class="pop">hosting</span> is everyone's computer.</h1>
+      <p class="lead">This page has no server. It lives as three self-healing copies on everyday machines, and any gateway on the network can serve it.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://c0mpute.com/getting-started">Host your site</a>
+        <a class="btn ghost" href="https://d1sks.pwa.pit.world">Browse disks</a>
+      </div>
+    </div>
+    <div class="art bob" id="hero-art">
+      <svg viewBox="0 0 600 400" role="img" aria-label="A cheerful round robot carrying a glowing website across a town of friendly computer houses">
+        <defs>
+          <radialGradient id="sun" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fff6c2"/><stop offset="1" stop-color="#ffb347" stop-opacity="0"/></radialGradient>
+          <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9fff3"/><stop offset="1" stop-color="#9be8c0"/></linearGradient>
+          <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d9f8ff"/></linearGradient>
+        </defs>
+        <circle cx="470" cy="90" r="120" fill="url(#sun)"/>
+        <path d="M0 300 Q150 250 300 290 T600 280 V400 H0Z" fill="#6c4fd6" opacity=".55"/>
+        <path d="M0 330 Q170 290 320 325 T600 315 V400 H0Z" fill="#4d38a8"/>
+        <!-- houses: little computers -->
+        <g>
+          <rect x="40" y="250" width="90" height="70" rx="14" fill="#ffd166"/><rect x="55" y="262" width="60" height="38" rx="8" fill="#1f2440"/><circle cx="74" cy="281" r="5" fill="#7ff0b4"/><circle cx="96" cy="281" r="5" fill="#7ff0b4"/><path d="M75 291 Q85 297 95 291" stroke="#7ff0b4" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <rect x="470" y="245" width="100" height="78" rx="16" fill="#ff8fab"/><rect x="486" y="258" width="68" height="42" rx="9" fill="#1f2440"/><circle cx="508" cy="279" r="5" fill="#7ff0b4"/><circle cx="532" cy="279" r="5" fill="#7ff0b4"/><path d="M509 290 Q520 297 531 290" stroke="#7ff0b4" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <rect x="150" y="272" width="70" height="56" rx="12" fill="#8ecbff"/><rect x="162" y="282" width="46" height="30" rx="7" fill="#1f2440"/><circle cx="177" cy="297" r="4" fill="#7ff0b4"/><circle cx="193" cy="297" r="4" fill="#7ff0b4"/>
+        </g>
+        <!-- glowing links between houses -->
+        <path d="M85 250 Q200 160 300 205 T520 245" stroke="#7ff0b4" stroke-width="4" fill="none" stroke-dasharray="2 12" stroke-linecap="round"/>
+        <!-- robot -->
+        <g transform="translate(250 120)">
+          <ellipse cx="60" cy="205" rx="62" ry="12" fill="#000" opacity=".18"/>
+          <rect x="18" y="70" width="84" height="100" rx="40" fill="url(#body)" stroke="#1f2440" stroke-width="5"/>
+          <circle cx="60" cy="58" r="50" fill="url(#body)" stroke="#1f2440" stroke-width="5"/>
+          <rect x="24" y="36" width="72" height="40" rx="20" fill="#1f2440"/>
+          <circle cx="45" cy="56" r="9" fill="#7ff0b4"/><circle cx="75" cy="56" r="9" fill="#7ff0b4"/>
+          <circle cx="48" cy="52" r="3" fill="#fff"/><circle cx="78" cy="52" r="3" fill="#fff"/>
+          <path d="M48 92 Q60 102 72 92" stroke="#1f2440" stroke-width="5" fill="none" stroke-linecap="round"/>
+          <line x1="60" y1="8" x2="60" y2="-12" stroke="#1f2440" stroke-width="5"/><circle cx="60" cy="-16" r="9" fill="#ff8a3d" stroke="#1f2440" stroke-width="4"/>
+          <rect x="28" y="168" width="22" height="30" rx="10" fill="#9be8c0" stroke="#1f2440" stroke-width="5"/><rect x="70" y="168" width="22" height="30" rx="10" fill="#9be8c0" stroke="#1f2440" stroke-width="5"/>
+          <!-- carried web page -->
+          <g transform="translate(95 40) rotate(8)">
+            <rect x="0" y="0" width="120" height="90" rx="12" fill="url(#page)" stroke="#1f2440" stroke-width="5"/>
+            <rect x="0" y="0" width="120" height="20" rx="10" fill="#2f8cff" stroke="#1f2440" stroke-width="5"/>
+            <rect x="14" y="32" width="70" height="9" rx="4" fill="#ff8a3d"/><rect x="14" y="48" width="92" height="7" rx="3" fill="#b9c0dd"/><rect x="14" y="61" width="80" height="7" rx="3" fill="#b9c0dd"/>
+          </g>
+          <path d="M100 110 Q125 100 120 80" stroke="#1f2440" stroke-width="10" fill="none" stroke-linecap="round"/>
+        </g>
+      </svg>
+    </div>
+  </header>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>How a site lives on the network</h2>
+      <p>No hosting account, no server to babysit, no single point of failure.</p>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <h3>Publish a folder</h3>
+        <p><code>c0mpute hosting publish ./public</code> signs your site with your own key and splits it into content-addressed chunks. Only you can publish new versions.</p>
+      </div>
+      <div class="step">
+        <h3>Three copies, self-healing</h3>
+        <p>Hosting nodes keep at least three copies. If a machine goes away, another picks up a copy within minutes. Every chunk is checked against its hash.</p>
+      </div>
+      <div class="step">
+        <h3>Any gateway serves it</h3>
+        <p>Every gateway on the network serves every site, fetching from the fastest copy. Point a Moshpit name or your own domain at it and you are live.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="family">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Meet the crew</h2>
+      <p>Three networks, one idea: the computers people already own can do the work data centers charge for.</p>
+    </div>
+    <div class="trio">
+      <article class="product c0">
+        <div class="pic" id="art-c0">
+          <svg viewBox="0 0 400 300" role="img" aria-label="Friendly computer characters holding hands in a ring">
+            <circle cx="200" cy="150" r="95" fill="none" stroke="#0d6b40" stroke-width="5" stroke-dasharray="4 14" stroke-linecap="round"/>
+            <g stroke="#1f2440" stroke-width="5">
+              <rect x="150" y="30" width="100" height="74" rx="18" fill="#fff"/><rect x="40" y="150" width="100" height="74" rx="18" fill="#fff"/><rect x="260" y="150" width="100" height="74" rx="18" fill="#fff"/>
+            </g>
+            <g fill="#1f2440"><circle cx="185" cy="62" r="7"/><circle cx="215" cy="62" r="7"/><circle cx="75" cy="182" r="7"/><circle cx="105" cy="182" r="7"/><circle cx="295" cy="182" r="7"/><circle cx="325" cy="182" r="7"/></g>
+            <g stroke="#1f2440" stroke-width="5" fill="none" stroke-linecap="round"><path d="M186 80 Q200 90 214 80"/><path d="M76 200 Q90 210 104 200"/><path d="M296 200 Q310 210 324 200"/></g>
+          </svg>
+        </div>
+        <div class="body">
+          <span class="tag">The network</span>
+          <h3>c0mpute</h3>
+          <p>A peer to peer market for compute. Nodes run jobs and keep sites alive, and buyers pay per job with crypto.</p>
+          <ul>
+            <li>Hosting, storage and gateways</li>
+            <li>Images, music, speech, transcoding</li>
+            <li>No coordinator in the path</li>
+          </ul>
+          <a class="more" href="https://c0mpute.com">c0mpute.com →</a>
+        </div>
+      </article>
+      <article class="product dk">
+        <div class="pic" id="art-dk">
+          <svg viewBox="0 0 400 300" role="img" aria-label="A happy hard drive character holding three glowing copies of a page">
+            <rect x="120" y="70" width="160" height="190" rx="26" fill="#fff" stroke="#1f2440" stroke-width="6"/>
+            <circle cx="200" cy="200" r="38" fill="#ffe0b8" stroke="#1f2440" stroke-width="6"/><circle cx="200" cy="200" r="8" fill="#1f2440"/>
+            <circle cx="172" cy="118" r="10" fill="#1f2440"/><circle cx="228" cy="118" r="10" fill="#1f2440"/><circle cx="175" cy="114" r="3" fill="#fff"/><circle cx="231" cy="114" r="3" fill="#fff"/>
+            <path d="M180 140 Q200 154 220 140" stroke="#1f2440" stroke-width="6" fill="none" stroke-linecap="round"/>
+            <g stroke="#1f2440" stroke-width="5"><rect x="30" y="40" width="60" height="76" rx="10" fill="#fff6c2"/><rect x="40" y="130" width="60" height="76" rx="10" fill="#fff6c2"/><rect x="310" y="80" width="60" height="76" rx="10" fill="#fff6c2"/></g>
+            <g stroke="#1f2440" stroke-width="8" stroke-linecap="round" fill="none"><path d="M120 150 Q95 140 92 120"/><path d="M280 150 Q305 140 310 125"/></g>
+          </svg>
+        </div>
+        <div class="body">
+          <span class="tag">The disk market</span>
+          <h3>d1sks</h3>
+          <p>Where c0mpute disks list their space and price. Publish with <code>--disks auto</code> to pick preferred hosts that replicate first and prove they still hold your chunks.</p>
+          <ul>
+            <li>Priced per GiB-month (from $0.004)</li>
+            <li>Random chunk challenges, signed receipts</li>
+            <li>Free hosting stays free</li>
+          </ul>
+          <a class="more" href="https://d1sks.pwa.pit.world">Browse d1sks →</a>
+        </div>
+      </article>
+      <article class="product ifn">
+        <div class="pic" id="art-ifn">
+          <svg viewBox="0 0 400 300" role="img" aria-label="A friendly glowing brain wearing headphones, connected to many small laptops">
+            <g stroke="#e2d9ff" stroke-width="3" stroke-dasharray="2 9" stroke-linecap="round"><path d="M200 140 L70 240"/><path d="M200 140 L330 240"/><path d="M200 140 L200 270"/><path d="M200 140 L60 90"/><path d="M200 140 L340 90"/></g>
+            <g stroke="#1f2440" stroke-width="4" fill="#fff"><rect x="40" y="225" width="60" height="38" rx="8"/><rect x="300" y="225" width="60" height="38" rx="8"/><rect x="170" y="252" width="60" height="38" rx="8"/><rect x="30" y="72" width="60" height="38" rx="8"/><rect x="310" y="72" width="60" height="38" rx="8"/></g>
+            <path d="M140 140 C120 80 180 50 205 70 C230 45 290 80 265 140 C285 175 240 205 205 190 C170 205 120 180 140 140Z" fill="#f1b6ff" stroke="#1f2440" stroke-width="6"/>
+            <path d="M205 75 C200 110 210 150 205 185" stroke="#c77dff" stroke-width="5" fill="none"/>
+            <circle cx="182" cy="128" r="8" fill="#1f2440"/><circle cx="228" cy="128" r="8" fill="#1f2440"/>
+            <path d="M190 152 Q205 164 220 152" stroke="#1f2440" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <path d="M125 125 Q125 45 205 42 Q285 45 285 125" stroke="#1f2440" stroke-width="8" fill="none"/>
+            <rect x="110" y="115" width="26" height="44" rx="12" fill="#7a5cff" stroke="#1f2440" stroke-width="5"/><rect x="274" y="115" width="26" height="44" rx="12" fill="#7a5cff" stroke="#1f2440" stroke-width="5"/>
+          </svg>
+        </div>
+        <div class="body">
+          <span class="tag">The AI network</span>
+          <h3>Infernet</h3>
+          <p>Open models served by the same kind of machines: chat, coding models, transcription, voices, music and video, with an OpenAI-style API.</p>
+          <ul>
+            <li>Qwen Coder, Devstral, Whisper, Kokoro</li>
+            <li>Every node pulls the house models</li>
+            <li>Pay per request, no subscription</li>
+          </ul>
+          <a class="more" href="https://infernetprotocol.com">infernetprotocol.com →</a>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Old hosting vs. the network</h2>
+    </div>
+    <div class="compare">
+      <div class="col old">
+        <h3>A server in a data center</h3>
+        <ul>
+          <li>One box, one region, one bill</li>
+          <li>Goes down when that box goes down</li>
+          <li>Your provider can switch you off</li>
+          <li>You patch it, scale it, renew it</li>
+        </ul>
+      </div>
+      <div class="col new">
+        <h3>A site on c0mpute</h3>
+        <ul>
+          <li>At least three copies on independent machines</li>
+          <li>Heals itself when a host leaves</li>
+          <li>Signed by your key, served by anyone</li>
+          <li>Free by default, pennies for preferred hosts</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Put a site on the network in a minute</h2>
+      <p>This exact page was published with these commands.</p>
+    </div>
+    <div class="terminal">
+      <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+<pre><span class="c"># install the c0mpute node and CLI</span>
+<span class="p">$ </span>curl -fsSL https://c0mpute.com/install.sh | sh
+
+<span class="c"># publish a folder: prints your site id, keeps 3 network copies</span>
+<span class="p">$ </span>c0mpute hosting publish ./public --name my-site
+
+<span class="c"># optional: pay preferred hosts from the d1sks market</span>
+<span class="p">$ </span>c0mpute hosting publish ./public --name my-site --disks auto
+
+<span class="c"># open it on any gateway</span>
+<span class="p">$ </span>open https://gateway.c0mpute.com/s/&lt;site_id&gt;/
+
+<span class="c"># give it a Moshpit name, no server of yours</span>
+<span class="p">$ </span>moshcode name c0mpute my-site.indie &lt;site_id&gt;</pre>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="earn">
+      <div class="art" id="art-earn" style="aspect-ratio: 4 / 3">
+        <svg viewBox="0 0 400 300" role="img" aria-label="A laptop character resting happily while its spare space hosts websites">
+          <rect x="0" y="0" width="400" height="300" fill="#ffd59e"/>
+          <rect x="90" y="70" width="220" height="140" rx="18" fill="#fff" stroke="#1f2440" stroke-width="6"/>
+          <rect x="60" y="208" width="280" height="26" rx="12" fill="#b9c0dd" stroke="#1f2440" stroke-width="6"/>
+          <path d="M160 130 Q175 118 190 130" stroke="#1f2440" stroke-width="6" fill="none" stroke-linecap="round"/><path d="M210 130 Q225 118 240 130" stroke="#1f2440" stroke-width="6" fill="none" stroke-linecap="round"/>
+          <path d="M175 160 Q200 182 225 160" stroke="#1f2440" stroke-width="6" fill="none" stroke-linecap="round"/>
+          <g font-family="Fredoka, sans-serif" font-weight="700" fill="#7a5cff"><text x="300" y="60" font-size="28">z</text><text x="322" y="40" font-size="22">z</text><text x="340" y="24" font-size="16">z</text></g>
+          <g fill="#2bb673"><circle cx="40" cy="60" r="10"/><circle cx="60" cy="40" r="7"/><circle cx="350" cy="250" r="9"/></g>
+        </svg>
+      </div>
+      <div>
+        <h2>Your spare disk can host the web</h2>
+        <p>Every c0mpute node can keep copies of sites and list its space on d1sks. Install the node, leave it running, and your idle disk and CPU become part of the network.</p>
+        <p>Set your own price per GiB-month. Host payouts settle through CoinPay once settlement is switched on for the network; until then the receipts are recorded as a dry run.</p>
+        <div class="ctas">
+          <a class="btn primary" href="https://c0mpute.com/getting-started">Run a node</a>
+          <a class="btn ghost" href="https://c0mpute.com/nodes">See the nodes</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="ring">
+      <a href="https://rssamplifier.com/ring/profullstack/previous">← Previous</a>
+      <a href="https://rssamplifier.com/ring/profullstack">Profullstack ring</a>
+      <a href="https://rssamplifier.com/ring/profullstack/next">Next →</a>
+    </div>
+    <p>Served from the c0mpute network: content-addressed chunks on hosting nodes, no origin server. Part of the Profullstack network.</p>
+  </div>
+</footer>
+
+<script>
+  // Swap in network-generated art when it was published alongside the page.
+  for (const [id, src] of [["hero-art", "img/hero.png"], ["art-dk", "img/disks.png"], ["art-ifn", "img/brain.png"]]) {
+    const img = new Image();
+    img.alt = document.querySelector("#" + id + " svg")?.getAttribute("aria-label") || "";
+    img.onload = () => { const box = document.getElementById(id); box.replaceChildren(img); };
+    img.src = src;
+  }
+</script>
+</body>
+</html>
