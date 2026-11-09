@@ -426,8 +426,8 @@ enum WorkerCmd {
     /// Start the worker daemon and accept jobs.
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
-        /// verifier, workflow-step, video, diffusion. Default: the config's
-        /// roles plus tts, stt, workflow-step and diffusion.
+        /// verifier, workflow-step, video, diffusion, music. Default: the config's
+        /// roles plus tts, stt, workflow-step, diffusion and music.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -1551,6 +1551,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Stt,
                     Role::WorkflowStep,
                     Role::Diffusion,
+                    Role::Music,
                     Role::Crawl,
                     Role::Hosting,
                     Role::Ocr,
@@ -1590,7 +1591,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if default_speech_roles {
                 eprintln!(
-                    "TTS, STT, workflow-step and diffusion (CPU images, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
+                    "TTS, STT, workflow-step, diffusion and music (CPU images and songs, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
                 );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
@@ -3911,6 +3912,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         "video" => Some(Role::Video),
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
+        "music" | "song" | "songs" => Some(Role::Music),
         "crawl" | "fetch" => Some(Role::Crawl),
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),
