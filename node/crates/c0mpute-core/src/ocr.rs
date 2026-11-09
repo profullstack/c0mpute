@@ -6,9 +6,12 @@
 //! a node advertises `c0mpute:role:ocr` only when `tesseract` answers, and bids
 //! on a PDF or a language only when it can actually serve it.
 //!
-//! The input travels like `stt.transcribe` audio: the buyer stores the bytes as
-//! a content-addressed chunk and announces it, the spec names the hash and the
-//! buyer's peer id, and the worker fetches and verifies the bytes by hash.
+//! The input travels by hash: the buyer stores it as content-addressed
+//! [`crate::pieces::INPUT_PIECE_BYTES`] pieces and announces each, the spec
+//! names the whole hash (plus `input_size` and `input_pieces` when there is
+//! more than one piece) and the buyer's peer id, and the worker fetches and
+//! verifies every piece and the whole. A spec with only `input_hash` (a
+//! one-piece input, or an older buyer) is fetched as a single chunk.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,7 +21,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::{JobOffer, JobStatus};
 use c0mpute_net::{Libp2pNetwork, Network};
-use c0mpute_proto::{ChunkRequest, Hash};
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,6 +28,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::pieces::InputRef;
 use crate::runner::{AcceptedJob, WorkerLoad, cleanup_job_dir, publish_receipt, safe_job_dir};
 
 pub const WORKLOAD: &str = "ocr.extract";
@@ -46,14 +49,21 @@ pub const FORMATS: &[&str] = &["png", "jpg", "tiff", "webp", "pdf"];
 const PDF_DPI: &str = "300";
 const PAGE_TIMEOUT: Duration = Duration::from_secs(180);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(300);
-const INPUT_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What a buyer asks for.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OcrSpec {
     pub v: u32,
-    /// Content hash of the input chunk, already announced by its holder.
+    /// Content hash of the whole input, already announced by its holder
+    /// (as one chunk, or as the pieces below).
     pub input_hash: String,
+    /// Input size in bytes; present with `input_pieces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_size: Option<u64>,
+    /// Hashes of the input's [`crate::pieces::INPUT_PIECE_BYTES`] pieces, in
+    /// order. Absent: `input_hash` is a single chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_pieces: Option<Vec<String>>,
     /// Peer that holds the input (normally the buyer). Without it the worker
     /// looks the hash up on the DHT.
     #[serde(default)]
@@ -67,6 +77,19 @@ pub struct OcrSpec {
 
 fn default_lang() -> String {
     DEFAULT_LANG.to_string()
+}
+
+impl OcrSpec {
+    /// The input as a checked [`InputRef`].
+    pub fn input(&self) -> std::result::Result<InputRef, String> {
+        InputRef::parse(
+            "input",
+            &self.input_hash,
+            self.input_size,
+            self.input_pieces.as_deref(),
+            MAX_INPUT_BYTES,
+        )
+    }
 }
 
 /// `[a-z_+]{3,32}` with every `+`-separated part non-empty: Tesseract's
@@ -86,8 +109,7 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<OcrSpec, String> {
     if s.v != 1 {
         return Err(format!("unsupported ocr.extract spec version {}", s.v));
     }
-    Hash::from_hex(&s.input_hash)
-        .map_err(|_| "input_hash must be a hex content hash".to_string())?;
+    s.input()?;
     if let Some(peer) = s.input_provider_peer_id.as_deref() {
         peer.parse::<c0mpute_net::PeerId>()
             .map_err(|_| "input_provider_peer_id is not a peer id".to_string())?;
@@ -450,34 +472,30 @@ pub fn spawn_ocr_runner(
     tx
 }
 
+/// Fetch and verify a spec's input from its holder (pieces or one chunk).
+pub async fn fetch_input(net: &Arc<Libp2pNetwork>, spec: &OcrSpec) -> Result<Vec<u8>> {
+    let input = spec.input().map_err(anyhow::Error::msg)?;
+    let provider = spec
+        .input_provider_peer_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .context("invalid input provider peer id")?;
+    input
+        .fetch(net, provider, MAX_INPUT_BYTES)
+        .await
+        .context("fetch the OCR input (maximum 32 MiB)")
+}
+
 async fn run_ocr_job(
-    net: &Libp2pNetwork,
+    net: &Arc<Libp2pNetwork>,
     store: &ChunkStore,
     cache_root: &Path,
     job: &AcceptedJob,
 ) -> Result<String> {
     let spec = crate::workflow::resolve_spec(net, job).await?;
     let spec = parse_spec(&spec).map_err(anyhow::Error::msg)?;
-    let input_hash = Hash::from_hex(&spec.input_hash).context("invalid input hash")?;
-    let request = ChunkRequest {
-        chunk_hash: input_hash,
-        shard_index: None,
-    };
-    let fetch = async {
-        match spec.input_provider_peer_id.as_deref() {
-            Some(peer) => {
-                let peer = peer.parse().context("invalid input provider peer id")?;
-                net.fetch_from_peer(peer, &request).await
-            }
-            None => net.fetch(&request).await,
-        }
-    };
-    let input = tokio::time::timeout(INPUT_FETCH_TIMEOUT, fetch)
-        .await
-        .context("timed out fetching the OCR input")??;
-    if Hash::of(&input) != input_hash || input.is_empty() || input.len() > MAX_INPUT_BYTES {
-        bail!("OCR input hash or size is invalid (maximum 32 MiB)");
-    }
+    let input = fetch_input(net, &spec).await?;
     if detect_format(&input) != Some(spec.format.as_str()) {
         bail!("OCR input is not the {} the spec declared", spec.format);
     }
@@ -495,6 +513,7 @@ async fn run_ocr_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use c0mpute_proto::Hash;
 
     fn hash() -> String {
         Hash::of(b"x").to_hex()
@@ -533,6 +552,23 @@ mod tests {
             )
             .is_err()
         );
+        // Pieces: size and list together, the count matching the size.
+        let two = json!([hash(), hash()]);
+        let big = crate::pieces::INPUT_PIECE_BYTES + 1;
+        assert!(
+            parse_spec(&json!({"v":1,"input_hash":hash(),"format":"png","input_size":big,"input_pieces":two}))
+                .is_ok()
+        );
+        assert!(
+            parse_spec(&json!({"v":1,"input_hash":hash(),"format":"png","input_size":big,"input_pieces":[hash()]}))
+                .unwrap_err()
+                .contains("pieces")
+        );
+        assert!(
+            parse_spec(&json!({"v":1,"input_hash":hash(),"format":"png","input_size":MAX_INPUT_BYTES + 1,"input_pieces":two}))
+                .is_err()
+        );
+        assert!(parse_spec(&json!({"v":1,"input_hash":hash(),"format":"png","input_size":5})).is_err());
         let peer = c0mpute_net::PeerId::random().to_base58();
         assert!(
             parse_spec(&json!({"v":1,"input_hash":hash(),"format":"pdf","lang":"eng+deu","input_provider_peer_id":peer}))
@@ -590,6 +626,8 @@ mod tests {
         let spec = |format: &str, lang: &str| OcrSpec {
             v: 1,
             input_hash: hash(),
+            input_size: None,
+            input_pieces: None,
             input_provider_peer_id: None,
             format: format.into(),
             lang: lang.into(),

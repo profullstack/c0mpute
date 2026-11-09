@@ -2825,14 +2825,17 @@ async fn run_ocr(
         ocr::WORKLOAD,
         Some(bytes),
         |blob| {
-            let (hash, peer) = blob.unwrap_or_default();
-            serde_json::json!({
+            let (pieces, peer) = blob.expect("the document was stored");
+            let mut spec = serde_json::json!({
                 "v": 1,
-                "input_hash": hash,
                 "input_provider_peer_id": peer,
                 "format": format,
                 "lang": lang,
-            })
+            });
+            if let Some(obj) = spec.as_object_mut() {
+                obj.extend(pieces.spec_fields("input"));
+            }
+            spec
         },
         max_price,
         std::time::Duration::from_secs(timeout_secs.clamp(10, 1800)),

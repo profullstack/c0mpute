@@ -58,6 +58,12 @@ async fn wait_for_listen(net: &Libp2pNetwork) -> libp2p::Multiaddr {
 
 /// A one-page PDF with `line` set in 36pt Helvetica.
 fn text_pdf(line: &str) -> Vec<u8> {
+    padded_pdf(line, 0)
+}
+
+/// [`text_pdf`] with about `pad` bytes of comment lines after the header, so
+/// the document is big without changing what it shows.
+fn padded_pdf(line: &str, pad: usize) -> Vec<u8> {
     let content = format!("BT /F1 36 Tf 72 700 Td ({line}) Tj ET");
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
@@ -67,6 +73,17 @@ fn text_pdf(line: &str) -> Vec<u8> {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
     ];
     let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut x: u32 = 0x1234_5678;
+    while pdf.len() < pad {
+        pdf.push(b'%');
+        for _ in 0..1023 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            pdf.push(b'!' + (x % 90) as u8);
+        }
+        pdf.push(b'\n');
+    }
     let mut offsets = Vec::new();
     for (i, body) in objects.iter().enumerate() {
         offsets.push(pdf.len());
@@ -129,6 +146,7 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
     let pdf = text_pdf("INVOICE 7731 PAID");
     let hash = buyer_store.put(&pdf).await.unwrap();
     buyer.announce(&hash).await.unwrap();
+    let buyer_store_for_big = buyer_store.clone();
     let bridge = JobsBridge::new(
         buyer.clone(),
         buyer_store,
@@ -173,4 +191,33 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("no_bids") || err.contains("timeout"), "{err}");
+
+    // A 12 MiB document: far over one network message, so it travels as
+    // pieces (stored the way `/v1/ocr` and `c0mpute ocr` store it).
+    let big = padded_pdf("LEDGER 5150 BIG", 12 * 1024 * 1024);
+    assert!(big.len() > 12 * 1024 * 1024 && big.len() < ocr::MAX_INPUT_BYTES);
+    let stored = c0mpute_core::pieces::put_bytes_pieces(
+        &buyer,
+        &buyer_store_for_big,
+        &big,
+        c0mpute_core::pieces::INPUT_PIECE_BYTES,
+    )
+    .await
+    .unwrap();
+    assert!(stored.pieces.len() > 1);
+    let mut spec = json!({
+        "v": 1,
+        "input_provider_peer_id": buyer.peer_id().to_base58(),
+        "format": "pdf",
+        "lang": "eng",
+    });
+    spec.as_object_mut()
+        .unwrap()
+        .extend(stored.spec_fields("input"));
+    let out = bridge
+        .submit_once(ocr::WORKLOAD, spec, Duration::from_secs(180))
+        .await
+        .expect("12 MiB ocr job");
+    let text = out["result"]["text"].as_str().unwrap().to_uppercase();
+    assert!(text.contains("LEDGER") && text.contains("5150"), "{text}");
 }

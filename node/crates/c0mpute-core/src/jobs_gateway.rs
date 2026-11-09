@@ -202,21 +202,30 @@ pub async fn submit_once(workload: &str, spec: Value, max_price_usd: f64, timeou
 }
 
 /// [`submit_once`] for a job that reads an input blob (`c0mpute ocr`): the
-/// buyer stores and announces `input` first, then `build_spec` gets the
-/// blob's hash and this buyer's peer id (the provider the worker fetches from).
+/// buyer stores and announces `input` first, as
+/// [`crate::pieces::INPUT_PIECE_BYTES`] pieces, then `build_spec` gets the
+/// stored pieces and this buyer's peer id (the provider the worker fetches
+/// from). [`crate::pieces::Pieces::spec_fields`] turns the pieces into spec
+/// fields.
 pub async fn submit_once_with_input(
     workload: &str,
     input: Option<Vec<u8>>,
-    build_spec: impl FnOnce(Option<(String, String)>) -> Value,
+    build_spec: impl FnOnce(Option<(crate::pieces::Pieces, String)>) -> Value,
     max_price_usd: f64,
     timeout: Duration,
 ) -> Result<Value> {
     let supervisor = Supervisor::boot_buyer(Config::default()).await?;
     let blob = match input {
         Some(bytes) => {
-            let hash = supervisor.store.put(&bytes).await.context("store job input")?;
-            supervisor.libp2p.announce(&hash).await.context("announce job input")?;
-            Some((hash.to_hex(), supervisor.libp2p.peer_id().to_base58()))
+            let pieces = crate::pieces::put_bytes_pieces(
+                &supervisor.libp2p,
+                &supervisor.store,
+                &bytes,
+                crate::pieces::INPUT_PIECE_BYTES,
+            )
+            .await
+            .context("store job input")?;
+            Some((pieces, supervisor.libp2p.peer_id().to_base58()))
         }
         None => None,
     };

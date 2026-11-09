@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use c0mpute_net::topics::JobStatus;
 use c0mpute_net::{Libp2pNetwork, Network};
-use c0mpute_proto::{ChunkRequest, Hash};
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -80,9 +79,17 @@ pub struct VideoJobInline {
     pub prompt: String,
     #[serde(default)]
     pub negative_prompt: String,
-    /// img2vid only: content-addressed conditioning image.
+    /// img2vid only: content hash of the whole conditioning image (one
+    /// chunk, or the pieces below).
     #[serde(default)]
     pub image_hash: Option<String>,
+    /// Image size in bytes; present with `image_pieces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<u64>,
+    /// Hashes of the image's [`crate::pieces::INPUT_PIECE_BYTES`] pieces,
+    /// in order. Absent: `image_hash` is a single chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pieces: Option<Vec<String>>,
     /// Peer holding `image_hash`, when the buyer knows it.
     #[serde(default)]
     pub image_provider_peer_id: Option<String>,
@@ -124,6 +131,19 @@ fn default_image_format() -> String {
 }
 
 impl VideoJobInline {
+    /// The conditioning image as a checked input, when there is one.
+    pub fn image_input(&self) -> Option<std::result::Result<crate::pieces::InputRef, String>> {
+        self.image_hash.as_deref().map(|hash| {
+            crate::pieces::InputRef::parse(
+                "image",
+                hash,
+                self.image_size,
+                self.image_pieces.as_deref(),
+                MAX_IMAGE_BYTES,
+            )
+        })
+    }
+
     /// Reject anything the runner would reject, plus anything that would make
     /// the container argv wrong. `workload` decides whether an image is
     /// required.
@@ -170,11 +190,16 @@ impl VideoJobInline {
         match workload {
             WORKLOAD_TXT2VID => {}
             WORKLOAD_IMG2VID => {
-                if self.image_hash.is_none() {
-                    return Err("video.img2vid needs an image_hash".into());
+                match self.image_input() {
+                    None => return Err("video.img2vid needs an image_hash".into()),
+                    Some(Err(e)) => return Err(e),
+                    Some(Ok(_)) => {}
                 }
             }
             other => return Err(format!("unsupported workload {other}")),
+        }
+        if self.image_hash.is_none() && (self.image_size.is_some() || self.image_pieces.is_some()) {
+            return Err("image_size and image_pieces need an image_hash".into());
         }
         if let Some(scale) = self.guidance_scale {
             if !(0.0..=20.0).contains(&scale) || !scale.is_finite() {
@@ -405,7 +430,7 @@ pub fn spawn_video_runner(
 }
 
 async fn run_video_job(
-    net: &Libp2pNetwork,
+    net: &Arc<Libp2pNetwork>,
     store: &ChunkStore,
     cache_root: &Path,
     workload: &str,
@@ -429,23 +454,19 @@ async fn run_video_job(
 
     // img2vid: the conditioning image comes out of the chunk store, verified
     // against its hash, and lands in the job dir under a bare filename.
-    let image_name = match inline.image_hash.as_deref() {
-        Some(hex) => {
-            let hash = Hash::from_hex(hex).context("invalid image hash")?;
-            let request = ChunkRequest {
-                chunk_hash: hash,
-                shard_index: None,
-            };
-            let bytes = match inline.image_provider_peer_id.as_deref() {
-                Some(peer) => {
-                    let peer = peer.parse().context("invalid image provider peer id")?;
-                    net.fetch_from_peer(peer, &request).await?
-                }
-                None => net.fetch(&request).await?,
-            };
-            if Hash::of(&bytes) != hash || bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-                bail!("conditioning image hash or size is invalid (maximum 32 MiB)");
-            }
+    let image_name = match inline.image_input() {
+        Some(input) => {
+            let input = input.map_err(anyhow::Error::msg)?;
+            let provider = inline
+                .image_provider_peer_id
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("invalid image provider peer id")?;
+            let bytes = input
+                .fetch(net, provider, MAX_IMAGE_BYTES)
+                .await
+                .context("fetch the conditioning image (maximum 32 MiB)")?;
             let name = format!("input.{}", inline.image_format);
             fs::write(job_dir.join(&name), &bytes).await?;
             Some(name)
@@ -558,6 +579,8 @@ mod tests {
             prompt: "a neon alley in the rain".into(),
             negative_prompt: String::new(),
             image_hash: None,
+            image_size: None,
+            image_pieces: None,
             image_provider_peer_id: None,
             image_format: "png".into(),
             frames: 81,

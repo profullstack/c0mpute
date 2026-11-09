@@ -23,7 +23,7 @@ use c0mpute_net::{
     Network,
     topics::{JobAccept, JobReceipt, JobStatus, job_topic},
 };
-use c0mpute_proto::{ChunkRequest, Hash, TranscodeSpec};
+use c0mpute_proto::{Hash, TranscodeSpec};
 use c0mpute_store::ChunkStore;
 use tokio::fs;
 use tokio::sync::{Semaphore, mpsc};
@@ -136,8 +136,17 @@ pub struct TtsJobInline {
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 pub struct SttJobInline {
-    /// Content-addressed audio chunk already announced by the buyer.
+    /// Content hash of the whole audio, already announced by the buyer (as
+    /// one chunk, or as the pieces below).
     pub audio_hash: String,
+    /// Audio size in bytes; present with `audio_pieces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_size: Option<u64>,
+    /// Hashes of the audio's [`crate::pieces::INPUT_PIECE_BYTES`] pieces, in
+    /// order. Absent: `audio_hash` is a single chunk (older buyers, or audio
+    /// that fits in one piece).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_pieces: Option<Vec<String>>,
     /// Peer that owns the input audio, supplied by the buyer.
     #[serde(default)]
     pub audio_provider_peer_id: Option<String>,
@@ -270,8 +279,11 @@ async fn run_tts_job(
     Ok(hash.to_hex())
 }
 
+/// Largest audio input a worker accepts.
+pub const MAX_STT_AUDIO_BYTES: usize = 100 * 1024 * 1024;
+
 async fn run_stt_job(
-    net: &Libp2pNetwork,
+    net: &Arc<Libp2pNetwork>,
     store: &ChunkStore,
     cache_root: &std::path::Path,
     job: &AcceptedJob,
@@ -296,20 +308,24 @@ async fn run_stt_job(
     if !crate::speech::stt_ready() {
         bail!("faster-whisper is not installed; run `c0mpute stt setup`");
     }
-    let input_hash = Hash::from_hex(&inline.audio_hash).context("invalid audio hash")?;
-    let input_request = ChunkRequest {
-        chunk_hash: input_hash,
-        shard_index: None,
-    };
-    let audio = if let Some(provider) = inline.audio_provider_peer_id.as_deref() {
-        let provider = provider.parse().context("invalid audio provider peer id")?;
-        net.fetch_from_peer(provider, &input_request).await?
-    } else {
-        net.fetch(&input_request).await?
-    };
-    if Hash::of(&audio) != input_hash || audio.is_empty() || audio.len() > 100 * 1024 * 1024 {
-        bail!("audio input hash or size is invalid (maximum 100 MiB)");
-    }
+    let input = crate::pieces::InputRef::parse(
+        "audio",
+        &inline.audio_hash,
+        inline.audio_size,
+        inline.audio_pieces.as_deref(),
+        MAX_STT_AUDIO_BYTES,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let provider = inline
+        .audio_provider_peer_id
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .context("invalid audio provider peer id")?;
+    let audio = input
+        .fetch(net, provider, MAX_STT_AUDIO_BYTES)
+        .await
+        .context("fetch the audio input (maximum 100 MiB)")?;
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     fs::create_dir_all(&job_dir).await?;
     let audio_path = job_dir.join(format!("input-audio.{}", inline.audio_format));
