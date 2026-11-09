@@ -94,7 +94,8 @@ export interface PluginManifest {
   id: string;
   name: string;
   version: string;
-  kind: "workload" | "service" | "sdk";
+  /** `donation`: gives idle capacity away (e.g. crowdgpt); earns nothing. */
+  kind: "workload" | "service" | "sdk" | "donation";
   category: Category;
   status: PluginStatus;
   /** One sentence on what is missing; set for partial plugins. */
@@ -251,6 +252,11 @@ export function installCommand(p: PluginManifest): string | null {
 /** Ships inside the c0mpute binary and works today. */
 export function installedByDefault(p: PluginManifest): boolean {
   return p.builtin && p.status === "available";
+}
+
+/** Gives idle capacity away rather than selling it; off until the operator opts in. */
+export function isDonation(p: PluginManifest): boolean {
+  return p.kind === "donation";
 }
 
 /**

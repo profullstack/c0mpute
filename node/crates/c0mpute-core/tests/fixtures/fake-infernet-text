@@ -56,11 +56,35 @@ if args[:2] == ["model", "train"]:
     os.makedirs(out, exist_ok=True)
     seed = hashlib.sha256(raw).digest()
     weights = (seed * (2_621_440 // len(seed) + 1))[:2_621_440]
+    variant = os.environ.get("FAKE_TEXT_VARIANT")
+    if variant:
+        # Replicated-verification tests: a real (tiny) LoRA safetensors file.
+        # Honest variants train "the same job" (weights from the corpus and the
+        # job's seed) plus a little per-worker drift; "cheat" returns weights
+        # from nowhere.
+        import random, struct
+        base = random.Random(digest + str(job["hyperparams"].get("seed")))
+        drift = random.Random(variant)
+        r, n = 4, 32
+        header, body = {}, b""
+        for m in ("l0.q_proj", "l0.v_proj", "l1.q_proj", "l1.v_proj"):
+            for part, shape in (("lora_A", [r, n]), ("lora_B", [n, r])):
+                vals = []
+                for _ in range(shape[0] * shape[1]):
+                    v = base.uniform(-0.5, 0.5)
+                    vals.append(drift.uniform(-0.5, 0.5) if variant == "cheat" else v + 0.01 * drift.uniform(-0.5, 0.5))
+                start = len(body)
+                body += struct.pack("<%df" % len(vals), *vals)
+                header[f"base_model.model.{m}.{part}.weight"] = {"dtype": "F32", "shape": shape, "data_offsets": [start, len(body)]}
+        h = json.dumps(header).encode()
+        weights = struct.pack("<Q", len(h)) + h + body
+        emit(type="eval", step=3, metrics={"perplexity": 12.0})
     open(os.path.join(out, "adapter_model.safetensors"), "wb").write(weights)
     open(os.path.join(out, "adapter_config.json"), "w").write(json.dumps({"r": job["hyperparams"]["lora_r"]}))
     open(os.path.join(out, "manifest.json"), "w").write(json.dumps({
         "base_model": job["base_model"], "dataset_sha256": digest, "documents": len(docs),
-        "conversation_turns": turns, "system_prompt": job.get("system_prompt")}))
+        "conversation_turns": turns, "system_prompt": job.get("system_prompt"), "steps": 3,
+        "hyperparams": job.get("hyperparams")}))
     emit(type="checkpoint", step=3, model="sha256:" + hashlib.sha256(weights).hexdigest(), size_bytes=len(weights))
     emit(type="done", reason="complete")
     sys.exit(0)

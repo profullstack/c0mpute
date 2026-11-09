@@ -147,6 +147,8 @@ pub fn can_serve(config: &VideoConfig) -> bool {
             config.max_load_per_cpu,
         )
         && diffusion::node_slot().available_permits() > 0
+        // Never beside a song either (same rule as images).
+        && !crate::music::busy()
 }
 
 /// Tags a CPU video node advertises while it can take a clip.

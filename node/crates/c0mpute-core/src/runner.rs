@@ -586,6 +586,7 @@ pub(crate) async fn publish_receipt(
     output_hash: Option<String>,
     status: JobStatus,
 ) {
+    crate::activity::job_finished(&accept.job_id);
     let receipt = JobReceipt {
         job_id: accept.job_id.clone(),
         worker_peer_id: net.peer_id().to_base58(),

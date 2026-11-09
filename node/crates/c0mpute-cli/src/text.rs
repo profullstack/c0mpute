@@ -108,6 +108,15 @@ enum Sub {
         retries: u32,
         #[arg(long, default_value_t = 8)]
         bid_window_s: u64,
+        /// Replicated verification: the same job on N independent workers,
+        /// keeping the adapter a majority agrees on (costs up to N x
+        /// --max-price). Default: the job file's `replicas`, else 1.
+        #[arg(long, default_value_t = 0)]
+        replicas: u32,
+        /// With --replicas: relative weight-delta distance two adapters may
+        /// differ by and still agree.
+        #[arg(long, default_value_t = c0mpute_core::train_verify::DEFAULT_TOLERANCE)]
+        replica_tolerance: f64,
         /// Consent: send the corpus to the winning worker.
         #[arg(long)]
         yes: bool,
@@ -151,7 +160,11 @@ pub async fn run(args: &[String]) -> Result<()> {
                 eprintln!("  listening {a}/p2p/{}", s.net.peer_id().to_base58());
             }
             eprintln!("  tags {}", s.tags.join(" "));
-            tokio::signal::ctrl_c().await?;
+            text::shutdown_signal().await;
+            let failed = s.fail_in_flight().await;
+            if failed > 0 {
+                eprintln!("shutting down: reported {failed} running job(s) failed so their buyers re-auction");
+            }
             Ok(())
         }
         Sub::Chat { adapter, question, no_search, search_url, max_new_tokens, worker, max_price, legacy_http, public_url, bind, timeout_s, bid_window_s, json: as_json, net } => {
@@ -187,12 +200,12 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window_s, yes, json: as_json, net } => {
-            let req = TrainRequest { job_path: job, dataset_path: dataset, output, workers: worker, max_price_usd: max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window: Duration::from_secs(bid_window_s) };
+        Sub::Train { job, dataset, output, worker, max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window_s, replicas, replica_tolerance, yes, json: as_json, net } => {
+            let req = TrainRequest { job_path: job, dataset_path: dataset, output, workers: worker, max_price_usd: max_price, gpu, min_ram_gb, legacy_http, public_url, bind, timeout_s, retries, bid_window: Duration::from_secs(bid_window_s), replicas, replica_tolerance, penalty_file: None };
             let (_, _, p) = text::load(&req)?;
             if !yes {
                 eprintln!(
-                    "About to send {} ({} documents, {} bytes, {}) to {} to fine-tune {} as {} (max ${} per job).\nRe-run with --yes to send it.",
+                    "About to send {} ({} documents, {} bytes, {}) to {} to fine-tune {} as {} ({}).\nRe-run with --yes to send it.",
                     p.dataset,
                     p.documents,
                     p.bytes,
@@ -200,7 +213,7 @@ pub async fn run(args: &[String]) -> Result<()> {
                     if p.workers.is_empty() { "any eligible worker".to_string() } else { p.workers.join(",") },
                     p.base_model,
                     p.name,
-                    p.max_price_usd
+                    crate::train::price_note(p.max_price_usd, p.replicas)
                 );
                 if as_json {
                     println!("{}", json!({"preview": p}));
@@ -241,6 +254,9 @@ pub async fn run(args: &[String]) -> Result<()> {
                 println!("{}", serde_json::to_string(&out)?);
             } else {
                 println!("adapter {}  {}  (worker {}, ${})", out["adapter_hash"].as_str().unwrap_or("?"), out["adapter_dir"].as_str().unwrap_or("?"), out["receipt"]["worker_peer_id"].as_str().unwrap_or("?"), out["receipt"]["price_usd"]);
+                if let Some(r) = out.get("replicas") {
+                    println!("replicas: {} of {} agreed, {} dropped; ${} in total", r["agreeing"].as_array().map_or(0, Vec::len), r["requested"], r["outliers"].as_array().map_or(0, Vec::len), r["price_usd_total"]);
+                }
             }
             Ok(())
         }

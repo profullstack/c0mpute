@@ -15,6 +15,9 @@ FROM rust:1.92-bookworm AS rustbuild
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY node ./node
+# The crowdgpt runner's Dockerfile and watchdog are compiled into the binary
+# (`c0mpute crowdgpt setup --build`).
+COPY plugins/crowdgpt/runner ./plugins/crowdgpt/runner
 RUN cargo build --release --bin c0mpute
 
 # ── stage 2: build the Next.js site (Bun) ────────────────────────────────

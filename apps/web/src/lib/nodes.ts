@@ -28,6 +28,8 @@ export interface NodeRow {
    * serve hosted sites (`/s/<site_id>/`) here. Absent on older aggregators.
    */
   gateway?: string | null;
+  /** Projects the node donates idle compute to (e.g. `crowdgpt`); absent when none. */
+  donates?: string[];
   last_seen_s: number;
 }
 

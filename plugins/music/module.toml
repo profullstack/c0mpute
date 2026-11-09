@@ -2,7 +2,7 @@
 #
 # Music generation: songs from a style prompt and optional lyrics with
 # ACE-Step 1.5 (MIT code and weights; the model card allows commercial use of
-# what it makes). Every node with >=24 GiB RAM and >=30 GB free disk
+# what it makes). Every node with >=16 GiB RAM and >=30 GB free disk
 # provisions it itself (node/crates/c0mpute-core/src/music.rs): a Python 3.12
 # environment built by uv (pinned, SHA-256 checked when the box has none),
 # CPU PyTorch, ACE-Step from a pinned commit, and the turbo DiT + text encoder
@@ -15,7 +15,7 @@
 [module]
 id          = "music"
 name        = "Music — song generation (ACE-Step 1.5)"
-version     = "0.2.86"
+version     = "0.2.89"
 kind        = "workload"
 category    = "ai"
 status      = "available"
@@ -29,7 +29,7 @@ keywords    = ["music", "song", "ace-step", "ace-step-1.5", "audio", "txt2music"
 c0mpute      = ">=0.2.81"
 os           = ["linux"]
 arch         = ["x86_64"]
-capabilities = ["cpu"]
+capabilities = ["cpu", "gpu:nvidia"]
 
 [module.workloads]
 "music.txt2music" = { command = "txt2music", validation = "audio_magic" }

@@ -22,10 +22,12 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod ai_chat;
+mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
 mod peers;
+mod promo;
 mod storage;
 mod temporal;
 mod text;
@@ -159,6 +161,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SttCmd,
     },
+    /// Donate idle compute to CrowdGPT (an open LLM trained by volunteers).
+    /// Off by default, earns nothing, runs only while this node has no paid
+    /// work and stops the moment it does: `c0mpute crowdgpt on|off|status`.
+    Crowdgpt {
+        #[command(subcommand)]
+        cmd: crowdgpt::CrowdgptCmd,
+    },
+    /// This node at a glance: the worker, auto-update, bench, idle donation
+    /// (same as `c0mpute worker status`).
+    Status,
     /// Video generation (Wan 2.2) in the runner container.
     Video {
         #[command(subcommand)]
@@ -347,6 +359,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Make a 20-40 s cartoon promo video (MP4 with narration, music and
+    /// captions) of a website on the c0mpute network:
+    /// `c0mpute promo https://example.com --style pixar [--vertical]`.
+    /// Needs `c0mpute chat login`.
+    Promo(promo::PromoArgs),
 
     /// Secure DMs — E2E encrypted p2p messaging (DIP-0018). Was `c0mpute chat`.
     Dm {
@@ -1338,6 +1356,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Tts { cmd } => run_tts(cmd, &config_path).await,
         Cmd::Stt { cmd } => run_stt(cmd).await,
         Cmd::Video { cmd } => run_video(cmd).await,
+        Cmd::Crowdgpt { cmd } => crowdgpt::run(cmd, &config_path).await,
+        Cmd::Status => run_worker(WorkerCmd::Status, &config_path).await,
         Cmd::Speech { cmd } => {
             let cfg = Config::load_or_default(&config_path)?;
             start_auto_update_poller(cfg.update_auto);
@@ -1414,6 +1434,7 @@ async fn run_app(cli: Cli) -> Result<()> {
             run_chat(dm.cmd).await
         }
         Cmd::Chat { args } => ai_chat::run(&args).await,
+        Cmd::Promo(args) => promo::run(args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
@@ -1622,6 +1643,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 ),
                 None => println!("bench: not run — `c0mpute bench` publishes a capacity score"),
             }
+            println!("{}", crowdgpt::status_line(config_path));
             print_served_models_eligibility();
             print_house_models();
             println!("{}", serde_json::to_string_pretty(&cfg)?);

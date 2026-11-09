@@ -58,6 +58,27 @@ adapter sha256:b8533a34...  ./adapter  (worker 12D3KooWSB7L...)`}</Code>
         </p>
       </section>
 
+      <section className="space-y-3 text-sm leading-7" id="replicas">
+        <h2 className="font-semibold text-[var(--color-fg)]">[ optional: verify with replicas ]</h2>
+        <p>
+          Add <code>--replicas 3</code> (or <code>&quot;replicas&quot;: 3</code> in the job file) and the same job
+          runs on three different workers with the same data, seed and step count. Your machine downloads all three
+          adapters, compares their weight changes, keeps one that the majority agrees on and benches any worker whose
+          adapter disagrees. If there is no majority the job fails and says why.
+        </p>
+        <Code>{`c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --replicas 3 --max-price 1 --yes
+replicated verification: 3 workers, up to $1 each ($3 total)
+[replica 1] [########################] step 6/6  loss 1.93  92.5 tok/s
+...
+replicas: 2 of 3 agreed (tolerance 0.3), 1 dropped; $2.4 in total`}</Code>
+        <p>
+          Each replica is a separate job at up to <code>--max-price</code>, so three replicas cost up to three times
+          one job. The default is one replica. CPU and GPU workers never produce identical weights, so adapters are
+          compared with a tolerance (<code>--replica-tolerance</code>, default 0.3), not for equality; with{" "}
+          <code>--gpu</code> every replica runs on CUDA and a tighter tolerance works.
+        </p>
+      </section>
+
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ 2. chat ]</h2>
         <Code>{`c0mpute infernet text chat --adapter ./adapter "How should I price my SaaS?"

@@ -112,7 +112,7 @@ fn store(saved: &Saved) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn base_url(flag: Option<&str>) -> String {
+pub(crate) fn base_url(flag: Option<&str>) -> String {
     flag.map(str::to_string)
         .or_else(|| std::env::var("C0MPUTE_URL").ok().filter(|s| !s.is_empty()))
         .or_else(|| load().url)
@@ -128,11 +128,11 @@ fn api_key() -> Option<String> {
         .or_else(|| load().key)
 }
 
-fn require_key() -> Result<String> {
+pub(crate) fn require_key() -> Result<String> {
     api_key().ok_or_else(|| anyhow!("not signed in: run `c0mpute chat login` (or set C0MPUTE_API_KEY)"))
 }
 
-fn client() -> Result<reqwest::Client> {
+pub(crate) fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("c0mpute-cli/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
@@ -140,7 +140,7 @@ fn client() -> Result<reqwest::Client> {
 }
 
 /// Pull `error.message` (or `error`) out of an API error body.
-fn api_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+pub(crate) fn api_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
     let msg = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| {

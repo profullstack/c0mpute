@@ -4,12 +4,14 @@
 //! flags + config + detected hardware, and supervises the long-lived tasks
 //! for each role.
 
+pub mod activity;
 pub mod ads;
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
 pub mod container;
 pub mod crawl;
+pub mod crowdgpt;
 pub mod diffusion;
 pub mod dm;
 pub mod music;
@@ -47,6 +49,7 @@ pub mod supervisor;
 pub mod temporal;
 pub mod text;
 pub mod train;
+pub mod train_verify;
 pub mod video;
 pub mod video_cpu;
 pub mod webhook;

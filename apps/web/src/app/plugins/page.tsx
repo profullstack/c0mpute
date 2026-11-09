@@ -7,6 +7,7 @@ import {
   tagline,
   installCommand,
   installedByDefault,
+  isDonation,
   modelOptions,
   CATEGORY_LABELS,
   CATEGORY_BLURBS,
@@ -73,6 +74,26 @@ export default function PluginsPage() {
         </p>
       </section>
 
+      <section id="crowdgpt" className="space-y-2 text-sm leading-6 border border-[var(--color-rule)] rounded-md px-4 py-3">
+        <p className="text-xs text-[var(--color-dim)]">// donate idle compute</p>
+        <p>
+          A node with nothing to do can lend its spare CPU or GPU to{" "}
+          <a href="https://github.com/Vxtzq/CrowdGPT">CrowdGPT</a>, an open
+          language model trained by volunteers. It earns nothing. It is off
+          until you turn it on, runs only while your node has no paid job or
+          open bid, and is stopped within seconds when one arrives. The
+          CrowdGPT client (GPL-3.0) runs unmodified in its own locked-down
+          container, pinned to a reviewed commit.
+        </p>
+        <CodeBlock>{`$ c0mpute crowdgpt on       # opt in (pulls the runner image)
+$ c0mpute crowdgpt status   # rounds submitted, tokens trained
+$ c0mpute crowdgpt off`}</CodeBlock>
+        <p className="text-xs text-[var(--color-dim)]">
+          Nodes that donate show &quot;donates idle to CrowdGPT&quot; on the{" "}
+          <Link href="/nodes">node board</Link>.
+        </p>
+      </section>
+
       {groups.map(({ category, plugins }) => (
         <section key={category} className="space-y-4">
           <header className="space-y-1 rule pt-6">
@@ -125,6 +146,7 @@ export default function PluginsPage() {
 /** workload | service | application — see the legend above. */
 function kindLabel(p: PluginManifest): string {
   if (p.kind === "workload") return "workload";
+  if (p.kind === "donation") return "donation";
   return p.category === "applications" ? "application" : "service";
 }
 
@@ -201,6 +223,10 @@ function PluginCard({ p }: { p: PluginManifest }) {
       {comingSoon ? (
         <p className="text-xs text-[var(--color-dim)]">
           coming soon · spec only, not yet implemented
+        </p>
+      ) : isDonation(p) && installedByDefault(p) ? (
+        <p className="text-xs accent">
+          ships with c0mpute · off until you run <code>c0mpute {p.id} on</code> · earns nothing
         </p>
       ) : installedByDefault(p) ? (
         <p className="text-xs accent">ships with c0mpute · installed by default</p>

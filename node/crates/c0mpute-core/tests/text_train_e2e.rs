@@ -104,6 +104,9 @@ async fn trains_peer_to_peer_with_pieces_and_conversations() {
         timeout_s: 120,
         retries: 1,
         bid_window: Duration::from_secs(2),
+        replicas: 1,
+        replica_tolerance: c0mpute_core::train_verify::DEFAULT_TOLERANCE,
+        penalty_file: None,
     };
     let mut events: Vec<Value> = Vec::new();
     let out = text::train(buyer.clone(), &store, &req, |ev| events.push(ev.clone())).await.expect("trains");
@@ -183,3 +186,4 @@ fn conversations_need_a_runner_that_reports_messages() {
     let new_runner = text::worker_tags(&json!({"installed": true, "cuda": false, "formats": ["text", "messages"]}), 8 * 1024);
     assert!(tags.iter().all(|t| new_runner.contains(t)));
 }
+

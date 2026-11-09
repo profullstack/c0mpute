@@ -167,6 +167,9 @@ pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
         && has_headroom_with(config, memory())
         && idle_enough_with(load_avg_1m(), logical_cpus(), config.max_load_per_cpu)
         && node_slot().available_permits() > 0
+        // A song holds the same CPU: an image taken next to one starves and
+        // misses its receipt deadline (vienna, 2026-11-09).
+        && !crate::music::busy()
 }
 
 /// Busiest a box may be (1-minute load average per logical CPU) and still
@@ -551,6 +554,11 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
         bail!("sd-cli failed (exit {:?}): {tail}", result.status.code());
     }
     Ok(())
+}
+
+/// True while this node is rendering an image or a CPU clip.
+pub fn busy() -> bool {
+    node_slot().available_permits() == 0
 }
 
 /// One sd-cli job at a time per node: a job holds ~4-9 GB and every core, so a
