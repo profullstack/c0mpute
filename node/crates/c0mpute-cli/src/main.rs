@@ -51,7 +51,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  inference  (chat from your Ollama/llama-server, p2p)\n  infernet   (temporal + LoRA runtimes, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat --p2p \"hello\"     (peer to peer, no account)\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --yes\n  c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  captcha    (ddddocr image/slider/gap/detect, CPU; audio + math via speech serve)\n  render     (Blender frames, Cycles on CPU or GPU)\n  coinpay    (DID + payments, peer CLI)\n  inference  (chat from your Ollama/llama-server, p2p)\n  infernet   (temporal + LoRA runtimes, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  c0mpute captcha code.png --charset alnum --plain\n  c0mpute render scene.blend --frames 1-120 --out frames --mp4\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat --p2p \"hello\"     (peer to peer, no account)\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute train lora --base Qwen/Qwen2.5-0.5B-Instruct --dataset data.jsonl --yes\n  c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -317,6 +317,45 @@ enum Cmd {
         max_price: f64,
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
+    /// Captcha plugin: read a captcha on a c0mpute worker (`captcha.solve`,
+    /// ddddocr on CPU). Image text by default; `--type slider|gap` with
+    /// `--background`, `--type detect` for click-the-text boxes, or
+    /// `--question "3 + 4?"` for math (answered locally). Audio captchas go
+    /// through `POST /v1/captcha` on `c0mpute speech serve`.
+    /// `c0mpute captcha setup` provisions the solver on this machine.
+    #[command(args_conflicts_with_subcommands = true)]
+    Captcha {
+        #[command(subcommand)]
+        cmd: Option<CaptchaCmd>,
+        /// The captcha image (PNG, JPEG, GIF, WebP, BMP); the puzzle piece
+        /// for `slider`, the backdrop with the gap for `gap`.
+        file: Option<std::path::PathBuf>,
+        /// image (default), slider, gap, detect or math.
+        #[arg(long = "type", default_value = "image")]
+        kind: String,
+        /// Background image for slider / gap.
+        #[arg(long)]
+        background: Option<std::path::PathBuf>,
+        /// Limit image answers to a charset: digits, lower, upper, letters,
+        /// alnum, lower_digits, upper_digits, or the literal characters.
+        #[arg(long)]
+        charset: Option<String>,
+        /// Force the answer's case: lower or upper.
+        #[arg(long)]
+        case: Option<String>,
+        /// A math question to answer locally ("What is 3 + 4?").
+        #[arg(long)]
+        question: Option<String>,
+        /// Print only the answer (text, or "x,y" for slider/gap).
+        #[arg(long)]
+        plain: bool,
+        /// Highest price in USD you will pay for the job.
+        #[arg(long, default_value_t = 0.001)]
+        max_price: f64,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
     },
     /// Podcasting plugin: publish a podcast (RSS 2.0 + Podcasting 2.0 feed,
@@ -829,6 +868,15 @@ enum HostingCmd {
         #[arg(long, default_value = "http://127.0.0.1:7777")]
         gateway: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptchaCmd {
+    /// Install ddddocr so this node serves `captcha.solve` (a worker does
+    /// this by itself in the background).
+    Setup,
+    /// Show whether this machine can serve captcha jobs.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1599,6 +1647,32 @@ async fn run_app(cli: Cli) -> Result<()> {
             max_price,
             timeout_secs,
         } => run_embed(cmd, texts, model, max_price, timeout_secs).await,
+        Cmd::Captcha {
+            cmd,
+            file,
+            kind,
+            background,
+            charset,
+            case,
+            question,
+            plain,
+            max_price,
+            timeout_secs,
+        } => {
+            run_captcha(CaptchaArgs {
+                cmd,
+                file,
+                kind,
+                background,
+                charset,
+                case,
+                question,
+                plain,
+                max_price,
+                timeout_secs,
+            })
+            .await
+        }
         Cmd::Podcasting { cmd } => run_podcasting(cmd).await,
         Cmd::Podcasts { cmd } => run_podcasts(cmd).await,
         Cmd::Ads { cmd } => run_ads(cmd).await,
@@ -1867,6 +1941,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Hosting,
                     Role::Ocr,
                     Role::Embed,
+                    Role::Captcha,
                     Role::LiveStream,
                     Role::Render,
                     Role::Inference,
@@ -4285,6 +4360,83 @@ async fn run_embed(
     }
 }
 
+struct CaptchaArgs {
+    cmd: Option<CaptchaCmd>,
+    file: Option<std::path::PathBuf>,
+    kind: String,
+    background: Option<std::path::PathBuf>,
+    charset: Option<String>,
+    case: Option<String>,
+    question: Option<String>,
+    plain: bool,
+    max_price: f64,
+    timeout_secs: u64,
+}
+
+async fn run_captcha(a: CaptchaArgs) -> Result<()> {
+    use base64::Engine as _;
+    use c0mpute_core::captcha;
+    match a.cmd {
+        Some(CaptchaCmd::Setup) => {
+            let version = captcha::setup().await?;
+            println!("ready: ddddocr {version} ({})", captcha::captcha_root().display());
+            return Ok(());
+        }
+        Some(CaptchaCmd::Status) => {
+            println!("runtime: {}", captcha::captcha_root().display());
+            println!("captcha.solve: {}", if captcha::ready() { "ready" } else { "not installed" });
+            return Ok(());
+        }
+        None => {}
+    }
+    if a.case.as_deref().is_some_and(|c| !matches!(c, "lower" | "upper" | "any")) {
+        anyhow::bail!("--case must be lower, upper or any");
+    }
+    let kind = if a.question.is_some() { "math".to_string() } else { a.kind.to_ascii_lowercase() };
+    let mut result = if kind == "math" {
+        let question = a.question.as_deref().context("--type math needs --question")?;
+        let answer = captcha::solve_math(question).context("no arithmetic found in the question")?;
+        serde_json::json!({"v": 1, "ok": true, "kind": "math", "text": answer, "engine": "local"})
+    } else {
+        if !captcha::WORKER_KINDS.contains(&kind.as_str()) {
+            anyhow::bail!(captcha::unsupported_kind_message(&kind));
+        }
+        let b64 = |path: &std::path::Path| -> Result<String> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        };
+        let file = a.file.as_deref().context("give the captcha image file")?;
+        let mut spec = serde_json::json!({ "v": 1, "kind": kind, "image": b64(file)? });
+        if let Some(bg) = a.background.as_deref() {
+            spec["background"] = serde_json::json!(b64(bg)?);
+        }
+        if let Some(cs) = a.charset.as_deref() {
+            spec["charset"] = serde_json::json!(captcha::resolve_charset(cs).map_err(anyhow::Error::msg)?);
+        }
+        captcha::parse_spec(&spec).map_err(anyhow::Error::msg)?;
+        c0mpute_core::jobs_gateway::submit_once(
+            captcha::WORKLOAD,
+            spec,
+            a.max_price,
+            std::time::Duration::from_secs(a.timeout_secs.clamp(5, 600)),
+        )
+        .await?
+    };
+    if let Some(text) = result.get("text").and_then(|t| t.as_str()).map(str::to_string) {
+        result["text"] = serde_json::json!(captcha::apply_case(&text, a.case.as_deref()));
+    }
+    if a.plain {
+        match kind.as_str() {
+            "slider" | "gap" => println!("{},{}", result["x"], result["y"]),
+            "detect" => println!("{}", result["boxes"]),
+            _ => println!("{}", result["text"].as_str().unwrap_or("")),
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    Ok(())
+}
+
 async fn run_jobs(cmd: JobsCmd) -> Result<()> {
     match cmd {
         JobsCmd::Serve {
@@ -4556,6 +4708,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),
         "embed" | "embeddings" => Some(Role::Embed),
+        "captcha" | "captchas" => Some(Role::Captcha),
         "gameserver" | "gameservers" | "games" => Some(Role::Gameserver),
         "apps" | "app" | "backends" | "backend" => Some(Role::Apps),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),

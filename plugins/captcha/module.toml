@@ -1,0 +1,62 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Built into the c0mpute binary as the `captcha.solve` workload
+# (node/crates/c0mpute-core/src/captcha.rs). Like embeddings, nothing ML is
+# linked into the binary: each node provisions a per-user Python venv with
+# ddddocr (MIT, ONNX Runtime, CPU; its models ship inside the wheel, ~150 MB
+# installed) in the background and advertises c0mpute:role:captcha only once
+# a warmup run loads both models. Opt out: C0MPUTE_CAPTCHA_AUTO=0.
+#
+# Input: {v: 1, kind: image|slider|gap|detect, image (base64), background?,
+# charset?}; images up to 256 KiB each. Output: {v, ok, kind, text +
+# confidence | x, y | boxes}; buyers check the shape for the kind.
+# The gateway adds two kinds that never reach ddddocr: `audio` runs
+# stt.transcribe (faster-whisper) and normalizes spoken digits/letters, and
+# `math` answers arithmetic questions locally.
+# Not solved, by design: token captchas (reCAPTCHA, hCaptcha, Turnstile,
+# FunCaptcha); they are passed by a browser session, not read from a picture.
+# Buyers: `c0mpute captcha`, POST /v1/captcha on `c0mpute speech serve`,
+# workload captcha.solve on the jobs bridge, or the JS package
+# @profullstack/c0mpute-captcha (fetch(url).then(solveCaptcha), CLI, MCP).
+
+[module]
+id          = "captcha"
+name        = "Captcha — image, slider, audio and math solving"
+version     = "0.2.98"
+kind        = "workload"
+category    = "ai"
+status      = "available"
+builtin     = true
+description = "Read captchas on plain CPUs: text in images (with charset limits), slider and gap puzzle offsets, click-the-text boxes (ddddocr), audio captchas (whisper) and math questions, from a CLI, an HTTP API, an MCP server or fetch().then(solveCaptcha)."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["captcha", "ocr", "ddddocr", "slider", "audio-captcha", "solver", "mcp"]
+
+[module.requirements]
+c0mpute      = ">=0.2.98"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["cpu", "python:>=3.9"]
+
+[module.workloads]
+"captcha.solve" = { command = "solve", validation = "shape_for_kind" }
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute captcha"
+api = "POST /v1/captcha (c0mpute speech serve)"
+mcp = "c0mpute-captcha mcp (npm @profullstack/c0mpute-captcha)"
+sdk = "npm @profullstack/c0mpute-captcha: fetch(url).then(solveCaptcha)"
+
+[module.models."ddddocr-1.6.1"]
+repo      = "sml2h3/ddddocr"
+default   = true
+precision = "fp32 ONNX"
+workloads = ["captcha.solve"]
+license   = "MIT"
+backend   = "ddddocr (onnxruntime, opencv)"
+
+[module.config.defaults]
+engine = "ddddocr"

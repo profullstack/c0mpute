@@ -57,6 +57,9 @@ pub struct Config {
     /// CPU text embeddings (`embed.text`) provisioning.
     #[serde(default)]
     pub embed: EmbedConfig,
+    /// Captcha solving (`captcha.solve`, ddddocr) provisioning.
+    #[serde(default)]
+    pub captcha: CaptchaConfig,
     /// Ads: gateways serve VAST/VMAP and podcast ad insertion from the
     /// gossiped campaign index.
     #[serde(default)]
@@ -307,6 +310,37 @@ fn default_embed_min_free_disk_gb() -> u64 {
 impl EmbedConfig {
     pub fn auto_install_enabled(&self) -> bool {
         auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_EMBED_AUTO").ok())
+    }
+}
+
+/// Captcha solving (`captcha.solve`): ddddocr (MIT, ONNX, CPU, ~150 MB of
+/// wheels, models included) in a per-user virtualenv. On by default; opt out
+/// with `C0MPUTE_CAPTCHA_AUTO=0` or `auto_install = false`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaptchaConfig {
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+    /// Skip provisioning when the disk has less than this much free.
+    #[serde(default = "default_captcha_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+}
+
+impl Default for CaptchaConfig {
+    fn default() -> Self {
+        Self {
+            auto_install: true,
+            min_free_disk_gb: default_captcha_min_free_disk_gb(),
+        }
+    }
+}
+
+fn default_captcha_min_free_disk_gb() -> u64 {
+    1
+}
+
+impl CaptchaConfig {
+    pub fn auto_install_enabled(&self) -> bool {
+        auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_CAPTCHA_AUTO").ok())
     }
 }
 
@@ -582,6 +616,7 @@ impl Default for Config {
                 Role::Hosting,
                 Role::Ocr,
                 Role::Embed,
+                Role::Captcha,
                 Role::LiveStream,
                 Role::Render,
                 Role::Inference,
@@ -600,6 +635,7 @@ impl Default for Config {
             hosting: HostingConfig::default(),
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
+            captcha: CaptchaConfig::default(),
             gameserver: GameserverConfig::default(),
             apps: AppsConfig::default(),
             payments: Default::default(),

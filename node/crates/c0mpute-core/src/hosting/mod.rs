@@ -21,6 +21,7 @@
 
 pub mod dns;
 pub mod market;
+pub mod meta;
 pub mod proof;
 pub mod replicas;
 pub mod settle;
@@ -614,6 +615,14 @@ impl Hosting {
         if self.held_bytes().await - already + rec.size > self.0.max_bytes {
             bail!("over this node's hosting budget");
         }
+        let (disk_free, disk_total) = crate::opendisk::disk_for(self.0.store.root());
+        if !leaves_free_floor(disk_free, disk_total, rec.size.saturating_sub(already)) {
+            bail!(
+                "disk nearly full: {} GiB free, a copy must leave at least {} GiB",
+                disk_free / GIB_BYTES,
+                free_disk_floor(disk_total) / GIB_BYTES
+            );
+        }
         let owner_bytes: u64 = self
             .0
             .catalog
@@ -1206,6 +1215,21 @@ fn site_root_redirect(site: &str, query: Option<&str>) -> Response {
     }
 }
 
+const GIB_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Free space a hosting copy must leave on the disk: 10 GiB or 5% of it,
+/// whichever is more, capped at 50 GiB. Every node hosts by default, including
+/// busy production boxes, so the 5 GiB hosting budget alone could fill a disk
+/// that was already nearly full.
+fn free_disk_floor(disk_total: u64) -> u64 {
+    (disk_total / 20).clamp(10 * GIB_BYTES, 50 * GIB_BYTES)
+}
+
+fn leaves_free_floor(disk_free: u64, disk_total: u64, extra: u64) -> bool {
+    // An unknown disk (0/0) is not refused: the budget check still applies.
+    disk_total == 0 || disk_free.saturating_sub(extra) >= free_disk_floor(disk_total)
+}
+
 pub(crate) fn jitter(d: Duration) -> Duration {
     let ms = d.as_millis() as u64;
     let spread = ms / 10;
@@ -1245,6 +1269,15 @@ async fn serve_root(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
+    // `/s/<id>` without the slash would resolve every relative URL on the
+    // page (images, CSS, og:image) one level too high: send it to `/s/<id>/`.
+    if !uri.path().ends_with('/') {
+        let to = match uri.query() {
+            Some(q) => format!("{}/?{q}", uri.path()),
+            None => format!("{}/", uri.path()),
+        };
+        return axum::response::Redirect::permanent(&to).into_response();
+    }
     serve_site(&h, &site, "", uri.query(), &headers).await
 }
 
@@ -1259,8 +1292,45 @@ async fn serve_path(
 
 async fn serve_site(h: &Hosting, site: &str, path: &str, query: Option<&str>, headers: &HeaderMap) -> Response {
     match h.record_for(site).await {
-        Some(rec) => h.serve_with_hook(&rec, path, query, headers).await,
+        Some(rec) => {
+            let resp = h.serve_with_hook(&rec, path, query, headers).await;
+            let page = meta::public_origin(headers).map(|o| format!("{o}/s/{site}/{path}"));
+            with_absolute_meta(resp, page.as_deref()).await
+        }
         None => (StatusCode::NOT_FOUND, "no such site on the network (yet)").into_response(),
+    }
+}
+
+/// Largest HTML page whose social meta tags get rewritten.
+const MAX_META_REWRITE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Rewrite relative `og:image` / `twitter:image` / `og:url` tags of an HTML
+/// response to absolute URLs (see [`meta`]); anything else passes through.
+async fn with_absolute_meta(resp: Response, page_url: Option<&str>) -> Response {
+    let Some(page) = page_url.and_then(|u| url::Url::parse(u).ok()) else {
+        return resp;
+    };
+    let html = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("text/html"));
+    if !html {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_META_REWRITE_BYTES).await else {
+        return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
+    };
+    let rewritten = std::str::from_utf8(&bytes).ok().and_then(|text| meta::absolutize(text, &page));
+    match rewritten {
+        Some(text) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            // The body now depends on the host it was served from.
+            parts.headers.insert(header::VARY, HeaderValue::from_static("Host, X-Forwarded-Host"));
+            Response::from_parts(parts, Body::from(text))
+        }
+        None => Response::from_parts(parts, Body::from(bytes)),
     }
 }
 
@@ -1313,7 +1383,9 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
         .collect();
     for rec in candidates {
         if h.0.dns.confirms(&host, &rec.site_id).await {
-            return h.serve_with_hook(&rec, uri.path(), uri.query(), &headers).await;
+            let resp = h.serve_with_hook(&rec, uri.path(), uri.query(), &headers).await;
+            let page = meta::public_origin(&headers).map(|o| format!("{o}{}", uri.path()));
+            return with_absolute_meta(resp, page.as_deref()).await;
         }
     }
     (StatusCode::NOT_FOUND, "not found").into_response()
@@ -1321,6 +1393,24 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosting_copy_must_leave_a_free_disk_floor() {
+        let g = GIB_BYTES;
+        // 1.8 TiB disk: floor is capped at 50 GiB.
+        assert_eq!(free_disk_floor(1843 * g), 50 * g);
+        // 100 GiB disk: floor is the 10 GiB minimum.
+        assert_eq!(free_disk_floor(100 * g), 10 * g);
+        // dev2 on 2026-11-09: 20 GiB free on 1.8 TiB, refuse.
+        assert!(!leaves_free_floor(20 * g, 1843 * g, g));
+        // Plenty free: accept.
+        assert!(leaves_free_floor(500 * g, 1843 * g, 5 * g));
+        // Exactly at the floor after the copy: accept; one byte under: refuse.
+        assert!(leaves_free_floor(11 * g, 100 * g, g));
+        assert!(!leaves_free_floor(11 * g, 100 * g, g + 1));
+        // Unknown disk: the hosting budget still guards it.
+        assert!(leaves_free_floor(0, 0, g));
+    }
+
     #[test]
     fn slashless_site_path_redirects_with_query() {
         let r = site_root_redirect("53021d6e8d5a0e1aac48", None);

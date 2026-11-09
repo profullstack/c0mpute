@@ -11,6 +11,7 @@ pub mod auction_stats;
 pub mod buyer;
 pub mod canary;
 pub mod capabilities;
+pub mod captcha;
 pub mod config;
 pub mod container;
 pub mod crawl;

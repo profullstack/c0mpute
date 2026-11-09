@@ -5,7 +5,7 @@
 //! winner's receipt, fetches the result by the receipt's hash from the
 //! winner, checks the bytes against that hash, and answers with the result.
 //! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash),
-//! `embed.text`, `blender.render-frame` (input pieces by hash; the bridge
+//! `embed.text`, `captcha.solve` (images inline), `blender.render-frame` (input pieces by hash; the bridge
 //! fetches and checks the frames and returns them base64-encoded) and
 //! `infernet.inference` (chat completions);
 //! [`Workload`] is where more go.
@@ -55,6 +55,7 @@ enum Workload {
     CrawlFetch,
     OcrExtract,
     EmbedText,
+    CaptchaSolve,
     RenderFrame,
     Inference,
 }
@@ -65,6 +66,7 @@ impl Workload {
         Workload::CrawlFetch,
         Workload::OcrExtract,
         Workload::EmbedText,
+        Workload::CaptchaSolve,
         Workload::RenderFrame,
         Workload::Inference,
     ];
@@ -78,6 +80,7 @@ impl Workload {
             Workload::CrawlFetch => crate::crawl::WORKLOAD,
             Workload::OcrExtract => crate::ocr::WORKLOAD,
             Workload::EmbedText => crate::embed::WORKLOAD,
+            Workload::CaptchaSolve => crate::captcha::WORKLOAD,
             Workload::RenderFrame => crate::render::WORKLOAD,
             Workload::Inference => crate::inference::WORKLOAD,
         }
@@ -90,6 +93,7 @@ impl Workload {
             Workload::CrawlFetch => crate::crawl::parse_spec(spec).map(|_| ()),
             Workload::OcrExtract => crate::ocr::parse_spec(spec).map(|_| ()),
             Workload::EmbedText => crate::embed::parse_spec(spec).map(|_| ()),
+            Workload::CaptchaSolve => crate::captcha::parse_spec(spec).map(|_| ()),
             Workload::RenderFrame => crate::render::parse_spec(spec).map(|_| ()),
             Workload::Inference => crate::inference::parse_spec(spec).map(|_| ()),
         }
@@ -108,6 +112,7 @@ impl Workload {
                     crate::embed::model_tag(model),
                 ]
             }
+            Workload::CaptchaSolve => vec![crate::captcha::ROLE_TAG.to_string()],
             Workload::RenderFrame => crate::render::required_capabilities_for(spec),
             Workload::Inference => crate::inference::required_capabilities(spec),
         }
@@ -117,6 +122,7 @@ impl Workload {
             Workload::WorkflowStep | Workload::CrawlFetch => workflow::MAX_RESULT_BYTES,
             Workload::OcrExtract => crate::ocr::MAX_RESULT_BYTES,
             Workload::EmbedText => crate::embed::MAX_RESULT_BYTES,
+            Workload::CaptchaSolve => crate::captcha::MAX_RESULT_BYTES,
             Workload::RenderFrame => crate::render::MAX_RESULT_BYTES,
             Workload::Inference => crate::inference::MAX_RESULT_BYTES,
         }
@@ -131,6 +137,8 @@ impl Workload {
             Workload::EmbedText => crate::embed::parse_spec(spec).is_ok_and(|(s, model)| {
                 crate::embed::validate_result(value, s.texts.len(), model).is_ok()
             }),
+            Workload::CaptchaSolve => crate::captcha::parse_spec(spec)
+                .is_ok_and(|parsed| crate::captcha::valid_result(&parsed.kind, value)),
             Workload::RenderFrame => crate::render::parse_spec(spec)
                 .is_ok_and(|parsed| crate::render::valid_result(&parsed, value)),
             Workload::Inference => crate::inference::valid_result(value),

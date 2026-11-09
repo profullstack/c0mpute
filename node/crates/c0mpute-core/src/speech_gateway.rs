@@ -45,6 +45,7 @@ const VIDEO_QUEUE_WAIT: Duration = Duration::from_secs(60);
 const QUICK_QUEUE_WAIT: Duration = Duration::from_secs(20);
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
+const MAX_CONCURRENT_CAPTCHA_JOBS: usize = 16;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -61,6 +62,8 @@ struct GatewayState {
     ocr_slots: Arc<Semaphore>,
     /// Embedding jobs in flight.
     embed_slots: Arc<Semaphore>,
+    /// Captcha jobs in flight (each a few KiB and a second or two of CPU).
+    captcha_slots: Arc<Semaphore>,
     /// Warm, pinned sessions this node is holding (see `speech_session`).
     sessions: crate::speech_session::SessionStore,
     /// Workers that won and did not deliver, benched for a while.
@@ -208,6 +211,7 @@ pub fn router_with(
         music_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_MUSIC_JOBS)),
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
+        captcha_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_CAPTCHA_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
         progress: crate::job_progress::ProgressBoard::default(),
         results,
@@ -233,6 +237,7 @@ pub fn router_with(
             post(ocr_extract).layer(DefaultBodyLimit::max(crate::ocr::MAX_INPUT_BYTES)),
         )
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/captcha", post(captcha_solve))
         // Warm, pinned sessions: open once per call, then say a sentence at a
         // time with no auction and no model reload in the way.
         .route("/v1/sessions", post(open_session).get(list_sessions))
@@ -1480,6 +1485,244 @@ async fn ocr_extract(
     )
     .await?;
     json_job_response(&bytes, &outcome)
+}
+
+/// `POST /v1/captcha`: solve one captcha.
+///
+/// Body: `{type, image?, background?, charset?, case?, length?, audio?,
+/// audio_format?, question?}` where `type` is `image` (default), `slider`,
+/// `gap`, `detect` (ddddocr on a worker), `audio` (whisper on a worker, then
+/// spoken digits/letters normalized) or `math` (answered here). Images and
+/// audio are base64 or `data:` URLs. Answers `{v, ok, kind, text | x,y |
+/// boxes, confidence?, ...}` plus `job_id` and `worker_peer_id` when a worker
+/// ran it. Token captchas (reCAPTCHA, hCaptcha, Turnstile) get a 501.
+async fn captcha_solve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<CaptchaRequest>,
+) -> ApiResult<Response> {
+    use crate::captcha;
+    authenticate(&state, &headers)?;
+    let kind = match req.kind.as_deref() {
+        Some(k) => k.trim().to_ascii_lowercase(),
+        None if req.audio.is_some() => "audio".into(),
+        None if req.question.is_some() => "math".into(),
+        None => "image".into(),
+    };
+    let case = req.case.as_deref();
+    if case.is_some_and(|c| !matches!(c, "lower" | "upper" | "any")) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "case must be lower, upper or any".into(),
+        ));
+    }
+    let finish = |mut payload: serde_json::Value| -> serde_json::Value {
+        if let Some(text) = payload.get("text").and_then(|t| t.as_str()) {
+            let text = captcha::apply_case(text, case);
+            if let Some(len) = req.length {
+                payload["length_ok"] = serde_json::json!(text.chars().count() == len);
+            }
+            payload["text"] = serde_json::json!(text);
+        }
+        payload
+    };
+    match kind.as_str() {
+        "math" => {
+            let question = req.question.as_deref().unwrap_or("");
+            if question.is_empty() || question.chars().count() > captcha::MAX_QUESTION_CHARS {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "math needs a question of 1 to 256 characters".into(),
+                ));
+            }
+            let Some(answer) = captcha::solve_math(question) else {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "no arithmetic found in the question".into(),
+                ));
+            };
+            Ok(Json(finish(serde_json::json!({
+                "v": 1, "ok": true, "kind": "math", "text": answer, "engine": "local",
+            })))
+            .into_response())
+        }
+        "audio" => {
+            use base64::Engine as _;
+            let raw = req.audio.as_deref().unwrap_or("");
+            let audio = base64::engine::general_purpose::STANDARD
+                .decode(captcha::strip_data_url(raw))
+                .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "audio is not valid base64".into()))?;
+            if audio.is_empty() || audio.len() > captcha::MAX_AUDIO_BYTES {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "audio must be between 1 byte and 2 MiB".into(),
+                ));
+            }
+            let format = req
+                .audio_format
+                .as_deref()
+                .and_then(|f| ["wav", "mp3", "ogg", "webm", "m4a"].into_iter().find(|k| *k == f))
+                .or_else(|| sniff_audio(&audio))
+                .ok_or_else(|| {
+                    ApiError(
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "send WAV, MP3, Ogg, WebM or M4A audio".into(),
+                    )
+                })?;
+            let _slot = state.stt_slots.clone().acquire_owned().await.map_err(|_| {
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech queue is unavailable".into())
+            })?;
+            let pieces = crate::pieces::put_bytes_pieces(
+                &state.net,
+                &state.store,
+                &audio,
+                crate::pieces::INPUT_PIECE_BYTES,
+            )
+            .await
+            .map_err(gateway_failure)?;
+            let mut spec = serde_json::json!({
+                "audio_provider_peer_id": state.net.peer_id().to_string(),
+                "audio_format": format,
+                "model": "base",
+                "language": "en",
+            });
+            spec.as_object_mut()
+                .expect("spec is an object")
+                .extend(pieces.spec_fields("audio"));
+            let (outcome, bytes) = run_speech_job(
+                &state,
+                "stt.transcribe",
+                spec,
+                vec![
+                    "c0mpute:role:stt".to_string(),
+                    "c0mpute:stt:engine:faster-whisper".to_string(),
+                ],
+                10 * 1024 * 1024,
+            )
+            .await?;
+            let transcript: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid transcript JSON".into())
+            })?;
+            let heard = transcript
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let payload = finish(serde_json::json!({
+                "v": 1,
+                "ok": true,
+                "kind": "audio",
+                "text": captcha::normalize_spoken(&heard),
+                "transcript": heard,
+                "engine": "faster-whisper",
+                "job_id": outcome.job_id,
+                "worker_peer_id": outcome.accepted_bid.bidder_peer_id,
+            }));
+            let mut response = Json(payload).into_response();
+            set_job_headers(
+                response.headers_mut(),
+                &outcome.job_id,
+                &outcome.accepted_bid.bidder_peer_id,
+            );
+            Ok(response)
+        }
+        k if captcha::WORKER_KINDS.contains(&k) => {
+            let mut spec = serde_json::json!({
+                "v": 1,
+                "kind": k,
+                "image": captcha::strip_data_url(req.image.as_deref().unwrap_or("")),
+            });
+            if let Some(bg) = req.background.as_deref() {
+                spec["background"] = serde_json::json!(captcha::strip_data_url(bg));
+            }
+            if let Some(cs) = req.charset.as_deref() {
+                spec["charset"] = serde_json::json!(cs);
+            }
+            let parsed =
+                captcha::parse_spec(&spec).map_err(|m| ApiError(StatusCode::BAD_REQUEST, m))?;
+            // Hand workers the resolved charset, not the preset name.
+            if let Some(cs) = parsed.charset.as_deref() {
+                spec["charset"] = serde_json::json!(cs);
+            }
+            let _slot = state.captcha_slots.clone().acquire_owned().await.map_err(|_| {
+                ApiError(StatusCode::SERVICE_UNAVAILABLE, "captcha queue is unavailable".into())
+            })?;
+            let spec_bytes =
+                serde_json::to_vec(&spec).map_err(|error| gateway_failure(error.into()))?;
+            // Up to two 256 KiB images: often too big for the gossip offer, so
+            // the worker fetches the spec from this node by hash.
+            let offer_spec = if spec_bytes.len() <= crate::workflow::MAX_INLINE_SPEC_BYTES {
+                spec
+            } else {
+                let hash = state.store.put(&spec_bytes).await.map_err(gateway_failure)?;
+                state.net.announce(&hash).await.map_err(gateway_failure)?;
+                crate::workflow::spec_ref(&hash, spec_bytes.len())
+            };
+            let expected = parsed.kind.clone();
+            let (outcome, bytes) = run_checked_job(
+                &state,
+                captcha::WORKLOAD,
+                offer_spec,
+                vec![captcha::ROLE_TAG.to_string()],
+                captcha::MAX_RESULT_BYTES,
+                &move |bytes| {
+                    serde_json::from_slice::<serde_json::Value>(bytes)
+                        .is_ok_and(|v| captcha::valid_result(&expected, &v))
+                },
+            )
+            .await?;
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid JSON".into())
+            })?;
+            let rewritten =
+                serde_json::to_vec(&finish(payload)).map_err(|error| gateway_failure(error.into()))?;
+            json_job_response(&rewritten, &outcome)
+        }
+        other => Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            captcha::unsupported_kind_message(other),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptchaRequest {
+    #[serde(default, alias = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    background: Option<String>,
+    #[serde(default)]
+    charset: Option<String>,
+    #[serde(default)]
+    case: Option<String>,
+    #[serde(default)]
+    length: Option<usize>,
+    #[serde(default)]
+    audio: Option<String>,
+    #[serde(default)]
+    audio_format: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+}
+
+/// Audio container by magic bytes.
+fn sniff_audio(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        Some("wav")
+    } else if bytes.starts_with(b"ID3") || (bytes.len() > 1 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0) {
+        Some("mp3")
+    } else if bytes.starts_with(b"OggS") {
+        Some("ogg")
+    } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        Some("webm")
+    } else if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        Some("m4a")
+    } else {
+        None
+    }
 }
 
 /// OpenAI-style embeddings request: `input` is one string or a list.
