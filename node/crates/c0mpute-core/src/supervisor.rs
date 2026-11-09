@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use c0mpute_net::{ChunkSource, Libp2pNetwork, Network, NetworkConfig, bootstrap};
 
 use crate::capabilities::{self, Registry};
@@ -28,6 +28,8 @@ impl Supervisor {
     /// Boot as this machine's worker: identity at `<config_dir>/identity.key`.
     pub async fn boot(config: Config) -> Result<Self> {
         let identity_dir = config::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        std::fs::create_dir_all(&identity_dir)?;
+        hold_instance_lock(&identity_dir)?;
         Self::boot_with_identity(config, identity_dir).await
     }
 
@@ -178,7 +180,13 @@ impl Supervisor {
             } else if workload_type == crate::crawl::WORKLOAD {
                 crate::crawl::worker_load()
             } else {
-                runner::WorkerLoad::new(compute_slots.clone(), total_slots)
+                // Job times survive restarts, so ETAs stay real (see `with_history`).
+                runner::WorkerLoad::new(compute_slots.clone(), total_slots).with_history(
+                    config::data_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+                        .join("job-times")
+                        .join(format!("{workload_type}.ms")),
+                )
             };
             // Speech is the one workload whose runtime we install ourselves.
             // Provision it first, in the background, then subscribe with the
@@ -1001,6 +1009,51 @@ impl ChunkSource for StoreSource {
     }
 }
 
+/// Take `<identity_dir>/worker.lock` for the life of the process, or fail.
+///
+/// Two workers with one identity (bonita ran a system and a user
+/// `c0mpute-worker.service`, both as the same user, for six days) both bid on
+/// every offer with their own E2E keys under one peer id. The buyer seals the
+/// spec to whichever bid it kept, the accept reaches both, and the other
+/// process answers "sealed spec does not open" with a Failed receipt that
+/// the buyer may take as the result; remote peers also keep only one
+/// connection per peer id. One worker per identity, enforced here.
+#[cfg(unix)]
+pub(crate) fn hold_instance_lock(identity_dir: &std::path::Path) -> Result<()> {
+    use std::io::{Read, Seek, Write};
+    use std::os::fd::AsRawFd;
+    let path = identity_dir.join("worker.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    // SAFETY: flock on a file descriptor we own; no memory is shared.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let mut holder = String::new();
+        let _ = file.read_to_string(&mut holder);
+        anyhow::bail!(
+            "another c0mpute worker with this identity is already running (pid {}); \
+             stop it first (systemctl --user / sudo systemctl status c0mpute-worker)",
+            holder.trim()
+        );
+    }
+    let _ = file.set_len(0);
+    let _ = file.rewind();
+    let _ = write!(file, "{}", std::process::id());
+    // Held until the process exits (or re-execs into an update, which
+    // takes it again on start).
+    std::mem::forget(file);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn hold_instance_lock(_identity_dir: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 /// `tags` plus a workload's own role and model tags. Diffusion, music and
 /// CPU video advertise those only while the box is idle right now, so a
 /// subscriber that copied the live tag set while busy (a worker restarting
@@ -1036,4 +1089,17 @@ mod tests {
             ]
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_worker_with_the_same_identity_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        hold_instance_lock(dir.path()).unwrap();
+        // flock is per open file description: a second open in this process
+        // conflicts exactly like a second process would.
+        let err = hold_instance_lock(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("already running"), "{err}");
+        assert!(err.contains(&std::process::id().to_string()), "names the holder: {err}");
+    }
+
 }

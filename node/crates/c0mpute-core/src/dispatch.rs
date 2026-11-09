@@ -209,6 +209,12 @@ pub fn run_worker_subscriber_with_load(
                     debug!(job_id = %offer.job_id, "dispatch: no runner wired, not bidding");
                     continue;
                 };
+                // This node's recent jobs of this workload failed: let other
+                // nodes take it for a while (see `activity::note_outcome`).
+                if let Some(left) = crate::activity::bid_paused(&workload_type) {
+                    debug!(job_id = %offer.job_id, left_secs = left.as_secs(), "dispatch: recent jobs failed here, backing off");
+                    continue;
+                }
                 // Restarting into an update: finish what we hold, take nothing new.
                 if c0mpute_update::draining() {
                     debug!(job_id = %offer.job_id, "dispatch: draining for an update, not bidding");

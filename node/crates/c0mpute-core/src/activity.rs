@@ -92,6 +92,59 @@ pub fn since_last_activity() -> Option<Duration> {
     }
 }
 
+// ── failure backoff ──────────────────────────────────────────────────────
+//
+// A node whose jobs of a workload keep failing (renders killed by the host's
+// OOM killer, or timing out on a box too loaded to finish them) kept bidding
+// and winning, and the buyer's queue kept handing it jobs it could not
+// finish: vienna's last six image and song jobs all hit sd-cli's 900 s
+// timeout, and dev2's were OOM-killed seconds in (2026-11-09). After
+// FAILS_BEFORE_BACKOFF failures in a row a workload stops bidding for a
+// while, doubling each further failure, and a success clears it.
+
+/// Failures in a row before a workload backs off.
+pub const FAILS_BEFORE_BACKOFF: u32 = 2;
+/// First pause; doubles per further failure.
+pub const FIRST_BACKOFF: Duration = Duration::from_secs(15 * 60);
+/// Longest pause.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(2 * 60 * 60);
+
+static OUTCOMES: Mutex<Option<HashMap<String, (u32, u64)>>> = Mutex::new(None);
+
+/// Pause after `fails` failures in a row (`None` while under the threshold).
+pub fn backoff_for(fails: u32) -> Option<Duration> {
+    let over = fails.checked_sub(FAILS_BEFORE_BACKOFF)?;
+    Some(FIRST_BACKOFF.saturating_mul(1u32 << over.min(8)).min(MAX_BACKOFF))
+}
+
+/// A job of `workload` finished here: completed (`ok`) or failed.
+pub fn note_outcome(workload: &str, ok: bool) {
+    note_outcome_at(workload, ok, now_ms());
+}
+
+fn note_outcome_at(workload: &str, ok: bool, now: u64) {
+    let mut g = OUTCOMES.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    if ok {
+        m.remove(workload);
+        return;
+    }
+    let fails = m.get(workload).map(|(f, _)| f + 1).unwrap_or(1);
+    let until = backoff_for(fails).map(|d| now + d.as_millis() as u64).unwrap_or(0);
+    m.insert(workload.to_string(), (fails, until));
+}
+
+/// How much longer `workload` should not bid, if it is backing off.
+pub fn bid_paused(workload: &str) -> Option<Duration> {
+    bid_paused_at(workload, now_ms())
+}
+
+fn bid_paused_at(workload: &str, now: u64) -> Option<Duration> {
+    let g = OUTCOMES.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, until) = g.as_ref()?.get(workload)?;
+    (*until > now).then(|| Duration::from_millis(until - now))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,4 +170,21 @@ mod tests {
         let before = running_jobs();
         assert!(running_jobs_at(later) < before);
     }
+
+    #[test]
+    fn repeated_failures_pause_bidding_until_a_success() {
+        let w = "test.backoff";
+        let t = 1_000_000_000;
+        note_outcome_at(w, false, t);
+        assert_eq!(bid_paused_at(w, t), None, "one failure is not a pattern");
+        note_outcome_at(w, false, t);
+        assert_eq!(bid_paused_at(w, t), Some(FIRST_BACKOFF));
+        note_outcome_at(w, false, t);
+        assert_eq!(bid_paused_at(w, t), Some(FIRST_BACKOFF * 2), "doubles");
+        assert_eq!(bid_paused_at(w, t + 3 * 60 * 60 * 1000), None, "and expires");
+        note_outcome_at(w, true, t);
+        assert_eq!(bid_paused_at(w, t), None, "a success clears it");
+        assert_eq!(backoff_for(20), Some(MAX_BACKOFF));
+    }
+
 }

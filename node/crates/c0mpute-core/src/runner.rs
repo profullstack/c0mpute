@@ -45,6 +45,8 @@ pub struct WorkerLoad {
     total_slots: usize,
     /// Moving average of recent completed jobs' wall time in ms; 0 = none.
     recent_job_ms: Arc<AtomicU64>,
+    /// Where the average is kept across restarts (see [`Self::with_history`]).
+    history: Option<Arc<std::path::PathBuf>>,
 }
 
 impl WorkerLoad {
@@ -53,7 +55,25 @@ impl WorkerLoad {
             compute_slots,
             total_slots: total_slots.max(1),
             recent_job_ms: Arc::new(AtomicU64::new(0)),
+            history: None,
         }
+    }
+
+    /// Keep the recent-job average in `path` and start from what it holds.
+    /// Workers restart on every release; without this each restart forgot
+    /// its job times and quoted the 60 s placeholder ETA, so a buyer waited
+    /// 6 min on a node that needs 10 (bonita, 2026-11-09: images done in
+    /// 382-623 s, after the buyer had given up).
+    pub fn with_history(mut self, path: std::path::PathBuf) -> Self {
+        if let Some(ms) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+        {
+            self.recent_job_ms.store(ms, Ordering::Relaxed);
+        }
+        self.history = Some(Arc::new(path));
+        self
     }
 
     pub fn compute_slots(&self) -> Arc<Semaphore> {
@@ -90,6 +110,12 @@ impl WorkerLoad {
                     (old * 7 + ms * 3) / 10
                 })
             });
+        if let Some(path) = self.history.as_deref() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(path, self.recent_job_ms.load(Ordering::Relaxed).to_string());
+        }
     }
 }
 
@@ -592,6 +618,7 @@ pub(crate) async fn publish_receipt(
     status: JobStatus,
 ) {
     crate::activity::job_finished(&accept.job_id);
+    crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
     let receipt = JobReceipt {
         job_id: accept.job_id.clone(),
         worker_peer_id: net.peer_id().to_base58(),
@@ -730,6 +757,18 @@ mod tests {
         cleanup_job_dir(&root, id).await;
         cleanup_job_dir(&root, "../../etc").await;
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn job_times_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-times").join("diffusion.txt2img.ms");
+        let load = WorkerLoad::new(Arc::new(Semaphore::new(1)), 1).with_history(path.clone());
+        assert_eq!(load.recent_job_duration(), None);
+        load.record_job(Duration::from_secs(600));
+        // A new process (an update re-exec) starts from what was measured.
+        let again = WorkerLoad::new(Arc::new(Semaphore::new(1)), 1).with_history(path);
+        assert_eq!(again.recent_job_duration(), Some(Duration::from_secs(600)));
     }
 
     #[test]
