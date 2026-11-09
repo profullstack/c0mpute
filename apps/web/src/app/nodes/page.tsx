@@ -84,6 +84,11 @@ export default async function NodesPage() {
                     <td className="py-2 pr-3">
                       {n.name ? <span className="accent font-bold">{n.name}</span> : <span className="text-[var(--color-dim)]">unnamed</span>}
                       <span className="block font-mono text-[var(--color-dim)]">{n.id}</span>
+                      {n.donates?.includes("crowdgpt") && (
+                        <Link href="/plugins#crowdgpt" className="block text-[var(--color-dim)] !border-0" title="Donates idle compute to CrowdGPT when it has no paid work">
+                          donates idle to CrowdGPT
+                        </Link>
+                      )}
                     </td>
                     <td className="py-2 pr-3">{n.class}</td>
                     <td className="py-2 pr-3">{n.cores ?? "-"}</td>

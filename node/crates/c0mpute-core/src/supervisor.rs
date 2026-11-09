@@ -157,6 +157,15 @@ impl Supervisor {
             cuda_devices_per_job = ?crate::resources::cuda_devices_per_job(),
             "node compute budget configured"
         );
+        // Idle donation (crowdgpt plugin): off unless the operator turned it
+        // on; runs only while these slots are free and no bid or job is in
+        // flight, and is stopped the moment one is. Watches the default
+        // config file so `c0mpute crowdgpt on|off` applies without a restart.
+        crate::crowdgpt::spawn_governor(
+            config::default_config_path(),
+            self.config.crowdgpt.clone(),
+            Some(runner::WorkerLoad::new(compute_slots.clone(), total_slots)),
+        );
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
             // Node-wide slots, per-workload job timing: the dispatch loop
             // reads this to stop bidding when full and to quote an ETA.

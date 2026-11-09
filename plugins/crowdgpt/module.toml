@@ -1,0 +1,78 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Donate idle compute to CrowdGPT (github.com/Vxtzq/CrowdGPT), an open LLM
+# (huggingface.co/Vxtzq/Crowd-v1, MIT weights) trained from volunteered
+# compute. Not a workload anyone pays for: kind = "donation".
+#
+# EARNS NOTHING. Off by default; the operator opts in with `c0mpute crowdgpt
+# on` (config `[crowdgpt] enabled = true`). A private node does not donate
+# unless `allow_in_private = true`.
+#
+# Idle only. The governor (node/crates/c0mpute-core/src/crowdgpt.rs) starts
+# the client after `idle_secs` (120) with no bid in flight, no job running
+# (c0mpute-core/src/activity.rs: dispatch + the receipt path) and every
+# node-wide compute slot free. The moment a bid goes out or a job lands it
+# runs `docker stop -t <stop_grace_secs>`: SIGTERM (the client stops at its
+# next safe step), SIGKILL after the grace. The round in progress, upload
+# included, is forfeited, so a multi-GB delta upload never competes with paid
+# work. It resumes when the node is idle again.
+#
+# GPL isolation. The client is GPL-3.0 and is never vendored, linked or
+# imported: it runs unmodified as a separate process in a container built by
+# runner/Dockerfile (MIT) from CrowdGPT's repository at one reviewed commit
+# (CROWDGPT_COMMIT in crowdgpt.rs, also the image's
+# org.c0mpute.crowdgpt.commit label, checked before every run). CI publishes
+# it as ghcr.io/profullstack/c0mpute-crowdgpt-runner:crowdgpt-<sha12>
+# (.github/workflows/crowdgpt-runner.yml); `c0mpute crowdgpt setup --build`
+# builds the same image locally.
+#
+# Containment: read-only root, --cap-drop ALL, no-new-privileges, CPU quota
+# (half the node by default) at the lowest CPU weight plus nice 19, a hard
+# memory limit without swap (a third of RAM, 4..16 GB), oom-score-adj 1000,
+# pid limit, bridge network only (outbound HTTPS to Hugging Face and the
+# coordinator), the node user's uid, one host mount (its own cache dir).
+# Self-update is off (--no-update and a read-only /app). The engram table
+# (+1.4 GB RAM) is off on nodes under 16 GB. A watchdog in the container stops
+# the client if the worker stops heart-beating.
+#
+# Attribution: the client has no worker-name flag; rounds are credited to a
+# CrowdGPT account. `c0mpute crowdgpt register --email <you>` creates
+# `c0mpute-<node nickname>`; `--token` uses an existing one; otherwise it
+# trains anonymously.
+
+[module]
+id          = "crowdgpt"
+name        = "CrowdGPT: donate idle compute"
+version     = "0.2.85"
+kind        = "donation"
+category    = "ai"
+status      = "available"
+builtin     = true
+description = "Donate this node's idle compute to CrowdGPT, an open LLM trained by volunteers. Earns nothing; off by default; runs only while the node has no paid work and stops the moment it does."
+author      = "Profullstack (plugin); Vxtzq (CrowdGPT client, GPL-3.0)"
+license     = "MIT (plugin); GPL-3.0 (CrowdGPT client, run unmodified in its own container)"
+homepage    = "https://crowdgpt.net"
+source      = "https://github.com/Vxtzq/CrowdGPT"
+keywords    = ["donation", "idle", "training", "llm", "crowdgpt", "volunteer"]
+earns       = false
+
+[module.requirements]
+c0mpute      = ">=0.2.86"
+os           = ["linux"]
+arch         = ["x86_64"]
+capabilities = ["container-runtime", "gpu:cuda?"]
+hardware     = "docker; 8 GB+ RAM (16 GB+ for the engram table); CPU works, a CUDA GPU is faster"
+
+[module.dispatch]
+mode  = "container"
+image = "ghcr.io/profullstack/c0mpute-crowdgpt-runner:crowdgpt-b7d5b399c74c"
+
+[module.surfaces]
+cli = "c0mpute crowdgpt on|off|status"
+
+[module.config.defaults]
+enabled          = false
+allow_in_private = false
+idle_secs        = 120
+stop_grace_secs  = 20
+backend          = "cpu"

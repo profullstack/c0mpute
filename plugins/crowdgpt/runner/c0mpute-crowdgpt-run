@@ -1,0 +1,74 @@
+#!/bin/sh
+# c0mpute's wrapper around the CrowdGPT client (MIT). Runs the unmodified
+# client headless and stops it when c0mpute's governor stops heart-beating,
+# so a crashed or killed c0mpute worker never leaves CrowdGPT running
+# unsupervised on someone's machine.
+#
+# Inputs (all from c0mpute; see node/crates/c0mpute-core/src/crowdgpt.rs):
+#   /data                      the only writable mount (cache, checkpoints)
+#   /data/c0mpute-heartbeat    touched by the governor every 2 s
+#   /data/c0mpute-token        optional CrowdGPT token (0600), read here so it
+#                              never appears on a command line
+#   CROWDGPT_BACKEND           cpu | cuda
+#   CROWDGPT_ENGRAM            0 | 1 (read by the client itself)
+#   C0MPUTE_HEARTBEAT_STALE_S  seconds without a heartbeat before stopping
+#
+# Any arguments are passed to client.py instead (e.g. --register ...).
+set -eu
+
+DATA=/data
+HB="$DATA/c0mpute-heartbeat"
+STALE="${C0MPUTE_HEARTBEAT_STALE_S:-90}"
+mkdir -p "$DATA/checkpoints" "$DATA/hf_home" "$DATA/torch_home" "$DATA/cache" "${HOME:-$DATA/home}" 2>/dev/null || true
+cd /app
+
+if [ "$#" -gt 0 ]; then
+    exec python client.py --no-update --no-tokenizer "$@"
+fi
+
+if [ -f "$DATA/c0mpute-token" ]; then
+    CROWDGPT_TOKEN="$(cat "$DATA/c0mpute-token")"
+    export CROWDGPT_TOKEN
+fi
+
+set -- --headless --no-tui --no-update --no-tokenizer
+if [ -n "${CROWDGPT_BACKEND:-}" ] && [ "$CROWDGPT_BACKEND" != "auto" ]; then
+    set -- "$@" --backend "$CROWDGPT_BACKEND"
+fi
+# Train anonymously unless there is a token or a saved session.
+if [ -z "${CROWDGPT_TOKEN:-}" ] && [ ! -f "$DATA/checkpoints/auth_token.json" ]; then
+    set -- "$@" --anon
+fi
+
+echo "[c0mpute] CrowdGPT client starting (worker ${C0MPUTE_WORKER_NAME:-c0mpute}): python client.py $*"
+nice -n 19 python client.py "$@" &
+pid=$!
+
+stop() {
+    # First SIGTERM = the client's graceful stop (it ends at its next safe
+    # step); docker stop SIGKILLs after its grace if that takes too long.
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid"
+    exit $?
+}
+trap stop TERM INT
+
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 5 &
+    wait $! 2>/dev/null || true
+    if [ -f "$HB" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$HB") ))
+    else
+        age=999999
+    fi
+    if [ "$age" -gt "$STALE" ]; then
+        echo "[c0mpute] no heartbeat from the c0mpute worker for ${age}s; stopping CrowdGPT"
+        stop
+        break
+    fi
+done
+
+set +e
+wait "$pid"
+code=$?
+exit "$code"

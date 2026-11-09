@@ -398,7 +398,17 @@ struct NodeRow {
     /// a bare http(s) origin. Clients that are not libp2p peers use it to find
     /// gateways that serve `/s/<site>/`.
     gateway: Option<String>,
+    /// Projects this node donates idle compute to (`crowdgpt`), from its
+    /// `c0mpute:donate:<project>` tags; only known projects are passed on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    donates: Vec<String>,
     last_seen_s: u64,
+}
+
+/// Known donation projects a node's tags name.
+fn donates(tags: &[String]) -> Vec<String> {
+    const KNOWN: [&str; 1] = ["crowdgpt"];
+    KNOWN.iter().filter(|p| tags.iter().any(|t| t.strip_prefix("c0mpute:donate:") == Some(**p))).map(|p| p.to_string()).collect()
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -558,6 +568,7 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .get("gateway")
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::gateway_origin),
+            donates: donates(&ad.tags),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
         })
         .collect();
@@ -776,6 +787,13 @@ fn iso8601_utc(unix_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn donation_tags_show_only_known_projects() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(donates(&tags(&["c0mpute:role:tts", "c0mpute:donate:crowdgpt"])), vec!["crowdgpt".to_string()]);
+        assert!(donates(&tags(&["c0mpute:donate:<script>", "c0mpute:role:tts"])).is_empty());
+    }
 
     #[test]
     fn node_board_ranks_by_bench_and_counts_referrers() {
