@@ -31,7 +31,7 @@ mod webhook;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use c0mpute_core::{
     Config, JobAuction, Supervisor, TranscodeJobInline, config, init_tracing, run_auction,
     run_register,
@@ -223,6 +223,18 @@ enum Cmd {
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 120)]
         timeout_secs: u64,
+    },
+    /// Podcasting plugin: publish a podcast (RSS 2.0 + Podcasting 2.0 feed,
+    /// episode page, audio) as a self-healing hosting site.
+    Podcasting {
+        #[command(subcommand)]
+        cmd: PodcastingCmd,
+    },
+    /// Podcasts plugin: subscribe to c0mpute shows or any RSS podcast feed,
+    /// list, download and play episodes.
+    Podcasts {
+        #[command(subcommand)]
+        cmd: PodcastsCmd,
     },
     /// Live-stream plugin: p2p HLS live streaming. `go` broadcasts (needs
     /// ffmpeg); every gateway serves /live/<stream_id>/index.m3u8 and peers
@@ -550,6 +562,126 @@ enum EmbedCmd {
     },
     /// Show which embedding models this machine can serve.
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum PodcastingCmd {
+    /// Build a show and publish it (a new version each time).
+    ///
+    /// Input is a show folder (every audio file in it, plus optional
+    /// show.toml and episodes.toml) or a list of audio files. The show is
+    /// written to <data_dir>/podcasting/<name>/site and published as hosting
+    /// site <name>: feed at /s/<site_id>/feed.xml on every gateway.
+    #[command(verbatim_doc_comment)]
+    Publish {
+        /// Show folder, or audio files (mp3, m4a, aac, ogg, opus, flac, wav).
+        #[arg(required = true)]
+        inputs: Vec<std::path::PathBuf>,
+        /// Show (= hosting site) name: 1-63 of a-z, 0-9 and '-'.
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Cover art (jpg, png or webp; 1400-3000 px square for Apple).
+        #[arg(long)]
+        image: Option<std::path::PathBuf>,
+        #[arg(long)]
+        language: Option<String>,
+        /// iTunes category, e.g. "Technology".
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        explicit: bool,
+        /// Owner email (itunes:owner, podcast:locked owner).
+        #[arg(long)]
+        email: Option<String>,
+        /// Write podcast:locked "no" (allow other hosts to import the show).
+        #[arg(long)]
+        unlocked: bool,
+        /// Public URL of the site, for absolute enclosure URLs (defaults to
+        /// https://<first --domain>/; without either, URLs are relative).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Custom domain (repeatable), as in `c0mpute hosting publish`.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// podcast:value recipient address (e.g. a Lightning node pubkey).
+        /// No value block is written without it.
+        #[arg(long)]
+        value_address: Option<String>,
+        #[arg(long, default_value = "lightning")]
+        value_type: String,
+        #[arg(long, default_value = "keysend")]
+        value_method: String,
+        /// Build the show folder only; do not publish.
+        #[arg(long)]
+        dry_run: bool,
+        /// Give up waiting for network copies after this many seconds.
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PodcastsCmd {
+    /// Subscribe to a show: a c0mpute site id (or c0mpute://site/<id>) or
+    /// any http(s) RSS feed URL.
+    Subscribe {
+        source: String,
+        #[command(flatten)]
+        via: PodcastsVia,
+    },
+    /// Remove a subscription.
+    Unsubscribe { show: String },
+    /// List subscriptions.
+    Ls,
+    /// List a show's episodes, newest first (refreshes the feed).
+    Episodes {
+        /// Subscription id, number from `ls`, site id or title fragment.
+        show: String,
+        /// Use the stored copy of the feed; do not fetch.
+        #[arg(long)]
+        offline: bool,
+        #[command(flatten)]
+        via: PodcastsVia,
+    },
+    /// Download an episode (default: the newest).
+    Download {
+        show: String,
+        /// Number from `episodes`, guid, or title fragment.
+        episode: Option<String>,
+        /// Directory to save into (default <data_dir>/podcasts/episodes/<show>).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        via: PodcastsVia,
+    },
+    /// Download and play an episode with mpv or ffplay (prints the path when
+    /// neither is installed).
+    Play {
+        show: String,
+        episode: Option<String>,
+        #[command(flatten)]
+        via: PodcastsVia,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct PodcastsVia {
+    /// Gateway that serves c0mpute shows (/s/<site_id>/feed.xml).
+    #[arg(long, default_value = c0mpute_core::podcast::listen::DEFAULT_GATEWAY)]
+    gateway: String,
+    /// Read c0mpute shows straight from the network: run a hosting client on
+    /// this machine's buyer identity instead of asking a gateway.
+    #[arg(long)]
+    p2p: bool,
+    /// With --p2p: how long to wait to learn the show from gossip.
+    #[arg(long, default_value_t = 360)]
+    wait_secs: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -918,6 +1050,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Stream { cmd } => run_stream(cmd).await,
         Cmd::Ocr {
             file,
             lang,
@@ -932,7 +1065,8 @@ async fn run_app(cli: Cli) -> Result<()> {
             max_price,
             timeout_secs,
         } => run_embed(cmd, texts, model, max_price, timeout_secs).await,
-        Cmd::Stream { cmd } => run_stream(cmd).await,
+        Cmd::Podcasting { cmd } => run_podcasting(cmd).await,
+        Cmd::Podcasts { cmd } => run_podcasts(cmd).await,
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
@@ -2151,6 +2285,238 @@ async fn run_speech(cmd: SpeechCmd) -> Result<()> {
             let token = std::env::var("C0MPUTE_SPEECH_TOKEN")
                 .context("set C0MPUTE_SPEECH_TOKEN to a random secret (at least 24 characters)")?;
             c0mpute_core::speech_gateway::serve(bind, token, max_price_usd).await
+        }
+    }
+}
+
+async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
+    use c0mpute_core::podcast::show;
+    match cmd {
+        PodcastingCmd::Publish {
+            inputs,
+            name,
+            title,
+            author,
+            description,
+            image,
+            language,
+            category,
+            explicit,
+            email,
+            unlocked,
+            base_url,
+            domains,
+            value_address,
+            value_type,
+            value_method,
+            dry_run,
+            wait_secs,
+        } => {
+            let mut input = show::load_input(&inputs)?;
+            let m = &mut input.show;
+            m.title = title.or(m.title.take());
+            m.author = author.or(m.author.take());
+            m.description = description.or(m.description.take());
+            m.language = language.or(m.language.take());
+            m.category = category.or(m.category.take());
+            m.email = email.or(m.email.take());
+            if explicit {
+                m.explicit = Some(true);
+            }
+            if unlocked {
+                m.locked = Some(false);
+            }
+            if let Some(address) = value_address {
+                m.value = Some(show::ValueMeta {
+                    kind: value_type,
+                    method: value_method,
+                    address,
+                    name: None,
+                    recipient_type: "node".into(),
+                    suggested: None,
+                });
+            }
+            if let Some(img) = image {
+                input.image = Some(img);
+            }
+            let domains: Vec<String> = domains.into_iter().map(|d| d.to_ascii_lowercase()).collect();
+            if dry_run {
+                let keypair = c0mpute_core::hosting::publisher_keypair()?;
+                let owner = c0mpute_core::hosting::site::owner_hex(&keypair).context("ed25519 identity")?;
+                let site_id = c0mpute_core::hosting::site::site_id_for(&owner, &name);
+                let base = base_url
+                    .or_else(|| input.show.base_url.clone())
+                    .or_else(|| domains.first().map(|d| format!("https://{d}/")));
+                let out = show::build_dir(&name);
+                let built = show::build_show(&input, &name, &site_id, base.as_deref(), &out)?;
+                println!("built:   {} ({} episodes, {} bytes)", out.display(), built.episodes.len(), built.total_bytes);
+                println!("site:    {site_id} (not published: --dry-run)");
+                println!("guid:    {}", built.podcast_guid);
+                return Ok(());
+            }
+            let (record, copies, built) = show::publish(
+                &input,
+                &name,
+                domains.clone(),
+                base_url,
+                std::time::Duration::from_secs(wait_secs),
+            )
+            .await?;
+            println!("show:    {} ({} episodes)", built.title, built.episodes.len());
+            println!("site:    {}", record.site_id);
+            println!("version: {}", record.seq);
+            println!("copies:  {copies}/{}", c0mpute_core::hosting::TARGET_REPLICAS);
+            println!("guid:    {}", built.podcast_guid);
+            println!("feed:    /s/{}/feed.xml   (on any c0mpute gateway)", record.site_id);
+            if let Some(b) = &built.base_url {
+                println!("public:  {b}feed.xml");
+            } else {
+                eprintln!(
+                    "note: enclosure URLs are relative (fine for gateways and `c0mpute podcasts`); \
+                     pass --base-url or --domain for absolute URLs that every podcast app accepts"
+                );
+            }
+            println!("listen:  c0mpute podcasts subscribe {}", record.site_id);
+            for d in &domains {
+                println!(
+                    "domain:  {d}  -> add TXT {}.{d} \"site={}\" and point {d} at gateway nodes",
+                    c0mpute_core::hosting::dns::TXT_PREFIX,
+                    record.site_id
+                );
+            }
+            if copies < c0mpute_core::hosting::TARGET_REPLICAS {
+                eprintln!(
+                    "note: fewer than {} hosting nodes took a copy before the wait ran out; \
+                     re-run publish (same --name) if no copies appear",
+                    c0mpute_core::hosting::TARGET_REPLICAS
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A podcasts client for `source`: through the gateway, or (`--p2p`, c0mpute
+/// shows only) through a hosting client run here. Keep the second value alive.
+async fn podcasts_client(
+    via: &PodcastsVia,
+    source: &c0mpute_core::podcast::listen::Source,
+) -> Result<(
+    c0mpute_core::podcast::listen::Client,
+    Option<c0mpute_core::podcast::listen::LocalGateway>,
+)> {
+    use c0mpute_core::podcast::listen::{Client, LocalGateway, Source};
+    if via.p2p
+        && let Source::Site(id) = source
+    {
+        eprintln!("joining the network to find site {id} ...");
+        let lg = LocalGateway::start(id, std::time::Duration::from_secs(via.wait_secs)).await?;
+        let c = Client::new(&lg.url)?;
+        return Ok((c, Some(lg)));
+    }
+    Ok((Client::new(&via.gateway)?, None))
+}
+
+/// Refresh subscription `i` from the network and save.
+async fn podcasts_refresh(
+    store: &mut c0mpute_core::podcast::listen::Store,
+    i: usize,
+    via: &PodcastsVia,
+) -> Result<(
+    reqwest::Url,
+    c0mpute_core::podcast::listen::Client,
+    Option<c0mpute_core::podcast::listen::LocalGateway>,
+)> {
+    let source = store.subs[i].source.clone();
+    let (client, lg) = podcasts_client(via, &source).await?;
+    let (feed_url, feed) = client.fetch_feed(&source).await?;
+    store.upsert(source, feed_url.to_string(), feed);
+    store.save()?;
+    Ok((feed_url, client, lg))
+}
+
+async fn run_podcasts(cmd: PodcastsCmd) -> Result<()> {
+    use c0mpute_core::podcast::{dates, listen};
+    let mut store = listen::Store::open_default()?;
+    match cmd {
+        PodcastsCmd::Subscribe { source, via } => {
+            let source = listen::Source::parse(&source)?;
+            let (client, _lg) = podcasts_client(&via, &source).await?;
+            let (feed_url, feed) = client.fetch_feed(&source).await?;
+            let n = feed.episodes.len();
+            let title = feed.title.clone();
+            let id = store.upsert(source, feed_url.to_string(), feed);
+            store.save()?;
+            println!("subscribed: {title}  ({n} episodes)  id: {id}");
+            Ok(())
+        }
+        PodcastsCmd::Unsubscribe { show } => {
+            let gone = store.remove(&show)?;
+            store.save()?;
+            println!("unsubscribed: {} ({})", gone.title, gone.id);
+            Ok(())
+        }
+        PodcastsCmd::Ls => {
+            if store.subs.is_empty() {
+                println!("no subscriptions yet: c0mpute podcasts subscribe <feed-url|site_id>");
+            }
+            for (i, s) in store.subs.iter().enumerate() {
+                let n = s.feed.as_ref().map(|f| f.episodes.len()).unwrap_or(0);
+                println!("{:>3}  {:<28} {:<40} {n:>4} eps  {}", i + 1, s.id, s.title, s.source.label());
+            }
+            Ok(())
+        }
+        PodcastsCmd::Episodes { show, offline, via } => {
+            let i = store.find(&show)?;
+            if !offline && let Err(e) = podcasts_refresh(&mut store, i, &via).await {
+                eprintln!("warning: could not refresh ({e:#}); showing the stored copy");
+            }
+            let sub = &store.subs[i];
+            let feed = sub.feed.as_ref().context("no stored copy of this feed yet")?;
+            println!("{}", feed.title);
+            for (n, e) in listen::sorted_episodes(feed).iter().enumerate() {
+                let date = e.published.map(dates::fmt_ymd).unwrap_or_else(|| "          ".into());
+                let dur = e.duration_secs.map(dates::fmt_duration).unwrap_or_default();
+                let audio = if e.enclosure.is_some() { "" } else { "  (no audio)" };
+                println!("{:>4}  {date}  {dur:>8}  {}{audio}", n + 1, e.title);
+            }
+            Ok(())
+        }
+        PodcastsCmd::Download { show, episode, dir, via } => {
+            let i = store.find(&show)?;
+            let (feed_url, client, _lg) = podcasts_refresh(&mut store, i, &via).await?;
+            let sub = &store.subs[i];
+            let feed = sub.feed.as_ref().context("no feed")?;
+            let ep = listen::find_episode(feed, episode.as_deref())?;
+            let dir = dir.unwrap_or_else(|| listen::podcasts_dir().join("episodes").join(&sub.id));
+            eprintln!("downloading {} ...", ep.title);
+            let path = client.download(&feed_url, ep, &dir).await?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        PodcastsCmd::Play { show, episode, via } => {
+            let i = store.find(&show)?;
+            let (feed_url, client, _lg) = podcasts_refresh(&mut store, i, &via).await?;
+            let sub = &store.subs[i];
+            let feed = sub.feed.as_ref().context("no feed")?;
+            let ep = listen::find_episode(feed, episode.as_deref())?;
+            let dir = listen::podcasts_dir().join("episodes").join(&sub.id);
+            eprintln!("fetching {} ...", ep.title);
+            let path = client.download(&feed_url, ep, &dir).await?;
+            match listen::player() {
+                Some((bin, args)) => {
+                    eprintln!("playing {} with {bin} (q to stop)", path.display());
+                    let status = std::process::Command::new(bin).args(args).arg(&path).status()?;
+                    if !status.success() {
+                        bail!("{bin} exited with {status}");
+                    }
+                }
+                None => {
+                    eprintln!("no player found (install mpv or ffmpeg's ffplay); the episode is at:");
+                    println!("{}", path.display());
+                }
+            }
+            Ok(())
         }
     }
 }

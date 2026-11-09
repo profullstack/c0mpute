@@ -243,6 +243,12 @@ pub fn owner_hex(keypair: &c0mpute_net::libp2p::identity::Keypair) -> Option<Str
 
 /// MIME type from a path's extension.
 pub fn content_type_for(path: &str) -> &'static str {
+    // A podcast/RSS feed under the conventional names serves as RSS, so feed
+    // readers and browsers treat it as a feed rather than generic XML.
+    let file = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    if file == "feed.xml" || file == "rss.xml" {
+        return "application/rss+xml";
+    }
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
@@ -267,7 +273,13 @@ pub fn content_type_for(path: &str) -> &'static str {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
+        "ogg" | "oga" => "audio/ogg",
+        "m4a" => "audio/x-m4a",
+        "aac" => "audio/aac",
+        "opus" => "audio/opus",
+        "flac" => "audio/flac",
+        "wav" => "audio/wav",
+        "vtt" => "text/vtt; charset=utf-8",
         "wasm" => "application/wasm",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
@@ -474,5 +486,14 @@ mod tests {
         assert_eq!(resolve_path(m, "/about").unwrap().0, "about.html");
         assert_eq!(resolve_path(m, "/about.html?x=1").unwrap().0, "about.html");
         assert!(resolve_path(m, "/nope").is_none());
+    }
+
+    #[test]
+    fn feeds_serve_as_rss() {
+        assert_eq!(content_type_for("feed.xml"), "application/rss+xml");
+        assert_eq!(content_type_for("show/Feed.XML"), "application/rss+xml");
+        assert_eq!(content_type_for("podcast.rss"), "application/rss+xml");
+        assert_eq!(content_type_for("sitemap.xml"), "application/xml");
+        assert_eq!(content_type_for("episodes/a.m4a"), "audio/x-m4a");
     }
 }
