@@ -197,14 +197,19 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     }
     assert_eq!(publisher.preferred(&site).await, preferred);
 
-    // A challenge round: every holder passes.
+    // A challenge round: every holder passes. (A copy released moments ago
+    // may still be listed by the challenger; it keeps serving through its
+    // grace period, so it passes too rather than failing.)
     let receipts = publisher.challenge_round().await;
-    assert_eq!(receipts.len(), 3, "one challenge per holder: {receipts:?}");
-    assert!(receipts.iter().all(|r| r.ok && r.verify() && r.challenger == owner_key));
+    assert!(receipts.len() >= 3, "one challenge per holder: {receipts:?}");
+    assert!(receipts.iter().all(|r| r.ok && r.verify() && r.challenger == owner_key), "{receipts:?}");
+    for x in &preferred {
+        assert!(receipts.iter().any(|r| &r.holder == x), "preferred {x} was challenged");
+    }
     let pd2 = pd.clone();
     assert_eq!(
         std::fs::read_to_string(pd2.join("receipts.jsonl")).unwrap().lines().count(),
-        3,
+        receipts.len(),
         "receipts are kept on disk for settlement"
     );
     // The receipts reach other nodes over gossip.

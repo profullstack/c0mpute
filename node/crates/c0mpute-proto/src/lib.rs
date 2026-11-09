@@ -227,6 +227,11 @@ pub enum Role {
     /// OpenAI-compatible runtime (Ollama by default, or llama-server). On by
     /// default; advertised only while the runtime lists chat models.
     Inference,
+    /// Secure-chat mailbox (DIP-0018): hold sealed messages for offline
+    /// recipients (bounded: 256 MiB, 30 days), cache self-published chat
+    /// keys, and receive direct messages for this machine's own `c0mpute dm`
+    /// user. On by default; needs nothing.
+    Mailbox,
 }
 
 #[cfg(test)]

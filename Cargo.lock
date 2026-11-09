@@ -548,6 +548,7 @@ dependencies = [
  "c0mpute-gateway",
  "c0mpute-net",
  "c0mpute-proto",
+ "c0mpute-secure-chat",
  "c0mpute-store",
  "c0mpute-transcode",
  "c0mpute-update",

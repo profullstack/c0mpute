@@ -118,6 +118,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                     tags.extend(models.iter().map(|m| crate::inference::model_tag(m)));
                 }
             }
+            Role::Mailbox => tags.push(crate::dm::ROLE_TAG.to_string()),
             Role::Render => {
                 // Only where `blender` runs. The probe (a few seconds) runs
                 // once at worker start; until it finishes, nothing is shown.

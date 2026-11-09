@@ -42,7 +42,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["hosting", "static", "p2p", "censorship-resistant", "self-healing", "dweb", "marketplace", "opendisk"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.82"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["disk", "network:ingress?"]

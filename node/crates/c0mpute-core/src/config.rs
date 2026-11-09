@@ -467,6 +467,7 @@ impl Default for Config {
                 Role::LiveStream,
                 Role::Render,
                 Role::Inference,
+                Role::Mailbox,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),

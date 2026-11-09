@@ -66,7 +66,7 @@ license     = "MIT"
 keywords    = ["gameserver", "minecraft", "factorio", "valheim", "hosting", "docker"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.82"
 os           = ["linux"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["container-runtime", "network:public-ip", "network:ingress"]

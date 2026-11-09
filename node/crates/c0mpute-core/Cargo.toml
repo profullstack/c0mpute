@@ -16,6 +16,7 @@ c0mpute-update = { workspace = true }
 c0mpute-doctor = { workspace = true }
 c0mpute-bench = { workspace = true }
 c0mpute-api = { workspace = true }
+c0mpute-secure-chat = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 rand = { workspace = true }

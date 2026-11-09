@@ -34,7 +34,7 @@ source      = "https://github.com/infernetprotocol/infernet-protocol"
 keywords    = ["ai", "llm", "inference", "gpu", "temporal-policy", "liquid-neural-network", "cfc", "lora", "fine-tuning"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.82"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["gpu:nvidia?", "model-runtime"]
