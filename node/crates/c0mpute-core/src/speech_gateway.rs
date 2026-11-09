@@ -64,6 +64,8 @@ struct GatewayState {
     progress: crate::job_progress::ProgressBoard,
     /// Finished tracked requests, collectable at GET /v1/result/{id}.
     results: crate::job_progress::ResultStore,
+    /// Unfinished tracked requests, re-run after a gateway restart.
+    pending: crate::job_progress::PendingStore,
 }
 
 #[derive(Debug)]
@@ -148,7 +150,10 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("gateway-penalties.json"),
     );
-    let app = router(supervisor.libp2p, supervisor.store, token, max_price_usd, penalties);
+    // The served gateway keeps tracked jobs on disk, so a restart (an
+    // auto-update) resumes them; the loopback tests use `router` in memory.
+    let data_dir = crate::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"));
+    let app = router_with(supervisor.libp2p, supervisor.store, token, max_price_usd, penalties, Some(data_dir));
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind c0mpute speech gateway at {bind}"))?;
@@ -166,6 +171,25 @@ pub fn router(
     max_price_usd: f64,
     penalties: crate::penalty_box::PenaltyBox,
 ) -> Router {
+    router_with(net, store, token, max_price_usd, penalties, None)
+}
+
+/// `router`, optionally keeping tracked jobs and results under `persist`.
+pub fn router_with(
+    net: Arc<Libp2pNetwork>,
+    store: ChunkStore,
+    token: String,
+    max_price_usd: f64,
+    penalties: crate::penalty_box::PenaltyBox,
+    persist: Option<std::path::PathBuf>,
+) -> Router {
+    let (results, pending) = match &persist {
+        Some(dir) => (
+            crate::job_progress::ResultStore::persistent(dir.join("gateway-results")),
+            crate::job_progress::PendingStore::persistent(dir.join("gateway-jobs")),
+        ),
+        None => Default::default(),
+    };
     let state = GatewayState {
         net,
         store,
@@ -181,9 +205,11 @@ pub fn router(
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
         progress: crate::job_progress::ProgressBoard::default(),
-        results: crate::job_progress::ResultStore::default(),
+        results,
+        pending,
         penalties,
     };
+    resume_pending(&state);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/voices", get(voices))
@@ -1114,12 +1140,26 @@ async fn run_tracked(
         });
     };
     state.progress.start(&key);
+    // On disk until it finishes, so a gateway restart can run it again.
+    state.pending.save(
+        &key,
+        &crate::job_progress::PendingJob {
+            workload: workload.to_string(),
+            spec: spec.clone(),
+            required: required.clone(),
+            max_bytes,
+            started_at_ms: crate::job_progress::now_ms_pub(),
+        },
+    );
     let st = state.clone();
     let task_key = key.clone();
     let task = tokio::spawn(crate::job_progress::CURRENT.scope(
         (state.progress.clone(), key.clone()),
         async move {
             let _slot = slot;
+            // A gateway auto-update waits for tracked jobs (a caller is
+            // waiting on them) instead of cutting them off.
+            let _long = c0mpute_update::LongJob::start();
             let result = run_speech_job(&st, workload, spec, required, max_bytes).await;
             crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
             let stored = match result {
@@ -1132,6 +1172,7 @@ async fn run_tracked(
                 Err(ApiError(status, message)) => Stored::Failed { status: status.as_u16(), message },
             };
             st.results.put(&task_key, stored.clone());
+            st.pending.remove(&task_key);
             stored
         },
     ));
@@ -1142,6 +1183,53 @@ async fn run_tracked(
         )),
         Ok(done) => Ok(done),
         Err(error) => Err(ApiError(StatusCode::BAD_GATEWAY, format!("job task failed: {error}"))),
+    }
+}
+
+/// After a restart: run again every tracked request that had not finished,
+/// under the same request id, so `GET /v1/result/{id}` still delivers it.
+/// What a resumed request needs: its workload, its queue and its content type.
+type ResumeTarget = (&'static str, Arc<Semaphore>, fn(&[u8]) -> &'static str);
+
+fn resume_pending(state: &GatewayState) {
+    use crate::job_progress::Stored;
+    for (key, job) in state.pending.take_resumable() {
+        let (workload, slots, content_type): ResumeTarget =
+            match job.workload.as_str() {
+                crate::music::WORKLOAD_TXT2MUSIC => (
+                    crate::music::WORKLOAD_TXT2MUSIC,
+                    state.music_slots.clone(),
+                    |b| crate::music::audio_content_type(b).unwrap_or("audio/mpeg"),
+                ),
+                crate::diffusion::WORKLOAD_TXT2IMG => {
+                    (crate::diffusion::WORKLOAD_TXT2IMG, state.image_slots.clone(), |_| "image/png")
+                }
+                _ => {
+                    state.pending.remove(&key);
+                    continue;
+                }
+            };
+        tracing::info!(%key, workload, "resuming a tracked request after a restart");
+        state.progress.start(&key);
+        let st = state.clone();
+        let task_key = key.clone();
+        tokio::spawn(crate::job_progress::CURRENT.scope((state.progress.clone(), key), async move {
+            let Ok(_slot) = slots.acquire_owned().await else { return };
+            let _long = c0mpute_update::LongJob::start();
+            let result = run_speech_job(&st, workload, job.spec, job.required, job.max_bytes).await;
+            crate::job_progress::set_stage(if result.is_ok() { "done" } else { "failed" });
+            let stored = match result {
+                Ok((outcome, bytes)) => Stored::Done {
+                    content_type: content_type(&bytes),
+                    bytes: Arc::new(bytes),
+                    job_id: outcome.job_id,
+                    worker: outcome.accepted_bid.bidder_peer_id,
+                },
+                Err(ApiError(status, message)) => Stored::Failed { status: status.as_u16(), message },
+            };
+            st.results.put(&task_key, stored);
+            st.pending.remove(&task_key);
+        }));
     }
 }
 

@@ -662,6 +662,8 @@ pub fn spawn_music_runner(
             };
             let started = Instant::now();
             let job_id = job.accept.job_id.clone();
+            // An auto-update waits for this to finish instead of killing it.
+            let _long = c0mpute_update::LongJob::start();
             let result = run_job(&net, &store, &cache_root, &job).await;
             cleanup_job_dir(&cache_root, &job_id).await;
             match result {
