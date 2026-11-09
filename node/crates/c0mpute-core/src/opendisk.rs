@@ -153,7 +153,12 @@ pub fn descriptor(
         },
         "accepts": {
             "visibility": ["public", "private"],
+            // Private objects arrive already encrypted by their owner
+            // (DIP-0012 `private` tier): this node stores and serves
+            // ciphertext it has no key for. Public sites stay plaintext.
+            "encrypted": true,
             "encrypted_only": false,
+            "client_side_encryption": "c0mpute-private-v1",
             // A c0mpute hosting node holds static sites for the network and
             // can be picked as a paid (preferred) host by
             // `c0mpute hosting publish --disks auto`.
@@ -167,6 +172,12 @@ pub fn descriptor(
             "version": env!("CARGO_PKG_VERSION"),
             "storage_api": origin.map(|o| format!("{}/storage/v1", o.trim_end_matches('/'))),
             "redundancy": "reed-solomon 10/14",
+            "private_storage": {
+                "format": "c0mpute-private-v1",
+                "cipher": "AES-256-GCM, X25519 key wrap, client-held keys",
+                "operator_sees": "ciphertext, padded size, access timing",
+                "docs": "https://c0mpute.com/getting-started#private-storage",
+            },
             "roles": roles,
         },
     });
@@ -451,6 +462,8 @@ mod tests {
         assert!(d["updated"].as_str().unwrap().ends_with('Z'));
         // Default roles include hosting: the disk says so, for d1sks to filter on.
         assert_eq!(d["accepts"]["hosting"], true);
+        assert_eq!(d["accepts"]["encrypted"], true);
+        assert_eq!(d["c0mpute"]["private_storage"]["format"], "c0mpute-private-v1");
         assert!(d["c0mpute"]["roles"].as_array().unwrap().iter().any(|r| r == "hosting"));
         assert_eq!(d["c0mpute"]["hosting"]["price_per_gib_month"], 0.004);
         assert_eq!(d["c0mpute"]["hosting"]["max_gib"], 5.0);

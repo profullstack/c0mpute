@@ -1348,9 +1348,58 @@ impl Hosting {
             .route("/s/{site}", get(redirect_site_root))
             .route("/s/{site}/", get(serve_root))
             .route("/s/{site}/{*path}", get(serve_path))
+            .route("/p/{site}", get(redirect_private_root))
+            .route("/p/{site}/", get(private_loader))
             .fallback(serve_by_host)
             .with_state(self.clone())
     }
+}
+
+/// The browser decrypt loader for private objects (`c0mpute storage link`,
+/// `c0mpute hosting publish --private`). A fixed page: it fetches the
+/// object's ciphertext from `/s/<site>/o` and decrypts it in the browser with
+/// the key from the URL fragment, which browsers never send to the server.
+/// This gateway only ever handles ciphertext.
+pub const PRIVATE_LOADER_HTML: &str = include_str!("private_loader.html");
+
+/// The loader's CSP. Decrypted pages render in a sandboxed (opaque-origin)
+/// blob: frame that inherits this policy, so they can run their own scripts
+/// but cannot reach this gateway's origin or any other host: no fetches out,
+/// no external images, no form posts.
+pub const PRIVATE_LOADER_CSP: &str = "default-src 'none'; script-src 'unsafe-inline' blob: data:; \
+style-src 'unsafe-inline' blob: data:; img-src blob: data:; media-src blob: data:; font-src blob: data:; \
+connect-src 'self'; frame-src blob:; child-src blob:; object-src 'none'; base-uri 'none'; \
+form-action 'none'; frame-ancestors 'none'";
+
+fn valid_site_id(s: &str) -> bool {
+    s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+async fn private_loader(AxPath(site): AxPath<String>) -> Response {
+    if !valid_site_id(&site) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let mut resp = (StatusCode::OK, PRIVATE_LOADER_HTML).into_response();
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(PRIVATE_LOADER_CSP));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("cross-origin-opener-policy", HeaderValue::from_static("same-origin"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300"));
+    h.insert("x-robots-tag", HeaderValue::from_static("noindex, nofollow"));
+    resp
+}
+
+async fn redirect_private_root(AxPath(site): AxPath<String>) -> Response {
+    if !valid_site_id(&site) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let mut resp = StatusCode::PERMANENT_REDIRECT.into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!("/p/{site}/")) {
+        resp.headers_mut().insert(header::LOCATION, v);
+    }
+    resp
 }
 
 /// `/s/<site>` -> `/s/<site>/` (query kept). Serving the page at the slashless
