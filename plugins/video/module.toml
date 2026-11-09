@@ -110,7 +110,7 @@ hardware     = "GPU path: NVIDIA GPU + docker with the NVIDIA container runtime 
 
 [module.dispatch]
 mode  = "container"
-image = "ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c"
+image = "ghcr.io/profullstack/c0mpute-video-runner@sha256:daf24f7547678e325ba60bb78cc03f20577598463f1e9587df5890c935945022"
 
 [module.surfaces]
 cli = "c0mpute video"

@@ -193,10 +193,10 @@ pub const RUNNER_TAG: &str = "stable";
 /// moves cannot change what a node runs. Bump it (and
 /// `plugins/video/module.toml` [module.dispatch]) to the digest the workflow
 /// prints in its job summary after a runner change.
-pub const RUNNER_DIGEST: &str = "sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c";
+pub const RUNNER_DIGEST: &str = "sha256:daf24f7547678e325ba60bb78cc03f20577598463f1e9587df5890c935945022";
 
 /// What `c0mpute video setup` pulls: the repository at the pinned digest.
-pub const RUNNER_PULL_REF: &str = "ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c";
+pub const RUNNER_PULL_REF: &str = "ghcr.io/profullstack/c0mpute-video-runner@sha256:daf24f7547678e325ba60bb78cc03f20577598463f1e9587df5890c935945022";
 
 /// The local name the node runs. Setup tags the pinned pull as this, or
 /// builds it from source under this name when the pull fails, so the worker

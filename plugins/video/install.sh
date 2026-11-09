@@ -14,7 +14,7 @@ set -eu
 # The published runner, pinned by digest (keep in step with module.toml
 # [module.dispatch] and RUNNER_DIGEST in video.rs), and the local name the
 # node runs, whichever way the image arrives.
-PULL_REF="${C0MPUTE_VIDEO_PULL_REF:-ghcr.io/profullstack/c0mpute-video-runner@sha256:2ba52bedfaa2f8b0bb76a2778a3184c6baf591b9879c7fa090abb56bbddf141c}"
+PULL_REF="${C0MPUTE_VIDEO_PULL_REF:-ghcr.io/profullstack/c0mpute-video-runner@sha256:daf24f7547678e325ba60bb78cc03f20577598463f1e9587df5890c935945022}"
 IMAGE="c0mpute/video-runner:stable"
 SOURCE_REPO="${C0MPUTE_VIDEO_SOURCE_REPO:-https://github.com/profullstack/c0mpute.git}"
 
