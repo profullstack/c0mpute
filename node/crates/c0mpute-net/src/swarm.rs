@@ -69,6 +69,21 @@ fn mdns_disabled() -> bool {
     std::env::var("C0MPUTE_DISABLE_MDNS").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
+/// True when every listen address is loopback (127.0.0.0/8 or ::1). Such a
+/// node is a local test or tool, not part of a LAN: it must not discover (and
+/// join) live nodes on the machine over mDNS. Every e2e test listens on
+/// 127.0.0.1, so this keeps all of them off the real network without each
+/// one remembering to set `C0MPUTE_DISABLE_MDNS`.
+pub(crate) fn loopback_only(listen: &[Multiaddr]) -> bool {
+    use libp2p::multiaddr::Protocol;
+    !listen.is_empty()
+        && listen.iter().all(|a| match a.iter().next() {
+            Some(Protocol::Ip4(ip)) => ip.is_loopback(),
+            Some(Protocol::Ip6(ip)) => ip.is_loopback(),
+            _ => false,
+        })
+}
+
 /// `[u16 BE topic length][topic][payload]`.
 fn encode_direct(topic: &str, payload: &[u8]) -> Vec<u8> {
     let t = topic.as_bytes();
@@ -274,8 +289,10 @@ impl Libp2pNetwork {
         let (gossip_tx, _) = broadcast::channel::<GossipMessage>(256);
 
         let rpc_handlers: RpcHandlers = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let use_mdns = !mdns_disabled() && !loopback_only(&config.listen);
         let task = SwarmTask::new(
             keypair.clone(),
+            use_mdns,
             config.local_source,
             gossip_tx.clone(),
             rpc_handlers.clone(),
@@ -745,6 +762,7 @@ struct SwarmTask {
 impl SwarmTask {
     async fn new(
         keypair: identity::Keypair,
+        use_mdns: bool,
         local_source: Option<Arc<dyn ChunkSource>>,
         gossip_tx: broadcast::Sender<GossipMessage>,
         rpc_handlers: RpcHandlers,
@@ -799,10 +817,11 @@ impl SwarmTask {
                     gossipsub_cfg,
                 )
                 .map_err(|e| std::io::Error::other(format!("gossipsub behaviour: {e}")))?;
-                // `C0MPUTE_DISABLE_MDNS=1` keeps a node off LAN discovery:
-                // tests run on a box beside live workers set it, or their
-                // offers reach (and are won by) the real network.
-                let mdns = if mdns_disabled() {
+                // `C0MPUTE_DISABLE_MDNS=1`, or listening on loopback only,
+                // keeps a node off LAN discovery: tests run on a box beside
+                // live workers, and their offers and sites must never reach
+                // (or take copies from) the real network.
+                let mdns = if !use_mdns {
                     None
                 } else {
                     Some(mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?)
@@ -1457,6 +1476,17 @@ mod tests {
             .await
             .expect("fetch should succeed");
         assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn loopback_only_listeners_skip_mdns() {
+        let m = |s: &str| -> Multiaddr { s.parse().unwrap() };
+        assert!(loopback_only(&[m("/ip4/127.0.0.1/tcp/0")]));
+        assert!(loopback_only(&[m("/ip4/127.0.0.1/tcp/0"), m("/ip6/::1/tcp/0")]));
+        assert!(!loopback_only(&[m("/ip4/0.0.0.0/tcp/0")]));
+        assert!(!loopback_only(&[m("/ip4/127.0.0.1/tcp/0"), m("/ip4/0.0.0.0/tcp/0")]));
+        assert!(!loopback_only(&[m("/ip4/192.168.1.5/tcp/4001")]));
+        assert!(!loopback_only(&[]));
     }
 
     async fn wait_for_listen(net: &Libp2pNetwork) -> Multiaddr {
