@@ -240,6 +240,10 @@ pub struct Options {
     /// To read images published as hosting sites.
     pub hosting: Option<Hosting>,
     pub dns: dns::Verifier,
+    /// Capability ads, to find and dial other apps nodes and gateways. The
+    /// apps topic has few subscribers, and gossipsub only carries a topic
+    /// between peers that are connected and both subscribed.
+    pub registry: Option<crate::capabilities::Registry>,
 }
 
 impl Default for Options {
@@ -253,6 +257,7 @@ impl Default for Options {
             timing: Timing::default(),
             hosting: None,
             dns: dns::Verifier::default(),
+            registry: None,
         }
     }
 }
@@ -373,6 +378,9 @@ impl Apps {
         a.spawn_gossip_reader();
         a.spawn_announcer();
         a.spawn_supervisor();
+        if let Some(reg) = opts.registry {
+            a.spawn_linker(reg);
+        }
         Ok(a)
     }
 
@@ -686,6 +694,47 @@ impl Apps {
         drop(nodes);
         v.insert(self.0.me.clone(), self.my_view().await);
         v
+    }
+
+    /// Keep connections to the other apps nodes (and a few gateways), found
+    /// through their capability ads, so the apps gossip reaches them.
+    fn spawn_linker(&self, registry: crate::capabilities::Registry) {
+        let a = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                if a.is_stopped() {
+                    return;
+                }
+                let mut peers: Vec<c0mpute_net::PeerId> = registry
+                    .find_with_tag(ROLE_TAG)
+                    .await
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .take(16)
+                    .collect();
+                peers.extend(
+                    registry
+                        .find_with_tag("c0mpute:role:gateway")
+                        .await
+                        .into_iter()
+                        .map(|(p, _)| p)
+                        .take(8),
+                );
+                for p in peers {
+                    if p == a.0.net.peer_id() || a.0.net.is_connected(p).await {
+                        continue;
+                    }
+                    if tokio::time::timeout(Duration::from_secs(10), a.0.net.connect(p))
+                        .await
+                        .is_ok()
+                    {
+                        debug!(peer = %p, "apps: linked");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(20)).await;
+            }
+        });
     }
 
     // ── supervision ──────────────────────────────────────────────────────

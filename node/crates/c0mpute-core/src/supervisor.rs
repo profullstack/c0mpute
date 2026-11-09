@@ -746,6 +746,7 @@ impl Supervisor {
                 owners: cfg.owners.clone(),
                 dir: Some(self.config.storage.root.join("apps")),
                 hosting,
+                registry: Some(self.registry.clone()),
                 ..Default::default()
             },
         )
