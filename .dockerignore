@@ -2,7 +2,11 @@
 # node_modules (bun install) and .next / target (build), so none of these
 # should be copied in from the context.
 .git
+# `target` alone only matches the root; a cargo build in the deploy checkout
+# leaves node/target (14 GB on 2026-11-09), which COPY node / COPY . . then
+# copied into the build three times and into a 23 GB image, filling dev2's disk.
 target
+**/target
 node_modules
 **/node_modules
 .next
