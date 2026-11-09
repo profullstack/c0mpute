@@ -42,6 +42,12 @@ pub struct JobAuction {
     /// Bids from these peer ids are ignored. This is useful when retrying a
     /// job after a selected worker cannot return its output.
     pub excluded_bidders: Vec<String>,
+    /// Bids from these peer ids are kept back and used only when nobody else
+    /// bid: workers benched for an earlier failure. A bench deprioritizes; it
+    /// must not turn an auction its only capable bidder could win into "no
+    /// bids" (dev2's gateway, 2026-11-09: 114 bids from two benched nodes
+    /// dropped in six minutes while image and song auctions failed).
+    pub fallback_bidders: Vec<String>,
     /// The job's id in the system that bills it (Infernet job id, CoinPay
     /// invoice id). Carried on the offer, accept and receipt; billing keys
     /// on it, not on the per-auction `job_id` (see
@@ -69,6 +75,7 @@ impl JobAuction {
             receipt_timeout: DEFAULT_RECEIPT_TIMEOUT,
             allowed_bidders: Vec::new(),
             excluded_bidders: Vec::new(),
+            fallback_bidders: Vec::new(),
             external_ref: None,
             policy: crate::routing::SelectionPolicy::default(),
             accept_notify: None,
@@ -95,6 +102,11 @@ impl JobAuction {
 
     pub fn with_allowed_bidders(mut self, peers: Vec<String>) -> Self {
         self.allowed_bidders = peers;
+        self
+    }
+
+    pub fn with_fallback_bidders(mut self, peers: Vec<String>) -> Self {
+        self.fallback_bidders = peers;
         self
     }
 
@@ -214,6 +226,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     // re-sends the same bid without reserving more capacity.
     let mut republish_at = Some(Instant::now() + auction.bid_window / 2);
     let mut bids: Vec<JobBid> = Vec::new();
+    let mut fallback: Vec<JobBid> = Vec::new();
     while Instant::now() < deadline {
         if let Some(at) = republish_at
             && bids.is_empty()
@@ -264,7 +277,12 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             continue;
                         }
                         // The same bid arrives directly and over gossip.
-                        if bids.iter().any(|b| b.bidder_peer_id == bid.bidder_peer_id) {
+                        if bids.iter().chain(fallback.iter()).any(|b| b.bidder_peer_id == bid.bidder_peer_id) {
+                            continue;
+                        }
+                        if auction.fallback_bidders.contains(&bid.bidder_peer_id) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a benched worker kept as a fallback");
+                            fallback.push(bid);
                             continue;
                         }
                         debug!(
@@ -287,6 +305,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         }
     }
 
+    // Nobody else bid: a benched worker beats no worker at all.
+    if bids.is_empty() && !fallback.is_empty() {
+        info!(%job_id, count = fallback.len(), "buyer: only benched workers bid; using them");
+        bids = fallback;
+    }
     let received = bids.len();
     // A bid that expired while the window was open is no longer backed by
     // the worker's capacity; accepting it would overbook that worker.
