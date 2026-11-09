@@ -14,3 +14,4 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+minisign-verify = "0.3"

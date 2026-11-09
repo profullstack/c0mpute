@@ -1,8 +1,8 @@
 //! Self-upgrade: poll the release manifest, verify signatures, swap binary.
 //!
-//! Status: scaffold for the upgrade flow. Wire format + version compare
-//! are real; the actual binary swap is stubbed (printed) until we have
-//! signed releases to swap to.
+//! Every update is checked twice before the swap: sha256 (corruption) and a
+//! minisign signature against the embedded production key [`RELEASE_PUBKEY`]
+//! (authenticity). A missing or invalid signature aborts the update.
 
 use std::time::Duration;
 
@@ -32,8 +32,8 @@ pub enum Channel {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Artifact {
-    pub os: String,    // "linux" | "darwin" | "windows"
-    pub arch: String,  // "x86_64" | "aarch64"
+    pub os: String,   // "linux" | "darwin" | "windows"
+    pub arch: String, // "x86_64" | "aarch64"
     pub url: String,
     pub sha256_hex: String,
     pub minisig_url: String,
@@ -187,7 +187,7 @@ fn target_os_arch() -> Result<(&'static str, &'static str)> {
 /// feed-provided artifact (its `sha256_hex` is served from a different origin
 /// than the binary, a stronger integrity anchor); otherwise falls back to the
 /// stable pinned-version URL and its companion `.sha256`.
-async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String, String)> {
+async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String, String, String)> {
     let (os, arch) = target_os_arch()?;
     let artifact = format!("c0mpute-{os}-{arch}.tar.gz");
 
@@ -197,7 +197,17 @@ async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String,
         .find(|a| a.os == os && a.arch == arch)
     {
         if !a.url.is_empty() && !a.sha256_hex.is_empty() {
-            return Ok((a.url.clone(), a.sha256_hex.to_lowercase(), artifact));
+            let sig_url = if a.minisig_url.is_empty() {
+                format!("{}.minisig", a.url)
+            } else {
+                a.minisig_url.clone()
+            };
+            return Ok((
+                a.url.clone(),
+                a.sha256_hex.to_lowercase(),
+                sig_url,
+                artifact,
+            ));
         }
     }
 
@@ -220,7 +230,49 @@ async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String,
         .next()
         .context("empty checksum file")?
         .to_lowercase();
-    Ok((url, expected, artifact))
+    let sig_url = format!("{url}.minisig");
+    Ok((url, expected, sig_url, artifact))
+}
+
+/// Production minisign public key for c0mpute release artifacts. Must match
+/// `minisign.pub` at the repo root (a unit test enforces it) and the key in
+/// scripts/install.sh. Kept as a const rather than `include_str!` because the
+/// Docker builds copy only `node/` into the Rust build stage.
+pub const RELEASE_PUBKEY: &str = "RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM";
+
+/// Verify a minisign signature (`sig_text`, the `.minisig` file contents) over
+/// `bytes` with `pubkey_b64`. The signed trusted comment must name `artifact`
+/// (`file:<artifact>`) and, when given, the release tag (`version:<tag>`), so a
+/// validly signed file for another platform or release can't be swapped in.
+pub fn verify_release_signature(
+    pubkey_b64: &str,
+    bytes: &[u8],
+    sig_text: &str,
+    artifact: &str,
+    tag: Option<&str>,
+) -> Result<()> {
+    let pk = minisign_verify::PublicKey::from_base64(pubkey_b64)
+        .map_err(|e| anyhow::anyhow!("bad release public key: {e}"))?;
+    let sig = minisign_verify::Signature::decode(sig_text)
+        .map_err(|e| anyhow::anyhow!("malformed signature for {artifact}: {e}"))?;
+    pk.verify(bytes, &sig, false)
+        .map_err(|e| anyhow::anyhow!("signature verification FAILED for {artifact}: {e}"))?;
+    let comment = sig.trusted_comment();
+    let names_file = comment
+        .split_whitespace()
+        .any(|w| w == format!("file:{artifact}"));
+    if !names_file {
+        anyhow::bail!("signature for {artifact} signs a different file ({comment})");
+    }
+    if let Some(tag) = tag {
+        if !comment
+            .split_whitespace()
+            .any(|w| w == format!("version:{tag}"))
+        {
+            anyhow::bail!("signature for {artifact} is not for release {tag} ({comment})");
+        }
+    }
+    Ok(())
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -231,7 +283,7 @@ fn http_client() -> Result<reqwest::Client> {
 
 /// Download the artifact, verify its checksum, and swap it into place.
 async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
-    let (url, expected_sha, artifact) = resolve_artifact(manifest).await?;
+    let (url, expected_sha, sig_url, artifact) = resolve_artifact(manifest).await?;
 
     info!(%url, "downloading update");
     let bytes = http_client()?
@@ -250,9 +302,26 @@ async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
         hex::encode(h.finalize())
     };
     if actual_sha != expected_sha {
-        anyhow::bail!("checksum mismatch for {artifact}: expected {expected_sha}, got {actual_sha}");
+        anyhow::bail!(
+            "checksum mismatch for {artifact}: expected {expected_sha}, got {actual_sha}"
+        );
     }
-    info!("checksum verified; swapping binary");
+
+    // Fail closed: the sha256 above comes from the same origin as the binary,
+    // so it only catches corruption. The minisign signature is what proves the
+    // release came from us. No signature or a bad one means no swap.
+    let sig_text = http_client()?
+        .get(&sig_url)
+        .send()
+        .await
+        .with_context(|| format!("GET {sig_url}"))?
+        .error_for_status()
+        .with_context(|| format!("no signature for {artifact} at {sig_url}; refusing to update"))?
+        .text()
+        .await?;
+    let tag = format!("v{}", manifest.version.trim_start_matches('v'));
+    verify_release_signature(RELEASE_PUBKEY, &bytes, &sig_text, &artifact, Some(&tag))?;
+    info!("checksum + signature verified; swapping binary");
 
     // Extraction + filesystem swap is blocking work — keep it off the reactor.
     let bytes = bytes.to_vec();
@@ -341,7 +410,10 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
 
     // Small initial jitter (0–60s) so 1000 nodes don't all hit at once.
     let jitter = fastish_jitter_secs();
-    info!(secs = jitter, "auto-upgrade poll loop starting after jitter");
+    info!(
+        secs = jitter,
+        "auto-upgrade poll loop starting after jitter"
+    );
     tokio::time::sleep(Duration::from_secs(jitter)).await;
 
     let mut ticker = tokio::time::interval(interval);
@@ -427,6 +499,71 @@ mod tests {
     fn no_upgrade_when_same_or_older() {
         assert!(!should_upgrade("0.2.0", &manifest("0.2.0")).unwrap());
         assert!(!should_upgrade("0.2.0", &manifest("0.1.99")).unwrap());
+    }
+
+    // Test keypair (not the production key), generated with minisign 0.12.
+    const TEST_PUBKEY: &str = "RWSgKx30JhkH5l0N/vDWkkaQiHCDHjU9rB8KsX8Wa5/b6CP9AcF3mXX1";
+    const OTHER_PUBKEY: &str = "RWTTP1/dlNYVmhsaFYelmTJhVmvUctWmBqnIOBYeewyBgJf/KFdIzQYE";
+    const TEST_PAYLOAD: &[u8] = b"c0mpute test artifact\n";
+    const TEST_SIG: &str = "untrusted comment: signature from minisign secret key
+RUSgKx30JhkH5uRp7VRolVR4bM+n44NjjP5/duvM3raMiSDyRlUhTyEYAKVmuWzEBxhLEQE8VKRybfYLgQ+53uUy38iJOMrkrwg=
+trusted comment: timestamp:1 version:v9.9.9 file:c0mpute-linux-x86_64.tar.gz
+Blqf7m00l6vWH+cZyF7MfEWS3yzPB72bD9SD4FKBHNxraBa9P0juzgFm7uK6VFEpq3Fn0wr21tqB4o9lMbP2DA==
+";
+    const ART: &str = "c0mpute-linux-x86_64.tar.gz";
+
+    #[test]
+    fn good_signature_passes() {
+        verify_release_signature(TEST_PUBKEY, TEST_PAYLOAD, TEST_SIG, ART, Some("v9.9.9")).unwrap();
+        verify_release_signature(TEST_PUBKEY, TEST_PAYLOAD, TEST_SIG, ART, None).unwrap();
+    }
+
+    #[test]
+    fn tampered_bytes_fail() {
+        let err =
+            verify_release_signature(TEST_PUBKEY, b"c0mpute test artifacT\n", TEST_SIG, ART, None)
+                .unwrap_err();
+        assert!(err.to_string().contains("FAILED"), "{err}");
+    }
+
+    #[test]
+    fn wrong_key_fails() {
+        assert!(verify_release_signature(OTHER_PUBKEY, TEST_PAYLOAD, TEST_SIG, ART, None).is_err());
+        assert!(
+            verify_release_signature(RELEASE_PUBKEY, TEST_PAYLOAD, TEST_SIG, ART, None).is_err()
+        );
+    }
+
+    #[test]
+    fn wrong_file_or_release_fails() {
+        assert!(verify_release_signature(
+            TEST_PUBKEY,
+            TEST_PAYLOAD,
+            TEST_SIG,
+            "c0mpute-darwin-aarch64.tar.gz",
+            None
+        )
+        .is_err());
+        assert!(
+            verify_release_signature(TEST_PUBKEY, TEST_PAYLOAD, TEST_SIG, ART, Some("v9.9.8"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_or_garbage_signature_fails() {
+        assert!(verify_release_signature(TEST_PUBKEY, TEST_PAYLOAD, "", ART, None).is_err());
+        assert!(
+            verify_release_signature(TEST_PUBKEY, TEST_PAYLOAD, "<html>404</html>", ART, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn release_pubkey_matches_repo_minisign_pub() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../minisign.pub");
+        let file = std::fs::read_to_string(path).expect("read minisign.pub at repo root");
+        assert_eq!(file.lines().nth(1).map(str::trim), Some(RELEASE_PUBKEY));
     }
 
     #[test]

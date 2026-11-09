@@ -226,6 +226,55 @@ recent_release_tags() {
     | sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' | head -n 6
 }
 
+# Release signing. Every artifact on a c0mpute release has a minisign
+# signature next to it (<artifact>.minisig). The public key is also committed
+# as minisign.pub at the repo root; C0MPUTE_PUBKEY overrides it for testing.
+C0MPUTE_PUBKEY="${C0MPUTE_PUBKEY:-RWQqOew3QbWhAWH36TA5roreh18RgRqgozSwhE3yZtdza7eeLKmbDbJM}"
+# When minisign isn't installed we fetch this pinned upstream release
+# (github.com/jedisct1/minisign, static binaries) into the temp dir and check
+# it against these hard-coded sha256s before running it. No root needed.
+MINISIGN_PIN_VERSION="0.12"
+MINISIGN_PIN_LINUX_SHA256="9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73"
+MINISIGN_PIN_MACOS_SHA256="89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63"
+
+c0mpute_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 -r "$1" | cut -d' ' -f1
+  else return 1
+  fi
+}
+
+# Print the path of a minisign binary for platform $1, fetching the pinned
+# release into dir $2 when none is installed. Fails when neither works.
+c0mpute_minisign() {
+  if [ -z "${C0MPUTE_FORCE_PINNED_MINISIGN:-}" ] && command -v minisign >/dev/null 2>&1; then
+    command -v minisign
+    return 0
+  fi
+  case "$1" in
+    linux-x86_64)   ms_asset="minisign-${MINISIGN_PIN_VERSION}-linux.tar.gz"; ms_want="$MINISIGN_PIN_LINUX_SHA256"; ms_member="minisign-linux/x86_64/minisign" ;;
+    linux-aarch64)  ms_asset="minisign-${MINISIGN_PIN_VERSION}-linux.tar.gz"; ms_want="$MINISIGN_PIN_LINUX_SHA256"; ms_member="minisign-linux/aarch64/minisign" ;;
+    darwin-aarch64) ms_asset="minisign-${MINISIGN_PIN_VERSION}-macos.zip";    ms_want="$MINISIGN_PIN_MACOS_SHA256"; ms_member="minisign" ;;
+    *) warn "no pinned minisign build for $1"; return 1 ;;
+  esac
+  say "minisign not installed; fetching pinned minisign ${MINISIGN_PIN_VERSION} to verify the download" >&2
+  curl -fsSL -o "$2/$ms_asset" "https://github.com/jedisct1/minisign/releases/download/${MINISIGN_PIN_VERSION}/${ms_asset}" 2>/dev/null \
+    || { warn "could not download minisign"; return 1; }
+  ms_got=$(c0mpute_sha256 "$2/$ms_asset") || { warn "no sha256 tool (sha256sum/shasum/openssl) to check minisign"; return 1; }
+  if [ "$ms_got" != "$ms_want" ]; then
+    warn "minisign download has sha256 ${ms_got}, expected ${ms_want}"
+    return 1
+  fi
+  mkdir -p "$2/minisign"
+  case "$ms_asset" in
+    *.zip) unzip -q -o "$2/$ms_asset" "$ms_member" -d "$2/minisign" >/dev/null 2>&1 || { warn "could not unzip minisign"; return 1; } ;;
+    *) tar -xzf "$2/$ms_asset" -C "$2/minisign" "$ms_member" 2>/dev/null || [ -f "$2/minisign/$ms_member" ] || { warn "could not unpack minisign"; return 1; } ;;
+  esac
+  chmod +x "$2/minisign/$ms_member"
+  printf '%s\n' "$2/minisign/$ms_member"
+}
+
 install_c0mpute() {
   platform="$1"
   target="$C0MPUTE_HOME/bin/c0mpute"
@@ -287,16 +336,42 @@ install_c0mpute() {
 EOF
     exit 1
   fi
-  curl -fsSL "$sig_url" -o "$tmp/$artifact.minisig" 2>/dev/null \
-    || warn "no signature published for c0mpute yet; continuing"
-
-  if command -v minisign >/dev/null 2>&1 && [ -f "$tmp/$artifact.minisig" ]; then
-    say "verifying signature for c0mpute"
-    C0MPUTE_PUBKEY="${C0MPUTE_PUBKEY:-RWQ_REPLACE_ME_WITH_PROD_MINISIGN_PUBKEY}"
-    if ! minisign -V -P "$C0MPUTE_PUBKEY" -m "$tmp/$artifact" -x "$tmp/$artifact.minisig" >/dev/null 2>&1; then
+  # Fail closed: every release artifact ships a minisign signature
+  # (<artifact>.minisig, key in minisign.pub at the repo root). No signature,
+  # no verifier, a bad signature or a signature for a different file all abort.
+  sig_code=$(curl -sSL -o "$tmp/$artifact.minisig" -w '%{http_code}' "$sig_url" 2>/dev/null || echo "000")
+  if [ "$sig_code" != "200" ]; then
+    if [ "${C0MPUTE_ALLOW_UNSIGNED:-0}" = "1" ]; then
+      warn "no signature at ${sig_url} (HTTP ${sig_code}); installing UNVERIFIED because C0MPUTE_ALLOW_UNSIGNED=1"
+    else
       rm -rf "$tmp"
-      die "signature verification failed for c0mpute"
+      die "no signature at ${sig_url} (HTTP ${sig_code}); refusing to install an unverified binary (C0MPUTE_ALLOW_UNSIGNED=1 overrides)"
     fi
+  else
+    say "verifying signature for c0mpute"
+    if ! ms_bin=$(c0mpute_minisign "$platform" "$tmp"); then
+      rm -rf "$tmp"
+      die "cannot verify the download: install minisign (brew install minisign / apt install minisign / https://jedisct1.github.io/minisign/) and re-run"
+    fi
+    if ! ms_out=$("$ms_bin" -V -P "$C0MPUTE_PUBKEY" -m "$tmp/$artifact" -x "$tmp/$artifact.minisig" 2>&1); then
+      rm -rf "$tmp"
+      die "signature verification FAILED for ${artifact} from ${url}; not installing it"
+    fi
+    # The signed (trusted) comment names the file and release, so a validly
+    # signed artifact for another platform or release can't be swapped in.
+    ms_tag=""
+    case "$url" in */latest/*) ;; *) ms_tag="${url%/*}"; ms_tag="${ms_tag##*/}" ;; esac
+    case "$ms_out" in
+      *"file:${artifact}"*) ;;
+      *) rm -rf "$tmp"; die "signature for ${artifact} is valid but signs a different file; not installing it" ;;
+    esac
+    if [ -n "$ms_tag" ]; then
+      case "$ms_out" in
+        *"version:${ms_tag} "*) ;;
+        *) rm -rf "$tmp"; die "signature for ${artifact} is valid but not for release ${ms_tag}; not installing it" ;;
+      esac
+    fi
+    ok "signature verified (minisign key $(printf '%s' "$C0MPUTE_PUBKEY" | cut -c1-12)…)"
   fi
 
   tar -xzf "$tmp/$artifact" -C "$C0MPUTE_HOME/bin"
