@@ -201,7 +201,15 @@ fn hosting_budget(config: &Config) -> u64 {
         return config.hosting.max_bytes;
     }
     let (free, total) = disk_for(&config.storage.root);
-    crate::hosting::auto_budget(0, free, total)
+    hosting_budget_with(config, free, total)
+}
+
+/// [`hosting_budget`] for a given disk reading (testable without a real disk).
+fn hosting_budget_with(config: &Config, disk_free: u64, disk_total: u64) -> u64 {
+    if config.hosting.max_bytes > 0 {
+        return config.hosting.max_bytes;
+    }
+    crate::hosting::auto_budget(0, disk_free, disk_total)
 }
 
 fn chrono_now() -> String {
@@ -483,10 +491,17 @@ mod tests {
 
     #[test]
     fn the_automatic_budget_follows_the_disk() {
-        let cfg = Config::default();
+        // Fixed readings: the real disk's free space moves between two reads
+        // on a busy box, which made this test flaky (CI run 42641997226).
+        let gib = 1024u64 * 1024 * 1024;
+        let mut cfg = Config::default();
         assert_eq!(cfg.hosting.max_bytes, 0);
-        let (free, total) = disk_for(&cfg.storage.root);
-        assert_eq!(hosting_budget(&cfg), crate::hosting::auto_budget(0, free, total));
+        for (free, total) in [(900 * gib, 1000 * gib), (17 * gib, 1843 * gib), (0, 0)] {
+            assert_eq!(hosting_budget_with(&cfg, free, total), crate::hosting::auto_budget(0, free, total));
+        }
+        cfg.hosting.max_bytes = 7 * gib;
+        assert_eq!(hosting_budget_with(&cfg, 900 * gib, 1000 * gib), 7 * gib);
+        assert_eq!(hosting_budget(&cfg), 7 * gib);
     }
 
     #[test]
