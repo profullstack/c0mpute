@@ -174,7 +174,7 @@ pub fn detect_hardware_tag() -> String {
 }
 
 /// NVIDIA GPU present — a device node or a working `nvidia-smi -L`.
-fn nvidia_present() -> bool {
+pub fn nvidia_present() -> bool {
     if std::path::Path::new("/dev/nvidia0").exists() {
         return true;
     }

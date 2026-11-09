@@ -73,6 +73,20 @@ const WEIGHTS_REPO: &str = "ACE-Step/Ace-Step1.5";
 const WEIGHTS_REVISION: &str = "19671f406d603126926c1b7e2adc169acbcade22";
 const TORCH_PIN: [&str; 3] = ["torch==2.10.0", "torchaudio==2.10.0", "torchvision==0.25.0"];
 const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
+/// CUDA 12.8 wheels of the same torch pin, for nodes with an NVIDIA GPU.
+/// On a GPU ACE-Step renders a 2-3 minute song in well under a minute, so
+/// one card carries more songs than every CPU node together.
+const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu128";
+
+/// "cu128" on a box with an NVIDIA GPU, else "cpu". Probed once.
+pub fn torch_variant() -> &'static str {
+    static VARIANT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    VARIANT.get_or_init(|| if crate::capabilities::nvidia_present() { "cu128" } else { "cpu" })
+}
+
+fn on_gpu() -> bool {
+    torch_variant() != "cpu"
+}
 /// What ACE-Step imports at inference time. Its own dependency list adds
 /// gradio, the training stack and CUDA-only wheels, none of which a worker
 /// runs, so it is installed with --no-deps on top of these.
@@ -103,8 +117,11 @@ const UV_TARBALL_SHA256: &str = "745765a3b6e360ad76743599ae5c42e9278c7edf8bbff9f
 /// re-provision instead of running stale files.
 fn ready_stamp() -> String {
     format!(
-        "acestep={ACESTEP_COMMIT} weights={WEIGHTS_REVISION} torch={}-cpu worker={}\n",
+        // CPU nodes keep the exact stamp they were installed with ("-cpu");
+        // a GPU node re-provisions once to get CUDA wheels.
+        "acestep={ACESTEP_COMMIT} weights={WEIGHTS_REVISION} torch={}-{} worker={}\n",
         TORCH_PIN[0].trim_start_matches("torch=="),
+        torch_variant(),
         &hex::encode(Sha256::digest(WORKER.as_bytes()))[..12],
     )
 }
@@ -163,7 +180,8 @@ pub fn fast_enough_with(config: &crate::config::MusicConfig, job_threads: usize)
 }
 
 fn fast_enough(config: &crate::config::MusicConfig) -> bool {
-    fast_enough_with(config, crate::resources::cpu_threads_per_job())
+    // On a GPU the card does the work; a few CPU threads are enough.
+    on_gpu() || fast_enough_with(config, crate::resources::cpu_threads_per_job())
 }
 
 /// Installed, enabled, idle enough and with the free memory for a song.
@@ -173,11 +191,12 @@ pub fn can_serve(config: &crate::config::MusicConfig) -> bool {
         && installed()
         && fast_enough(config)
         && has_headroom_with(config, crate::diffusion::memory())
-        && crate::diffusion::idle_enough_with(
+        && (on_gpu()
+            || crate::diffusion::idle_enough_with(
             sysinfo::System::load_average().one,
             std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             config.max_load_per_cpu,
-        )
+        ))
         && node_slot().available_permits() > 0
         // An image render holds the same CPU; never run both at once.
         && !crate::diffusion::busy()
@@ -325,8 +344,14 @@ pub async fn install() -> Result<()> {
         command
     };
     let mut torch: Vec<&str> = TORCH_PIN.to_vec();
-    torch.extend(["--index-url", TORCH_CPU_INDEX]);
-    crate::speech::run_checked(pip(&torch), "install CPU PyTorch").await?;
+    if on_gpu() {
+        // --reinstall: a box that had the CPU build swaps it for CUDA.
+        torch.extend(["--reinstall", "--index-url", TORCH_CUDA_INDEX]);
+        crate::speech::run_checked(pip(&torch), "install CUDA PyTorch").await?;
+    } else {
+        torch.extend(["--index-url", TORCH_CPU_INDEX]);
+        crate::speech::run_checked(pip(&torch), "install CPU PyTorch").await?;
+    }
     crate::speech::run_checked(pip(RUNTIME_DEPS), "install ACE-Step's runtime dependencies").await?;
     let source = format!(
         "ace-step @ https://github.com/ace-step/ACE-Step-1.5/archive/{ACESTEP_COMMIT}.tar.gz"
@@ -762,6 +787,16 @@ mod tests {
         assert!(!has_headroom_with(&config, small));
         assert!(fast_enough_with(&config, 8));
         assert!(!fast_enough_with(&config, 3));
+    }
+
+    #[test]
+    fn cpu_nodes_keep_their_ready_stamp() {
+        // Changing a CPU node's stamp would re-provision every music node (8 GB).
+        if torch_variant() == "cpu" {
+            assert!(ready_stamp().starts_with(&format!(
+                "acestep={ACESTEP_COMMIT} weights={WEIGHTS_REVISION} torch=2.10.0-cpu worker="
+            )));
+        }
     }
 
     #[test]
