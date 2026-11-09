@@ -50,7 +50,7 @@
 [module]
 id          = "video"
 name        = "Video — generation (Wan 2.2, LTX-2.3 with audio)"
-version     = "0.2.81"
+version     = "0.2.82"
 kind        = "workload"
 category    = "ai"
 status      = "available"
@@ -61,7 +61,7 @@ license     = "MIT"
 keywords    = ["video", "wan", "wan2.2", "ltx-2", "ltx-2.3", "audio", "txt2vid", "img2vid", "generation", "diffusion"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.82"
 os           = ["linux"]
 arch         = ["x86_64"]
 capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]

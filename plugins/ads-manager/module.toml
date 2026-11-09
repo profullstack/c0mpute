@@ -38,7 +38,7 @@
 [module]
 id          = "ads-manager"
 name        = "Ads Manager — shared ad operations layer"
-version     = "0.2.81"
+version     = "0.2.82"
 kind        = "service"
 category    = "applications"
 status      = "partial"
@@ -51,7 +51,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c
 keywords    = ["ads", "advertising", "campaigns", "p2p", "receipts", "publisher", "creative", "billing", "coinpay"]
 
 [module.requirements]
-c0mpute      = ">=NEXT"
+c0mpute      = ">=0.2.82"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:ingress?", "network:egress", "disk"]
