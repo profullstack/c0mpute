@@ -2637,7 +2637,7 @@ mod tests {
     #[test]
     fn a_holding_message_of_striped_sites_fits_gossipsub() {
         // Entries are packed up to HOLDING_MESSAGE_BYTES; the largest bitmap
-        // (every group of a 256 GiB site) still leaves room.
+        // (every group of a 4 TiB site, MAX_GROUPS) still leaves room.
         let all: BTreeSet<u32> = (0..stripe::group_count(site::MAX_SITE_BYTES) as u32).collect();
         let g = stripe::encode_groups(&all);
         let per = HOLDING_MESSAGE_BYTES / (120 + g.len()) + 1;
@@ -3053,9 +3053,10 @@ pub async fn publish_dir_with(
         scanned.manifest.files.len(),
         gib(record.size),
         if striped {
-            ", striped in 64 MiB groups"
+            let n = stripe::group_count(record.size) as u64;
+            format!(", striped in {n} groups of ~{} MiB", record.size.div_ceil(n) >> 20)
         } else {
-            ""
+            String::new()
         },
         record.site_id
     );

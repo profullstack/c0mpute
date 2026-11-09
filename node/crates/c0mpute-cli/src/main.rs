@@ -817,8 +817,8 @@ enum HostingCmd {
     /// The site is signed with this machine's identity, so only this machine
     /// can update it; publishing the same --name again ships a new version.
     /// Stays up until three hosting nodes hold copies, then exits.
-    /// Sites over 1 GiB (up to 64 GiB free, 256 GiB with --disks) are striped
-    /// over the network in 64 MiB groups; files are served from the folder
+    /// Sites over 1 GiB (up to 64 GiB free, 4 TiB with --disks) are striped
+    /// over the network in 64 MiB groups (bigger past 512 GiB); files are served from the folder
     /// itself while the network copies them, so keep it running, and run the
     /// same command again to resume if it stops.
     #[command(verbatim_doc_comment)]

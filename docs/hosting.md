@@ -44,7 +44,7 @@ is used for misses.
 
 | | |
 |---|---|
-| Site, paid (`--disks`, a v2 record) | 256 GiB |
+| Site, paid (`--disks`, a v2 record) | 4 TiB |
 | Site, free (v1 record) | 64 GiB |
 | Files per site | 10,000,000 |
 | One file | 128 GiB |
@@ -63,15 +63,16 @@ The budget advertised to d1sks (`max_gib`) is the same number, so `--disks auto`
 picks disks with room for their share of the site.
 
 Errors say which limit was hit and what to do (`--disks auto` for a free site over
-64 GiB, split the folder above 256 GiB). A hosting node logs the limit that made it
+64 GiB, split the folder above 4 TiB). A hosting node logs the limit that made it
 refuse a copy (`over this node's hosting budget`, `disk nearly full`, `per-owner limit`).
 
 ## Large sites: striped placement
 
 A site up to 1 GiB is replicated whole, exactly as before. Above that it is
 **striped**: its chunks are bucketed by hash into groups, one group per 64 MiB of the
-site (the count comes from the size in the signed record), and every group is placed on
-its own:
+site up to 8,192 groups (512 GiB); a bigger site keeps 8,192 groups and makes each one
+bigger (512 MiB at the 4 TiB cap), so a group bitmap on the gossip stays at most 1 KiB.
+The count comes from the size in the signed record, and every group is placed on its own:
 
 * The hosting nodes that rank highest for `(site, group)` (rendezvous hashing, the same
   answer on every node) take that group until it has three copies. No node needs the
@@ -85,14 +86,15 @@ its own:
   A node holds each group as soon as it is complete, so a restart resumes group by group.
 * Paid sites: preferred hosts take every group when there are at most three of them (a
   paid host holds the whole site), else the three that rank highest per group; each is
-  paid for its share (`size x 3 / preferred`).
+  paid for its share (`size x 3 / preferred`). A multi-TiB site therefore needs disks
+  with that much room each; `--copies 5` cuts each host's share to 60% of the site.
 * `c0mpute hosting ls` and `/hosting/v1/sites` show, for a striped site, `copies` = the
   fewest copies of any group, plus `groups`, `short_groups` and `missing_groups`.
 
 Manifests: up to 5,000 files and 1 GiB the manifest is one chunk, byte for byte what
 older nodes read. Above either, it is a root listing parts (by first path) of at most
 4,000 files and 65,536 chunk hashes each, so every part is one chunk fetch even for a
-256 GiB site; a gateway fetches only the part a request needs. Every holder of any group
+4 TiB site; a gateway fetches only the part a request needs. Every holder of any group
 keeps the root and all parts.
 
 Groups are defined over chunk hashes only (the group of a chunk is its hash modulo the

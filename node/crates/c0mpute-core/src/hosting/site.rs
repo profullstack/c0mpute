@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 /// as a CBOR integer array (about 2x on the wire and slow to decode), so
 /// small chunks keep each fetch quick and well under the 10 MiB response cap.
 pub const FILE_CHUNK_BYTES: usize = 1024 * 1024;
-/// Largest site a node will publish or replicate (with paid preferred hosts).
-pub const MAX_SITE_BYTES: u64 = 256 * GIB;
+/// Largest site a node will publish or replicate (with paid preferred hosts):
+/// 4 TiB. Striping caps a site at [`super::stripe::MAX_GROUPS`] groups, so
+/// past 512 GiB the groups grow (512 MiB each at 4 TiB) instead.
+pub const MAX_SITE_BYTES: u64 = 4 * 1024 * GIB;
 /// Largest free site (a v1 record, no preferred hosts). Volunteers hold free
 /// copies, so a free site may use at most a quarter of what a paid one may.
 pub const MAX_FREE_SITE_BYTES: u64 = 64 * GIB;
@@ -638,7 +640,7 @@ impl SiteManifest {
     /// Encode the manifest: one chunk up to [`INLINE_FILES`] files and
     /// [`STRIPE_ABOVE`] bytes (byte for byte what older nodes read), else a
     /// root plus parts of at most [`PART_FILES`] files and [`PART_CHUNKS`]
-    /// chunks, so even a 256 GiB site's chunk lists are fetched a part at a
+    /// chunks, so even a 4 TiB site's chunk lists are fetched a part at a
     /// time.
     pub fn stored(&self) -> StoredManifest {
         let m = self;
