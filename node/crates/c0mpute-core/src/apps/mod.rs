@@ -1088,6 +1088,14 @@ impl Apps {
                     Err(e) => {
                         l.failures += 1;
                         warn!(app = %id, err = %e, "apps: start failed");
+                        // A local snapshot that does not read back (a piece
+                        // missing or damaged) is forgotten, so the next pass
+                        // pulls a fresh copy from the other holders instead
+                        // of failing on the same bytes again.
+                        let msg = format!("{e:#}");
+                        if msg.contains("chunk") || msg.contains("snapshot") {
+                            l.snapshot = None;
+                        }
                         // Give the role up after repeated failures so another
                         // holder can try.
                         if l.failures >= 3 {
