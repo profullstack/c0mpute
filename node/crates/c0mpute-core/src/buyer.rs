@@ -66,6 +66,10 @@ pub struct JobAuction {
     /// only bids whose attestation verifies are considered, and the spec is
     /// sealed to the attested key only.
     pub confidential: bool,
+    /// Told what to persist about the job the moment its accept is out
+    /// ([`crate::job_e2e::InFlightJob`], no secrets), so a buyer that
+    /// restarts can [`resume_auction`] instead of re-auctioning.
+    pub on_accept: Option<Arc<dyn Fn(&crate::job_e2e::InFlightJob) + Send + Sync>>,
 }
 
 impl JobAuction {
@@ -85,7 +89,13 @@ impl JobAuction {
             policy: crate::routing::SelectionPolicy::default(),
             accept_notify: None,
             confidential: false,
+            on_accept: None,
         }
+    }
+
+    pub fn with_on_accept(mut self, f: Arc<dyn Fn(&crate::job_e2e::InFlightJob) + Send + Sync>) -> Self {
+        self.on_accept = Some(f);
+        self
     }
 
     pub fn with_confidential(mut self, confidential: bool) -> Self {
@@ -236,7 +246,9 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
 
     let job_id = Uuid::new_v4().to_string();
     let now_ms = unix_ms();
-    let session = crate::job_e2e::BuyerSession::new(&auction.spec_inline, auction.confidential)?;
+    // The key is derived from this node's job secret and the job id, so a
+    // restart can re-derive it and still collect the job (resume_auction).
+    let session = crate::job_e2e::BuyerSession::for_job(&net, &job_id, &auction.spec_inline, auction.confidential)?;
     let offer = JobOffer {
         job_id: job_id.clone(),
         workload_type: auction.workload_type.clone(),
@@ -474,6 +486,18 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     if let Some(tx) = &auction.accept_notify {
         let _ = tx.send((job_id.clone(), winner.clone()));
     }
+    if let (Some(f), Some(e)) = (&auction.on_accept, &winner.e2e) {
+        f(&crate::job_e2e::InFlightJob {
+            job_id: job_id.clone(),
+            workload: auction.workload_type.clone(),
+            buyer_peer: offer.buyer_peer_id.clone(),
+            winner_peer: winner.bidder_peer_id.clone(),
+            worker_key: e.worker_key.clone(),
+            price_usd: winner.price_usd,
+            external_ref: auction.external_ref.clone(),
+            accepted_at_ms: unix_ms(),
+        });
+    }
 
     // ── wait for receipt ────────────────────────────────────────────
     let receipt_timeout = receipt_wait(auction.receipt_timeout, &winner);
@@ -529,6 +553,130 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         winner.bidder_peer_id, receipt_timeout
     ))
     .into())
+}
+
+/// Why [`resume_auction`] could not collect a job: the caller re-auctions.
+#[derive(Debug)]
+pub enum ResumeFailure {
+    /// The worker does not know the job (restarted, or never got it), it
+    /// was cancelled, or it cannot be reached.
+    Gone(String),
+    /// The worker still runs it but no receipt came within the time left.
+    NoReceipt(String),
+}
+
+impl std::fmt::Display for ResumeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gone(m) => write!(f, "job gone: {m}"),
+            Self::NoReceipt(m) => write!(f, "no receipt: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for ResumeFailure {}
+
+/// How often a resumed job asks its worker where it stands while waiting.
+const RESUME_POLL: Duration = Duration::from_secs(20);
+
+/// After a restart: collect a job a worker is still running for us (or has
+/// finished) instead of auctioning it again. The result key is re-derived
+/// from this node's job secret and the job id
+/// ([`crate::job_e2e::resume_result_key`]); the worker is asked over
+/// `c0mpute.job.control.v1`. A worker that does not know the job (or cannot
+/// be reached) yields [`ResumeFailure::Gone`].
+pub async fn resume_auction(
+    net: Arc<Libp2pNetwork>,
+    job: &crate::job_e2e::InFlightJob,
+    receipt_timeout: Duration,
+) -> Result<AuctionOutcome> {
+    use crate::job_control::{Op, State};
+    let result_key = crate::job_e2e::resume_result_key(&net, job)?;
+    let worker: c0mpute_net::PeerId =
+        job.winner_peer.parse().map_err(|e| anyhow::anyhow!("winner peer id: {e}"))?;
+    let topic = job_topic(&job.workload);
+    net.subscribe(&topic).await?;
+    let mut rx = net.messages();
+    let outcome = |receipt: JobReceipt, key: c0mpute_net::topics::JobKey| AuctionOutcome {
+        job_id: job.job_id.clone(),
+        accepted_bid: JobBid {
+            job_id: job.job_id.clone(),
+            bidder_peer_id: job.winner_peer.clone(),
+            bidder_did: None,
+            price_usd: job.price_usd,
+            eta_seconds: 0,
+            published_at_ms: job.accepted_at_ms,
+            expires_at_ms: None,
+            bench_score: None,
+            load: None,
+            e2e: None,
+        },
+        receipt,
+        external_ref: job.external_ref.clone(),
+        result_key: key,
+    };
+    // A receipt is only taken from the winner itself, for this job.
+    let valid = |r: &JobReceipt| r.job_id == job.job_id && r.worker_peer_id == job.winner_peer;
+    let deadline = Instant::now() + receipt_timeout;
+    loop {
+        if let Err(e) = net.reach(worker, Duration::from_secs(10)).await {
+            debug!(job_id = %job.job_id, err = %e, "buyer: resumed job's worker not reachable yet");
+        }
+        let status = crate::job_control::ask(&net, worker, Op::Status, &job.job_id).await;
+        match status {
+            Ok(r) if r.state == State::Done => {
+                let receipt: JobReceipt = r
+                    .receipt
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .ok_or_else(|| ResumeFailure::Gone("worker reported done without a receipt".into()))?;
+                if !valid(&receipt) {
+                    return Err(ResumeFailure::Gone("worker returned another job's receipt".into()).into());
+                }
+                info!(job_id = %job.job_id, status = ?receipt.status, "buyer: resumed job had finished");
+                return Ok(outcome(receipt, result_key));
+            }
+            Ok(r) if r.state == State::Running => {
+                debug!(job_id = %job.job_id, "buyer: resumed job still running on its worker");
+            }
+            Ok(r) => return Err(ResumeFailure::Gone(format!("worker reports {:?}", r.state)).into()),
+            Err(e) => return Err(ResumeFailure::Gone(format!("worker not reachable: {e:#}")).into()),
+        }
+        // Still running: wait for its receipt, asking again now and then in
+        // case the receipt is lost.
+        let until = (Instant::now() + RESUME_POLL).min(deadline);
+        while Instant::now() < until {
+            match tokio::time::timeout(until.saturating_duration_since(Instant::now()), rx.recv()).await {
+                Ok(Ok(msg)) if msg.topic == topic => {
+                    if let Ok(receipt) = serde_json::from_slice::<JobReceipt>(&msg.data)
+                        && valid(&receipt)
+                        && source_matches_claim(&msg, &receipt.worker_peer_id)
+                    {
+                        info!(job_id = %job.job_id, status = ?receipt.status, "buyer: resumed job's receipt received");
+                        return Ok(outcome(receipt, result_key));
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(_)) => break,
+                Err(_) => break,
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(ResumeFailure::NoReceipt(format!("no receipt within {receipt_timeout:?}")).into());
+        }
+    }
+}
+
+/// Tell the worker running `job` to stop: the buyer gave up on it (it is
+/// being re-auctioned or the request was abandoned). Best effort.
+pub async fn cancel_job(net: &Libp2pNetwork, job: &crate::job_e2e::InFlightJob) {
+    let Ok(worker) = job.winner_peer.parse::<c0mpute_net::PeerId>() else { return };
+    if net.reach(worker, Duration::from_secs(5)).await.is_err() {
+        return;
+    }
+    match crate::job_control::ask(net, worker, crate::job_control::Op::Cancel, &job.job_id).await {
+        Ok(r) => info!(job_id = %job.job_id, state = ?r.state, "buyer: cancelled an abandoned job"),
+        Err(e) => debug!(job_id = %job.job_id, err = %e, "buyer: cancel not delivered"),
+    }
 }
 
 /// [`run_auction`] that waits in a queue instead of failing when nobody

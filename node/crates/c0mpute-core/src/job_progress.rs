@@ -243,6 +243,11 @@ pub struct PendingJob {
     /// The request's queue limit; older pending files predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wait_ms: Option<u64>,
+    /// The auction already awarded for it, if any: after a restart the
+    /// gateway collects that job from its worker instead of re-auctioning
+    /// (DIP-0032). No secrets: the job key is re-derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<crate::job_e2e::InFlightJob>,
 }
 
 /// How long a pending request without a recorded limit is resumable.
@@ -272,6 +277,24 @@ impl PendingStore {
         if let Ok(json) = serde_json::to_vec(job) {
             let _ = std::fs::write(dir.join(format!("{key}.json")), json);
         }
+    }
+
+    /// Record (or clear) the job awarded for request `key`.
+    pub fn set_in_flight(&self, key: &str, job: Option<crate::job_e2e::InFlightJob>) {
+        let Some(dir) = self.0.as_deref() else { return };
+        let path = dir.join(format!("{key}.json"));
+        let Some(mut pending) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<PendingJob>(&b).ok()) else {
+            return;
+        };
+        pending.in_flight = job;
+        self.save(key, &pending);
+    }
+
+    /// The job awarded for request `key`, if one is recorded.
+    pub fn in_flight(&self, key: &str) -> Option<crate::job_e2e::InFlightJob> {
+        let dir = self.0.as_deref()?;
+        let b = std::fs::read(dir.join(format!("{key}.json"))).ok()?;
+        serde_json::from_slice::<PendingJob>(&b).ok()?.in_flight
     }
 
     pub fn remove(&self, key: &str) {
@@ -320,6 +343,18 @@ tokio::task_local! {
     /// The queue limit of the request running on this task, and when it was
     /// first queued (unix ms; kept across a gateway restart).
     pub static QUEUE: QueueCtx;
+    /// The awarded job a resumed request should collect before auctioning.
+    pub static RESUME: std::sync::Mutex<Option<crate::job_e2e::InFlightJob>>;
+}
+
+/// Take the awarded job this (resumed) request should collect first.
+pub fn take_resume() -> Option<crate::job_e2e::InFlightJob> {
+    RESUME.try_with(|r| r.lock().ok().and_then(|mut g| g.take())).ok().flatten()
+}
+
+/// The request id of the tracked job running on this task.
+pub fn current_key() -> Option<String> {
+    CURRENT.try_with(|(_, key)| key.clone()).ok()
 }
 
 /// See [`QUEUE`].
@@ -411,11 +446,11 @@ mod tests {
             let pending = PendingStore::persistent(dir.join("jobs"));
             pending.save(
                 "song-10",
-                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({"prompt": "x"}), required: vec![], max_bytes: 1, started_at_ms: now_ms(), max_wait_ms: None },
+                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({"prompt": "x"}), required: vec![], max_bytes: 1, started_at_ms: now_ms(), max_wait_ms: None, in_flight: None },
             );
             pending.save(
                 "stale",
-                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({}), required: vec![], max_bytes: 1, started_at_ms: 1, max_wait_ms: None },
+                &PendingJob { workload: "music.txt2music".into(), spec: serde_json::json!({}), required: vec![], max_bytes: 1, started_at_ms: 1, max_wait_ms: None, in_flight: None },
             );
         }
         // "Restart": fresh stores over the same directories.
@@ -427,6 +462,33 @@ mod tests {
         assert_eq!(resumable[0].0, "song-10");
         pending.remove("song-10");
         assert!(pending.take_resumable().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_awarded_job_is_kept_for_a_restart_without_secrets() {
+        let dir = std::env::temp_dir().join(format!("c0-inflight-{}", uuid::Uuid::new_v4()));
+        let pending = PendingStore::persistent(dir.clone());
+        let job = PendingJob { workload: "diffusion.txt2img".into(), spec: serde_json::json!({}), required: vec![], max_bytes: 1, started_at_ms: now_ms(), max_wait_ms: None, in_flight: None };
+        pending.save("img-1", &job);
+        let rec = crate::job_e2e::InFlightJob {
+            job_id: "j".into(),
+            workload: "diffusion.txt2img".into(),
+            buyer_peer: "b".into(),
+            winner_peer: "w".into(),
+            worker_key: "ab".repeat(32),
+            price_usd: 0.01,
+            external_ref: None,
+            accepted_at_ms: 1,
+        };
+        pending.set_in_flight("img-1", Some(rec.clone()));
+        // A restarted gateway reads it back with the request.
+        let again = PendingStore::persistent(dir.clone());
+        assert_eq!(again.in_flight("img-1"), Some(rec.clone()));
+        let resumable = again.take_resumable();
+        assert_eq!(resumable[0].1.in_flight, Some(rec));
+        again.set_in_flight("img-1", None);
+        assert_eq!(again.in_flight("img-1"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -448,6 +510,7 @@ mod tests {
             max_bytes: 1,
             started_at_ms: now - age_ms,
             max_wait_ms,
+            in_flight: None,
         };
         let hour = 60 * 60 * 1000;
         // Queued 90 min with a 2 h limit: resumed (the old rule dropped it at 30 min).
@@ -489,6 +552,7 @@ mod tests {
                     max_bytes: 1,
                     started_at_ms: now - age,
                     max_wait_ms: None,
+                    in_flight: None,
                 },
             );
         }

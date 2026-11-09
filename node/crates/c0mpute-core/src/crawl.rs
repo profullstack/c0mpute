@@ -259,7 +259,7 @@ pub fn spawn_crawl_runner(
                 let _slot = slot;
                 let started = Instant::now();
                 let job_id = job.accept.job_id.clone();
-                match run_fetch_job(&net, &store, &job).await {
+                match crate::job_control::cancellable(&job.accept.job_id, run_fetch_job(&net, &store, &job)).await {
                     Ok(hash) => {
                         load.record_job(started.elapsed());
                         info!(%job_id, %hash, "crawl runner: fetch complete");

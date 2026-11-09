@@ -718,9 +718,65 @@ pub struct BuyerSession {
     pub attest_nonce: Option<String>,
 }
 
+/// The buyer's X25519 secret for `job_id`: derived from the node's job
+/// secret and the job id, so a buyer that restarts mid-job re-derives it and
+/// can still open the result. See DIP-0032 "Resuming after a restart".
+fn job_buyer_secret(net: &Libp2pNetwork, job_id: &str) -> StaticSecret {
+    let mut context = b"c0mpute/job-e2e/v1 buyer-key\0".to_vec();
+    context.extend_from_slice(job_id.as_bytes());
+    let bytes = net.derive_job_secret(&context);
+    StaticSecret::from(*bytes)
+}
+
+/// What a buyer persists about a job a worker is running for it: enough to
+/// re-derive the job's result key after a restart and to ask the worker
+/// where the job stands. No secret: the buyer's key is re-derived from its
+/// job secret, the worker's key is public.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InFlightJob {
+    pub job_id: String,
+    pub workload: String,
+    pub buyer_peer: String,
+    pub winner_peer: String,
+    /// The winner's X25519 public key (hex), from its signed bid.
+    pub worker_key: String,
+    pub price_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
+    pub accepted_at_ms: u64,
+}
+
+/// Re-derive the result key of an in-flight job (after a restart).
+pub fn resume_result_key(net: &Libp2pNetwork, job: &InFlightJob) -> Result<JobKey> {
+    if net.peer_id().to_base58() != job.buyer_peer {
+        bail!("this node is not the job's buyer");
+    }
+    let secret = job_buyer_secret(net, &job.job_id);
+    let buyer_key = public_hex(&secret);
+    let b = Binding {
+        job_id: &job.job_id,
+        workload: &job.workload,
+        buyer_peer: &job.buyer_peer,
+        worker_peer: &job.winner_peer,
+        buyer_key: &buyer_key,
+        worker_key: &job.worker_key,
+    };
+    Ok(derive(&secret, &job.worker_key, &b)?.result.clone())
+}
+
 impl BuyerSession {
+    /// The session of one auction, its X25519 key derived from the node's
+    /// job secret and `job_id` (re-derivable after a restart).
+    pub fn for_job(net: &Libp2pNetwork, job_id: &str, spec: &Value, confidential: bool) -> Result<Self> {
+        Self::with_secret(job_buyer_secret(net, job_id), spec, confidential)
+    }
+
+    /// A session with a random key (never resumed: canary probes).
     pub fn new(spec: &Value, confidential: bool) -> Result<Self> {
-        let secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        Self::with_secret(StaticSecret::random_from_rng(rand::rngs::OsRng), spec, confidential)
+    }
+
+    fn with_secret(secret: StaticSecret, spec: &Value, confidential: bool) -> Result<Self> {
         let attest_nonce = confidential.then(|| {
             let mut n = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut n);
