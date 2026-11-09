@@ -455,9 +455,16 @@ pub fn decide(running: bool, busy: bool, blocked: bool, idle_for: Duration, idle
     }
 }
 
-fn owner_of(dir: &Path) -> Option<(u32, u32)> {
+/// The uid:gid owning `dir`, which the container runs as (`None` off Unix).
+#[cfg(unix)]
+pub fn owner_of(dir: &Path) -> Option<(u32, u32)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(dir).ok().map(|m| (m.uid(), m.gid()))
+}
+
+#[cfg(not(unix))]
+pub fn owner_of(_dir: &Path) -> Option<(u32, u32)> {
+    None
 }
 
 /// Running crowdgpt containers (by [`LABEL`]).

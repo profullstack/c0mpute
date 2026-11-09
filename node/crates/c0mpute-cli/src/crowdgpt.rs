@@ -171,8 +171,7 @@ pub async fn run(cmd: CrowdgptCmd, config_path: &Path) -> Result<()> {
 }
 
 fn owner_args(dir: &Path) -> Vec<String> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(dir).map(|m| vec!["--user".to_string(), format!("{}:{}", m.uid(), m.gid())]).unwrap_or_default()
+    cg::owner_of(dir).map(|(u, g)| vec!["--user".to_string(), format!("{u}:{g}")]).unwrap_or_default()
 }
 
 fn credited_as() -> String {
@@ -190,11 +189,17 @@ fn credited_as() -> String {
 
 fn write_token(token: &str) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     anyhow::ensure!(!token.is_empty() && token.len() < 4096 && !token.chars().any(char::is_whitespace), "that does not look like a token");
     let p = cg::token_path();
     std::fs::create_dir_all(p.parent().unwrap())?;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&p)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(&p)?;
     f.write_all(token.as_bytes())?;
     Ok(())
 }
