@@ -22,6 +22,7 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod ai_chat;
+mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
@@ -160,6 +161,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SttCmd,
     },
+    /// Donate idle compute to CrowdGPT (an open LLM trained by volunteers).
+    /// Off by default, earns nothing, runs only while this node has no paid
+    /// work and stops the moment it does: `c0mpute crowdgpt on|off|status`.
+    Crowdgpt {
+        #[command(subcommand)]
+        cmd: crowdgpt::CrowdgptCmd,
+    },
+    /// This node at a glance: the worker, auto-update, bench, idle donation
+    /// (same as `c0mpute worker status`).
+    Status,
     /// Video generation (Wan 2.2) in the runner container.
     Video {
         #[command(subcommand)]
@@ -1341,6 +1352,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Tts { cmd } => run_tts(cmd, &config_path).await,
         Cmd::Stt { cmd } => run_stt(cmd).await,
         Cmd::Video { cmd } => run_video(cmd).await,
+        Cmd::Crowdgpt { cmd } => crowdgpt::run(cmd, &config_path).await,
+        Cmd::Status => run_worker(WorkerCmd::Status, &config_path).await,
         Cmd::Speech { cmd } => {
             let cfg = Config::load_or_default(&config_path)?;
             start_auto_update_poller(cfg.update_auto);
@@ -1626,6 +1639,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 ),
                 None => println!("bench: not run — `c0mpute bench` publishes a capacity score"),
             }
+            println!("{}", crowdgpt::status_line(config_path));
             print_served_models_eligibility();
             print_house_models();
             println!("{}", serde_json::to_string_pretty(&cfg)?);

@@ -207,6 +207,8 @@ pub fn run_worker_subscriber_with_load(
                 )
                 .await
                 {
+                    // Idle-donation workloads stand down while a bid stands.
+                    crate::activity::note_bid(expires_at_ms);
                     if open_bids.len() >= MAX_OPEN_BIDS {
                         open_bids.clear();
                     }
@@ -267,6 +269,7 @@ pub fn run_worker_subscriber_with_load(
                     job_id = %accept.job_id,
                     "dispatch: we won — forwarding to runner"
                 );
+                crate::activity::job_started(&accept.job_id);
                 if let Err(e) = tx.send(AcceptedJob { accept }).await {
                     warn!(err = %e, "dispatch: runner channel closed");
                 }

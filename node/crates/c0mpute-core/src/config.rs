@@ -64,6 +64,10 @@ pub struct Config {
     /// `enabled = true` and the rail's key is in the environment.
     #[serde(default)]
     pub payments: crate::payments::PaymentsConfig,
+    /// Donate idle compute to CrowdGPT (`crowdgpt` plugin). Off by default;
+    /// earns nothing; stops the moment paid work arrives.
+    #[serde(default)]
+    pub crowdgpt: crate::crowdgpt::CrowdgptConfig,
 }
 
 /// Ads on a gateway (`ads-manager`, `ctv-ads`, `podcast-ads`). Every gateway
@@ -484,6 +488,7 @@ impl Default for Config {
             embed: EmbedConfig::default(),
             gameserver: GameserverConfig::default(),
             payments: Default::default(),
+            crowdgpt: Default::default(),
         }
     }
 }

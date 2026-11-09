@@ -4,12 +4,14 @@
 //! flags + config + detected hardware, and supervises the long-lived tasks
 //! for each role.
 
+pub mod activity;
 pub mod ads;
 pub mod buyer;
 pub mod capabilities;
 pub mod config;
 pub mod container;
 pub mod crawl;
+pub mod crowdgpt;
 pub mod diffusion;
 pub mod dm;
 pub mod music;
