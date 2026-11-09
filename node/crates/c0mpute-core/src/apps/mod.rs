@@ -1141,8 +1141,9 @@ impl Apps {
                 (None, _) => false,
             };
             if !keep_volume {
+                // Fresh volume, the snapshot unpacked into it, then the app
+                // container on top (see `runtime::restore_state`).
                 let _ = runtime::remove_volume(id).await;
-                runtime::create(&rec, &secret_env).await?;
                 if let Some(s) = newest {
                     let have = mine.as_ref().map(|m| m.order()) == Some(s.order());
                     if !have {
@@ -1150,9 +1151,10 @@ impl Apps {
                     }
                     let m = self.snap_manifest(&s.manifest).await?;
                     let tar = snapshot::load(&self.0.store, &key, &m).await?;
-                    runtime::restore_state(id, state_path, &tar).await?;
-                    info!(app = %id, epoch = s.epoch, n = s.n, bytes = tar.len(), "apps: state restored");
+                    runtime::restore_state(id, &tar).await?;
+                    info!(app = %id, epoch = s.epoch, n = s.n, bytes = tar.len(), path = %state_path, "apps: state restored");
                 }
+                runtime::create(&rec, &secret_env).await?;
             } else {
                 runtime::create(&rec, &secret_env).await?;
             }

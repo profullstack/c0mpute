@@ -37,8 +37,8 @@ case "$1" in
   inspect) echo true ;;
   logs) echo "app log line" ;;
   ps) ;;
-  cp)
-    if [ "$2" = "-" ]; then cat > "$FAKE_DIR/restored"; else cat "$FAKE_DIR/state.tar"; fi ;;
+  cp) cat "$FAKE_DIR/state.tar" ;;
+  run) case "$*" in *" tar -x "*) cat > "$FAKE_DIR/restored" ;; esac ;;
   *) ;;
 esac
 exit 0
