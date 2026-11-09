@@ -15,6 +15,8 @@ type Msg = {
   image?: string;
   audio?: string;
   audioType?: string;
+  /** The music job a song message came from, so late cover art finds it. */
+  musicJob?: string;
 };
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
@@ -312,7 +314,24 @@ export function ChatApp({ error }: { error: string | null }) {
         content: `${written?.title ? `"${written.title}" ` : ""}[music: ${(written?.caption ?? music.prompt).slice(0, 300)}${written?.lyrics || music.lyrics ? " (with lyrics)" : ", instrumental"}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute worker)${written?.lyrics ? `\n\n${written.lyrics}` : ""}`,
         audio: url,
         audioType: blob.type || "audio/mpeg",
+        musicJob: start.id,
       });
+      // The song can beat its cover (image workers queue separately): keep
+      // looking for the cover and attach it to this song's message.
+      if (!coverUrl) {
+        const jobId: string = start.id;
+        void (async () => {
+          const until = Date.now() + 8 * 60_000;
+          while (Date.now() < until) {
+            await new Promise((r) => setTimeout(r, 6000));
+            const c = await fetch(`${start.poll}/cover`, { cache: "no-store" }).catch(() => null);
+            if (!c?.ok) continue;
+            const late = URL.createObjectURL(await c.blob());
+            update(id, (cv) => ({ ...cv, messages: cv.messages.map((m) => (m.musicJob === jobId ? { ...m, image: late } : m)) }));
+            return;
+          }
+        })();
+      }
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         setFailure(e instanceof Error ? e.message : String(e));
