@@ -31,7 +31,7 @@ use tokio::sync::Semaphore;
 use tower_http::trace::TraceLayer;
 
 use crate::buyer::AuctionFailure;
-use crate::gateway_util::{BearerCheck, FetchError, check_bearer, fetch_verified};
+use crate::gateway_util::{BearerCheck, FetchError, check_bearer, fetch_result};
 use crate::{Config, JobAuction, Supervisor, run_auction, workflow};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8788";
@@ -489,8 +489,8 @@ async fn run_job(
     };
     let fetch_budget = timeout
         .saturating_sub(started.elapsed())
-        .min(Duration::from_secs(20));
-    let bytes = match fetch_verified(
+        .min(Duration::from_secs(10 * 60));
+    let bytes = match fetch_result(
         &state.net,
         &output_hash,
         &worker,
