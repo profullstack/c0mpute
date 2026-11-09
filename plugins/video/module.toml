@@ -65,7 +65,7 @@
 [module]
 id          = "video"
 name        = "Video — generation (Wan 2.2, Wan 2.1 1.3B on 8 GiB or CPU, LTX-2.3 with audio)"
-version     = "0.3.13"
+version     = "0.3.14"
 kind        = "workload"
 category    = "ai"
 status      = "available"
