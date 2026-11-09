@@ -12,7 +12,7 @@
 [module]
 id          = "ocr"
 name        = "OCR — document text extraction"
-version     = "0.2.71"
+version     = "0.2.72"
 kind        = "workload"
 category    = "ai"
 status      = "coming-soon"

@@ -20,7 +20,7 @@
 [module]
 id          = "podcasting"
 name        = "Podcasting — p2p podcast publishing"
-version     = "0.2.71"
+version     = "0.2.72"
 kind        = "service"
 category    = "media"
 status      = "coming-soon"

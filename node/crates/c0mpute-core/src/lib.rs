@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod config;
 pub mod crawl;
 pub mod diffusion;
+pub mod hosting;
 pub mod dispatch;
 pub(crate) mod gateway_util;
 pub mod jobs_gateway;

@@ -194,6 +194,9 @@ pub enum Role {
     /// `crawl.fetch`: fetch one public web page for a buyer (static, robots
     /// aware, SSRF-guarded). On by default; it needs nothing but a network.
     Crawl,
+    /// Static-site hosting: hold copies of sites (the network keeps three of
+    /// each, healing itself) and serve them from every gateway. On by default.
+    Hosting,
 }
 
 #[cfg(test)]

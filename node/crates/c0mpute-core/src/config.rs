@@ -44,6 +44,30 @@ pub struct Config {
     /// CPU image generation (`diffusion.txt2img`) provisioning and gates.
     #[serde(default)]
     pub diffusion: DiffusionConfig,
+    /// Static-site hosting: how much this node holds for the network.
+    #[serde(default)]
+    pub hosting: HostingConfig,
+}
+
+/// Static-site hosting (`hosting` role). A hosting node holds copies of
+/// sites so the network keeps three of each; every gateway serves them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostingConfig {
+    /// Most bytes of other people's sites this node will hold.
+    #[serde(default = "default_hosting_max_bytes")]
+    pub max_bytes: u64,
+}
+
+impl Default for HostingConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_hosting_max_bytes(),
+        }
+    }
+}
+
+fn default_hosting_max_bytes() -> u64 {
+    crate::hosting::DEFAULT_MAX_BYTES
 }
 
 /// CPU image generation: stable-diffusion.cpp + Z-Image-Turbo, ~6.7 GB of
@@ -185,6 +209,7 @@ impl Default for Config {
                 Role::WorkflowStep,
                 Role::Diffusion,
                 Role::Crawl,
+                Role::Hosting,
             ],
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),
@@ -194,6 +219,7 @@ impl Default for Config {
             private: Default::default(),
             speech: SpeechConfig::default(),
             diffusion: DiffusionConfig::default(),
+            hosting: HostingConfig::default(),
         }
     }
 }
