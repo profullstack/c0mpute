@@ -14,7 +14,7 @@
 [module]
 id          = "workflow-step"
 name        = "Workflow step — webhook workflow steps (meshhook)"
-version     = "0.3.3"
+version     = "0.3.4"
 kind        = "workload"
 category    = "infrastructure"
 status      = "available"
