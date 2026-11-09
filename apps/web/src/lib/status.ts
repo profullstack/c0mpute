@@ -1,6 +1,19 @@
 import "server-only";
 import { fetchFromAggregators } from "./aggregators";
 
+export interface AuctionCanaryStats {
+  auctions: number;
+  with_bids: number;
+  success_rate: number | null;
+  bids_total: number;
+  /** Probes run while at least one node advertised the workload. */
+  with_capable?: number;
+  with_capable_and_bids?: number;
+  capable_success_rate?: number | null;
+  last_at_ms: number | null;
+  last_bids: number | null;
+}
+
 export interface StatusPayload {
   ok: boolean;
   generated_at: string;
@@ -26,6 +39,11 @@ export interface StatusPayload {
       median_score: number | null;
       max_score: number | null;
     };
+    /**
+     * Canary auctions over the last hour, per workload: one tiny offer every
+     * few minutes, bids counted, nothing accepted. Absent from older aggregators.
+     */
+    auction_canary?: Record<string, AuctionCanaryStats>;
   };
   source: "aggregator" | "stub";
 }
