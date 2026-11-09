@@ -12,7 +12,9 @@ use std::time::Duration;
 use c0mpute_core::pricing::{PricingConfig, PricingMode};
 use c0mpute_core::routing::SelectionPolicy;
 use c0mpute_core::runner::AcceptedJob;
-use c0mpute_core::{JobAuction, Registry, advertise_loop, buyer, dispatch, pieces, run_auction, runner};
+use c0mpute_core::{
+    JobAuction, Registry, advertise_loop, buyer, dispatch, pieces, run_auction, runner,
+};
 use c0mpute_net::topics::{JobAccept, JobReceipt, JobStatus, job_topic};
 use c0mpute_net::{ChunkSource, Libp2pNetwork, NetworkConfig, PeerId};
 use c0mpute_proto::Hash;
@@ -62,7 +64,10 @@ async fn node(bootstrap: Vec<libp2p::Multiaddr>) -> Node {
 async fn twin(of: &Node, bootstrap: Vec<libp2p::Multiaddr>) -> Node {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("id")).unwrap();
-    for e in std::fs::read_dir(of.dir.path().join("id")).unwrap().flatten() {
+    for e in std::fs::read_dir(of.dir.path().join("id"))
+        .unwrap()
+        .flatten()
+    {
         std::fs::copy(e.path(), dir.path().join("id").join(e.file_name())).unwrap();
     }
     node_in(dir, bootstrap).await
@@ -138,7 +143,13 @@ async fn two_swarms_sharing_a_key_show_as_two_instances_of_one_peer() {
     }
     assert_eq!(seen, 2, "the board heard both processes behind one peer id");
     // Each ad names its own instance.
-    let ad = registry.list().await.into_iter().find(|(p, _)| *p == peer).unwrap().1;
+    let ad = registry
+        .list()
+        .await
+        .into_iter()
+        .find(|(p, _)| *p == peer)
+        .unwrap()
+        .1;
     let inst = ad.hardware["instance"].as_str().unwrap().to_string();
     assert!(inst == a.net.instance_id() || inst == b.net.instance_id());
 }
@@ -156,7 +167,14 @@ where
         min_usd: 0.0,
         fixed_usd: Some(price),
     };
-    dispatch::run_worker_subscriber_priced(w.net.clone(), workload.to_string(), vec![], Some(tx), None, Some(pricing));
+    dispatch::run_worker_subscriber_priced(
+        w.net.clone(),
+        workload.to_string(),
+        vec![],
+        Some(tx),
+        None,
+        Some(pricing),
+    );
     let (net, store) = (w.net.clone(), w.store.clone());
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -172,7 +190,12 @@ async fn a_twin_fault_is_re_awarded_to_the_next_bidder_without_failing_the_job()
     let hub_addr = addr(&hub.net).await;
     let cheap = node(vec![hub_addr.clone()]).await;
     let honest = node(vec![hub_addr.clone()]).await;
-    let buyer_node = node(vec![hub_addr.clone(), addr(&cheap.net).await, addr(&honest.net).await]).await;
+    let buyer_node = node(vec![
+        hub_addr.clone(),
+        addr(&cheap.net).await,
+        addr(&honest.net).await,
+    ])
+    .await;
     let workload = "tts.synthesize";
 
     // The cheapest bidder wins, but the accept turns out to be its twin's:
@@ -183,7 +206,9 @@ async fn a_twin_fault_is_re_awarded_to_the_next_bidder_without_failing_the_job()
     });
     // The next bidder does the work.
     worker(&honest, workload, 0.002, |net, store, accept| async move {
-        let hash = pieces::publish_result_bytes(&net, &store, &accept, b"{\"ok\":true}").await.unwrap();
+        let hash = pieces::publish_result_bytes(&net, &store, &accept, b"{\"ok\":true}")
+            .await
+            .unwrap();
         let r = JobReceipt {
             job_id: accept.job_id.clone(),
             worker_peer_id: net.peer_id().to_base58(),
@@ -200,7 +225,9 @@ async fn a_twin_fault_is_re_awarded_to_the_next_bidder_without_failing_the_job()
         let topic = job_topic(&accept.workload_type);
         let bytes = serde_json::to_vec(&r).unwrap();
         let buyer: PeerId = accept.buyer_peer_id.parse().unwrap();
-        let _ = net.send_direct(buyer, &topic, &bytes, Duration::from_secs(5)).await;
+        let _ = net
+            .send_direct(buyer, &topic, &bytes, Duration::from_secs(5))
+            .await;
         let _ = net.publish(&topic, bytes).await;
     });
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -212,10 +239,13 @@ async fn a_twin_fault_is_re_awarded_to_the_next_bidder_without_failing_the_job()
     .with_policy(SelectionPolicy::Cheapest)
     .with_max_price_usd(0.01)
     .with_receipt_timeout(Duration::from_secs(30));
-    let out = tokio::time::timeout(Duration::from_secs(60), run_auction(buyer_node.net.clone(), auction))
-        .await
-        .expect("auction finished")
-        .expect("the job completes after the re-award");
+    let out = tokio::time::timeout(
+        Duration::from_secs(60),
+        run_auction(buyer_node.net.clone(), auction),
+    )
+    .await
+    .expect("auction finished")
+    .expect("the job completes after the re-award");
     assert_eq!(out.receipt.status, JobStatus::Completed);
     assert_eq!(
         out.accepted_bid.bidder_peer_id,

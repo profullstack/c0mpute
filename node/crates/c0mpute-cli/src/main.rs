@@ -1609,6 +1609,10 @@ fn main() -> Result<()> {
     }) = &cli.command
     {
         daemonize_worker()?;
+        // The daemon child keeps the lock taken above; record its own pid
+        // (and restart the takeover watch: threads do not survive a fork).
+        let dir = c0mpute_core::config::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        c0mpute_core::instance::claim(&dir)?;
     }
 
     init_tracing()?;

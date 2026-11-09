@@ -98,7 +98,11 @@ pub struct Unit {
 impl Unit {
     pub fn describe(&self) -> String {
         if self.user {
-            format!("user unit {} (uid {})", self.name, self.uid.map(|u| u.to_string()).unwrap_or("?".into()))
+            format!(
+                "user unit {} (uid {})",
+                self.name,
+                self.uid.map(|u| u.to_string()).unwrap_or("?".into())
+            )
         } else {
             format!("system unit {}", self.name)
         }
@@ -129,7 +133,11 @@ impl Unit {
             .map(|d| d.display().to_string())
             .unwrap_or_else(|| format!("~/.config/systemd/user/{}.d", self.name));
         let sudo = if self.user { "" } else { "sudo " };
-        let ctl = if self.user { "systemctl --user" } else { "sudo systemctl" };
+        let ctl = if self.user {
+            "systemctl --user"
+        } else {
+            "sudo systemctl"
+        };
         format!(
             "{sudo}mkdir -p {dir} && printf '[Service]\\nRestartPreventExitStatus={RESTART_PREVENT_EXIT_STATUS}\\n' | {sudo}tee {dir}/{DROPIN_FILE} >/dev/null && {ctl} daemon-reload"
         )
@@ -163,16 +171,26 @@ impl Unit {
     fn restart_prevent(&self) -> Option<String> {
         let out = self
             .systemctl()
-            .args(["show", "-p", "RestartPreventExitStatus", "--value", &self.name])
+            .args([
+                "show",
+                "-p",
+                "RestartPreventExitStatus",
+                "--value",
+                &self.name,
+            ])
             .output()
             .ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 }
 
 /// Whether a `RestartPreventExitStatus` value covers both our exit codes.
 pub fn prevents_our_restarts(value: &str) -> bool {
-    let codes: Vec<&str> = value.split(|c: char| c.is_whitespace() || c == ',').collect();
+    let codes: Vec<&str> = value
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .collect();
     codes.contains(&"90") && codes.contains(&"91")
 }
 
@@ -182,7 +200,10 @@ fn systemctl_program() -> String {
     if let Some(p) = SYSTEMCTL_OVERRIDE.lock().ok().and_then(|g| g.clone()) {
         return p;
     }
-    std::env::var("C0MPUTE_SYSTEMCTL").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "systemctl".into())
+    std::env::var("C0MPUTE_SYSTEMCTL")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "systemctl".into())
 }
 
 static SYSTEMCTL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -201,7 +222,11 @@ fn own_unit(pid: u32) -> Option<Unit> {
         && !v.is_empty()
     {
         // Testing hook: pretend to run in this user unit.
-        return Some(Unit { name: v, user: true, uid: Some(current_uid()) });
+        return Some(Unit {
+            name: v,
+            user: true,
+            uid: Some(current_uid()),
+        });
     }
     let unit = unit_of(pid)?;
     if unit.name.contains("c0mpute") {
@@ -213,7 +238,12 @@ fn own_unit(pid: u32) -> Option<Unit> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        });
     (main == Some(pid)).then_some(unit)
 }
 
@@ -232,7 +262,10 @@ pub fn parse_cgroup(text: &str) -> Option<Unit> {
     let path = text
         .lines()
         .find_map(|l| l.strip_prefix("0::"))
-        .or_else(|| text.lines().find_map(|l| l.split_once(":name=systemd:").map(|(_, p)| p)))?;
+        .or_else(|| {
+            text.lines()
+                .find_map(|l| l.split_once(":name=systemd:").map(|(_, p)| p))
+        })?;
     let last = path.trim_end_matches('/').rsplit('/').next()?;
     if !last.ends_with(".service") || last.starts_with("user@") {
         return None;
@@ -325,12 +358,21 @@ fn pid_alive(pid: u32) -> bool {
 /// Whether `args` (a cmdline) is a foreground or daemon `c0mpute worker
 /// start` (not `-a`, which only tails a daemon's log).
 pub fn is_worker_cmdline(args: &[String]) -> bool {
-    let Some(bin) = args.first() else { return false };
-    let base = Path::new(bin).file_name().map(|b| b.to_string_lossy().into_owned()).unwrap_or_default();
+    let Some(bin) = args.first() else {
+        return false;
+    };
+    let base = Path::new(bin)
+        .file_name()
+        .map(|b| b.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if !base.starts_with("c0mpute") {
         return false;
     }
-    let rest: Vec<&str> = args[1..].iter().map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    let rest: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
     let starts = rest.windows(2).any(|w| w == ["worker", "start"]);
     starts && !args.iter().any(|a| a == "-a" || a == "--attach")
 }
@@ -377,7 +419,10 @@ impl Holder {
             "pid {} (user {}, {}, c0mpute {}, {})",
             self.pid,
             self.user,
-            self.unit.as_ref().map(Unit::describe).unwrap_or_else(|| "no systemd unit".into()),
+            self.unit
+                .as_ref()
+                .map(Unit::describe)
+                .unwrap_or_else(|| "no systemd unit".into()),
             self.version,
             self.exe
         )
@@ -399,7 +444,9 @@ impl Holder {
     /// Re-checked right before a signal: same pid, same start time, a
     /// c0mpute binary. Never signals a process that only reused the pid.
     fn safe_to_signal(&self) -> bool {
-        let Some(now) = proc_start(self.pid) else { return false };
+        let Some(now) = proc_start(self.pid) else {
+            return false;
+        };
         if self.proc_start.is_some_and(|s| s != now) {
             return false;
         }
@@ -535,7 +582,10 @@ pub fn claim(identity_dir: &Path) -> Result<()> {
     let _ = std::fs::remove_file(identity_dir.join(TAKEOVER_FILE));
     // The worker this one replaced must not come back from its unit (a
     // restart of our own unit is just a restart).
-    if let Some(unit) = replaced.and_then(|p| p.unit).filter(|u| Some(u) != me.unit.as_ref()) {
+    if let Some(unit) = replaced
+        .and_then(|p| p.unit)
+        .filter(|u| Some(u) != me.unit.as_ref())
+    {
         evict_unit(identity_dir, &unit, &me);
     }
     let _ = std::fs::write(identity_dir.join(HEARTBEAT_FILE), now_ms().to_string());
@@ -547,8 +597,18 @@ pub fn claim(identity_dir: &Path) -> Result<()> {
     // A second unit for this identity would start a second worker at every
     // boot: say so now (it is replaced each time, but should be removed).
     let report = scan();
-    for f in report.findings.iter().filter(|f| f.kind == FindingKind::DuplicateUnits) {
-        say(&format!("{} Fix: {}", f.message, f.fix.clone().unwrap_or_else(|| "c0mpute doctor --fix".into())));
+    for f in report
+        .findings
+        .iter()
+        .filter(|f| f.kind == FindingKind::DuplicateUnits)
+    {
+        say(&format!(
+            "{} Fix: {}",
+            f.message,
+            f.fix
+                .clone()
+                .unwrap_or_else(|| "c0mpute doctor --fix".into())
+        ));
     }
     Ok(())
 }
@@ -561,7 +621,9 @@ pub fn claim(_identity_dir: &Path) -> Result<()> {
 /// Write this process's record into the held lock file.
 fn record_self(identity_dir: &Path) -> Result<()> {
     let mut guard = HELD.lock().unwrap_or_else(|e| e.into_inner());
-    let Some((dir, file)) = guard.as_mut() else { return Ok(()) };
+    let Some((dir, file)) = guard.as_mut() else {
+        return Ok(());
+    };
     if dir != identity_dir {
         return Ok(());
     }
@@ -576,7 +638,10 @@ fn record_self(identity_dir: &Path) -> Result<()> {
 /// Ask `holder` to hand over and wait until the lock is ours.
 fn take_over(identity_dir: &Path, file: &std::fs::File, holder: Option<Holder>) -> Result<()> {
     let me = Holder::me();
-    let who = holder.as_ref().map(Holder::describe).unwrap_or_else(|| "an unknown process".into());
+    let who = holder
+        .as_ref()
+        .map(Holder::describe)
+        .unwrap_or_else(|| "an unknown process".into());
 
     // This unit was evicted by the worker that holds the lock now and was
     // restarted anyway (no RestartPreventExitStatus): stand down instead of
@@ -636,8 +701,11 @@ fn take_over(identity_dir: &Path, file: &std::fs::File, holder: Option<Holder>) 
         unit: me.unit.clone(),
         at_ms: now_ms(),
     };
-    std::fs::write(identity_dir.join(TAKEOVER_FILE), serde_json::to_vec(&request)?)
-        .context("write the takeover request")?;
+    std::fs::write(
+        identity_dir.join(TAKEOVER_FILE),
+        serde_json::to_vec(&request)?,
+    )
+    .context("write the takeover request")?;
 
     let legacy = h.instance.is_empty();
     let wedged = heartbeat_age(identity_dir).is_some_and(|a| a > WEDGED_AFTER);
@@ -645,7 +713,11 @@ fn take_over(identity_dir: &Path, file: &std::fs::File, holder: Option<Holder>) 
     // Old binaries never read the request and wedged ones cannot: no wait.
     let term_at = if legacy || wedged {
         if wedged {
-            say(&format!("the running worker (pid {}) has not written a heartbeat for over {} min: treating it as wedged", h.pid, WEDGED_AFTER.as_secs() / 60));
+            say(&format!(
+                "the running worker (pid {}) has not written a heartbeat for over {} min: treating it as wedged",
+                h.pid,
+                WEDGED_AFTER.as_secs() / 60
+            ));
         }
         Duration::ZERO
     } else {
@@ -671,7 +743,10 @@ fn take_over(identity_dir: &Path, file: &std::fs::File, holder: Option<Holder>) 
         } else if let Some(k) = killed
             && k.elapsed() >= Duration::from_secs(30)
         {
-            let msg = format!("the identity lock is still held after SIGKILL of pid {}; `c0mpute doctor` lists every worker", h.pid);
+            let msg = format!(
+                "the identity lock is still held after SIGKILL of pid {}; `c0mpute doctor` lists every worker",
+                h.pid
+            );
             say(&msg);
             return Err(DuplicateWorker(msg).into());
         }
@@ -696,15 +771,25 @@ fn signal_holder(h: &Holder, sig: i32) -> Result<()> {
         say(&msg);
         return Err(DuplicateWorker(msg).into());
     }
-    let name = if sig == libc::SIGKILL { "SIGKILL" } else { "SIGTERM" };
-    say(&format!("sending {name} to the worker it replaces ({})", h.describe()));
+    let name = if sig == libc::SIGKILL {
+        "SIGKILL"
+    } else {
+        "SIGTERM"
+    };
+    say(&format!(
+        "sending {name} to the worker it replaces ({})",
+        h.describe()
+    ));
     // SAFETY: plain kill(2) on a pid just verified to be the recorded worker.
     if unsafe { libc::kill(h.pid as i32, sig) } != 0 {
         let msg = format!(
             "cannot signal pid {} ({}). Stop it: {}",
             h.pid,
             std::io::Error::last_os_error(),
-            h.unit.as_ref().map(Unit::disable_command).unwrap_or_else(|| format!("sudo kill {}", h.pid))
+            h.unit
+                .as_ref()
+                .map(Unit::disable_command)
+                .unwrap_or_else(|| format!("sudo kill {}", h.pid))
         );
         say(&msg);
         return Err(DuplicateWorker(msg).into());
@@ -764,7 +849,10 @@ fn evict_unit(identity_dir: &Path, unit: &Unit, me: &Holder) {
             .status()
             .is_ok_and(|s| s.success());
         if ok {
-            say(&format!("disabled the replaced {} so only one worker runs this identity", unit.describe()));
+            say(&format!(
+                "disabled the replaced {} so only one worker runs this identity",
+                unit.describe()
+            ));
             return;
         }
     }
@@ -785,7 +873,10 @@ pub fn ensure_restart_prevention(unit: &Unit) -> bool {
 /// [`ensure_restart_prevention`] with the drop-in directory given (doctor
 /// knows where each unit file lives).
 pub fn ensure_restart_prevention_in(unit: &Unit, dropin_dir: Option<PathBuf>) -> bool {
-    if unit.restart_prevent().is_some_and(|v| prevents_our_restarts(&v)) {
+    if unit
+        .restart_prevent()
+        .is_some_and(|v| prevents_our_restarts(&v))
+    {
         return true;
     }
     if unit.manageable()
@@ -810,7 +901,11 @@ pub fn ensure_restart_prevention_in(unit: &Unit, dropin_dir: Option<PathBuf>) ->
 }
 
 fn heartbeat_age(identity_dir: &Path) -> Option<Duration> {
-    let ms: u64 = std::fs::read_to_string(identity_dir.join(HEARTBEAT_FILE)).ok()?.trim().parse().ok()?;
+    let ms: u64 = std::fs::read_to_string(identity_dir.join(HEARTBEAT_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     Some(Duration::from_millis(now_ms().saturating_sub(ms)))
 }
 
@@ -836,35 +931,39 @@ static WATCH_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 
 fn spawn_watch(identity_dir: PathBuf) {
     WATCH_PID.store(std::process::id(), std::sync::atomic::Ordering::SeqCst);
-    let _ = std::thread::Builder::new().name("c0mpute-instance".into()).spawn(move || {
-        let mut last_beat = std::time::Instant::now();
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            if !RUNTIME_HEARTBEAT.load(std::sync::atomic::Ordering::SeqCst) && last_beat.elapsed() >= HEARTBEAT_EVERY {
-                let _ = std::fs::write(identity_dir.join(HEARTBEAT_FILE), now_ms().to_string());
-                last_beat = std::time::Instant::now();
-            }
-            let Some(req) = std::fs::read(identity_dir.join(TAKEOVER_FILE))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Takeover>(&b).ok())
-            else {
-                continue;
-            };
-            if req.pid == std::process::id() || req.instance == process_instance() {
-                continue;
-            }
-            let requester_live = pid_alive(req.pid)
-                && match (req.proc_start, proc_start(req.pid)) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => true,
+    let _ = std::thread::Builder::new()
+        .name("c0mpute-instance".into())
+        .spawn(move || {
+            let mut last_beat = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if !RUNTIME_HEARTBEAT.load(std::sync::atomic::Ordering::SeqCst)
+                    && last_beat.elapsed() >= HEARTBEAT_EVERY
+                {
+                    let _ = std::fs::write(identity_dir.join(HEARTBEAT_FILE), now_ms().to_string());
+                    last_beat = std::time::Instant::now();
+                }
+                let Some(req) = std::fs::read(identity_dir.join(TAKEOVER_FILE))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Takeover>(&b).ok())
+                else {
+                    continue;
                 };
-            if !requester_live {
-                let _ = std::fs::remove_file(identity_dir.join(TAKEOVER_FILE));
-                continue;
+                if req.pid == std::process::id() || req.instance == process_instance() {
+                    continue;
+                }
+                let requester_live = pid_alive(req.pid)
+                    && match (req.proc_start, proc_start(req.pid)) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    };
+                if !requester_live {
+                    let _ = std::fs::remove_file(identity_dir.join(TAKEOVER_FILE));
+                    continue;
+                }
+                hand_over(&req);
             }
-            hand_over(&req);
-        }
-    });
+        });
 }
 
 /// Stop bidding, let running jobs finish (capped), exit [`EXIT_REPLACED`].
@@ -872,7 +971,10 @@ fn hand_over(req: &Takeover) -> ! {
     let by = format!(
         "pid {}{}",
         req.pid,
-        req.unit.as_ref().map(|u| format!(", {}", u.describe())).unwrap_or_default()
+        req.unit
+            .as_ref()
+            .map(|u| format!(", {}", u.describe()))
+            .unwrap_or_default()
     );
     say(&format!(
         "replaced by a newer `c0mpute worker start` with this identity ({by}): no new work; finishing running jobs \
@@ -881,7 +983,9 @@ fn hand_over(req: &Takeover) -> ! {
     ));
     c0mpute_update::begin_drain();
     let started = std::time::Instant::now();
-    while c0mpute_update::long_jobs_running() + crate::activity::running_jobs() > 0 && started.elapsed() < drain_limit() {
+    while c0mpute_update::long_jobs_running() + crate::activity::running_jobs() > 0
+        && started.elapsed() < drain_limit()
+    {
         std::thread::sleep(Duration::from_secs(2));
     }
     say(&format!("handing over to {by}; exiting"));
@@ -973,7 +1077,9 @@ fn homes(root: &Path) -> Vec<(PathBuf, u32)> {
             let dirs: Vec<PathBuf> = if base.ends_with("root") {
                 vec![base.clone()]
             } else {
-                std::fs::read_dir(&base).map(|r| r.flatten().map(|e| e.path()).collect()).unwrap_or_default()
+                std::fs::read_dir(&base)
+                    .map(|r| r.flatten().map(|e| e.path()).collect())
+                    .unwrap_or_default()
             };
             for d in dirs {
                 use std::os::unix::fs::MetadataExt;
@@ -996,7 +1102,9 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
     // Processes.
     if let Ok(rd) = std::fs::read_dir("/proc") {
         for e in rd.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
             let args = cmdline_of(pid);
             if !is_worker_cmdline(&args) {
                 continue;
@@ -1017,7 +1125,11 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
     r.processes.sort_by_key(|p| p.pid);
 
     // Units.
-    for dir in ["etc/systemd/system", "lib/systemd/system", "usr/lib/systemd/system"] {
+    for dir in [
+        "etc/systemd/system",
+        "lib/systemd/system",
+        "usr/lib/systemd/system",
+    ] {
         let dir = root.join(dir);
         for (path, text) in unit_files(&dir) {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -1025,7 +1137,11 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
             let enabled = wants_link_exists(&dir, &name);
             r.units.push(UnitFile {
                 restart_prevented: restart_prevented_in(&path, &text, &dir),
-                unit: Unit { name, user: false, uid: None },
+                unit: Unit {
+                    name,
+                    user: false,
+                    uid: None,
+                },
                 exec: exec_binary(&text),
                 path,
                 runs_as,
@@ -1040,7 +1156,11 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
             r.units.push(UnitFile {
                 restart_prevented: restart_prevented_in(&path, &text, &dir),
                 enabled: wants_link_exists(&dir, &name),
-                unit: Unit { name, user: true, uid: Some(uid) },
+                unit: Unit {
+                    name,
+                    user: true,
+                    uid: Some(uid),
+                },
                 exec: exec_binary(&text),
                 path,
                 runs_as: user_name(uid),
@@ -1050,7 +1170,10 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
 
     // Identity locks.
     for (home, uid) in homes.iter().cloned() {
-        let dir = if uid == current_uid() && root == Path::new("/") && std::env::var_os("HOME").is_some_and(|h| PathBuf::from(h) == home) {
+        let dir = if uid == current_uid()
+            && root == Path::new("/")
+            && std::env::var_os("HOME").is_some_and(|h| PathBuf::from(h) == home)
+        {
             crate::config::config_dir().unwrap_or_else(|| home.join(".config/c0mpute"))
         } else {
             home.join(".config/c0mpute")
@@ -1086,15 +1209,20 @@ pub fn scan_with(root: &Path, homes: &[(PathBuf, u32)]) -> Report {
 }
 
 fn unit_files(dir: &Path) -> Vec<(PathBuf, String)> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut v: Vec<(PathBuf, String)> = rd
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "service") && p.is_file())
         .filter_map(|p| {
             let text = std::fs::read_to_string(&p).ok()?;
-            let exec = text.lines().find(|l| l.trim_start().starts_with("ExecStart="))?;
-            (exec.contains("c0mpute") && exec.contains("worker") && exec.contains("start")).then_some((p, text))
+            let exec = text
+                .lines()
+                .find(|l| l.trim_start().starts_with("ExecStart="))?;
+            (exec.contains("c0mpute") && exec.contains("worker") && exec.contains("start"))
+                .then_some((p, text))
         })
         .collect();
     v.sort();
@@ -1110,7 +1238,12 @@ fn unit_value(text: &str, key: &str) -> Option<String> {
 
 fn exec_binary(text: &str) -> Option<String> {
     let v = unit_value(text, "ExecStart")?;
-    Some(v.trim_start_matches(['-', '@', '+', '!']).split_whitespace().next()?.to_string())
+    Some(
+        v.trim_start_matches(['-', '@', '+', '!'])
+            .split_whitespace()
+            .next()?
+            .to_string(),
+    )
 }
 
 fn wants_link_exists(dir: &Path, name: &str) -> bool {
@@ -1151,23 +1284,49 @@ fn findings(r: &Report) -> Vec<Finding> {
         if ps.len() > 1 {
             let list: Vec<String> = ps
                 .iter()
-                .map(|p| format!("pid {} ({})", p.pid, p.unit.as_ref().map(Unit::describe).unwrap_or_else(|| "no unit".into())))
+                .map(|p| {
+                    format!(
+                        "pid {} ({})",
+                        p.pid,
+                        p.unit
+                            .as_ref()
+                            .map(Unit::describe)
+                            .unwrap_or_else(|| "no unit".into())
+                    )
+                })
                 .collect();
             out.push(Finding {
                 kind: FindingKind::DuplicateProcesses,
-                message: format!("{} c0mpute workers run as {}: {}", ps.len(), ps[0].user, list.join(", ")),
-                fix: Some("the newest replaces the others within minutes; remove the extra unit below".into()),
+                message: format!(
+                    "{} c0mpute workers run as {}: {}",
+                    ps.len(),
+                    ps[0].user,
+                    list.join(", ")
+                ),
+                fix: Some(
+                    "the newest replaces the others within minutes; remove the extra unit below"
+                        .into(),
+                ),
                 disable: None,
                 add_dropin: None,
             });
         }
     }
     // Two enabled units for one user.
-    let mut users: Vec<String> = r.units.iter().filter(|u| u.enabled).map(|u| u.runs_as.clone()).collect();
+    let mut users: Vec<String> = r
+        .units
+        .iter()
+        .filter(|u| u.enabled)
+        .map(|u| u.runs_as.clone())
+        .collect();
     users.sort();
     users.dedup();
     for user in users {
-        let units: Vec<&UnitFile> = r.units.iter().filter(|u| u.enabled && u.runs_as == user).collect();
+        let units: Vec<&UnitFile> = r
+            .units
+            .iter()
+            .filter(|u| u.enabled && u.runs_as == user)
+            .collect();
         if units.len() < 2 {
             continue;
         }
@@ -1180,7 +1339,11 @@ fn findings(r: &Report) -> Vec<Finding> {
             .find_map(|l| l.holder.as_ref()?.unit.clone());
         let keep = units
             .iter()
-            .position(|u| holder_unit.as_ref().is_some_and(|h| h.name == u.unit.name && h.user == u.unit.user))
+            .position(|u| {
+                holder_unit
+                    .as_ref()
+                    .is_some_and(|h| h.name == u.unit.name && h.user == u.unit.user)
+            })
             .or_else(|| units.iter().position(|u| u.unit.user))
             .unwrap_or(0);
         for (i, u) in units.iter().enumerate() {
@@ -1209,7 +1372,10 @@ fn findings(r: &Report) -> Vec<Finding> {
             out.push(Finding {
                 kind: FindingKind::OldBinary,
                 message: format!("{} starts {exec}, which does not exist", u.unit.describe()),
-                fix: Some(format!("point ExecStart at the current binary, or remove the unit: {}", u.unit.disable_command())),
+                fix: Some(format!(
+                    "point ExecStart at the current binary, or remove the unit: {}",
+                    u.unit.disable_command()
+                )),
                 disable: None,
                 add_dropin: None,
             });
@@ -1298,23 +1464,42 @@ pub fn fix(report: &Report) -> Vec<String> {
                 done.push(if ok {
                     format!("disabled {}", u.describe())
                 } else {
-                    format!("could not disable {}; run: {}", u.describe(), u.disable_command())
+                    format!(
+                        "could not disable {}; run: {}",
+                        u.describe(),
+                        u.disable_command()
+                    )
                 });
             } else {
-                done.push(format!("not allowed to disable {} from this user; run: {}", u.describe(), u.disable_command()));
+                done.push(format!(
+                    "not allowed to disable {} from this user; run: {}",
+                    u.describe(),
+                    u.disable_command()
+                ));
             }
         }
         if let Some((u, dir)) = &f.add_dropin {
             // Disabled duplicates need no drop-in.
-            if report.findings.iter().any(|g| g.disable.as_ref() == Some(u)) {
+            if report
+                .findings
+                .iter()
+                .any(|g| g.disable.as_ref() == Some(u))
+            {
                 continue;
             }
             if u.manageable() {
                 if ensure_restart_prevention_in(u, Some(dir.clone())) {
-                    done.push(format!("added RestartPreventExitStatus={RESTART_PREVENT_EXIT_STATUS} to {}", u.describe()));
+                    done.push(format!(
+                        "added RestartPreventExitStatus={RESTART_PREVENT_EXIT_STATUS} to {}",
+                        u.describe()
+                    ));
                 }
             } else {
-                done.push(format!("not allowed to change {} from this user; run: {}", u.describe(), u.dropin_command()));
+                done.push(format!(
+                    "not allowed to change {} from this user; run: {}",
+                    u.describe(),
+                    u.dropin_command()
+                ));
             }
         }
     }
@@ -1330,17 +1515,37 @@ mod tests {
         let sys = "0::/system.slice/c0mpute-worker.service\n";
         assert_eq!(
             parse_cgroup(sys),
-            Some(Unit { name: "c0mpute-worker.service".into(), user: false, uid: None })
+            Some(Unit {
+                name: "c0mpute-worker.service".into(),
+                user: false,
+                uid: None
+            })
         );
-        let user = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/c0mpute-worker.service\n";
+        let user =
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/c0mpute-worker.service\n";
         assert_eq!(
             parse_cgroup(user),
-            Some(Unit { name: "c0mpute-worker.service".into(), user: true, uid: Some(1000) })
+            Some(Unit {
+                name: "c0mpute-worker.service".into(),
+                user: true,
+                uid: Some(1000)
+            })
         );
         // A shell or tmux scope is not a unit we manage.
-        assert_eq!(parse_cgroup("0::/user.slice/user-1000.slice/session-4.scope\n"), None);
-        assert_eq!(parse_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-1.scope\n"), None);
-        assert_eq!(parse_cgroup("0::/user.slice/user-1000.slice/user@1000.service\n"), None);
+        assert_eq!(
+            parse_cgroup("0::/user.slice/user-1000.slice/session-4.scope\n"),
+            None
+        );
+        assert_eq!(
+            parse_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-1.scope\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_cgroup("0::/user.slice/user-1000.slice/user@1000.service\n"),
+            None
+        );
         // cgroup v1.
         let v1 = "12:pids:/x\n1:name=systemd:/system.slice/c0mpute-worker.service\n";
         assert_eq!(parse_cgroup(v1).map(|u| u.user), Some(false));
@@ -1349,9 +1554,13 @@ mod tests {
     #[test]
     fn worker_cmdlines() {
         let v = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
-        assert!(is_worker_cmdline(&v("/home/a/.c0mpute/bin/c0mpute worker start")));
+        assert!(is_worker_cmdline(&v(
+            "/home/a/.c0mpute/bin/c0mpute worker start"
+        )));
         assert!(is_worker_cmdline(&v("c0mpute worker start -d")));
-        assert!(is_worker_cmdline(&v("c0mpute --config /x worker start --gpu")));
+        assert!(is_worker_cmdline(&v(
+            "c0mpute --config /x worker start --gpu"
+        )));
         assert!(!is_worker_cmdline(&v("c0mpute worker start -a")));
         assert!(!is_worker_cmdline(&v("c0mpute worker status")));
         assert!(!is_worker_cmdline(&v("/usr/bin/vim worker start")));
@@ -1391,19 +1600,28 @@ mod tests {
     /// a worker until replaced.
     #[test]
     fn child_worker() {
-        let Ok(dir) = std::env::var("C0MPUTE_TEST_CHILD_DIR") else { return };
+        let Ok(dir) = std::env::var("C0MPUTE_TEST_CHILD_DIR") else {
+            return;
+        };
         match claim(Path::new(&dir)) {
             Ok(()) => loop {
                 std::thread::sleep(Duration::from_secs(1));
             },
-            Err(e) if e.downcast_ref::<DuplicateWorker>().is_some() => std::process::exit(EXIT_DUPLICATE),
+            Err(e) if e.downcast_ref::<DuplicateWorker>().is_some() => {
+                std::process::exit(EXIT_DUPLICATE)
+            }
             Err(e) => panic!("{e:#}"),
         }
     }
 
     fn spawn_child(dir: &Path, unit: &str, xdg: &Path) -> std::process::Child {
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "instance::tests::child_worker", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "instance::tests::child_worker",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env("C0MPUTE_TEST_CHILD_DIR", dir)
             .env("C0MPUTE_INSTANCE_UNIT", unit)
             .env("C0MPUTE_SYSTEMCTL", "true")
@@ -1425,7 +1643,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        panic!("pid {pid} never took the lock (holder: {:?})", holder_pid(dir));
+        panic!(
+            "pid {pid} never took the lock (holder: {:?})",
+            holder_pid(dir)
+        );
     }
 
     fn wait_exit(child: &mut std::process::Child, max: Duration) -> Option<i32> {
@@ -1449,9 +1670,15 @@ mod tests {
         let mut b = spawn_child(&id, "", tmp.path());
         // The first one drains (nothing running) and exits "replaced", a code
         // every unit lists in RestartPreventExitStatus: no restart loop.
-        assert_eq!(wait_exit(&mut a, Duration::from_secs(30)), Some(EXIT_REPLACED));
+        assert_eq!(
+            wait_exit(&mut a, Duration::from_secs(30)),
+            Some(EXIT_REPLACED)
+        );
         wait_holder(&id, b.id());
-        assert!(!id.join(TAKEOVER_FILE).exists(), "the request is cleared once served");
+        assert!(
+            !id.join(TAKEOVER_FILE).exists(),
+            "the request is cleared once served"
+        );
         let _ = b.kill();
         let _ = b.wait();
     }
@@ -1463,7 +1690,10 @@ mod tests {
         let mut a = spawn_child(&id, "c0mpute-a.service", tmp.path());
         wait_holder(&id, a.id());
         let mut b = spawn_child(&id, "c0mpute-b.service", tmp.path());
-        assert_eq!(wait_exit(&mut a, Duration::from_secs(30)), Some(EXIT_REPLACED));
+        assert_eq!(
+            wait_exit(&mut a, Duration::from_secs(30)),
+            Some(EXIT_REPLACED)
+        );
         wait_holder(&id, b.id());
         let ev = read_evicted(&id).expect("the replaced unit is recorded");
         assert_eq!(ev.unit.name, "c0mpute-a.service");
@@ -1471,11 +1701,17 @@ mod tests {
         // systemd restarts unit a anyway (an old unit without the guard): it
         // must not evict b back.
         let mut a2 = spawn_child(&id, "c0mpute-a.service", tmp.path());
-        assert_eq!(wait_exit(&mut a2, Duration::from_secs(20)), Some(EXIT_DUPLICATE));
+        assert_eq!(
+            wait_exit(&mut a2, Duration::from_secs(20)),
+            Some(EXIT_DUPLICATE)
+        );
         assert_eq!(holder_pid(&id), Some(b.id()), "b keeps working");
         // ...and it added the guard to its own unit on the way out, so this
         // was the last restart.
-        let dropin = tmp.path().join("systemd/user/c0mpute-a.service.d").join(DROPIN_FILE);
+        let dropin = tmp
+            .path()
+            .join("systemd/user/c0mpute-a.service.d")
+            .join(DROPIN_FILE);
         let text = std::fs::read_to_string(&dropin).expect("drop-in written");
         assert!(text.contains("RestartPreventExitStatus=90 91"), "{text}");
 
@@ -1514,7 +1750,10 @@ mod tests {
         let sys_dir = root.path().join("etc/systemd/system");
         write(
             &sys_dir.join("c0mpute-worker.service"),
-            &format!("[Service]\nUser={me}\nExecStart={} worker start\nRestart=always\n", bin.display()),
+            &format!(
+                "[Service]\nUser={me}\nExecStart={} worker start\nRestart=always\n",
+                bin.display()
+            ),
         );
         enable(&sys_dir, "multi-user.target", "c0mpute-worker.service");
         let user_dir = home.join(".config/systemd/user");
@@ -1526,38 +1765,74 @@ mod tests {
         // The system unit's worker holds the identity: that one is kept.
         let id = home.join(".config/c0mpute");
         let mut holder = Holder::me();
-        holder.unit = Some(Unit { name: "c0mpute-worker.service".into(), user: false, uid: None });
-        write(&id.join(LOCK_FILE), &serde_json::to_string(&holder).unwrap());
+        holder.unit = Some(Unit {
+            name: "c0mpute-worker.service".into(),
+            user: false,
+            uid: None,
+        });
+        write(
+            &id.join(LOCK_FILE),
+            &serde_json::to_string(&holder).unwrap(),
+        );
         let lock = std::fs::File::open(id.join(LOCK_FILE)).unwrap();
-        assert!(try_flock(&lock), "the test holds the lock like a live worker");
+        assert!(
+            try_flock(&lock),
+            "the test holds the lock like a live worker"
+        );
 
         let r = scan_with(root.path(), &[(home.clone(), uid)]);
         let kinds: Vec<FindingKind> = r.findings.iter().map(|f| f.kind).collect();
-        let dup = r.findings.iter().find(|f| f.kind == FindingKind::DuplicateUnits).expect("duplicate units");
+        let dup = r
+            .findings
+            .iter()
+            .find(|f| f.kind == FindingKind::DuplicateUnits)
+            .expect("duplicate units");
         let disable = dup.disable.as_ref().unwrap();
-        assert!(disable.user, "keeps the unit whose worker holds the lock: {}", dup.message);
-        assert!(kinds.contains(&FindingKind::OldBinary), "user unit starts a missing binary: {kinds:?}");
+        assert!(
+            disable.user,
+            "keeps the unit whose worker holds the lock: {}",
+            dup.message
+        );
+        assert!(
+            kinds.contains(&FindingKind::OldBinary),
+            "user unit starts a missing binary: {kinds:?}"
+        );
         assert_eq!(
-            kinds.iter().filter(|k| **k == FindingKind::NoRestartPrevention).count(),
+            kinds
+                .iter()
+                .filter(|k| **k == FindingKind::NoRestartPrevention)
+                .count(),
             2,
             "neither unit has the guard: {kinds:?}"
         );
-        assert!(r.locks.iter().any(|l| l.held && l.holder.as_ref().is_some_and(|h| h.pid == holder.pid)));
+        assert!(
+            r.locks
+                .iter()
+                .any(|l| l.held && l.holder.as_ref().is_some_and(|h| h.pid == holder.pid))
+        );
 
         // --fix: the user unit is ours to disable; the system unit is not
         // (unless root), so the doctor prints the sudo command for it.
         let log = root.path().join("systemctl.log");
         let fake = root.path().join("systemctl");
-        write(&fake, &format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()));
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write(
+            &fake,
+            &format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        );
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         set_systemctl_for_tests(Some(fake.display().to_string()));
         let done = fix(&r);
         set_systemctl_for_tests(None);
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(calls.contains("--user disable --now c0mpute-worker.service"), "{calls}\n{done:?}");
+        assert!(
+            calls.contains("--user disable --now c0mpute-worker.service"),
+            "{calls}\n{done:?}"
+        );
         if !is_root() {
             assert!(
-                done.iter().any(|l| l.contains("sudo") && l.contains("RestartPreventExitStatus")),
+                done.iter()
+                    .any(|l| l.contains("sudo") && l.contains("RestartPreventExitStatus")),
                 "system unit guard is printed as a sudo command: {done:?}"
             );
         }

@@ -115,7 +115,10 @@ pub fn ad_field(ours: &str) -> Option<serde_json::Value> {
 pub fn log_resume_if_cleared(ours: &str, was_yielding: &mut bool) {
     let now = yielding(ours);
     if *was_yielding && !now {
-        info!(instance = ours, "duplicate identity: no twin seen for a while; bidding again");
+        info!(
+            instance = ours,
+            "duplicate identity: no twin seen for a while; bidding again"
+        );
     }
     *was_yielding = now;
 }

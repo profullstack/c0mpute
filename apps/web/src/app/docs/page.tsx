@@ -71,6 +71,58 @@ c0mpute worker stop`}
         </Code>
       </Section>
 
+      <Section h="duplicate-workers" title="[ troubleshooting: one identity, two workers ]">
+        <P>
+          A node is its identity (<code>~/.config/c0mpute/identity.key</code>).
+          Two processes running one identity bid under one peer id with
+          different keys, and the one the buyer did not pick used to fail the
+          job. Typical causes: a system unit (<code>/etc/systemd/system</code>,{" "}
+          <code>User=you</code>) next to your user unit, or an identity dir
+          copied to a second machine.
+        </P>
+        <P>What c0mpute does about it now:</P>
+        <ul className="text-sm leading-6 list-disc pl-5 space-y-1">
+          <li>
+            Same machine: the newest <code>worker start</code> wins. The running
+            worker stops bidding, finishes its jobs (up to 10 min) and exits with
+            code 90; one that does not answer gets SIGTERM, then SIGKILL, after
+            its pid, start time and binary are re-checked.
+          </li>
+          <li>
+            Every unit c0mpute installs has{" "}
+            <code>RestartPreventExitStatus=90 91</code>, so systemd does not
+            restart the replaced worker. Older units get a drop-in from the
+            running worker (your own user units; system units only as root,
+            otherwise the log prints the <code>sudo</code> command). The new
+            worker disables the replaced unit when it may.
+          </li>
+          <li>
+            Two machines: buyers keep the newer process&apos;s bid and name its
+            instance on the accept. The other one answers &quot;not mine&quot;, the
+            buyer re-awards the job to the next bidder at once (no failed job,
+            no bench), and the older twin stops bidding while the newer one runs.{" "}
+            <Link href="/nodes">/nodes</Link> marks the node{" "}
+            <em>duplicate identity</em>.
+          </li>
+        </ul>
+        <Code>
+{`c0mpute doctor          # every worker process, unit and identity lock here:
+                        # duplicates, stale locks, wedged workers, old binaries
+c0mpute doctor --fix    # disable the extra unit (prints sudo for system units)
+c0mpute worker install  # one user unit; refuses if another unit runs a worker
+
+# Remove a duplicate system unit by hand:
+sudo systemctl disable --now c0mpute-worker.service
+
+# A copied identity: give the copy its own identity before starting it
+rm ~/.config/c0mpute/identity.key && c0mpute worker start`}
+        </Code>
+        <P>
+          Exit codes: <code>90</code> replaced by a newer start,{" "}
+          <code>91</code> a duplicate that stood down. Neither is a crash.
+        </P>
+      </Section>
+
       <Section h="networking" title="[ networking &amp; firewall ]">
         <P>
           To be dialable by other nodes — <strong>required</strong> for a

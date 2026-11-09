@@ -91,7 +91,7 @@ export default async function NodesPage() {
                       )}
                       {n.duplicate && (
                         <Link
-                          href="/docs/troubleshooting#duplicate-workers"
+                          href="/docs#duplicate-workers"
                           className="block text-red-500 !border-0"
                           title="This identity runs as more than one process. Run `c0mpute doctor` on each machine."
                         >
