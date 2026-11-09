@@ -20,6 +20,7 @@ export function parseMusicCommand(text: string): MusicCommand | null {
   return prompt ? { prompt, lyrics } : null;
 }
 
+export const MAX_TEXT_CHARS = 100_000;
 export const MIN_SECONDS = 10;
 export const MAX_SECONDS = 120;
 
@@ -29,9 +30,10 @@ export function parseMusicRequest(
 ): { prompt: string; lyrics: string; duration: number } | string {
   const b = (body ?? {}) as Record<string, unknown>;
   const prompt = typeof b.prompt === "string" ? b.prompt.trim() : "";
-  if (!prompt || prompt.length > 1000) return "prompt must contain 1 to 1000 characters";
+  // Long briefs and whole songs are fine; Infernet clips what the model reads.
+  if (!prompt || prompt.length > MAX_TEXT_CHARS) return `prompt must contain 1 to ${MAX_TEXT_CHARS} characters`;
   const lyrics = typeof b.lyrics === "string" ? b.lyrics.trim() : "";
-  if (lyrics.length > 4000) return "lyrics must be at most 4000 characters";
+  if (lyrics.length > MAX_TEXT_CHARS) return `lyrics must be at most ${MAX_TEXT_CHARS} characters`;
   const duration = b.duration === undefined || b.duration === null ? 30 : Number(b.duration);
   if (!Number.isInteger(duration) || duration < MIN_SECONDS || duration > MAX_SECONDS) {
     return `duration must be a whole number of seconds from ${MIN_SECONDS} to ${MAX_SECONDS}`;
