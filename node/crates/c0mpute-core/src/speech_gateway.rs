@@ -54,6 +54,8 @@ struct GatewayState {
     queue: Arc<crate::buyer_queue::QueueConfig>,
     /// Queued and running tracked requests, FIFO per workload.
     board: crate::buyer_queue::QueueBoard,
+    /// Only the oldest queued request of a queue auctions (FIFO hand-out).
+    turns: crate::buyer_queue::AuctionTurns,
     /// OCR jobs in flight (each holds an input of up to 32 MiB here).
     ocr_slots: Arc<Semaphore>,
     /// Embedding jobs in flight.
@@ -212,6 +214,7 @@ pub fn router_with(
         video_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VIDEO_JOBS)),
         queue: Arc::new(crate::buyer_queue::QueueConfig::from_env()),
         board: crate::buyer_queue::QueueBoard::default(),
+        turns: crate::buyer_queue::AuctionTurns::default(),
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         captcha_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_CAPTCHA_JOBS)),
@@ -687,6 +690,11 @@ async fn run_checked_job(
     crate::job_progress::report(|p| p.max_wait_s = Some(max_wait.as_secs()));
     let mut attempt = 0;
     let mut no_bid_rounds = 0u32;
+    // Tracked (queued) requests auction one at a time per queue, oldest
+    // first; see `AuctionTurns`. Untracked ones (voice, chat) never wait.
+    let turn_key = ctx.and_then(|c| crate::job_progress::current_key().map(|k| (k, c.queued_at_ms)));
+    let turn_queue = crate::buyer_queue::AuctionTurns::queue_of(workload, &required);
+    let mut turn: Option<crate::buyer_queue::AuctionTurn> = None;
     // Resumed after a restart with the auction already awarded: collect that
     // job from its worker (same derived key, no second run). Only if the
     // worker no longer has it is the work auctioned again.
@@ -729,6 +737,22 @@ async fn run_checked_job(
                 p.stage = "finding_worker";
             }
         });
+        if resumed.is_none()
+            && turn.is_none()
+            && let Some((key, queued_at)) = turn_key.as_ref()
+        {
+            let left = max_wait.saturating_sub(waited());
+            match tokio::time::timeout(left, state.turns.acquire(&turn_queue, key, *queued_at)).await {
+                Ok(t) => turn = Some(t),
+                Err(_) => {
+                    let model = crate::buyer_queue::model_of(&spec, &required);
+                    return Err(ApiError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        crate::buyer_queue::expired_message(workload, model.as_deref(), max_wait),
+                    ));
+                }
+            }
+        }
         let outcome = if let Some(outcome) = resumed.take() {
             outcome
         } else { match run_speech_auction(
@@ -782,6 +806,8 @@ async fn run_checked_job(
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
         } };
+        // A worker took it: the next request in line may auction now.
+        turn = None;
         let worker = outcome.accepted_bid.bidder_peer_id.clone();
         crate::job_progress::set_stage("fetching_result");
         let result = if outcome.receipt.status != c0mpute_net::topics::JobStatus::Completed {
