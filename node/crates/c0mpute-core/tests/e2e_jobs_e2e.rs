@@ -386,3 +386,70 @@ async fn gossip_shows_no_plaintext_and_only_the_winner_reads_the_job() {
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
+
+/// Live check (DIP-0032): join the real network as a passive node, subscribe
+/// to the job topics, record every gossip message for
+/// `C0MPUTE_CAPTURE_SECS` (default 120) into `C0MPUTE_CAPTURE_FILE`, and fail
+/// if any contains `C0MPUTE_CAPTURE_NEEDLE`. Run it while a real job with
+/// that needle in its prompt goes through:
+/// `cargo test -p c0mpute-core --test e2e_jobs_e2e live_capture -- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "joins the live network"]
+async fn live_capture_shows_no_plaintext() {
+    let needle = std::env::var("C0MPUTE_CAPTURE_NEEDLE").expect("C0MPUTE_CAPTURE_NEEDLE");
+    let secs: u64 = std::env::var("C0MPUTE_CAPTURE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    let out = std::env::var("C0MPUTE_CAPTURE_FILE").unwrap_or_else(|_| "capture.jsonl".into());
+    let dir = tempdir().unwrap();
+    let net = Libp2pNetwork::spawn(
+        NetworkConfig::for_dir(dir.path().join("id"))
+            .with_listen(vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap()])
+            .with_bootstrap(c0mpute_net::bootstrap::default_seeds()),
+    )
+    .await
+    .unwrap();
+    let topics = [
+        "infernet.inference",
+        "diffusion.txt2img",
+        "tts.synthesize",
+        "stt.transcribe",
+        "embed.text",
+        "infernet.text.infer",
+    ];
+    for t in topics {
+        net.subscribe(&job_topic(t)).await.unwrap();
+    }
+    let mut rx = net.messages();
+    let mut f = std::fs::File::create(&out).unwrap();
+    let (mut n, mut leaks, mut offers) = (0usize, 0usize, 0usize);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while let Ok(Ok(m)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        n += 1;
+        if contains(&m.data, needle.as_bytes()) {
+            leaks += 1;
+        }
+        if let Ok(o) = serde_json::from_slice::<c0mpute_net::topics::JobOffer>(&m.data) {
+            offers += 1;
+            eprintln!(
+                "offer {} {} e2e={} spec_inline={}",
+                o.workload_type,
+                o.job_id,
+                o.e2e.is_some(),
+                o.spec_inline.is_some()
+            );
+        }
+        use std::io::Write;
+        writeln!(
+            f,
+            "{}\t{}\t{}",
+            m.topic,
+            m.source.map(|p| p.to_base58()).unwrap_or_default(),
+            String::from_utf8_lossy(&m.data)
+        )
+        .unwrap();
+    }
+    eprintln!("captured {n} messages ({offers} offers) on {topics:?}; {leaks} contain the needle");
+    assert_eq!(leaks, 0, "plaintext on gossip");
+}
