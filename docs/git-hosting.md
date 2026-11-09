@@ -2,7 +2,9 @@
 
 c0mpute hosts git repositories with no server of record. A repo is signed by its owner's
 key, hosting nodes keep three self-healing copies of it, and any gateway serves clones,
-with the owner's machine offline. There is no account, no coordinator and no central
+with the owner's machine offline. **Repos are private by default**: end-to-end encrypted on
+your machine, so node operators and gateways only ever hold ciphertext (see
+[Private repos](#private-repos)). `--public` makes one readable by anyone. There is no account, no coordinator and no central
 index: it is the [hosting](hosting.md) machinery with git on top. You use plain `git`;
 the `c0mpute git` commands are shortcuts.
 
@@ -14,12 +16,15 @@ one command.
 ```sh
 c0mpute git install                        # once: puts git-remote-c0mpute on PATH
 cd my-project
-c0mpute git init my-project                # adds remote "origin" = c0mpute://<your-key>/my-project
-git push origin main                       # signed by your key, kept by the network x3
+c0mpute git init my-project                # private (default); adds remote "origin"
+git push origin main                       # encrypted here, signed by your key, kept x3
 
-# anyone, anywhere, no account:
-git clone c0mpute://<owner-key>/my-project                                 # verified by the helper
-git clone https://gateway.c0mpute.com/git/<owner-key>/my-project.git       # plain git, nothing installed
+c0mpute git share my-project --with c0ps1.... # let a teammate read it
+git clone c0mpute://<owner-key>/my-project    # you, or anyone you shared with
+
+# a public repo instead: anyone, anywhere, no account
+c0mpute git init my-lib --public
+git clone https://gateway.c0mpute.com/git/<owner-key>/my-lib.git      # plain git, nothing installed
 ```
 
 That is the whole setup. Everything after it is ordinary git.
@@ -29,7 +34,10 @@ That is the whole setup. Everything after it is ordinary git.
 | Command | What it does |
 |---|---|
 | `c0mpute git install` | Put `git-remote-c0mpute` (a link to the `c0mpute` binary) next to it, so plain `git push`/`git clone` understand `c0mpute://` URLs. `--dir <dir>` to put it elsewhere on PATH. Alias of `install-helper`. |
-| `c0mpute git init <repo>` | Print `c0mpute://<your-key>/<repo>`; inside a work tree, add it as remote `origin` (`--remote <name>` for another name). Publishes nothing until you push. |
+| `c0mpute git init <repo>` | Print `c0mpute://<your-key>/<repo>`; inside a work tree, add it as remote `origin` (`--remote <name>` for another name). Private by default (creates your c0mpute identity on first use; `--backup-to <file>` for its backup); `--public` for a public repo. Publishes nothing until you push. |
+| `c0mpute git share <repo> --with <c0ps1...>` | Let another identity read a private repo. Only the key header changes. Repeat `--with` for several. |
+| `c0mpute git unshare <repo> --from <c0ps1...>` | Stop sharing. Run inside a clone: re-keys the repo and re-encrypts every object. |
+| `c0mpute git readers <repo>` | Who can read a private repo of yours. |
 | `c0mpute git url <repo>` | Print the clone URL of one of your repos. |
 | `c0mpute git key` | Print this machine's owner key (the `<owner-key>` in URLs). |
 | `c0mpute git clone <url> [dir]` | `git clone` with the helper on PATH, so it works before `install`. `--gateway <url>` to pick a gateway. |
@@ -44,9 +52,50 @@ That is the whole setup. Everything after it is ordinary git.
 | `c0mpute://<owner-key>/<repo>` | Anyone's repo. `<owner-key>` is 64 hex (`c0mpute git key`). |
 | `c0mpute://<repo>` | A repo of this machine's key: the short form for your own remotes. |
 | `c0mpute://<20-hex site id>` | The URL form of c0mpute before 0.3.11; still clones (see [Old repos](#old-repos)). |
-| `https://<gateway>/git/<owner-key>/<repo>.git` | The same repo over git's plain ("dumb") HTTP: read-only, no c0mpute needed. |
+| `https://<gateway>/git/<owner-key>/<repo>.git` | A public repo over git's plain ("dumb") HTTP: read-only, no c0mpute needed. Private repos need the helper (the key never reaches a gateway). |
 
 Repo names are 1-59 of `a-z`, `0-9` and `-`.
+
+## Private repos
+
+A new repo is private unless you ask for public. Before anything leaves your machine, the
+helper encrypts it with [`c0mpute-sealed`](private-storage.md), the same format as private
+storage:
+
+- The repo has one random 256-bit key. Every pack file and its index is sealed with it
+  (AES-256-GCM in 64 KiB chunks, signed, Padme-padded so sizes are blurred). Pack names
+  are random, so they say nothing about the content.
+- Branches, tags, commit ids and HEAD live in `c0mpute-git.sealed`, sealed with the same
+  key. The key is wrapped (X25519) for each reader: you, and whoever you share with.
+- The plaintext `c0mpute-git.json` keeps only what gateways need to protect the repo:
+  pack names, `prev` (the version a push replaces) and `force`. Its `refs` are empty.
+
+| Who | can see | cannot see |
+|---|---|---|
+| Hosting nodes, gateways, anyone on the network | your owner key, the repo name, its size and when it changes | code, file names, commit messages, branches, tags, commit ids |
+| Readers you shared with | everything, like a clone | nothing more than you gave them |
+
+**Readers** are c0mpute identities: the one `c0mpute storage` and `c0mpute dm` use
+(`~/.config/c0mpute/chat.key`, password-protected). `c0mpute git init` creates yours on the
+first private repo and makes you save its encrypted backup. Lose the identity and its
+backup and nobody, not c0mpute, not node operators, can open your private repos.
+
+```sh
+c0mpute storage key show                         # your c0ps1... identity, to give people
+c0mpute git share my-project --with c0ps1.Zb3...  # they can clone it now
+c0mpute git readers my-project
+c0mpute git unshare my-project --from c0ps1.Zb3...  # inside a clone: re-key + re-encrypt
+```
+
+`unshare` re-keys because someone who could read the repo may have kept the old key.
+Their existing clone keeps what they already had, as with any git host.
+
+**Modes do not change.** Pushing a private repo as public would publish its whole history,
+and a public repo's history is already out, so asking for the other mode is refused. Push to
+a new repo instead. For scripts, `C0MPUTE_DM_PASSWORD` supplies the identity password.
+
+**Push to deploy still works** from a private repo, but deploying an app runs it on c0mpute
+nodes, and those nodes see the code they run.
 
 ## Everyday git
 
@@ -134,6 +183,9 @@ push rewrites the repo in the current layout (one full pack) with its whole hist
 | Symptom | Cause, fix |
 |---|---|
 | `git: 'remote-c0mpute' is not a git command` | The helper is not on PATH: `c0mpute git install` (or use `c0mpute git push`/`clone`). |
+| `... is private and this machine's identity is not one of its readers` | Ask the owner to `c0mpute git share <repo> --with <your c0ps1...>` (`c0mpute storage key show`). |
+| `no c0mpute identity on this machine yet` | Private repos need one: `c0mpute storage key init --backup-to <file>`, or restore yours with `c0mpute dm restore`. |
+| `unsupported repo doc version 2` | That c0mpute is older than private repos: update it. |
 | `HTTP 507 ... hosting budget` on push | That gateway has no room. Push through another: `--gateway https://gateway.c0mpute.com`. |
 | `no such repo on the network (yet)` | That gateway has not heard of it. Wait a few minutes, or use the gateway you pushed to. |
 | `the repo moved on since you fetched it` | Someone (your other machine) pushed first. `git pull`, then push. |
