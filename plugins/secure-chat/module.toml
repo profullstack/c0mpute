@@ -21,7 +21,7 @@
 [module]
 id          = "secure-chat"
 name        = "Secure Chat — E2E encrypted p2p messaging"
-version     = "0.2.82"
+version     = "0.2.83"
 kind        = "service"
 category    = "applications"
 status      = "available"
@@ -33,7 +33,7 @@ source      = "https://github.com/profullstack/c0mpute/tree/master/plugins/secur
 keywords    = ["chat", "messaging", "e2e", "encryption", "p2p", "post-quantum", "privacy", "mailbox"]
 
 [module.requirements]
-c0mpute      = ">=0.2.82"
+c0mpute      = ">=0.2.83"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["network:ingress", "network:egress", "storage:ephemeral"]
