@@ -48,8 +48,6 @@ pub struct DeployOptions {
     pub millicpus: u32,
     pub replicas: u8,
     pub domains: Vec<String>,
-    /// Peer ids allowed to hold the app (empty = any apps node).
-    pub hosts: Vec<String>,
     pub wait: Duration,
 }
 
@@ -258,7 +256,6 @@ pub async fn deploy(opts: DeployOptions) -> Result<AppRecord> {
         millicpus: opts.millicpus,
         replicas: opts.replicas,
         domains: opts.domains.clone(),
-        hosts: opts.hosts.clone(),
     };
     let rec = AppRecord::sign(&keypair, spec, seq)?;
     if let Some(s) = &secrets {
@@ -399,9 +396,6 @@ pub struct AppSection {
     pub replicas: u8,
     #[serde(default)]
     pub domains: Vec<String>,
-    /// Peer ids allowed to hold the app (empty = any apps node).
-    #[serde(default)]
-    pub hosts: Vec<String>,
     /// A pinned registry image instead of building the repository.
     pub image: Option<String>,
     #[serde(default)]
@@ -444,7 +438,6 @@ impl AppSection {
             millicpus: (self.cpus * 1000.0).round() as u32,
             replicas: self.replicas,
             domains: self.domains.clone(),
-            hosts: self.hosts.clone(),
             wait,
         }
     }

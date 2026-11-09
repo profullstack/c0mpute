@@ -24,8 +24,6 @@ impl ChunkSource for StoreSource {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_nine_thousand_file_site_publishes_and_serves() {
-    // Loopback only: never publish test sites to a live network via mDNS.
-    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
     let site = tmp.path().join("site");
     for i in 0..9_000 {
@@ -40,14 +38,8 @@ async fn a_nine_thousand_file_site_publishes_and_serves() {
     let built = build_from_dir(&site, "big").unwrap();
     assert!(built.manifest.files.len() > INLINE_FILES);
     let stored = built.stored();
-    assert!(
-        !stored.parts.is_empty(),
-        "a large site gets a parted manifest"
-    );
-    assert!(matches!(
-        Manifest::from_bytes(&stored.root).unwrap(),
-        Manifest::Parted(_)
-    ));
+    assert!(!stored.parts.is_empty(), "a large site gets a parted manifest");
+    assert!(matches!(Manifest::from_bytes(&stored.root).unwrap(), Manifest::Parted(_)));
 
     let store = ChunkStore::open(tmp.path().join("store")).await.unwrap();
     let net = Libp2pNetwork::spawn(
@@ -57,32 +49,14 @@ async fn a_nine_thousand_file_site_publishes_and_serves() {
     )
     .await
     .unwrap();
-    let h = Hosting::start(Arc::new(net), store, Options::default())
-        .await
-        .unwrap();
+    let h = Hosting::start(Arc::new(net), store, Options::default()).await.unwrap();
     let kp = libp2p::identity::Keypair::generate_ed25519();
-    let rec = SiteRecord::sign(
-        &kp,
-        "big",
-        &built.manifest_hash(),
-        1,
-        built.manifest.total_bytes(),
-        vec![],
-    )
-    .unwrap();
+    let rec = SiteRecord::sign(&kp, "big", &built.manifest_hash(), 1, built.manifest.total_bytes(), vec![]).unwrap();
     h.publish_site(&built, rec.clone()).await.unwrap();
 
-    let (_, body) = h
-        .read_file(&rec, "d7/p8197.html")
-        .await
-        .unwrap()
-        .expect("file in a late part");
+    let (_, body) = h.read_file(&rec, "d7/p8197.html").await.unwrap().expect("file in a late part");
     assert_eq!(body, b"page 8197");
-    let (_, body) = h
-        .read_file(&rec, "d0/p0.html")
-        .await
-        .unwrap()
-        .expect("file in the first part");
+    let (_, body) = h.read_file(&rec, "d0/p0.html").await.unwrap().expect("file in the first part");
     assert_eq!(body, b"page 0");
     assert!(h.read_file(&rec, "d0/nope.html").await.unwrap().is_none());
 
@@ -91,18 +65,8 @@ async fn a_nine_thousand_file_site_publishes_and_serves() {
         let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         (status, String::from_utf8_lossy(&b).into_owned())
     };
-    assert_eq!(
-        body_of(h.serve(&rec, "/d3/p4503").await).await,
-        (200, "page 4503".into()),
-        "extensionless path finds .html"
-    );
-    assert_eq!(
-        body_of(h.serve(&rec, "/docs/").await).await,
-        (200, "docs home".into())
-    );
-    assert_eq!(
-        body_of(h.serve(&rec, "/missing/thing").await).await,
-        (404, "custom 404".into())
-    );
+    assert_eq!(body_of(h.serve(&rec, "/d3/p4503").await).await, (200, "page 4503".into()), "extensionless path finds .html");
+    assert_eq!(body_of(h.serve(&rec, "/docs/").await).await, (200, "docs home".into()));
+    assert_eq!(body_of(h.serve(&rec, "/missing/thing").await).await, (404, "custom 404".into()));
     let _ = Duration::from_secs(0);
 }

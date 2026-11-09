@@ -300,18 +300,6 @@ fn load_x25519(dir: Option<&PathBuf>) -> crypto::KeyPair {
     kp
 }
 
-/// The view as this app sees it: nodes off its host allowlist do not exist
-/// for its placement, primary election, snapshots or secrets.
-fn scoped(rec: &AppRecord, view: &HashMap<String, NodeView>) -> HashMap<String, NodeView> {
-    if rec.hosts.is_empty() {
-        return view.clone();
-    }
-    view.iter()
-        .filter(|(p, _)| rec.allows(p))
-        .map(|(p, n)| (p.clone(), n.clone()))
-        .collect()
-}
-
 /// Write a file only its owner can read.
 pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
@@ -579,9 +567,6 @@ impl Apps {
         }
         // Only the owner or a node that holds the app may hand out secrets.
         let from_owner = rec.owner_peer().as_deref() == Some(src);
-        if !from_owner && !rec.allows(src) {
-            return;
-        }
         let from_holder = self
             .0
             .nodes
@@ -790,9 +775,8 @@ impl Apps {
         let view = self.live_view().await;
         let mut changed = false;
         for rec in records {
-            let v = scoped(&rec, &view);
-            changed |= self.step(&rec, &v).await;
-            self.seal_to_holders(&rec, &v).await;
+            changed |= self.step(&rec, &view).await;
+            self.seal_to_holders(&rec, &view).await;
         }
         // Apps this node holds whose record vanished: nothing to do but wait.
         if changed {
@@ -806,11 +790,6 @@ impl Apps {
     async fn step(&self, rec: &AppRecord, view: &HashMap<String, NodeView>) -> bool {
         let id = rec.app_id.clone();
         let holding = self.0.local.read().await.contains_key(&id);
-        if holding && !rec.deleted && !rec.allows(&self.0.me) {
-            info!(app = %id, "apps: no longer on the app's host list; dropping");
-            self.drop_app(&id).await;
-            return true;
-        }
         if rec.deleted {
             if holding {
                 info!(app = %id, "apps: deleted by owner; dropping");
@@ -1490,7 +1469,6 @@ impl Apps {
     }
 
     pub async fn info(&self, rec: &AppRecord, view: &HashMap<String, NodeView>) -> AppInfo {
-        let view = &scoped(rec, view);
         let holders = placement::holders(&rec.app_id, view);
         let p = placement::primary(&rec.app_id, rec.needs_secrets(), view);
         let (primary, epoch, healthy) = match &p {
@@ -1542,7 +1520,7 @@ impl Apps {
     /// Owner side: the last `tail` log lines from the primary.
     pub async fn logs(&self, app_id: &str, tail: u32) -> Result<String> {
         let rec = self.lookup_record(app_id).await.context("unknown app")?;
-        let view = scoped(&rec, &self.live_view().await);
+        let view = self.live_view().await;
         let peer = placement::primary(app_id, rec.needs_secrets(), &view)
             .peer()
             .map(str::to_string)
@@ -1560,7 +1538,7 @@ impl Apps {
         let Some(rec) = self.lookup_record(&req.app_id).await.filter(|r| !r.deleted) else {
             return (StatusCode::NOT_FOUND, "no such app").into_response();
         };
-        let view = scoped(&rec, &self.live_view().await);
+        let view = self.live_view().await;
         let Some(peer) = placement::primary(&rec.app_id, rec.needs_secrets(), &view)
             .peer()
             .map(str::to_string)

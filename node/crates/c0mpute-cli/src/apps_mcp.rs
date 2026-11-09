@@ -34,7 +34,6 @@ fn tools() -> Value {
                     "memory_mb": {"type": "integer"},
                     "replicas": {"type": "integer"},
                     "domains": {"type": "array", "items": {"type": "string"}},
-                    "hosts": {"type": "array", "items": {"type": "string"}, "description": "Peer ids allowed to hold the app; empty = any apps node (each holder gets the app's secrets)"},
                     "wait_secs": {"type": "integer"}
                 },
                 "required": ["name"]
@@ -114,10 +113,6 @@ async fn call(gateway: &str, name: &str, a: &Value) -> Result<String> {
                     }
                 }
             }
-            if let Some(h) = a.get("hosts").and_then(Value::as_array) {
-                opts.hosts
-                    .extend(h.iter().filter_map(Value::as_str).map(str::to_string));
-            }
             if let Some(d) = a.get("domains").and_then(Value::as_array) {
                 opts.domains
                     .extend(d.iter().filter_map(Value::as_str).map(str::to_string));
@@ -173,7 +168,6 @@ fn base(name: &str, source: deploy::Source, wait: Duration) -> deploy::DeployOpt
         millicpus: 500,
         replicas: c0mpute_core::apps::record::DEFAULT_REPLICAS,
         domains: vec![],
-        hosts: vec![],
         wait,
     }
 }

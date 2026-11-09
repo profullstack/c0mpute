@@ -23,8 +23,6 @@ pub const MAX_REPLICAS: u8 = 5;
 pub const MAX_ENV: usize = 64;
 pub const MAX_ENV_VALUE: usize = 4096;
 pub const MAX_DOMAINS: usize = 8;
-/// Most peers an app's host allowlist may name.
-pub const MAX_HOSTS: usize = 32;
 /// Memory an app may ask for, MiB.
 pub const MIN_MEMORY_MB: u32 = 64;
 pub const MAX_MEMORY_MB: u32 = 8192;
@@ -92,11 +90,6 @@ pub struct AppRecord {
     /// `app=<app_id>`).
     #[serde(default)]
     pub domains: Vec<String>,
-    /// Peer ids (base58) allowed to hold and run this app. Empty = any apps
-    /// node. Holders seal secrets only to, and take snapshots only from,
-    /// peers on this list, so a private app never reaches a stranger's box.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hosts: Vec<String>,
     /// A tombstone: holders stop the app and drop its copies.
     #[serde(default)]
     pub deleted: bool,
@@ -179,7 +172,6 @@ pub struct AppSpec {
     pub millicpus: u32,
     pub replicas: u8,
     pub domains: Vec<String>,
-    pub hosts: Vec<String>,
 }
 
 impl AppRecord {
@@ -218,7 +210,6 @@ impl AppRecord {
             millicpus: spec.millicpus,
             replicas: spec.replicas,
             domains: spec.domains,
-            hosts: spec.hosts,
             deleted: false,
             sig: String::new(),
         };
@@ -325,20 +316,6 @@ impl AppRecord {
         if self.domains.len() > MAX_DOMAINS || !self.domains.iter().all(|d| valid_domain(d)) {
             bail!("invalid domain list");
         }
-        if self.hosts.len() > MAX_HOSTS
-            || !self
-                .hosts
-                .iter()
-                .all(|h| crate::hosting::site::valid_peer_id(h))
-            || self
-                .hosts
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != self.hosts.len()
-        {
-            bail!("hosts must be up to {MAX_HOSTS} distinct peer ids");
-        }
         Ok(())
     }
 
@@ -364,11 +341,6 @@ impl AppRecord {
             c0mpute_net::libp2p::identity::ed25519::PublicKey::try_from_bytes(&key).ok()?;
         let pk: c0mpute_net::libp2p::identity::PublicKey = public.into();
         Some(pk.to_peer_id().to_base58())
-    }
-
-    /// May `peer` hold and run this app?
-    pub fn allows(&self, peer: &str) -> bool {
-        self.hosts.is_empty() || self.hosts.iter().any(|h| h == peer)
     }
 
     /// The docker image reference a holder runs.
@@ -406,33 +378,7 @@ pub(crate) mod tests {
             millicpus: 500,
             replicas: 3,
             domains: vec!["api.example.org".into()],
-            hosts: vec![],
         }
-    }
-
-    #[test]
-    fn host_allowlist_is_signed_and_old_records_still_verify() {
-        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
-        let open = AppRecord::sign(&kp, spec("demo"), 1).unwrap();
-        assert!(
-            !serde_json::to_string(&open).unwrap().contains("hosts"),
-            "empty list stays off the wire"
-        );
-        assert!(open.allows("anyone"));
-        let peer = c0mpute_net::libp2p::identity::Keypair::generate_ed25519()
-            .public()
-            .to_peer_id()
-            .to_base58();
-        let mut s = spec("demo");
-        s.hosts = vec![peer.clone()];
-        let pinned = AppRecord::sign(&kp, s, 2).unwrap();
-        assert!(pinned.verify() && pinned.allows(&peer) && !pinned.allows("someone-else"));
-        let mut bad = pinned.clone();
-        bad.hosts.push(peer.clone());
-        assert!(!bad.verify(), "the list is covered by the signature");
-        let mut s = spec("demo");
-        s.hosts = vec!["not a peer".into()];
-        assert!(AppRecord::sign(&kp, s, 3).is_err());
     }
 
     #[test]
