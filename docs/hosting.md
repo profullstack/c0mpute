@@ -316,3 +316,11 @@ Payments move only between the payer and the hosts it chose; c0mpute holds nothi
 Escrow (money held until a window is proven) and proof-of-serve challenges from DIP-0015
 are not implemented: payers pay from their own wallet after the fact. Free hosting stays
 free.
+
+## Private sites
+
+`c0mpute hosting publish ./dir --name mysite --private` seals the whole site on
+this machine and prints a link like `https://gateway.c0mpute.com/p/<id>/#k=<key>`.
+Gateways serve a fixed loader page and the ciphertext; the browser decrypts it
+with the key after `#`, which is never sent to the gateway. Republishing keeps
+the link; `--rekey` invalidates it. See [private storage](private-storage.md).

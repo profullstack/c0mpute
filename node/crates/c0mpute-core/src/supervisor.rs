@@ -48,7 +48,10 @@ impl Supervisor {
         Self::boot_with_identity(config, identity_dir).await
     }
 
-    async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
+    /// Boot with a libp2p identity kept in `identity_dir` (created if
+    /// missing). Private storage uses a fresh throwaway directory per
+    /// session, so its publishes are not tied to this machine's usual peer id.
+    pub async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&config.storage.root)?;
         let store = ChunkStore::open(&config.storage.root).await?;
 

@@ -748,6 +748,15 @@ pub fn build_from_dir(dir: &Path, name: &str) -> Result<BuiltSite> {
     })
 }
 
+/// The files `build_from_dir` would publish from `dir`, as sorted
+/// (manifest path, absolute path) pairs. Private sites use the same walk.
+pub fn list_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut paths = Vec::new();
+    walk(dir, dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
 /// Where one chunk of a scanned site lives on the publisher's disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChunkLoc {
@@ -1364,7 +1373,8 @@ mod tests {
         let e = check_site_size(70 * GIB, false).unwrap_err().to_string();
         assert!(e.contains("--disks auto"), "{e}");
         assert!(check_site_size(70 * GIB, true).is_ok());
-        assert!(check_site_size(300 * GIB, true).unwrap_err().to_string().contains("Split"));
+        assert!(check_site_size(300 * GIB, true).is_ok(), "300 GiB is under the 4 TiB cap");
+        assert!(check_site_size(MAX_SITE_BYTES + GIB, true).unwrap_err().to_string().contains("Split"));
     }
 
     #[test]

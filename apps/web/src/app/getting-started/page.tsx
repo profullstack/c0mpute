@@ -11,7 +11,7 @@ export default function GettingStartedPage() {
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">getting-started</h1>
-        <p className="comment">// install → identity → register → run</p>
+        <p className="comment">// install → identity → register → run → host → store privately</p>
       </header>
 
       <Section number="1" label="install the cli stack">
@@ -152,6 +152,46 @@ announce = "https://gw.example.org"   # TLS in front of :7777`}</CodeBlock>
           .
         </p>
       </Section>
+
+      <Section number="9" label="private storage" id="private-storage">
+        <p className="text-sm text-[var(--color-dim)]">
+          Anything you store that is not deliberately public is encrypted on
+          your machine first, with keys only you hold. Node operators store,
+          replicate and serve ciphertext and never get a key. Public sites
+          (step 8) stay plaintext; everything else is private by default.
+        </p>
+        <CodeBlock>{`$ c0mpute storage key init --backup-to /media/usb/c0mpute-identity.json
+$ c0mpute storage put taxes-2026.pdf          # encrypted here, 3 network copies
+c0p1:3f0c9a1e5b7d2c4a8e6f
+$ c0mpute storage get c0p1:3f0c9a1e5b7d2c4a8e6f -o taxes-2026.pdf
+
+$ c0mpute storage key show                    # your c0ps1... identity, safe to share
+$ c0mpute storage share c0p1:3f0c... --with c0ps1.Zb3...
+$ c0mpute storage revoke c0p1:3f0c... --from c0ps1.Zb3...
+$ c0mpute storage link c0p1:3f0c...           # https://gateway.c0mpute.com/p/<id>/#k=...
+
+$ c0mpute hosting publish ./photos --name family --private
+$ c0mpute storage mount ~/Private             # encrypted FUSE volume (Linux)
+$ c0mpute storage put press-kit.zip --public  # plaintext, on purpose`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          <span className="accent">Lost keys mean lost data.</span> First use
+          makes you save an encrypted backup of your identity; nobody can
+          recover it for you. A link&apos;s key sits after <code>#</code>,
+          which browsers never send to the gateway: the page decrypts in your
+          browser.
+        </p>
+        <p className="text-sm text-[var(--color-dim)]">
+          What an operator can see: ciphertext, its size rounded up to a
+          coarse bucket (at most about 12% over), and when it is written and
+          read. What it cannot see: the content, file names, the exact size,
+          or who it is shared with, and the object alone does not say who
+          owns it. Full threat model in{" "}
+          <a className="accent" href="https://github.com/profullstack/c0mpute/blob/master/docs/private-storage.md">
+            docs/private-storage.md
+          </a>
+          .
+        </p>
+      </Section>
     </div>
   );
 }
@@ -159,14 +199,16 @@ announce = "https://gw.example.org"   # TLS in front of :7777`}</CodeBlock>
 function Section({
   number,
   label,
+  id,
   children,
 }: {
   number: string;
   label: string;
+  id?: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="space-y-3">
+    <section className="space-y-3" id={id}>
       <h2 className="text-lg">
         <span className="accent">[{number}]</span>{" "}
         <span className="text-[var(--color-fg)]">{label}</span>

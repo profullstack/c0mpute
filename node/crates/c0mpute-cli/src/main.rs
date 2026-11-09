@@ -28,8 +28,11 @@ mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
 mod peers;
+mod private_storage;
 mod promo;
 mod storage;
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+mod mount;
 mod temporal;
 mod text;
 mod train;
@@ -131,10 +134,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: JobCmd,
     },
-    /// Erasure-coded object storage on this node (DIP-0012).
+    /// Object storage (DIP-0012), private by default.
     ///
-    /// Objects are content-addressed and split into Reed-Solomon shards. Run
-    /// `c0mpute storage tiers` for the redundancy and price table.
+    /// `put` encrypts on this machine and the network only ever holds
+    /// ciphertext; `--public` stores plaintext. Run `c0mpute storage tiers`
+    /// for the redundancy and price table.
     #[command(after_long_help = storage::unimplemented_note())]
     Storage {
         #[command(subcommand)]
@@ -854,6 +858,17 @@ enum HostingCmd {
         /// The OpenDisk marketplace to pick hosts from (discovery only).
         #[arg(long, default_value = c0mpute_core::opendisk::DEFAULT_D1SKS_URL)]
         d1sks: String,
+        /// Publish a private site: encrypted on this machine, served only to
+        /// people with its link (the browser decrypts; gateways see only
+        /// ciphertext). Sites are public by default.
+        #[arg(long)]
+        private: bool,
+        /// With --private: draw a new key, killing every link given out so far.
+        #[arg(long, requires = "private")]
+        rekey: bool,
+        /// With --private: the gateway the printed link points at.
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
     },
     /// Show the c0mpute hosting nodes d1sks lists, ranked the way
     /// `publish --disks` would pick them.
@@ -4051,7 +4066,16 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             country,
             copies,
             d1sks,
+            private,
+            rekey,
+            gateway,
         } => {
+            if private {
+                if !domains.is_empty() || disks.is_some() {
+                    anyhow::bail!("--private sites are reached by their link only: drop --domain and --disks");
+                }
+                return private_storage::publish_site(&dir, &name, rekey, &gateway, std::time::Duration::from_secs(wait_secs)).await;
+            }
             let domains: Vec<String> = domains.into_iter().map(|d| d.to_ascii_lowercase()).collect();
             let market = match disks {
                 Some(spec) => Some(c0mpute_core::hosting::MarketOptions {

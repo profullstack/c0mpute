@@ -5,9 +5,9 @@ status: Accepted
 authors:
   - anthony@profullstack.com
 created: 2026-05-03
-updated: 2026-05-03
+updated: 2026-11-09
 discussion:
-implementation: c0mpute-store::erasure (shipped) + storage role on workers + HTTP shard endpoints (in progress)
+implementation: c0mpute-store::erasure (shipped) + storage role on workers + HTTP shard endpoints (shipped) + `private` tier (implemented: c0mpute-sealed, c0mpute-core::sealed_store, docs/private-storage.md)
 supersedes:
 superseded-by:
 ---
@@ -110,13 +110,40 @@ Standard parameters; same Storj uses, well-trodden territory.
 |---|---|---|---|
 | `cheap` | 3-copy replication | optional | Low-stakes / replaceable / dev |
 | `verified` | RS 10/14 | server-side at-rest (worker-local key) | Default production |
-| `private` | RS 10/14 | customer-encrypted before PUT (E2E) | Sovereignty / regulated content |
+| `private` | 3 network copies (hosting layer) | customer-encrypted before upload (E2E), **implemented, and the default** | Everything not deliberately public |
 
 `private` is the genuine differentiator — workers process / serve
 opaque ciphertext. If the workload is "store and serve later" without
 any worker-side processing of plaintext, E2E is straightforward.
 If the workload is "transcode this video", `private` doesn't apply
 because the worker needs plaintext.
+
+### `private` tier: implemented (2026-11-09)
+
+Status: **Implemented.** The `private` tier is the default for
+`c0mpute storage put`; `--public` opts out. Node operators only ever
+hold ciphertext for anything that is not deliberately public. Full
+description and threat model: [docs/private-storage.md](../docs/private-storage.md).
+
+- **Format** `c0mpute-private-v1` (crate `c0mpute-sealed`): random
+  per-object data key; AES-256-GCM over 64 KiB chunks in the STREAM
+  construction (chunk index and last flag in nonce and AAD); HKDF key
+  commitment; metadata (names, types, exact size) encrypted inside the
+  stream; Padmé size padding; X25519 key wrap in 16 fixed anonymous
+  slots; per-object ed25519 owner signature. No convergent encryption.
+- **Keys** derive from the user's c0mpute identity seed (`c0mpute dm`
+  keyfile, Argon2id, mandatory encrypted backup on first use). Sharing
+  rewraps the key (header only); revocation re-encrypts under a new key.
+- **On the network** a sealed object is a hosting site with one opaque
+  file, published under a per-object key and random name, so
+  replication, healing, gateway serving and proof-of-storage challenges
+  run unchanged over ciphertext and objects cannot be grouped by owner.
+- **Surfaces:** `c0mpute storage put|get|share|revoke|link|rm|ls --private|key`,
+  `c0mpute hosting publish --private` (browser loader at `/p/<id>/#k=...`,
+  key never sent to the gateway), `c0mpute storage mount` (FUSE volume,
+  Linux). OpenDisk descriptors advertise `accepts.encrypted: true`.
+- **Deviation from CIP-011:** no convergent encryption, by decision:
+  cross-user equality leaks are worse than losing dedup.
 
 ### HTTP wire format
 
@@ -165,8 +192,8 @@ GET /storage/v1/shards/<shard-hash>
 ```
 
 Auth on PUTs: signed-request envelope keyed by CoinPay DID
-(DIP-0007). Reads of public objects don't require auth; reads of
-`private` tier do.
+(DIP-0007). Reads need no auth for either tier: a `private` object is
+ciphertext, so confidentiality comes from the owner's key, not an ACL.
 
 ### Phase plan
 

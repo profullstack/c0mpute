@@ -1,7 +1,7 @@
 ---
 cip: 011
 title: "Client-side encryption and key management"
-status: Draft
+status: Implemented (differently; see note)
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
@@ -12,6 +12,14 @@ blocks:
 implementation:
 estimate: "2–3 weeks"
 ---
+
+> **Implemented 2026-11-09** as the DIP-0012 `private` tier, see
+> [docs/private-storage.md](../private-storage.md). Differences from this
+> draft: no convergent encryption (no cross-user or cross-object equality
+> leak, at the cost of dedup); sizes are padded (Padmé); per-object random
+> data keys wrapped to X25519 storage keys rather than a volume key
+> hierarchy; volumes (`c0mpute storage mount`) seal each file as its own
+> object.
 
 ## Summary
 
