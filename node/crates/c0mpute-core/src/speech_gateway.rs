@@ -30,6 +30,8 @@ const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
 /// A healthy CPU worker draws an image in ~2 minutes. One that has not
 /// answered in 6 is benched and the job goes to the next worker.
 const IMAGE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+/// How long an image request waits for a busy worker to free up.
+const IMAGE_QUEUE_WAIT: Duration = Duration::from_secs(4 * 60);
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
 
@@ -143,7 +145,11 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
-        penalties: crate::penalty_box::PenaltyBox::new(),
+        penalties: crate::penalty_box::PenaltyBox::persistent(
+            crate::config::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+                .join("gateway-penalties.json"),
+        ),
     };
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -530,8 +536,11 @@ async fn run_checked_job(
     // Workers benched for not delivering earlier stay out of the auction.
     let mut excluded_bidders = state.penalties.benched();
     let mut last_error = None;
+    let started = std::time::Instant::now();
+    let mut attempt = 0;
 
-    for attempt in 1..=MAX_SPEECH_WORKER_ATTEMPTS {
+    while attempt < MAX_SPEECH_WORKER_ATTEMPTS {
+        attempt += 1;
         let outcome = match run_speech_auction(
             state,
             workload,
@@ -550,6 +559,18 @@ async fn run_checked_job(
                     "winner never delivered; benched, trying another worker");
                 excluded_bidders.push(winner);
                 last_error = Some(error);
+                continue;
+            }
+            // Nobody bid. For images that usually means every worker is busy
+            // with one (~2 min each): wait and re-auction instead of failing,
+            // without spending one of the real attempts.
+            Err((error, None))
+                if workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT =>
+            {
+                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free image worker yet; waiting");
+                attempt -= 1;
+                last_error.get_or_insert(error);
+                tokio::time::sleep(Duration::from_secs(15)).await;
                 continue;
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
