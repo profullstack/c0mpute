@@ -69,7 +69,7 @@ Delivering read/write network storage for c0mpute, implementing
 | [003](003-shard-placement-transport.md) | Cross-node shard placement and streaming transport | 002 | In progress |
 | [004](004-metadata-durability.md) | Metadata durability: manifests, volumes, and the root pointer | 002 | Draft |
 | [005](005-repair-daemon.md) | Auto-repair daemon | 003, 004 | In progress |
-| [006](006-challenges-metering-payouts.md) | Storage challenges, metering, and provider payouts | 003, 004 | Draft |
+| [006](006-challenges-metering-payouts.md) | Storage challenges, metering, and provider payouts | 003, 004 | In progress (payment rail merged, off by default; storage payouts not live) |
 | [007](007-c0mputefs-filesystem.md) | c0mputefs: mutable filesystem over immutable content | 004 | Draft |
 | [008](008-write-path-consistency.md) | Write path: chunking, journal, and crash consistency | 007 | Draft |
 | [009](009-mount-cli.md) | `c0mpute storage` CLI and the FUSE mount | 008 | Draft |

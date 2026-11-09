@@ -1,17 +1,36 @@
 ---
 cip: 006
 title: "Storage challenges, metering, and provider payouts"
-status: Draft
+status: In progress
 authors:
   - anthony@profullstack.com
 created: 2026-08-29
-updated: 2026-08-29
+updated: 2026-11-09
 implements: DIP-0012 (0012-storage-plugin.md) Phase 5, DIP-0007 (CoinPay DID)
 depends-on: 003, 004
 blocks:
 implementation:
 estimate: "4–6 weeks"
 ---
+
+## Status (2026-11-09)
+
+Storage payouts are **not paying yet**. What exists today:
+
+| Piece | State |
+|---|---|
+| Shared payment path (`node/crates/c0mpute-core/src/payments.rs`: `Rail`, idempotent `Ledger`, per-round USD cap) on CoinPay payouts | Merged (#163), **off by default** |
+| Hosting marketplace: proof of storage + settlement for hosted sites | Merged (#163), **off by default** |
+| Ads billing + settlement through the same path | Merged (#162, #166), **off by default** |
+| Storage challenges issued continuously by the network, storage metering, monthly provider statements (this CIP) | Not started beyond `c0mpute-verify`'s `StorageChallenge` primitive |
+| Paid inference payouts (Infernet, via CoinPay) | Live today; not part of this CIP |
+
+The planned storage rate is $0.0015/GB-month, so 1 TB earns about $1.50 a
+month. The network is still small (live count on
+[c0mpute.com/nodes](https://c0mpute.com/nodes)), so nobody should run a node
+for storage income yet. The README, `/providers` and
+[`docs/node-safety.md`](../node-safety.md) say this in plain words; keep them in step
+with this table.
 
 ## Summary
 
