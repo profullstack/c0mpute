@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -151,6 +151,9 @@ impl Workload {
 #[derive(Clone)]
 pub struct JobsBridge {
     net: Arc<Libp2pNetwork>,
+    // Specs used to be served from here by hash; sealed specs (DIP-0032)
+    // go point to point instead. Kept for the bridge's own inputs.
+    #[allow(dead_code)]
     store: ChunkStore,
     token: Arc<str>,
     max_price_usd: f64,
@@ -459,15 +462,11 @@ async fn run_job(
     let required = workload.required_capabilities(&spec);
     // Kept for checking the result (embeddings: one vector per text).
     let spec_for_check = spec.clone();
-    // Small specs ride in the gossip offer; large ones are served from this
-    // node's store and fetched by the winner by hash.
-    let spec_inline = if spec_bytes.len() <= workflow::MAX_INLINE_SPEC_BYTES {
-        spec
-    } else {
-        let hash = state.store.put(&spec_bytes).await.map_err(internal)?;
-        state.net.announce(&hash).await.map_err(internal)?;
-        workflow::spec_ref(&hash, spec_bytes.len())
-    };
+    // The spec never rides the gossip offer: it is sealed to the winner and
+    // fetched point to point (DIP-0032), whatever its size, so it is never
+    // stored here as a plaintext chunk anyone could fetch by hash.
+    let _ = spec_bytes;
+    let spec_inline = spec;
 
     let remaining = timeout.saturating_sub(started.elapsed());
     let auction = JobAuction::new(workload.name(), spec_inline)
@@ -508,8 +507,7 @@ async fn run_job(
         .min(Duration::from_secs(10 * 60));
     let bytes = match fetch_result(
         &state.net,
-        &output_hash,
-        &worker,
+        &outcome,
         workload.max_result_bytes(),
         fetch_budget,
     )
@@ -534,7 +532,7 @@ async fn run_job(
     }
     let result = if workload == Workload::RenderFrame {
         let budget = timeout.saturating_sub(started.elapsed());
-        attach_render_frames(state, &spec_for_check, result, &worker, budget)
+        attach_render_frames(state, &spec_for_check, result, &worker, &outcome.result_key, budget)
             .await
             .map_err(|error| worker_failed(&format!("{error:#}")))?
     } else {
@@ -559,6 +557,7 @@ async fn attach_render_frames(
     spec: &Value,
     mut result: Value,
     worker: &str,
+    key: &c0mpute_net::topics::JobKey,
     budget: Duration,
 ) -> Result<Value> {
     use base64::Engine;
@@ -568,7 +567,7 @@ async fn attach_render_frames(
     if total > MAX_INLINE_FRAME_BYTES {
         bail!("frames total {total} bytes, over the bridge's {MAX_INLINE_FRAME_BYTES}-byte limit; use `c0mpute render`");
     }
-    let frames = crate::render::fetch_frames(&state.net, worker, &metas, budget).await?;
+    let frames = crate::render::fetch_frames(&state.net, worker, &metas, key, budget).await?;
     if let Some(list) = result.get_mut("frames").and_then(Value::as_array_mut) {
         for (entry, (_, bytes)) in list.iter_mut().zip(frames) {
             entry["data_base64"] =
@@ -576,14 +575,6 @@ async fn attach_render_frames(
         }
     }
     Ok(result)
-}
-
-fn internal(error: anyhow::Error) -> ApiError {
-    tracing::warn!(err = %error, "jobs bridge operation failed");
-    ApiError(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        json!({ "error": "internal", "detail": "jobs bridge operation failed" }),
-    )
 }
 
 #[cfg(test)]

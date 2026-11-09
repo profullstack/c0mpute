@@ -147,6 +147,10 @@ pub struct SttJobInline {
     /// Peer that owns the input audio, supplied by the buyer.
     #[serde(default)]
     pub audio_provider_peer_id: Option<String>,
+    /// Hex key the stored audio is sealed under (DIP-0032); rides only inside
+    /// the sealed spec. Absent: the stored bytes are plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_key: Option<String>,
     #[serde(default = "default_stt_model")]
     pub model: String,
     #[serde(default)]
@@ -271,7 +275,7 @@ async fn run_tts_job(
     {
         bail!("TTS output is not a valid WAV under the 20 MiB result limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes).await
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
 }
 
 /// Largest audio input a worker accepts.
@@ -303,12 +307,13 @@ async fn run_stt_job(
     if !crate::speech::stt_ready() {
         bail!("faster-whisper is not installed; run `c0mpute stt setup`");
     }
+    let key = crate::pieces::input_key(inline.audio_key.as_deref())?;
     let input = crate::pieces::InputRef::parse(
         "audio",
         &inline.audio_hash,
         inline.audio_size,
         inline.audio_pieces.as_deref(),
-        MAX_STT_AUDIO_BYTES,
+        crate::pieces::input_limit(MAX_STT_AUDIO_BYTES, key.is_some()),
     )
     .map_err(anyhow::Error::msg)?;
     let provider = inline
@@ -318,7 +323,7 @@ async fn run_stt_job(
         .transpose()
         .context("invalid audio provider peer id")?;
     let audio = input
-        .fetch(net, provider, MAX_STT_AUDIO_BYTES)
+        .fetch_opened(net, provider, MAX_STT_AUDIO_BYTES, key.as_ref())
         .await
         .context("fetch the audio input (maximum 100 MiB)")?;
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
@@ -332,7 +337,7 @@ async fn run_stt_job(
     if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
         bail!("STT result is empty or exceeds the 10 MiB result limit");
     }
-    crate::pieces::publish_result_bytes(net, store, &bytes).await
+    crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
 }
 
 pub(crate) fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
@@ -441,7 +446,7 @@ async fn run_transcode_job(
     let _ = fs::remove_file(&input_path).await;
     // Streamed from disk as pieces (a manifest is what the receipt names);
     // the output is never in memory whole.
-    crate::pieces::publish_result_file(net, store, &output_path, MAX_OUTPUT_BYTES)
+    crate::pieces::publish_result_file(net, store, &job.accept, &output_path, MAX_OUTPUT_BYTES)
         .await
         .context("publish transcode output")
 }

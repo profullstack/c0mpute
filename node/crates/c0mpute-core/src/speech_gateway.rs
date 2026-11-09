@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -508,7 +508,8 @@ async fn transcribe(
         )
     })?;
     // One network message carries ~5 MiB at most: store the audio in pieces.
-    let audio = crate::pieces::put_bytes_pieces(
+    // Sealed under a fresh key that only the winning worker learns.
+    let (audio, audio_key) = crate::pieces::put_bytes_pieces_sealed(
         &state.net,
         &state.store,
         &body,
@@ -524,7 +525,7 @@ async fn transcribe(
     });
     spec.as_object_mut()
         .expect("spec is an object")
-        .extend(audio.spec_fields("audio"));
+        .extend(audio.sealed_spec_fields("audio", &audio_key));
     let (outcome, bytes) = run_speech_job(
         &state,
         "stt.transcribe",
@@ -741,8 +742,8 @@ async fn run_checked_job(
                 StatusCode::BAD_GATEWAY,
                 format!("c0mpute worker failed the {workload} job"),
             ))
-        } else if let Some(output_hash) = outcome.receipt.output_hash.as_deref() {
-            match fetch_result(state, output_hash, &worker, max_bytes).await {
+        } else if outcome.receipt.output_hash.is_some() {
+            match fetch_result(state, &outcome, max_bytes).await {
                 Ok(bytes) if valid(&bytes) => Ok(bytes),
                 Ok(_) => Err(ApiError(
                     StatusCode::BAD_GATEWAY,
@@ -834,15 +835,13 @@ fn result_fetch_budget(max_bytes: usize) -> Duration {
 
 async fn fetch_result(
     state: &GatewayState,
-    hash: &str,
-    provider_peer_id: &str,
+    outcome: &crate::AuctionOutcome,
     max_bytes: usize,
 ) -> ApiResult<Vec<u8>> {
     use crate::gateway_util::FetchError;
     match crate::gateway_util::fetch_result(
         &state.net,
-        hash,
-        provider_peer_id,
+        outcome,
         max_bytes,
         result_fetch_budget(max_bytes),
     )
@@ -1088,7 +1087,7 @@ async fn generate_video(
                     "image must be 1 byte to 32 MiB".into(),
                 ));
             }
-            let image = crate::pieces::put_bytes_pieces(
+            let (image, image_key) = crate::pieces::put_bytes_pieces_sealed(
                 &state.net,
                 &state.store,
                 &bytes,
@@ -1096,6 +1095,7 @@ async fn generate_video(
             )
             .await
             .map_err(gateway_failure)?;
+            job.image_key = Some(crate::job_e2e::key_to_hex(&image_key));
             job.image_hash = Some(image.hash.clone());
             if image.pieces.len() > 1 {
                 job.image_size = Some(image.size);
@@ -1557,7 +1557,7 @@ async fn ocr_extract(
         ApiError(StatusCode::SERVICE_UNAVAILABLE, "OCR queue is unavailable".into())
     })?;
     // One network message carries ~5 MiB at most: store the document in pieces.
-    let input = crate::pieces::put_bytes_pieces(
+    let (input, input_key) = crate::pieces::put_bytes_pieces_sealed(
         &state.net,
         &state.store,
         &body,
@@ -1573,7 +1573,7 @@ async fn ocr_extract(
     });
     spec.as_object_mut()
         .expect("spec is an object")
-        .extend(input.spec_fields("input"));
+        .extend(input.sealed_spec_fields("input", &input_key));
     let (outcome, bytes) = run_speech_job(
         &state,
         crate::ocr::WORKLOAD,
@@ -1670,7 +1670,7 @@ async fn captcha_solve(
             let _slot = state.stt_slots.clone().acquire_owned().await.map_err(|_| {
                 ApiError(StatusCode::SERVICE_UNAVAILABLE, "speech queue is unavailable".into())
             })?;
-            let pieces = crate::pieces::put_bytes_pieces(
+            let (pieces, audio_key) = crate::pieces::put_bytes_pieces_sealed(
                 &state.net,
                 &state.store,
                 &audio,
@@ -1686,7 +1686,7 @@ async fn captcha_solve(
             });
             spec.as_object_mut()
                 .expect("spec is an object")
-                .extend(pieces.spec_fields("audio"));
+                .extend(pieces.sealed_spec_fields("audio", &audio_key));
             let (outcome, bytes) = run_speech_job(
                 &state,
                 "stt.transcribe",
@@ -1746,17 +1746,10 @@ async fn captcha_solve(
             let _slot = state.captcha_slots.clone().acquire_owned().await.map_err(|_| {
                 ApiError(StatusCode::SERVICE_UNAVAILABLE, "captcha queue is unavailable".into())
             })?;
-            let spec_bytes =
-                serde_json::to_vec(&spec).map_err(|error| gateway_failure(error.into()))?;
-            // Up to two 256 KiB images: often too big for the gossip offer, so
-            // the worker fetches the spec from this node by hash.
-            let offer_spec = if spec_bytes.len() <= crate::workflow::MAX_INLINE_SPEC_BYTES {
-                spec
-            } else {
-                let hash = state.store.put(&spec_bytes).await.map_err(gateway_failure)?;
-                state.net.announce(&hash).await.map_err(gateway_failure)?;
-                crate::workflow::spec_ref(&hash, spec_bytes.len())
-            };
+            // The spec (up to two 256 KiB images) never rides the gossip
+            // offer: it is sealed to the winner and fetched point to point
+            // (DIP-0032), so it is never stored here as a plaintext chunk.
+            let offer_spec = spec;
             let expected = parsed.kind.clone();
             let (outcome, bytes) = run_checked_job(
                 &state,
@@ -1858,16 +1851,9 @@ async fn embeddings(
     let _slot = state.embed_slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(StatusCode::SERVICE_UNAVAILABLE, "embeddings queue is unavailable".into())
     })?;
-    // Up to 1 MiB of text: too big for the gossip offer, so the worker
-    // fetches it from this node by hash.
-    let spec_bytes = serde_json::to_vec(&spec).map_err(|error| gateway_failure(error.into()))?;
-    let offer_spec = if spec_bytes.len() <= crate::workflow::MAX_INLINE_SPEC_BYTES {
-        spec
-    } else {
-        let hash = state.store.put(&spec_bytes).await.map_err(gateway_failure)?;
-        state.net.announce(&hash).await.map_err(gateway_failure)?;
-        crate::workflow::spec_ref(&hash, spec_bytes.len())
-    };
+    // Up to 1 MiB of text, sealed to the winner and fetched point to point
+    // (DIP-0032): never on gossip, never stored here as a plaintext chunk.
+    let offer_spec = spec;
     let (outcome, bytes) = run_checked_job(
         &state,
         crate::embed::WORKLOAD,

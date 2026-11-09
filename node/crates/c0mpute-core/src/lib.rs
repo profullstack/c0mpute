@@ -21,6 +21,7 @@ pub mod crowdgpt;
 pub mod diffusion;
 pub mod dm;
 pub mod music;
+pub mod job_e2e;
 pub mod job_progress;
 pub mod job_process;
 pub mod hosting;

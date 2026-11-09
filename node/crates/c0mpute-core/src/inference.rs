@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use c0mpute_net::topics::JobStatus;
-use c0mpute_net::{Libp2pNetwork, Network};
+use c0mpute_net::Libp2pNetwork;
 use c0mpute_store::ChunkStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -241,8 +241,16 @@ pub fn worker_load() -> WorkerLoad {
 pub fn offer_filter() -> crate::dispatch::OfferFilter {
     Arc::new(|offer| {
         let ready = ready_models();
-        !ready.is_empty()
-            && offer.spec_inline.as_ref().and_then(|v| parse_spec(v).ok()).is_some_and(|s| s.model.is_none_or(|m| ready.contains(&m)))
+        if ready.is_empty() {
+            return false;
+        }
+        match crate::job_e2e::bid_spec(offer) {
+            // An e2e offer shows only the model; the whole spec is checked
+            // again here once it is opened.
+            Some(crate::job_e2e::BidSpec::Public(v)) => v.get("model").and_then(Value::as_str).is_none_or(|m| ready.iter().any(|r| r == m)),
+            Some(crate::job_e2e::BidSpec::Full(v)) => parse_spec(v).ok().is_some_and(|s| s.model.is_none_or(|m| ready.contains(&m))),
+            None => false,
+        }
     })
 }
 
@@ -260,9 +268,8 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
                     let spec = crate::workflow::resolve_spec(&net, &job).await?;
                     let answer = execute(&base, &spec, &ready_models()).await;
                     let bytes = serde_json::to_vec(&answer)?;
-                    let hash = store.put(&bytes).await.context("store answer")?;
-                    net.announce(&hash).await.context("announce answer")?;
-                    Ok(hash.to_hex())
+                    // Sealed to the buyer (e2e jobs) before it is stored.
+                    crate::pieces::publish_result_bytes(&net, &store, &job.accept, &bytes).await.context("store answer")
                 }
                 .await;
                 match result {

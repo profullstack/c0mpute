@@ -236,6 +236,9 @@ pub struct Libp2pNetwork {
     gossip_tx: broadcast::Sender<GossipMessage>,
     peer_id: PeerId,
     rpc_handlers: RpcHandlers,
+    /// The node identity, kept to sign statements other peers check against
+    /// our peer id ([`Self::sign`]).
+    keypair: identity::Keypair,
 }
 
 impl Libp2pNetwork {
@@ -250,7 +253,7 @@ impl Libp2pNetwork {
 
         let rpc_handlers: RpcHandlers = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let task = SwarmTask::new(
-            keypair,
+            keypair.clone(),
             config.local_source,
             gossip_tx.clone(),
             rpc_handlers.clone(),
@@ -288,7 +291,14 @@ impl Libp2pNetwork {
             gossip_tx,
             peer_id,
             rpc_handlers,
+            keypair,
         })
+    }
+
+    /// Sign `msg` with this node's identity key. Anyone can check it against
+    /// our peer id with [`crate::identity::verify_peer_signature`].
+    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
+        self.keypair.sign(msg).map_err(|e| anyhow!("sign: {e}"))
     }
 
     /// Serve `service` over `/c0mpute/rpc/1.0.0`. Replaces any handler

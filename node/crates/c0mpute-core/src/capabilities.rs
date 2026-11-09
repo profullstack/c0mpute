@@ -64,7 +64,11 @@ pub fn tags_from_config(config: &Config) -> Vec<String> {
 /// restart. The hardware tag, which shells out to `nvidia-smi`, is probed
 /// once and reused.
 pub fn role_tags(config: &Config) -> Vec<String> {
-    let mut tags = Vec::new();
+    // Not a workload: this node takes end-to-end encrypted jobs (DIP-0032).
+    let mut tags = vec![crate::job_e2e::JOB_E2E_TAG.to_string()];
+    if crate::job_e2e::attestation_provider().is_some() {
+        tags.push(crate::job_e2e::CONFIDENTIAL_TAG.to_string());
+    }
     // Not a workload: shows on the node's card that it donates idle compute.
     if crate::crowdgpt::donating() {
         tags.push(crate::crowdgpt::DONATE_TAG.to_string());
