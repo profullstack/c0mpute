@@ -38,6 +38,11 @@ const MAX_CONCURRENT_MUSIC_JOBS: usize = 4;
 /// A song holds a worker ~2.5 min on CPU, so this waits behind two or three;
 /// Infernet gives the whole call 19 min.
 const MUSIC_QUEUE_WAIT: Duration = Duration::from_secs(8 * 60);
+/// How long a video request keeps re-auctioning while nobody bids.
+const VIDEO_QUEUE_WAIT: Duration = Duration::from_secs(60);
+/// How long a speech, OCR or embedding request keeps re-auctioning while
+/// nobody bids (a worker restarting into an update, a bid lost in transit).
+const QUICK_QUEUE_WAIT: Duration = Duration::from_secs(20);
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
 
@@ -212,6 +217,8 @@ pub fn router_with(
     resume_pending(&state);
     Router::new()
         .route("/healthz", get(healthz))
+        // Per-workload auction outcomes over the last hour (no secrets).
+        .route("/v1/auctions", get(auction_stats))
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
@@ -234,6 +241,46 @@ pub fn router_with(
         .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn auction_stats() -> Json<serde_json::Value> {
+    Json(crate::auction_stats::snapshot_json())
+}
+
+/// How long a bid window an auction for `workload` gets. Speech answers in
+/// seconds and sits in front of a caller; images, songs and clips take
+/// minutes, so a slightly longer window that catches a slow bid is cheap.
+fn bid_window_for(workload: &str) -> Duration {
+    if is_video(workload)
+        || workload == crate::diffusion::WORKLOAD_TXT2IMG
+        || workload == crate::music::WORKLOAD_TXT2MUSIC
+    {
+        Duration::from_secs(6)
+    } else {
+        Duration::from_secs(4)
+    }
+}
+
+/// How long a request for `workload` keeps re-auctioning while no worker
+/// bids, before the caller is told none is available.
+fn no_bid_wait_for(workload: &str) -> Duration {
+    if workload == crate::diffusion::WORKLOAD_TXT2IMG {
+        IMAGE_QUEUE_WAIT
+    } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
+        MUSIC_QUEUE_WAIT
+    } else if is_video(workload) {
+        VIDEO_QUEUE_WAIT
+    } else {
+        QUICK_QUEUE_WAIT
+    }
+}
+
+/// Pause before the `round`-th re-auction (0-based) of a request nobody bid
+/// on: 1, 2, 4, 8 s, then every 15 s, never past what is left of `budget`.
+fn no_bid_backoff(round: u32, left: Duration) -> Duration {
+    Duration::from_secs(1u64 << round.min(4))
+        .min(Duration::from_secs(15))
+        .min(left)
 }
 
 async fn healthz() -> Json<serde_json::Value> {
@@ -536,7 +583,7 @@ async fn run_speech_auction(
         .with_required_capabilities(required)
         .with_excluded_bidders(excluded_bidders.to_vec())
         .with_max_price_usd(state.max_price_usd)
-        .with_bid_window(Duration::from_secs(4))
+        .with_bid_window(bid_window_for(workload))
         .with_deadline(if is_video(workload) {
             crate::video::JOB_TIMEOUT + Duration::from_secs(5 * 60)
         } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
@@ -622,6 +669,9 @@ async fn run_checked_job(
     let mut last_error = None;
     let started = std::time::Instant::now();
     let mut attempt = 0;
+    let mut no_bid_rounds = 0u32;
+    // An update waits for this request instead of killing it mid-flight.
+    let _long_job = c0mpute_update::LongJob::start();
 
     while attempt < MAX_SPEECH_WORKER_ATTEMPTS {
         attempt += 1;
@@ -655,18 +705,22 @@ async fn run_checked_job(
                 last_error = Some(error);
                 continue;
             }
-            // Nobody bid. For images that usually means every worker is busy
-            // with one (~2 min each): wait and re-auction instead of failing,
-            // without spending one of the real attempts.
-            Err((error, None))
-                if (workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT)
-                    || (workload == crate::music::WORKLOAD_TXT2MUSIC && started.elapsed() < MUSIC_QUEUE_WAIT) =>
-            {
-                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free worker yet; waiting");
+            // Nobody bid: every worker busy (an image holds one ~2 min), one
+            // restarting into an update, or a bid lost in transit. Re-auction
+            // with backoff instead of failing, without spending one of the
+            // real attempts, for as long as this workload is worth waiting.
+            Err((error, None)) if started.elapsed() < no_bid_wait_for(workload) => {
+                let pause = no_bid_backoff(
+                    no_bid_rounds,
+                    no_bid_wait_for(workload).saturating_sub(started.elapsed()),
+                );
+                no_bid_rounds += 1;
+                tracing::info!(workload, waited_secs = started.elapsed().as_secs(), round = no_bid_rounds,
+                    "no free worker yet; waiting");
                 crate::job_progress::set_stage("queued");
                 attempt -= 1;
                 last_error.get_or_insert(error);
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                tokio::time::sleep(pause).await;
                 continue;
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
@@ -723,6 +777,22 @@ async fn run_checked_job(
             "no c0mpute worker completed the speech job".into(),
         )
     }))
+}
+
+/// The small Wan model is served on CPU, whose workers take at most
+/// `video_cpu::MAX_FRAMES` frames, `MAX_STEPS` steps and 480x272. A request
+/// with the GPU-sized defaults (81 frames, 30 steps, 1280x704) was refused by
+/// every CPU node's offer filter, so it never got a bid. Clip it to what they
+/// take, keeping the orientation, as songs are clipped to their model.
+fn clip_for_cpu_video(job: &mut crate::video::VideoJobInline, workload: &str) {
+    if workload != crate::video::WORKLOAD_TXT2VID || job.model != crate::video_cpu::MODEL_ID {
+        return;
+    }
+    job.frames = job.frames.min(crate::video_cpu::MAX_FRAMES);
+    job.steps = job.steps.min(crate::video_cpu::MAX_STEPS);
+    if job.width.saturating_mul(job.height) > crate::video_cpu::MAX_PIXELS {
+        (job.width, job.height) = if job.height > job.width { (272, 480) } else { (480, 272) };
+    }
 }
 
 fn is_video(workload: &str) -> bool {
@@ -1026,6 +1096,7 @@ async fn generate_video(
         }
         None => crate::video::WORKLOAD_TXT2VID,
     };
+    clip_for_cpu_video(&mut job, workload);
     job.validate(workload)
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
     let _slot = state
@@ -1562,6 +1633,48 @@ fn default_stt_model() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_video_requests_are_clipped_to_what_cpu_nodes_take() {
+        let mut job: crate::video::VideoJobInline = serde_json::from_value(serde_json::json!({
+            "model": crate::video_cpu::MODEL_ID,
+            "prompt": "a cat",
+        }))
+        .unwrap();
+        clip_for_cpu_video(&mut job, crate::video::WORKLOAD_TXT2VID);
+        crate::video_cpu::fits(&job, crate::video::WORKLOAD_TXT2VID).unwrap();
+        assert_eq!((job.width, job.height), (480, 272));
+        // Portrait stays portrait; other models are left alone.
+        let mut tall = job.clone();
+        (tall.width, tall.height) = (704, 1280);
+        clip_for_cpu_video(&mut tall, crate::video::WORKLOAD_TXT2VID);
+        assert_eq!((tall.width, tall.height), (272, 480));
+        let mut big: crate::video::VideoJobInline = serde_json::from_value(serde_json::json!({
+            "model": "wan2.1-t2v-14b",
+            "prompt": "a cat",
+        }))
+        .unwrap();
+        let before = (big.frames, big.steps, big.width);
+        clip_for_cpu_video(&mut big, crate::video::WORKLOAD_TXT2VID);
+        assert_eq!((big.frames, big.steps, big.width), before);
+    }
+
+    #[test]
+    fn no_bid_backoff_doubles_then_holds_and_respects_the_budget() {
+        let lots = Duration::from_secs(600);
+        let pauses: Vec<u64> = (0..7).map(|r| no_bid_backoff(r, lots).as_secs()).collect();
+        assert_eq!(pauses, vec![1, 2, 4, 8, 15, 15, 15]);
+        assert_eq!(no_bid_backoff(6, Duration::from_millis(300)), Duration::from_millis(300));
+    }
+
+    #[test]
+    fn slow_workloads_get_longer_windows_and_waits() {
+        assert_eq!(bid_window_for("tts.synthesize"), Duration::from_secs(4));
+        assert_eq!(bid_window_for(crate::diffusion::WORKLOAD_TXT2IMG), Duration::from_secs(6));
+        assert_eq!(no_bid_wait_for("tts.synthesize"), QUICK_QUEUE_WAIT);
+        assert_eq!(no_bid_wait_for(crate::video::WORKLOAD_TXT2VID), VIDEO_QUEUE_WAIT);
+        assert_eq!(no_bid_wait_for(crate::music::WORKLOAD_TXT2MUSIC), MUSIC_QUEUE_WAIT);
+    }
 
     #[test]
     fn ocr_results_are_checked() {

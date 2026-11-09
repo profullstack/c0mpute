@@ -459,7 +459,10 @@ fn default_video_min_free_disk_gb() -> u64 {
     12
 }
 fn default_video_min_cpu_threads() -> usize {
-    16
+    // The per-job budget is half the box (`resources::cpu_threads_per_job`),
+    // so 16 here demanded a 32-core machine and a 16-core box that runs the
+    // CPU clip fine (bonita, 2026-11-09) never bid. Same floor as images.
+    8
 }
 
 impl VideoConfig {

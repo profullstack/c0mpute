@@ -194,6 +194,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         deadline_unix_ms: now_ms + auction.deadline.as_millis() as u64,
         published_at_ms: now_ms,
         external_ref: auction.external_ref.clone(),
+        // Workers deliver bids straight to us over one of these as well as
+        // on the gossip mesh, which drops them while it re-forms.
+        buyer_addrs: offer_buyer_addrs(&net).await,
+        bid_window_ms: Some(auction.bid_window.as_millis() as u64),
     };
 
     info!(
@@ -205,9 +209,27 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
 
     // ── collect bids ────────────────────────────────────────────────
     let deadline = Instant::now() + auction.bid_window;
+    // Halfway through a silent window, publish the offer once more: a worker
+    // that missed it (mesh re-forming) gets a second chance, and one that bid
+    // re-sends the same bid without reserving more capacity.
+    let mut republish_at = Some(Instant::now() + auction.bid_window / 2);
     let mut bids: Vec<JobBid> = Vec::new();
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Some(at) = republish_at
+            && bids.is_empty()
+            && Instant::now() >= at
+        {
+            republish_at = None;
+            debug!(%job_id, "buyer: no bids yet, re-publishing the offer");
+            if let Err(e) = publish_json(&net, &topic, &offer).await {
+                debug!(%job_id, err = %e, "buyer: offer re-publish failed");
+            }
+        }
+        let until = match republish_at {
+            Some(at) if bids.is_empty() => at.min(deadline),
+            _ => deadline,
+        };
+        let remaining = until.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(msg)) if msg.topic == topic => {
                 if let Ok(bid) = serde_json::from_slice::<JobBid>(&msg.data) {
@@ -241,6 +263,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             );
                             continue;
                         }
+                        // The same bid arrives directly and over gossip.
+                        if bids.iter().any(|b| b.bidder_peer_id == bid.bidder_peer_id) {
+                            continue;
+                        }
                         debug!(
                             %job_id,
                             bidder = %bid.bidder_peer_id,
@@ -256,7 +282,8 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                 warn!(skipped = n, "buyer: bid stream lagged");
             }
             Ok(Err(_)) => break,
-            Err(_) => break, // timeout: bid window closed
+            // Timeout: the window closed, or it is time to re-publish.
+            Err(_) => continue,
         }
     }
 
@@ -264,6 +291,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     // A bid that expired while the window was open is no longer backed by
     // the worker's capacity; accepting it would overbook that worker.
     retain_live_bids(&mut bids, unix_ms());
+    crate::auction_stats::record_auction(&auction.workload_type, bids.len());
     info!(%job_id, count = bids.len(), expired = received - bids.len(), "buyer: bid window closed");
     if bids.is_empty() {
         if received > 0 {
@@ -314,7 +342,27 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             &offer.buyer_peer_id,
         ),
     };
-    publish_json(&net, &topic, &accept).await?;
+    // Tell the winner directly as well as on the topic: an accept lost on
+    // the mesh used to leave the buyer waiting out the whole receipt timeout.
+    let accept_bytes = serde_json::to_vec(&accept)?;
+    let direct = async {
+        match winner.bidder_peer_id.parse::<c0mpute_net::PeerId>() {
+            Ok(peer) => {
+                net.send_direct(peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
+                    .await
+            }
+            Err(e) => Err(anyhow::anyhow!("winner peer id: {e}")),
+        }
+    };
+    let (direct, gossip) = tokio::join!(direct, publish_json(&net, &topic, &accept));
+    match (&direct, gossip) {
+        (Ok(()), _) => debug!(%job_id, "buyer: accept delivered to the winner"),
+        (Err(e), Ok(())) => debug!(%job_id, err = %e, "buyer: accept on gossip only"),
+        (Err(e), Err(g)) => {
+            warn!(%job_id, direct_err = %e, gossip_err = %g, "buyer: accept not delivered");
+            return Err(g);
+        }
+    }
     if let Some(tx) = &auction.accept_notify {
         let _ = tx.send((job_id.clone(), winner.clone()));
     }
@@ -371,6 +419,89 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
         winner.bidder_peer_id, auction.receipt_timeout
     ))
     .into())
+}
+
+/// Canary probe: publish an offer for `workload` exactly as a buyer would,
+/// count the distinct live bids that arrive within `window`, and accept none
+/// (a bid reserves a worker only for the window plus a few seconds). Returns
+/// the bid count; nothing runs anywhere.
+pub async fn probe_auction(
+    net: Arc<Libp2pNetwork>,
+    workload: &str,
+    spec_inline: serde_json::Value,
+    required_capabilities: Vec<String>,
+    window: Duration,
+) -> Result<usize> {
+    let topic = job_topic(workload);
+    net.subscribe(&topic).await?;
+    let mut rx = net.messages();
+    let job_id = Uuid::new_v4().to_string();
+    let now_ms = unix_ms();
+    let offer = JobOffer {
+        job_id: job_id.clone(),
+        workload_type: workload.to_string(),
+        buyer_peer_id: net.peer_id().to_base58(),
+        buyer_did: None,
+        spec_hash: blake3_hex(&spec_inline.to_string()),
+        spec_inline: Some(spec_inline),
+        required_capabilities,
+        max_price_usd: 0.0,
+        deadline_unix_ms: now_ms + 10 * 60 * 1000,
+        published_at_ms: now_ms,
+        external_ref: None,
+        buyer_addrs: offer_buyer_addrs(&net).await,
+        bid_window_ms: Some(window.as_millis() as u64),
+    };
+    publish_json(&net, &topic, &offer).await?;
+    let deadline = Instant::now() + window;
+    let mut bidders: Vec<String> = Vec::new();
+    while let Ok(next) =
+        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), rx.recv()).await
+    {
+        let msg = match next {
+            Ok(m) => m,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        };
+        if msg.topic != topic {
+            continue;
+        }
+        if let Ok(bid) = serde_json::from_slice::<JobBid>(&msg.data)
+            && bid.job_id == job_id
+            && bid.is_live(unix_ms())
+            && source_matches_claim(&msg, &bid.bidder_peer_id)
+            && !bidders.contains(&bid.bidder_peer_id)
+        {
+            bidders.push(bid.bidder_peer_id);
+        }
+    }
+    debug!(%job_id, workload, bids = bidders.len(), "buyer: canary probe closed");
+    Ok(bidders.len())
+}
+
+/// Longest the buyer waits on the direct delivery of its accept.
+const DIRECT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Public addresses a worker can dial us on: `C0MPUTE_P2P_EXTERNAL` plus the
+/// addresses the swarm confirmed as external, each ending in our peer id.
+/// Workers keep only public IPs from these (`reachability::dialable_buyer_addrs`).
+async fn offer_buyer_addrs(net: &Libp2pNetwork) -> Vec<String> {
+    let me = net.peer_id().to_base58();
+    let mut addrs = crate::reachability::buyer_external_addrs(
+        std::env::var("C0MPUTE_P2P_EXTERNAL").ok().as_deref(),
+        &me,
+    );
+    for addr in net.advertised_addrs().await {
+        let s = addr.to_string();
+        let full = if s.contains("/p2p/") { s } else { format!("{s}/p2p/{me}") };
+        if !addrs.contains(&full)
+            && !crate::reachability::dialable_buyer_addrs(std::slice::from_ref(&full), &me).is_empty()
+        {
+            addrs.push(full);
+        }
+    }
+    addrs.truncate(crate::reachability::MAX_BUYER_ADDRS);
+    addrs
 }
 
 async fn publish_json<T: serde::Serialize>(

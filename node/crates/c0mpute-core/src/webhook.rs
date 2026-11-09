@@ -1199,6 +1199,8 @@ mod tests {
             deadline_unix_ms: 1_000_000 + 600_000,
             published_at_ms: 1_000_000,
             external_ref: None,
+            buyer_addrs: Vec::new(),
+            bid_window_ms: None,
         }
     }
 
@@ -1227,7 +1229,7 @@ mod tests {
     #[test]
     fn accepts_must_match_the_webhook_offer_we_bid_on() {
         let s = serde_json::to_value(spec(3)).unwrap();
-        let bid = crate::dispatch::OpenBid { cap: 0.002, price: 0.001, buyer_peer_id: "buyer".into(), spec_inline: Some(s.clone()), external_ref: Some("coinpay:inv_1".into()), expires_at_ms: u64::MAX / 2 };
+        let bid = crate::dispatch::OpenBid { cap: 0.002, price: 0.001, buyer_peer_id: "buyer".into(), spec_inline: Some(s.clone()), external_ref: Some("coinpay:inv_1".into()), expires_at_ms: u64::MAX / 2, reserve_until_ms: u64::MAX / 2, payload: None };
         let accept = JobAccept { job_id: "j".into(), buyer_peer_id: "buyer".into(), winning_bidder_peer_id: "us".into(), agreed_price_usd: 0.001, workload_type: WORKLOAD.into(), spec_inline: Some(s), published_at_ms: 0, external_ref: Some("coinpay:inv_1".into()), buyer_addrs: Vec::new() };
         assert!(bid.matches(&accept, 0).is_ok());
         // A forged accept swapping in another buyer key (to read the call) is refused.

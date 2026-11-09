@@ -47,6 +47,61 @@ pub trait RpcHandler: Send + Sync + 'static {
 }
 
 type RpcHandlers = Arc<std::sync::RwLock<HashMap<String, Arc<dyn RpcHandler>>>>;
+
+/// RPC service that hands one pubsub message straight to a peer, which
+/// delivers it to its own subscribers exactly as if it had arrived on the
+/// gossip mesh, attributed to the (authenticated) calling peer. Auction
+/// traffic between a buyer and a bidder (bids, accepts, receipts) goes this
+/// way as well as over gossipsub: the mesh drops messages while it re-forms
+/// (every restart, every mDNS flap), and a lost bid is a failed auction.
+pub const DIRECT_SERVICE: &str = "c0mpute.direct.v1";
+
+/// Only job-dispatch topics may be delivered directly: everything else stays
+/// gossip-only.
+pub const DIRECT_TOPIC_PREFIX: &str = "c0mpute/jobs/";
+
+fn mdns_disabled() -> bool {
+    std::env::var("C0MPUTE_DISABLE_MDNS").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `[u16 BE topic length][topic][payload]`.
+fn encode_direct(topic: &str, payload: &[u8]) -> Vec<u8> {
+    let t = topic.as_bytes();
+    let mut out = Vec::with_capacity(2 + t.len() + payload.len());
+    out.extend_from_slice(&(t.len().min(u16::MAX as usize) as u16).to_be_bytes());
+    out.extend_from_slice(&t[..t.len().min(u16::MAX as usize)]);
+    out.extend_from_slice(payload);
+    out
+}
+
+fn decode_direct(body: &[u8]) -> Option<(String, Vec<u8>)> {
+    let len = u16::from_be_bytes([*body.first()?, *body.get(1)?]) as usize;
+    let topic = std::str::from_utf8(body.get(2..2 + len)?).ok()?.to_string();
+    Some((topic, body[2 + len..].to_vec()))
+}
+
+/// Serves [`DIRECT_SERVICE`]: re-emits the message on the local gossip
+/// stream with `source` = the peer that sent it. The peer id comes from the
+/// noise handshake, so it is as authenticated as a signed gossip source.
+struct DirectHandler {
+    gossip_tx: broadcast::Sender<GossipMessage>,
+}
+
+#[async_trait]
+impl RpcHandler for DirectHandler {
+    async fn handle(&self, peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+        let (topic, data) = decode_direct(&body).ok_or("malformed direct message")?;
+        if !topic.starts_with(DIRECT_TOPIC_PREFIX) {
+            return Err(format!("{topic}: not deliverable directly"));
+        }
+        let _ = self.gossip_tx.send(GossipMessage {
+            topic,
+            source: Some(peer),
+            data,
+        });
+        Ok(Vec::new())
+    }
+}
 const IDENTIFY_PROTOCOL: &str = "/c0mpute/id/1.0.0";
 
 /// What the swarm task accepts from the public API.
@@ -219,6 +274,15 @@ impl Libp2pNetwork {
 
         tokio::spawn(task.run(cmd_rx));
 
+        if let Ok(mut h) = rpc_handlers.write() {
+            h.insert(
+                DIRECT_SERVICE.to_string(),
+                Arc::new(DirectHandler {
+                    gossip_tx: gossip_tx.clone(),
+                }),
+            );
+        }
+
         Ok(Self {
             cmd_tx,
             gossip_tx,
@@ -256,6 +320,31 @@ impl Libp2pNetwork {
             .await
             .map_err(|_| anyhow!("swarm task closed"))?;
         rx.await.map_err(|_| anyhow!("swarm task closed"))?
+    }
+
+    /// Deliver `payload` on `topic` straight to `peer` ([`DIRECT_SERVICE`]),
+    /// dialing it if needed, and wait up to `timeout` for it to confirm.
+    /// `peer` hands it to its local subscribers as if it came over gossip
+    /// from us. Only `c0mpute/jobs/*` topics; never to ourselves (gossipsub
+    /// does not deliver our own messages to us either).
+    pub async fn send_direct(
+        &self,
+        peer: PeerId,
+        topic: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> Result<()> {
+        if peer == self.peer_id {
+            return Err(anyhow!("direct send to ourselves"));
+        }
+        if !topic.starts_with(DIRECT_TOPIC_PREFIX) {
+            return Err(anyhow!("{topic}: not deliverable directly"));
+        }
+        let body = encode_direct(topic, payload);
+        tokio::time::timeout(timeout, self.rpc(peer, DIRECT_SERVICE, body))
+            .await
+            .map_err(|_| anyhow!("direct send to {peer} timed out after {timeout:?}"))??;
+        Ok(())
     }
 
     /// Peers with an open connection now.
@@ -446,7 +535,7 @@ struct C0mputeBehaviour {
     fetch: request_response::cbor::Behaviour<FetchRequest, FetchResponse>,
     rpc: request_response::Behaviour<request_response::cbor::codec::Codec<RpcRequest, RpcResponse>>,
     gossipsub: gossipsub::Behaviour,
-    mdns: mdns::tokio::Behaviour,
+    mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -580,6 +669,10 @@ impl SwarmTask {
                 );
                 let gossipsub_cfg = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_secs(1))
+                    // Publish to every connected peer subscribed to the
+                    // topic, not only the mesh: a bid must reach the buyer
+                    // even while the mesh is still forming after a restart.
+                    .flood_publish(true)
                     .validation_mode(gossipsub::ValidationMode::Strict)
                     .build()
                     .map_err(|e| std::io::Error::other(format!("gossipsub config: {e}")))?;
@@ -588,7 +681,15 @@ impl SwarmTask {
                     gossipsub_cfg,
                 )
                 .map_err(|e| std::io::Error::other(format!("gossipsub behaviour: {e}")))?;
-                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+                // `C0MPUTE_DISABLE_MDNS=1` keeps a node off LAN discovery:
+                // tests run on a box beside live workers set it, or their
+                // offers reach (and are won by) the real network.
+                let mdns = if mdns_disabled() {
+                    None
+                } else {
+                    Some(mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?)
+                };
+                let mdns = libp2p::swarm::behaviour::toggle::Toggle::from(mdns);
                 Ok(C0mputeBehaviour {
                     kad,
                     identify,
@@ -903,17 +1004,35 @@ impl SwarmTask {
                 for (peer_id, addr) in peers {
                     debug!(%peer_id, %addr, "mDNS discovered peer");
                     sw.behaviour_mut().kad.add_address(&peer_id, addr.clone());
-                    // Add to gossipsub mesh too — gossipsub itself uses
-                    // Kad for routing once peers are known.
+                    // A LAN neighbour: gossipsub forwards every message on a
+                    // shared topic to explicit peers, mesh or not.
                     sw.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                 }
             }
+            // An mDNS record expiring does not mean the peer left: docker
+            // bridge peers expire and are rediscovered every few seconds
+            // (2,194 discoveries and 1,530 expiries in 20 minutes on dev2's
+            // seed, 2026-11-09). Dropping explicit status on every expiry
+            // left the peer neither explicit nor meshed (gossipsub ignores
+            // GRAFTs from explicit peers) until the next discovery, and
+            // messages forwarded meanwhile were lost. The peer stays explicit
+            // until its last connection actually closes.
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
-                let mut sw = self.swarm.lock().await;
                 for (peer_id, _addr) in peers {
                     debug!(%peer_id, "mDNS peer expired");
-                    sw.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                 }
+            }
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established: 0,
+                ..
+            } => {
+                self.swarm
+                    .lock()
+                    .await
+                    .behaviour_mut()
+                    .gossipsub
+                    .remove_explicit_peer(&peer_id);
             }
             _ => {}
         }
@@ -1220,5 +1339,63 @@ mod tests {
         assert_eq!(received.topic, topic);
         assert_eq!(received.data, payload);
         assert_eq!(received.source, Some(net_a.peer_id()));
+    }
+    /// A direct send arrives on the receiver's gossip stream, attributed to
+    /// the sender, with no topic subscription or mesh at all; non-job topics
+    /// and sends to ourselves are refused.
+    #[tokio::test]
+    async fn direct_send_reaches_the_peer_without_a_mesh() {
+        let net_a = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("direct-a"))
+                .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        let a_addr = wait_for_listen(&net_a).await;
+        let net_b = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("direct-b"))
+                .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        net_b.add_peer_address(net_a.peer_id(), a_addr).await;
+
+        let mut rx = net_a.messages();
+        let topic = "c0mpute/jobs/diffusion.txt2img";
+        net_b
+            .send_direct(net_a.peer_id(), topic, b"bid", Duration::from_secs(10))
+            .await
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("direct message should arrive")
+            .unwrap();
+        assert_eq!(got.topic, topic);
+        assert_eq!(got.data, b"bid");
+        assert_eq!(got.source, Some(net_b.peer_id()));
+
+        assert!(
+            net_b
+                .send_direct(net_a.peer_id(), "c0mpute/cap/v1", b"x", Duration::from_secs(5))
+                .await
+                .is_err()
+        );
+        assert!(
+            net_b
+                .send_direct(net_b.peer_id(), topic, b"x", Duration::from_secs(5))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn direct_body_round_trips() {
+        let body = encode_direct("c0mpute/jobs/x", b"payload");
+        assert_eq!(
+            decode_direct(&body),
+            Some(("c0mpute/jobs/x".to_string(), b"payload".to_vec()))
+        );
+        assert_eq!(decode_direct(&[0]), None);
+        assert_eq!(decode_direct(&[0, 9, b'a']), None);
     }
 }
