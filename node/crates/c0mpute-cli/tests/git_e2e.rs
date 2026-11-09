@@ -517,6 +517,46 @@ async fn git_push_and_clone_through_the_network() {
             .iter()
             .any(|r| r["repo"] == "demo" && r["owner"] == key)
     );
+
+    // 10. The web view on gateway B (which holds nothing): home page with
+    // README, a file, its raw bytes (never HTML), history, a commit, a tag.
+    let web = format!("{url_b}/git/{key}/demo");
+    let page = |u: String| async move {
+        let r = reqwest::get(&u).await.unwrap();
+        let status = r.status();
+        let ct = r
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let body = r.text().await.unwrap();
+        assert!(status.is_success(), "GET {u}: {status}\n{body}");
+        (ct, body)
+    };
+    let (ct, home) = page(web.clone()).await;
+    assert!(ct.starts_with("text/html"), "{ct}");
+    assert!(
+        home.contains("README.md") && home.contains("hello from the network"),
+        "{home}"
+    );
+    assert!(home.contains("diverge.txt"), "home shows HEAD's files: {home}");
+    // The clone URL opened in a browser redirects to the page.
+    let (_, via_dot_git) = page(format!("{url_b}/git/{key}/demo.git")).await;
+    assert!(via_dot_git.contains("hello from the network"));
+    let (_, blob) = page(format!("{web}/blob/main/diverge.txt")).await;
+    assert!(blob.contains("diverged"), "{blob}");
+    let (ct, raw) = page(format!("{web}/raw/main/README.md")).await;
+    assert_eq!(raw, "hello from the network\n");
+    assert!(ct.starts_with("text/plain"), "{ct}");
+    let (_, log) = page(format!("{web}/commits/main")).await;
+    assert!(log.contains("diverge") && log.contains("first"), "{log}");
+    let (_, commit) = page(format!("{web}/commit/{forced_sha}")).await;
+    assert!(commit.contains("diverge.txt"), "changed paths: {commit}");
+    let (_, at_tag) = page(format!("{web}/tree/v1.0.0")).await;
+    assert!(at_tag.contains("diverge.txt"));
+    // Dumb HTTP is untouched by the web routes.
+    let (_, info) = page(format!("{url_b}/git/{key}/demo.git/info/refs")).await;
+    assert!(info.contains("refs/heads/main"));
     drop(hosts);
 }
 
@@ -829,5 +869,15 @@ async fn private_repo_is_ciphertext_and_shareable() {
     owner.git(&work, &["commit", "-q", "-m", "more"]);
     let out = owner.git_fails(&work, &["push", "origin", "main"]);
     assert!(out.contains("is private"), "{out}");
+
+    // Its web page says it is private and shows nothing of it.
+    let r = reqwest::get(format!("{url}/git/{key}/secret")).await.unwrap();
+    assert!(r.status().is_success());
+    let page = r.text().await.unwrap();
+    assert!(page.contains("private"), "{page}");
+    assert!(
+        !page.contains("secret.txt") && !page.contains(&sha) && !page.contains(&marker),
+        "{page}"
+    );
     drop(hosts);
 }

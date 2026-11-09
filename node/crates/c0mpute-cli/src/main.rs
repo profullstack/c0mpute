@@ -1630,7 +1630,11 @@ fn main() -> Result<()> {
         c0mpute_core::instance::claim(&dir)?;
     }
 
-    init_tracing()?;
+    if matches!(&cli.command, Some(Cmd::Git { .. })) {
+        c0mpute_core::init_tracing_with("warn")?;
+    } else {
+        init_tracing()?;
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

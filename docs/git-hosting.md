@@ -53,6 +53,7 @@ That is the whole setup. Everything after it is ordinary git.
 | `c0mpute://<repo>` | A repo of this machine's key: the short form for your own remotes. |
 | `c0mpute://<20-hex site id>` | The URL form of c0mpute before 0.3.11; still clones (see [Old repos](#old-repos)). |
 | `https://<gateway>/git/<owner-key>/<repo>.git` | A public repo over git's plain ("dumb") HTTP: read-only, no c0mpute needed. Private repos need the helper (the key never reaches a gateway). |
+| `https://<gateway>/git/<owner-key>/<repo>` | The repo's web page (see [Web view](#web-view)). The `.git` URL opened in a browser redirects here. |
 
 Repo names are 1-59 of `a-z`, `0-9` and `-`.
 
@@ -172,6 +173,27 @@ A push needs room on the gateway: the node's hosting budget (automatic, from fre
 unless `[hosting] max_bytes` is set), the free-disk floor and the per-owner limit, like
 any copy it takes. In private mode a node accepts pushes only from its own key.
 
+## Web view
+
+Every gateway shows public repos in a browser, read straight from the signed packs it
+serves (no git on the gateway, no extra service):
+
+| Page | |
+|---|---|
+| `/git/<owner>/<repo>` | files at HEAD, the README, branches and tags, clone commands |
+| `/git/<owner>/<repo>/tree/<ref>/<path>` | a directory at a branch, tag or commit |
+| `/git/<owner>/<repo>/blob/<ref>/<path>` | a file with line numbers (`#L12` links a line) |
+| `/git/<owner>/<repo>/raw/<ref>/<path>` | the file's bytes |
+| `/git/<owner>/<repo>/commits/<ref>` | history (first parent, latest 100) |
+| `/git/<owner>/<repo>/commit/<id>` | a commit: message, parents, changed paths |
+
+`c0mpute git ls` prints each repo's page (on the public gateway when it lists your own
+node). Pages run no script and carry a strict CSP; raw files are never served as HTML
+(text, SVG included, is `text/plain`) and are sandboxed, so a repo cannot script the
+gateway's origin. A **private** repo's page says only that it is private: the gateway
+cannot read it, so its readers browse their clone. Repos over 256 MiB of packs are not
+browsed on a gateway; they still clone.
+
 ## Old repos
 
 c0mpute before 0.3.11 stored a repo as `refs.json` plus one `repo.bundle`. Nothing to do:
@@ -216,6 +238,7 @@ push rewrites the repo in the current layout (one full pack) with its whole hist
 | `POST /git/v1/repos/<owner>/<repo>` | push: `C0GIT1\n`, u32-BE header length, header JSON `{record, manifest}`, then chunks as u32-BE length + bytes. 200 `{site_id, seq, holders}`; 400 malformed; 403 bad signature or pushes off; 409 stale or rule broken; 502 a needed chunk unreachable; 507 over budget |
 | `GET /git/v1/sites/<site_id>` | the same `{record, manifest, holders}` by hosting site id (old `c0mpute://<site id>` URLs); the client checks the id against the record |
 | `GET /git/<owner>/<repo>.git/<path>` | repo files for git's dumb HTTP protocol |
+| `GET /git/<owner>/<repo>` and `.../{tree,blob,raw,commits,commit}/...` | the [web view](#web-view) |
 
 ### Limits
 
@@ -248,7 +271,8 @@ published today is a free (v1) site.
   pushes at a gateway that has been up a while (your own node is), or list several.
 - **CI / actions beyond deploy.** A push can deploy an app (see above), but there is no
   runner for build or test jobs on push.
-- git-lfs, sha256 repositories, a web UI, issues and pull requests.
+- git-lfs, sha256 repositories, issues and pull requests. The web view is read-only and
+  shows no content diffs yet (a commit lists its changed paths).
 
 ## Testing
 

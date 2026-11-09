@@ -302,6 +302,26 @@ async fn owner_push(
     Ok(r)
 }
 
+/// Where web links for a listing gateway should point: the gateway itself,
+/// unless it is this machine's loopback node (then the public gateway).
+fn web_base(gateway: &str) -> String {
+    let g = gateway.trim_end_matches('/');
+    let host = g.split("://").nth(1).unwrap_or(g);
+    if host.starts_with("127.") || host.starts_with("localhost") || host.starts_with("[::1]") {
+        git::PUBLIC_GATEWAY.to_string()
+    } else {
+        g.to_string()
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} B"),
+        1024..1_048_576 => format!("{:.1} KiB", n as f64 / 1024.0),
+        _ => format!("{:.1} MiB", n as f64 / 1_048_576.0),
+    }
+}
+
 fn my_key() -> Result<String> {
     let kp = c0mpute_core::hosting::publisher_keypair()?;
     c0mpute_core::hosting::site::owner_hex(&kp).context("this machine's identity is not ed25519")
@@ -467,14 +487,22 @@ pub async fn run(args: &[String]) -> Result<()> {
             if repos.is_empty() {
                 println!("no repos known to {gateway} yet");
             }
+            // Links on a loopback gateway only open on this machine: point
+            // them at the public gateway, which knows every repo by gossip.
+            let web = web_base(&gateway);
             for r in repos {
+                let path = r["clone_path"].as_str().unwrap_or("");
                 println!(
-                    "{:<70}  copies {}  {} bytes  {}{}",
+                    "{}\n  copies {}/3  {}{}\n  browse  {web}{}",
                     r["url"].as_str().unwrap_or(""),
                     r["copies"],
-                    r["size"],
-                    gateway.trim_end_matches('/'),
-                    r["clone_path"].as_str().unwrap_or("")
+                    human_bytes(r["size"].as_u64().unwrap_or(0)),
+                    if r["copies"].as_u64() == Some(0) {
+                        "  (no live copy: unreadable until a holder comes back)"
+                    } else {
+                        ""
+                    },
+                    path.strip_suffix(".git").unwrap_or(path),
                 );
             }
             Ok(())

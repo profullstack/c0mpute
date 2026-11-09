@@ -22,6 +22,7 @@
 pub mod client;
 pub mod deploy;
 pub mod helper;
+pub mod pack;
 
 use std::collections::BTreeMap;
 
