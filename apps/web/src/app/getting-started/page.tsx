@@ -64,6 +64,91 @@ $ c0mpute uninstall --purge   # also remove ~/.config/c0mpute`}</CodeBlock>
       <Section number="7" label="check the stack">
         <CodeBlock>{`$ c0mpute doctor`}</CodeBlock>
       </Section>
+
+      <Section number="8" label="host a site on c0mpute and point a Moshpit name at it">
+        <p className="text-sm text-[var(--color-dim)]">
+          Publish a directory of static files once. Hosting nodes keep three
+          copies, replace any copy whose node disappears, and every c0mpute
+          gateway serves it. Live example:{" "}
+          <a className="accent" href="http://alt.2600/">alt.2600</a> is site{" "}
+          <code>ea0e1f5afde44477e71d</code>, also at{" "}
+          <a className="accent" href="https://gateway.c0mpute.com/s/ea0e1f5afde44477e71d/">
+            gateway.c0mpute.com/s/ea0e1f5afde44477e71d/
+          </a>{" "}
+          and, for browsers without Moshpit DNS,{" "}
+          <a className="accent" href="https://alt.2600.pit.world/">alt.2600.pit.world</a>.
+        </p>
+
+        <p className="text-sm">publish (after step 1):</p>
+        <CodeBlock>{`$ c0mpute hosting publish ./public --name mysite
+site:    ea0e1f5afde44477e71d
+version: 1
+copies:  3/3
+path:    /s/ea0e1f5afde44477e71d/   (on any c0mpute gateway, e.g. http://<gateway>:7777/s/ea0e1f5afde44477e71d/)
+
+$ c0mpute hosting ls          # sites a gateway knows, with live copy counts`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          The site is signed with this machine&apos;s key, so only this machine
+          can publish new versions: run the same command with the same{" "}
+          <code>--name</code> to update it. Any gateway serves it at{" "}
+          <code>/s/&lt;site_id&gt;/</code>, for example{" "}
+          <code>https://gateway.c0mpute.com/s/&lt;site_id&gt;/</code>. Limits:
+          256 MiB and 10,000 files per site.
+        </p>
+
+        <p className="text-sm">point a Moshpit name at it (free to register):</p>
+        <CodeBlock>{`$ moshcode name c0mpute alt.2600 ea0e1f5afde44477e71d
+$ moshcode dns resolve alt.2600
+alt.2600 → edge.c0mpute.com
+
+$ moshcode name c0mpute alt.2600 off  # stop serving it from c0mpute`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          The registry now answers the name with the c0mpute edge
+          (edge.c0mpute.com). The edge holds a Moshpit CA certificate for the
+          name and fetches <code>/s/&lt;site_id&gt;/</code> from whichever
+          gateway is healthy, so <code>https://alt.2600</code> works for anyone
+          on Moshpit DNS (<code>moshcode dns enable</code> installs the root)
+          and <code>http://alt.2600</code> works without the root. Pointing
+          the name at a server again takes it off c0mpute.
+        </p>
+
+        <p className="text-sm">or a domain you own:</p>
+        <CodeBlock>{`$ c0mpute hosting publish ./public --name mysite --domain blog.example.org
+# DNS:
+#   TXT  _c0mpute-hosting.blog.example.org  "site=<site_id>"
+#   A/AAAA  blog.example.org  ->  one or more gateways (TLS in front of :7777)`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          A gateway serves the domain only when both agree: the signed site
+          record lists it and its TXT names the site.
+        </p>
+
+        <p className="text-sm">pay hosting nodes to keep it (d1sks marketplace):</p>
+        <CodeBlock>{`$ c0mpute hosting disks --country DE,FI     # what --disks auto would pick
+$ c0mpute hosting publish ./public --name mysite --disks auto
+$ c0mpute hosting publish ./public --name mysite --disks auto --max-price 0.01 --copies 3`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          Picks preferred hosts from{" "}
+          <a className="accent" href="https://d1sks.pwa.pit.world/disks?hosting=1">d1sks</a>,
+          cheapest first. Keep a node running on the publishing machine: it
+          challenges the holders and settles, as a dry run until{" "}
+          <code>[payments]</code> is enabled. Free copies stay free.
+        </p>
+
+        <p className="text-sm">run your own public gateway:</p>
+        <CodeBlock>{`# ~/.config/c0mpute/config.toml  (gateway and hosting are default roles)
+[gateway]
+bind = "0.0.0.0:7777"
+announce = "https://gw.example.org"   # TLS in front of :7777`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          An announced gateway is listed as <code>gateway</code> on{" "}
+          <code>/api/nodes</code>, where the Moshpit edge and other clients find
+          gateways to fetch sites from. More in{" "}
+          <a className="accent" href="https://github.com/profullstack/c0mpute/blob/master/docs/hosting.md">
+            docs/hosting.md
+          </a>
+          .
+        </p>
+      </Section>
     </div>
   );
 }

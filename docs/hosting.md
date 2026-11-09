@@ -58,7 +58,9 @@ cached for 10 minutes (2 minutes for a miss).
 site. The Moshpit registry resolves it to a c0mpute edge (moshpit-proxy
 `bin/moshpit-c0mpute-edge.ts`) that holds a Moshpit CA certificate for the name and
 fetches `/s/<site_id>/` from any healthy gateway, so no DNS check on the gateway is
-involved.
+involved. The public edge is `edge.c0mpute.com`; live example: `alt.2600` is site
+`ea0e1f5afde44477e71d` (`http://alt.2600`, `https://alt.2600` with the Moshpit root
+installed, `https://alt.2600.pit.world` from the regular web).
 
 ## Finding gateways
 
