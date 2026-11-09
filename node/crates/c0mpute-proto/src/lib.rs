@@ -197,6 +197,14 @@ pub enum Role {
     /// Static-site hosting: hold copies of sites (the network keeps three of
     /// each, healing itself) and serve them from every gateway. On by default.
     Hosting,
+    /// `ocr.extract`: text from images and PDFs with the box's own Tesseract
+    /// (and poppler for PDFs). On by default; advertised only where
+    /// `tesseract` is installed.
+    Ocr,
+    /// `embed.text`: CPU text embeddings (fastembed, bge-small-en-v1.5). On by
+    /// default; the node provisions the runtime in the background and
+    /// advertises the role once it works.
+    Embed,
 }
 
 #[cfg(test)]

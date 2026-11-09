@@ -545,6 +545,12 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     if roles.contains(&c0mpute_proto::Role::Crawl) {
         types.push(crate::crawl::WORKLOAD.to_string());
     }
+    if roles.contains(&c0mpute_proto::Role::Ocr) {
+        types.push(crate::ocr::WORKLOAD.to_string());
+    }
+    if roles.contains(&c0mpute_proto::Role::Embed) {
+        types.push(crate::embed::WORKLOAD.to_string());
+    }
     types
 }
 

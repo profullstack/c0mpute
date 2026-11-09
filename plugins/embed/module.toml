@@ -1,14 +1,20 @@
 # c0mpute plugin manifest. See dips/0006-module-model.md.
 #
-# CANDIDATE plugin — implementation not yet scaffolded.
-# Brief for the implementer:
-#   Bulk embedding generation. Suggested upstreams: sentence-transformers,
-#   BGE, Nomic, or llama.cpp's embedding mode. Input is a JSONL of
-#   {id, text}; output is a JSONL of {id, vector[]} or a binary
-#   parquet/npy artifact for large batches. CPU-only is acceptable;
-#   GPU is a price/throughput improvement, not a requirement.
-#   Validation: shape + cosine-similarity spot-check on a fixed seed
-#   string against a second worker.
+# Built into the c0mpute binary as the `embed.text` workload
+# (node/crates/c0mpute-core/src/embed.rs). Like the speech runtimes, nothing
+# ML is linked into the binary: each node provisions a per-user Python venv
+# with fastembed (ONNX Runtime, CPU) and BAAI/bge-small-en-v1.5 (384 dims,
+# ~130 MB) in the background, and advertises c0mpute:role:embed only once the
+# model answers. nomic-embed-text-v1.5 (768 dims) is opt-in:
+# `c0mpute embed setup --all`. Opt out: C0MPUTE_EMBED_AUTO=0.
+#
+# Input: {v: 1, model?, texts: [...]} with up to 256 texts of 8k chars,
+# 1 MiB in total. Output: {v, ok, model, dims, vectors}; buyers check one
+# finite vector of the model's dimension per text.
+# Buyers: `c0mpute embed "text" ...`, POST /v1/embeddings (OpenAI shape) on
+# `c0mpute speech serve`, or workload embed.text on the jobs bridge.
+# Not built yet: GPU acceleration, JSONL/parquet bulk files, cross-worker
+# cosine spot checks.
 
 [module]
 id          = "embed"
@@ -16,28 +22,46 @@ name        = "Embeddings — vector generation"
 version     = "0.2.72"
 kind        = "workload"
 category    = "ai"
-status      = "coming-soon"
-description = "Bulk text-embedding generation (sentence-transformers, BGE, Nomic) with CPU fallback and optional GPU acceleration."
+status      = "available"
+builtin     = true
+description = "Text embeddings on plain CPUs: fastembed with bge-small-en-v1.5 (384 dims, default) or nomic-embed-text-v1.5 (768 dims), provisioned by every node, with an OpenAI-compatible /v1/embeddings."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["embeddings", "vectors", "sentence-transformers", "bge", "nomic", "rag"]
+keywords    = ["embeddings", "vectors", "fastembed", "bge", "nomic", "rag", "onnx"]
 
 [module.requirements]
-c0mpute      = ">=0.1.0"
+c0mpute      = ">=0.2.71"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
-capabilities = ["gpu:nvidia?", "gpu:apple?"]
+capabilities = ["cpu", "python:>=3.10"]
 
 [module.workloads]
-"embed.text" = { command = "embed-text", validation = "shape_and_cosine_spotcheck" }
+"embed.text" = { command = "embed", validation = "shape_and_finite" }
 
 [module.dispatch]
-mode   = "subprocess"
-binary = "c0mpute-embed"
+mode = "in-process"
 
 [module.surfaces]
 cli = "c0mpute embed"
+api = "POST /v1/embeddings (c0mpute speech serve)"
+
+[module.models."bge-small-en-v1.5"]
+repo      = "BAAI/bge-small-en-v1.5"
+default   = true
+params    = "33M"
+precision = "fp32 ONNX"
+workloads = ["embed.text"]
+license   = "MIT"
+backend   = "fastembed"
+
+[module.models."nomic-embed-text-v1.5"]
+repo      = "nomic-ai/nomic-embed-text-v1.5"
+params    = "137M"
+precision = "fp32 ONNX"
+workloads = ["embed.text"]
+license   = "Apache-2.0"
+backend   = "fastembed"
 
 [module.config.defaults]
 model      = "bge-small-en-v1.5"
-batch_size = 64
+batch_size = 32

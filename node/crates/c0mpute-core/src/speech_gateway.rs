@@ -30,6 +30,8 @@ const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
 /// A healthy CPU worker draws an image in ~2 minutes. One that has not
 /// answered in 6 is benched and the job goes to the next worker.
 const IMAGE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+const MAX_CONCURRENT_OCR_JOBS: usize = 4;
+const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
 
 #[derive(Clone)]
 struct GatewayState {
@@ -41,6 +43,10 @@ struct GatewayState {
     stt_slots: Arc<Semaphore>,
     /// Image jobs in flight from this gateway (each holds a worker ~2 min).
     image_slots: Arc<Semaphore>,
+    /// OCR jobs in flight (each holds an input of up to 32 MiB here).
+    ocr_slots: Arc<Semaphore>,
+    /// Embedding jobs in flight.
+    embed_slots: Arc<Semaphore>,
     /// Warm, pinned sessions this node is holding (see `speech_session`).
     sessions: crate::speech_session::SessionStore,
     /// Workers that won and did not deliver, benched for a while.
@@ -134,6 +140,8 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         tts_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SPEECH_JOBS)),
         stt_slots: Arc::new(Semaphore::new(2)),
         image_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_JOBS)),
+        ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
+        embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
         penalties: crate::penalty_box::PenaltyBox::new(),
     };
@@ -144,6 +152,12 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .route("/v1/stt", post(transcribe))
         .route("/v1/images", post(generate_image))
         .route("/v1/videos", post(generate_video))
+        // OCR takes a 32 MiB document, above the router-wide audio limit.
+        .route(
+            "/v1/ocr",
+            post(ocr_extract).layer(DefaultBodyLimit::max(crate::ocr::MAX_INPUT_BYTES)),
+        )
+        .route("/v1/embeddings", post(embeddings))
         // Warm, pinned sessions: open once per call, then say a sentence at a
         // time with no auction and no model reload in the way.
         .route("/v1/sessions", post(open_session).get(list_sessions))
@@ -496,6 +510,23 @@ async fn run_speech_job(
     required: Vec<String>,
     max_bytes: usize,
 ) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
+    run_checked_job(state, workload, spec, required, max_bytes, &|bytes| {
+        valid_speech_result(workload, bytes)
+    })
+    .await
+}
+
+/// [`run_speech_job`] with the caller's own result check (embeddings need
+/// the request to know how many vectors are due). A result that fails it
+/// strikes the worker and the job goes to the next one.
+async fn run_checked_job(
+    state: &GatewayState,
+    workload: &str,
+    spec: serde_json::Value,
+    required: Vec<String>,
+    max_bytes: usize,
+    valid: &(dyn Fn(&[u8]) -> bool + Send + Sync),
+) -> ApiResult<(crate::AuctionOutcome, Vec<u8>)> {
     // Workers benched for not delivering earlier stay out of the auction.
     let mut excluded_bidders = state.penalties.benched();
     let mut last_error = None;
@@ -531,7 +562,7 @@ async fn run_speech_job(
             ))
         } else if let Some(output_hash) = outcome.receipt.output_hash.as_deref() {
             match fetch_result(state, output_hash, &worker, max_bytes).await {
-                Ok(bytes) if valid_speech_result(workload, &bytes) => Ok(bytes),
+                Ok(bytes) if valid(&bytes) => Ok(bytes),
                 Ok(_) => Err(ApiError(
                     StatusCode::BAD_GATEWAY,
                     "worker returned an invalid speech result".into(),
@@ -585,6 +616,8 @@ fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
         "stt.transcribe" => {
             serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|value| value.is_object())
         }
+        crate::ocr::WORKLOAD => serde_json::from_slice::<serde_json::Value>(bytes)
+            .is_ok_and(|value| crate::ocr::valid_result(&value)),
         _ => true,
     }
 }
@@ -937,6 +970,180 @@ async fn generate_image(
     Ok(response)
 }
 
+#[derive(Debug, Deserialize)]
+struct OcrQuery {
+    #[serde(default = "default_ocr_lang")]
+    lang: String,
+}
+
+fn default_ocr_lang() -> String {
+    crate::ocr::DEFAULT_LANG.into()
+}
+
+/// `POST /v1/ocr?lang=eng`: the raw image (PNG, JPEG, TIFF, WebP) or PDF as
+/// the body. Answers the worker's JSON: `{v, ok, text, pages:[{page, text}],
+/// engine, lang}` plus `job_id` and `worker_peer_id`.
+async fn ocr_extract(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<OcrQuery>,
+    body: Bytes,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    if body.is_empty() || body.len() > crate::ocr::MAX_INPUT_BYTES {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "document must be between 1 byte and 32 MiB".into(),
+        ));
+    }
+    if !crate::ocr::valid_lang(&query.lang) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "lang must match [a-z_+]{3,32}, e.g. eng or eng+deu".into(),
+        ));
+    }
+    let Some(format) = crate::ocr::detect_format(&body) else {
+        return Err(ApiError(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "send a PNG, JPEG, TIFF, WebP image or a PDF".into(),
+        ));
+    };
+    let _slot = state.ocr_slots.clone().acquire_owned().await.map_err(|_| {
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, "OCR queue is unavailable".into())
+    })?;
+    let input_hash = state.store.put(&body).await.map_err(gateway_failure)?;
+    state
+        .net
+        .announce(&input_hash)
+        .await
+        .map_err(gateway_failure)?;
+    let spec = serde_json::json!({
+        "v": 1,
+        "input_hash": input_hash.to_hex(),
+        "input_provider_peer_id": state.net.peer_id().to_base58(),
+        "format": format,
+        "lang": query.lang,
+    });
+    let (outcome, bytes) = run_speech_job(
+        &state,
+        crate::ocr::WORKLOAD,
+        spec,
+        vec![crate::ocr::ROLE_TAG.to_string()],
+        crate::ocr::MAX_RESULT_BYTES,
+    )
+    .await?;
+    json_job_response(&bytes, &outcome)
+}
+
+/// OpenAI-style embeddings request: `input` is one string or a list.
+#[derive(Debug, Deserialize)]
+struct EmbeddingsRequest {
+    input: EmbeddingsInput,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmbeddingsInput {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `POST /v1/embeddings`: `{input: string | [string], model?}` in the OpenAI
+/// shape, answered as `{object: "list", data: [{object: "embedding",
+/// embedding, index}], model}`. Runs `embed.text` on a worker.
+async fn embeddings(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<EmbeddingsRequest>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    let texts = match input.input {
+        EmbeddingsInput::One(text) => vec![text],
+        EmbeddingsInput::Many(texts) => texts,
+    };
+    let spec = serde_json::json!({ "v": 1, "model": input.model, "texts": texts });
+    let (parsed, model) = crate::embed::parse_spec(&spec)
+        .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
+    let expected = parsed.texts.len();
+    let _slot = state.embed_slots.clone().acquire_owned().await.map_err(|_| {
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, "embeddings queue is unavailable".into())
+    })?;
+    // Up to 1 MiB of text: too big for the gossip offer, so the worker
+    // fetches it from this node by hash.
+    let spec_bytes = serde_json::to_vec(&spec).map_err(|error| gateway_failure(error.into()))?;
+    let offer_spec = if spec_bytes.len() <= crate::workflow::MAX_INLINE_SPEC_BYTES {
+        spec
+    } else {
+        let hash = state.store.put(&spec_bytes).await.map_err(gateway_failure)?;
+        state.net.announce(&hash).await.map_err(gateway_failure)?;
+        crate::workflow::spec_ref(&hash, spec_bytes.len())
+    };
+    let (outcome, bytes) = run_checked_job(
+        &state,
+        crate::embed::WORKLOAD,
+        offer_spec,
+        vec![
+            crate::embed::ROLE_TAG.to_string(),
+            crate::embed::model_tag(model),
+        ],
+        crate::embed::MAX_RESULT_BYTES,
+        &|bytes| {
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .is_ok_and(|v| crate::embed::validate_result(&v, expected, model).is_ok())
+        },
+    )
+    .await?;
+    let result: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid embeddings JSON".into())
+    })?;
+    let data: Vec<serde_json::Value> = result["vectors"]
+        .as_array()
+        .map(|vectors| {
+            vectors
+                .iter()
+                .enumerate()
+                .map(|(index, embedding)| {
+                    serde_json::json!({ "object": "embedding", "embedding": embedding, "index": index })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut response = Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "model": model.id,
+        "dims": model.dims,
+        "job_id": outcome.job_id,
+        "worker_peer_id": outcome.accepted_bid.bidder_peer_id,
+    }))
+    .into_response();
+    set_job_headers(
+        response.headers_mut(),
+        &outcome.job_id,
+        &outcome.accepted_bid.bidder_peer_id,
+    );
+    Ok(response)
+}
+
+/// A worker's JSON result with the job id and worker peer id added.
+fn json_job_response(bytes: &[u8], outcome: &crate::AuctionOutcome) -> ApiResult<Response> {
+    let mut payload: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| {
+        ApiError(StatusCode::BAD_GATEWAY, "worker returned invalid JSON".into())
+    })?;
+    payload["job_id"] = serde_json::Value::String(outcome.job_id.clone());
+    payload["worker_peer_id"] =
+        serde_json::Value::String(outcome.accepted_bid.bidder_peer_id.clone());
+    let mut response = Json(payload).into_response();
+    set_job_headers(
+        response.headers_mut(),
+        &outcome.job_id,
+        &outcome.accepted_bid.bidder_peer_id,
+    );
+    Ok(response)
+}
+
 fn audio_response(bytes: Vec<u8>, job_id: &str, worker: &str) -> Response {
     let mut response = (StatusCode::OK, bytes).into_response();
     response
@@ -974,4 +1181,29 @@ fn default_speed() -> f32 {
 }
 fn default_stt_model() -> String {
     "base".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_results_are_checked() {
+        assert!(valid_speech_result(
+            crate::ocr::WORKLOAD,
+            br#"{"v":1,"ok":true,"text":"hello","pages":[{"page":1,"text":"hello"}]}"#
+        ));
+        assert!(!valid_speech_result(crate::ocr::WORKLOAD, br#"{"v":1,"ok":true}"#));
+        assert!(!valid_speech_result(crate::ocr::WORKLOAD, b"not json"));
+    }
+
+    #[test]
+    fn embeddings_input_shapes() {
+        let one: EmbeddingsRequest = serde_json::from_str(r#"{"input":"hi"}"#).unwrap();
+        assert!(matches!(one.input, EmbeddingsInput::One(ref t) if t == "hi"));
+        let many: EmbeddingsRequest =
+            serde_json::from_str(r#"{"input":["a","b"],"model":"bge-small-en-v1.5"}"#).unwrap();
+        assert!(matches!(many.input, EmbeddingsInput::Many(ref t) if t.len() == 2));
+        assert!(serde_json::from_str::<EmbeddingsRequest>(r#"{"input":[1,2]}"#).is_err());
+    }
 }

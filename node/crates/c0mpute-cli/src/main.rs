@@ -45,7 +45,7 @@ use clap::{Parser, Subcommand};
     name = "c0mpute",
     version,
     about = "c0mpute.com — decentralized compute network",
-    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
+    long_about = "c0mpute.com CLI. Submit jobs, run a worker, manage modules.\n\nBuilt-in workloads:\n  transcode  (FFmpeg)\n  tts        (Piper, Kokoro, or Pocket, CPU)\n  stt        (faster-whisper, CPU)\n  workflow-step (JMESPath transforms + guarded HTTP calls, for meshhook)\n  ocr        (Tesseract on the worker, images + PDFs)\n  embed      (fastembed bge-small-en-v1.5, CPU)\n  coinpay    (DID + payments, peer CLI)\n  infernet   (AI inference, peer CLI)\n\n  c0mpute coinpay reputation did claim\n  c0mpute transcode preset list\n  c0mpute tts setup --engine all\n  c0mpute stt setup\n  c0mpute speech serve\n  c0mpute ocr scan.pdf --lang eng\n  c0mpute embed \"first text\" \"second text\"\n  C0MPUTE_JOBS_TOKEN=<secret> c0mpute jobs serve\n  c0mpute worker start --roles tts,stt\n  c0mpute chat login\n  c0mpute chat \"hello\"\n  c0mpute infernet chat --model qwen2.5:7b \"hello\"\n  c0mpute infernet model list --node <id>\n  c0mpute infernet reservation pricing\n  c0mpute infernet text serve\n  c0mpute infernet text train --job job.json --dataset corpus.jsonl --yes\n  c0mpute infernet text chat --adapter ./adapter \"How should I price my SaaS?\"\n  c0mpute infernet temporal serve --model sha256:<hash> --train\n  c0mpute infernet temporal predict --session s1 --input step.json\n  c0mpute webhook serve --price 0.001\n  c0mpute webhook send https://example.com/hook -d '{\"event\":\"paid\"}' --secret whsec_..."
 )]
 struct Cli {
     /// Override the config file location.
@@ -184,6 +184,45 @@ enum Cmd {
     Hosting {
         #[command(subcommand)]
         cmd: HostingCmd,
+    },
+    /// OCR plugin: extract the text of an image (PNG, JPEG, TIFF, WebP) or a
+    /// PDF on a c0mpute worker running Tesseract (`ocr.extract`).
+    Ocr {
+        /// The image or PDF to read.
+        file: std::path::PathBuf,
+        /// Tesseract language(s), e.g. `eng`, `deu`, `eng+deu`.
+        #[arg(long, default_value = "eng")]
+        lang: String,
+        /// Highest price in USD you will pay for the job.
+        #[arg(long, default_value_t = 0.05)]
+        max_price: f64,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 900)]
+        timeout_secs: u64,
+        /// Print the whole result JSON instead of just the text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Embeddings plugin: embed texts on a c0mpute worker (`embed.text`,
+    /// fastembed on CPU) and print `{model, dims, vectors}`.
+    /// `c0mpute embed setup` provisions the runtime on this machine.
+    #[command(args_conflicts_with_subcommands = true)]
+    Embed {
+        #[command(subcommand)]
+        cmd: Option<EmbedCmd>,
+        /// Texts to embed (one vector each). Reads lines from stdin when none
+        /// are given.
+        texts: Vec<String>,
+        /// Model: bge-small-en-v1.5 (default, 384 dims) or
+        /// nomic-embed-text-v1.5 (768 dims).
+        #[arg(long)]
+        model: Option<String>,
+        /// Highest price in USD you will pay for the job.
+        #[arg(long, default_value_t = 0.01)]
+        max_price: f64,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
     },
     /// Coinpay plugin — delegates to the `coinpay` peer CLI.
     Coinpay {
@@ -494,6 +533,19 @@ enum HostingCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum EmbedCmd {
+    /// Install fastembed and download the model(s) so this node serves
+    /// `embed.text` (a worker does this by itself in the background).
+    Setup {
+        /// Also install nomic-embed-text-v1.5 (~550 MB) besides bge-small.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show which embedding models this machine can serve.
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
 enum CrawlCmd {
     /// Fetch one URL from a worker and print the result JSON
     /// (`{v, ok, output: {url, status, headers, body}}`).
@@ -793,6 +845,20 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
+        Cmd::Ocr {
+            file,
+            lang,
+            max_price,
+            timeout_secs,
+            json,
+        } => run_ocr(file, lang, max_price, timeout_secs, json).await,
+        Cmd::Embed {
+            cmd,
+            texts,
+            model,
+            max_price,
+            timeout_secs,
+        } => run_embed(cmd, texts, model, max_price, timeout_secs).await,
         Cmd::Dm { cmd } => run_chat(cmd),
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
@@ -1050,6 +1116,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Diffusion,
                     Role::Crawl,
                     Role::Hosting,
+                    Role::Ocr,
+                    Role::Embed,
                 ] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
@@ -2102,6 +2170,107 @@ async fn run_crawl(cmd: CrawlCmd) -> Result<()> {
     }
 }
 
+async fn run_ocr(
+    file: std::path::PathBuf,
+    lang: String,
+    max_price: f64,
+    timeout_secs: u64,
+    json: bool,
+) -> Result<()> {
+    use c0mpute_core::ocr;
+    if !ocr::valid_lang(&lang) {
+        anyhow::bail!("--lang must match [a-z_+]{{3,32}}, e.g. eng or eng+deu");
+    }
+    let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+    if bytes.is_empty() || bytes.len() > ocr::MAX_INPUT_BYTES {
+        anyhow::bail!("the document must be between 1 byte and 32 MiB");
+    }
+    let format = ocr::detect_format(&bytes)
+        .context("not a PNG, JPEG, TIFF, WebP image or a PDF")?;
+    let result = c0mpute_core::jobs_gateway::submit_once_with_input(
+        ocr::WORKLOAD,
+        Some(bytes),
+        |blob| {
+            let (hash, peer) = blob.unwrap_or_default();
+            serde_json::json!({
+                "v": 1,
+                "input_hash": hash,
+                "input_provider_peer_id": peer,
+                "format": format,
+                "lang": lang,
+            })
+        },
+        max_price,
+        std::time::Duration::from_secs(timeout_secs.clamp(10, 1800)),
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", result["result"]["text"].as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+async fn run_embed(
+    cmd: Option<EmbedCmd>,
+    texts: Vec<String>,
+    model: Option<String>,
+    max_price: f64,
+    timeout_secs: u64,
+) -> Result<()> {
+    use c0mpute_core::embed;
+    match cmd {
+        Some(EmbedCmd::Setup { all }) => {
+            let models: Vec<&'static embed::Model> = embed::MODELS
+                .iter()
+                .filter(|m| all || m.default_install)
+                .collect();
+            embed::setup(&models).await?;
+            for m in models {
+                println!("ready: {} ({} dims)", m.id, m.dims);
+            }
+            Ok(())
+        }
+        Some(EmbedCmd::Status) => {
+            println!("runtime: {}", embed::embed_root().display());
+            for m in embed::MODELS {
+                let state = if embed::model_ready(m) { "ready" } else { "not installed" };
+                println!("{:<32} {:>4} dims  {state}", m.id, m.dims);
+            }
+            Ok(())
+        }
+        None => {
+            let texts = if texts.is_empty() {
+                use std::io::{BufRead, IsTerminal};
+                if std::io::stdin().is_terminal() {
+                    anyhow::bail!("give texts to embed as arguments, or pipe them one per line");
+                }
+                std::io::stdin()
+                    .lock()
+                    .lines()
+                    .collect::<std::io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .collect()
+            } else {
+                texts
+            };
+            let spec = serde_json::json!({ "v": 1, "model": model, "texts": texts });
+            embed::parse_spec(&spec).map_err(|e| anyhow::anyhow!(e))?;
+            let result = c0mpute_core::jobs_gateway::submit_once(
+                embed::WORKLOAD,
+                spec,
+                max_price,
+                std::time::Duration::from_secs(timeout_secs.clamp(5, 600)),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+    }
+}
+
 async fn run_jobs(cmd: JobsCmd) -> Result<()> {
     match cmd {
         JobsCmd::Serve {
@@ -2488,6 +2657,8 @@ fn parse_role(s: &str) -> Option<Role> {
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
         "crawl" | "fetch" => Some(Role::Crawl),
         "hosting" | "host" | "sites" => Some(Role::Hosting),
+        "ocr" => Some(Role::Ocr),
+        "embed" | "embeddings" => Some(Role::Embed),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

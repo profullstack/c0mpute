@@ -91,6 +91,20 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::WorkflowStep => tags.push(crate::workflow::ROLE_TAG.to_string()),
             Role::Crawl => tags.push(crate::crawl::ROLE_TAG.to_string()),
             Role::Hosting => tags.push(crate::hosting::ROLE_TAG.to_string()),
+            Role::Ocr => {
+                // Only where `tesseract` actually runs (probed once).
+                if crate::ocr::runtime().ready() {
+                    tags.push(crate::ocr::ROLE_TAG.to_string());
+                }
+            }
+            Role::Embed => {
+                // Like TTS: appears once background provisioning finishes.
+                let models = crate::embed::ready_models();
+                if !models.is_empty() {
+                    tags.push(crate::embed::ROLE_TAG.to_string());
+                    tags.extend(models.into_iter().map(crate::embed::model_tag));
+                }
+            }
             Role::Video => {
                 // Same rule as TTS: advertise only what this box can do now.
                 // A node without the GPU, the runtime or the image would win
