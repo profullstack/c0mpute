@@ -91,14 +91,22 @@ pub fn diffusion_root() -> PathBuf {
         .join("diffusion")
 }
 
-fn bin_dir() -> PathBuf {
+pub(crate) fn bin_dir() -> PathBuf {
     diffusion_root().join("bin")
 }
-fn models_dir() -> PathBuf {
+pub(crate) fn models_dir() -> PathBuf {
     diffusion_root().join("models")
 }
-fn sd_cli() -> PathBuf {
+pub(crate) fn sd_cli() -> PathBuf {
     bin_dir().join("sd-cli")
+}
+/// Written once the sd.cpp runtime alone (no weights) is installed and runs.
+/// CPU video shares the runtime with images, so either can install it.
+fn runtime_marker() -> PathBuf {
+    diffusion_root().join(".runtime-ready")
+}
+fn runtime_stamp() -> String {
+    format!("sdcpp={SDCPP_RELEASE}\n")
 }
 fn ready_marker() -> PathBuf {
     diffusion_root().join(".ready")
@@ -107,7 +115,7 @@ fn retry_marker() -> PathBuf {
     diffusion_root().join(".retry-after")
 }
 
-fn platform_supported() -> bool {
+pub(crate) fn platform_supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
@@ -133,7 +141,7 @@ pub fn memory() -> MemorySnapshot {
     }
 }
 
-const GIB: u64 = 1024 * 1024 * 1024;
+pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Pure decision: can a box with this memory take a diffusion job right now?
 pub fn has_headroom_with(config: &crate::config::DiffusionConfig, mem: MemorySnapshot) -> bool {
@@ -171,15 +179,15 @@ pub fn idle_enough_with(load_1m: f64, cpus: usize, max_per_cpu: f64) -> bool {
     cpus > 0 && load_1m.is_finite() && load_1m < cpus as f64 * max_per_cpu
 }
 
-fn load_avg_1m() -> f64 {
+pub(crate) fn load_avg_1m() -> f64 {
     sysinfo::System::load_average().one
 }
 
-fn logical_cpus() -> usize {
+pub(crate) fn logical_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -193,7 +201,7 @@ fn in_install_backoff() -> bool {
         .is_some_and(|retry_after| now_secs() < retry_after)
 }
 
-fn free_disk_bytes(root: &Path) -> u64 {
+pub(crate) fn free_disk_bytes(root: &Path) -> u64 {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let mut best: Option<(usize, u64)> = None;
     let mut largest = 0u64;
@@ -284,10 +292,34 @@ pub async fn install() -> Result<()> {
     if !platform_supported() {
         bail!("diffusion has a CPU build for Linux x86_64 only");
     }
-    let root = diffusion_root();
     tokio::fs::create_dir_all(models_dir()).await?;
     let _ = tokio::fs::remove_file(ready_marker()).await;
 
+    install_runtime().await?;
+
+    for weight in &WEIGHTS {
+        download_verified_streaming(weight.url, &models_dir().join(weight.name), weight.sha256)
+            .await
+            .with_context(|| format!("download {}", weight.name))?;
+    }
+    tokio::fs::write(ready_marker(), ready_stamp()).await?;
+    Ok(())
+}
+
+/// The pinned sd.cpp runtime alone: download, verify, extract, self-test.
+/// Skipped when the runtime marker already names this release.
+pub(crate) async fn install_runtime() -> Result<()> {
+    if !platform_supported() {
+        bail!("stable-diffusion.cpp has a CPU build for Linux x86_64 only");
+    }
+    if sd_cli().is_file()
+        && std::fs::read_to_string(runtime_marker()).is_ok_and(|s| s == runtime_stamp())
+    {
+        return Ok(());
+    }
+    let root = diffusion_root();
+    tokio::fs::create_dir_all(&root).await?;
+    let _ = tokio::fs::remove_file(runtime_marker()).await;
     let zip_path = root.join("sdcpp.zip");
     download_verified_streaming(SDCPP_ZIP_URL, &zip_path, SDCPP_ZIP_SHA256).await?;
     let staging = root.join("bin.staging");
@@ -302,12 +334,6 @@ pub async fn install() -> Result<()> {
     let _ = tokio::fs::remove_dir_all(bin_dir()).await;
     tokio::fs::rename(&staging, bin_dir()).await?;
     let _ = tokio::fs::remove_file(&zip_path).await;
-
-    for weight in &WEIGHTS {
-        download_verified_streaming(weight.url, &models_dir().join(weight.name), weight.sha256)
-            .await
-            .with_context(|| format!("download {}", weight.name))?;
-    }
 
     // The binary links glibc and libstdc++ from the host. Running it once is
     // the only honest check that this box can load it.
@@ -328,7 +354,7 @@ pub async fn install() -> Result<()> {
                 .collect::<String>()
         );
     }
-    tokio::fs::write(ready_marker(), ready_stamp()).await?;
+    tokio::fs::write(runtime_marker(), runtime_stamp()).await?;
     Ok(())
 }
 
@@ -364,7 +390,7 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
 
 /// Stream a large file to disk while hashing it; never holds it in memory.
 /// A file already present with the right hash is kept.
-async fn download_verified_streaming(url: &str, path: &Path, expected_sha256: &str) -> Result<()> {
+pub(crate) async fn download_verified_streaming(url: &str, path: &Path, expected_sha256: &str) -> Result<()> {
     if path.is_file() && sha256_file(path).await? == expected_sha256 {
         return Ok(());
     }
@@ -527,16 +553,19 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One image at a time per node: a job holds ~9 GB and every core, so a second
-/// concurrent job would only swap.
-fn node_slot() -> Arc<Semaphore> {
+/// One sd-cli job at a time per node: a job holds ~4-9 GB and every core, so a
+/// second concurrent job would only swap.
+///
+/// Shared with CPU video (`video_cpu`): both are sd-cli, and an image and a
+/// clip at once on one box would only make both miss their deadlines.
+pub(crate) fn node_slot() -> Arc<Semaphore> {
     static SLOT: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
 }
 
 /// `/proc/<pid>/stat` -> (state, parent pid). The command name is in
 /// parentheses and may contain spaces, so parse after the last `)`.
-fn parse_stat(stat: &str) -> Option<(char, u32)> {
+pub(crate) fn parse_stat(stat: &str) -> Option<(char, u32)> {
     let rest = stat.get(stat.rfind(')')? + 1..)?.trim_start();
     let mut fields = rest.split_whitespace();
     let state = fields.next()?.chars().next()?;
@@ -551,7 +580,16 @@ fn parse_stat(stat: &str) -> Option<(char, u32)> {
 /// keeps ~6-9 GB and every core busy, so the node stops bidding (free-RAM
 /// gate) or runs the next image at half speed. Called once when the runner
 /// starts, before it takes any job, so every sd-cli child is such an orphan.
+///
+/// Both sd-cli runners (images, and CPU video in `video_cpu`) call this, but
+/// only the first call in a process does anything: the second runner can
+/// start minutes later, after its own install, when the first may already be
+/// rendering a live job.
 pub fn kill_orphaned_renders() -> usize {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return 0;
+    }
     if !cfg!(target_os = "linux") {
         return 0;
     }

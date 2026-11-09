@@ -274,5 +274,10 @@ function modelSpec(model: ModelOption): string[] {
     model.vram_gib ? `${model.vram_gib} GiB VRAM` : undefined,
     model.resolution,
     model.audio ? "video + audio" : undefined,
+    typeof model.cpu === "string" && model.cpu.length > 0
+      ? `or CPU: ${model.cpu}`
+      : model.cpu === true
+        ? "or CPU (slow, batch)"
+        : undefined,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
 }

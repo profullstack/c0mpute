@@ -138,7 +138,7 @@ async fn network(tmp: &Path) -> (String, Arc<Libp2pNetwork>) {
     dispatch::run_worker_subscriber_with_load(
         worker.clone(),
         video::WORKLOAD_TXT2VID.to_string(),
-        vec![video::ROLE_TAG.to_string(), "c0mpute:gpu:nvidia".to_string()],
+        vec![video::ROLE_TAG.to_string(), video::model_tag("wan2.2-ti2v-5b"), "c0mpute:gpu:nvidia".to_string()],
         Some(runner),
         None,
         Some(PricingConfig::default()),

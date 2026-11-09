@@ -68,7 +68,7 @@ def main() -> int:
 
     print("manifest is the single source of models")
     models = runner.load_models(MANIFEST)
-    check("four models load", len(models) == 4, f"(got {sorted(models)})")
+    check("five models load", len(models) == 5, f"(got {sorted(models)})")
     check("default model present", "wan2.2-ti2v-5b" in models)
     for mid, model in models.items():
         check(f"{mid} has a diffusers repo", model.diffusers_repo.endswith("-Diffusers"))
@@ -94,6 +94,46 @@ def main() -> int:
     refuses("bad fps", base_job(fps=0), tmp, "fps must be")
     refuses("non-multiple-of-16 size", base_job(width=1281), tmp, "multiples of 16")
     refuses("oversized frame", base_job(width=1920, height=1088), tmp, "exceed")
+    refuses("wan frames not 4k+1", base_job(frames=80), tmp, "4k+1")
+
+    print("the small Wan 2.1 model fits an 8 GiB card and defaults small")
+    small = "wan2.1-t2v-1.3b"
+    check("wan2.1 1.3b is advertised", small in models)
+    check("8 GiB floor", models[small].vram_gib == 8)
+    check("text-to-video only", models[small].workloads == ("video.txt2vid",))
+    sj = runner.parse_job(
+        {"workload": "video.txt2vid", "model": small, "prompt": "a fox in the snow"}, models, tmp
+    )
+    check(
+        "omitted fields take the model's defaults",
+        (sj["frames"], sj["fps"], sj["steps"], sj["width"], sj["height"]) == (33, 16, 20, 480, 272),
+        f"(got {sj['frames']} {sj['fps']} {sj['steps']} {sj['width']}x{sj['height']})",
+    )
+    check(
+        "explicit fields still win",
+        runner.parse_job(base_job(model=small, frames=81), models, tmp)["frames"] == 81,
+    )
+    check(
+        "other models keep the old defaults",
+        runner.parse_job(
+            {"workload": "video.txt2vid", "model": "wan2.2-ti2v-5b", "prompt": "p"}, models, tmp
+        )["frames"] == 81,
+    )
+    refuses(
+        "wan2.1 refuses img2vid",
+        base_job(workload="video.img2vid", model=small, image="in.png"),
+        tmp,
+        "does not serve",
+    )
+
+    print("offload only when the card cannot hold the whole pipeline")
+    check("8 GiB card offloads wan2.1", runner.use_offload(models[small], 8.0))
+    check("a card reporting 7.6 GiB offloads too", runner.use_offload(models[small], 7.6))
+    check("a 24 GiB card loads it whole", not runner.use_offload(models[small], 24.0))
+    check(
+        "models without full_vram_gib never offload",
+        not runner.use_offload(models["wan2.2-ti2v-5b"], 8.0),
+    )
 
     print("a model only serves the workloads it declares")
     # t2v-a14b is text-to-video only, so an img2vid job naming it is refused

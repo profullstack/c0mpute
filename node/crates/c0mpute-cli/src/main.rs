@@ -564,6 +564,10 @@ enum VideoCmd {
         /// Build from source without trying the registry first.
         #[arg(long)]
         build: bool,
+        /// No GPU: install CPU text-to-video instead (Wan 2.1 1.3B on
+        /// stable-diffusion.cpp, ~5.4 GB, slow batch clips). Opts this node in.
+        #[arg(long)]
+        cpu: bool,
     },
     /// Report whether this node can serve video, and why not if it cannot.
     Check {
@@ -1658,6 +1662,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::WorkflowStep,
                     Role::Diffusion,
                     Role::Music,
+                    Role::Video,
                     Role::Crawl,
                     Role::Hosting,
                     Role::Ocr,
@@ -2484,7 +2489,27 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
     use c0mpute_core::video;
 
     match cmd {
-        VideoCmd::Setup { build } => {
+        VideoCmd::Setup { cpu: true, .. } => {
+            use c0mpute_core::video_cpu;
+            println!(
+                "installing CPU video: stable-diffusion.cpp + Wan 2.1 T2V 1.3B ({:.1} GB of weights)",
+                video_cpu::download_bytes() as f64 / 1e9
+            );
+            video_cpu::install().await?;
+            println!("installed under {}", c0mpute_core::diffusion::diffusion_root().display());
+            if c0mpute_core::supervisor::which_ffmpeg().is_none() {
+                println!("ffmpeg is not on PATH: install it, or this node cannot encode clips");
+            }
+            println!(
+                "this node now serves {} text-to-video on CPU (at most {} frames of 480x272, {} steps; many minutes per clip)",
+                video_cpu::MODEL_ID,
+                video_cpu::MAX_FRAMES,
+                video_cpu::MAX_STEPS
+            );
+            println!("start (or restart) a worker with the video role: `c0mpute worker start`");
+            Ok(())
+        }
+        VideoCmd::Setup { build, .. } => {
             let how = video::setup(build, &std::env::temp_dir(), &|line: &str| println!("{line}")).await?;
             println!("runner image ready as {} ({how:?})", video::RUNNER_IMAGE);
             match video::readiness(video::RUNNER_IMAGE) {
@@ -2505,9 +2530,32 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
         }
         VideoCmd::Check { selftest } => {
             match video::readiness(video::RUNNER_IMAGE) {
-                None => println!("ready: GPU, container runtime and runner image are all present"),
+                None => {
+                    println!("ready: GPU, container runtime and runner image are all present");
+                    match video::nvidia_vram_mib() {
+                        Some(mib) => println!(
+                            "card: {mib} MiB; models it can run: {}",
+                            video::models_for_vram(mib).join(", ")
+                        ),
+                        None => println!("card memory unknown (nvidia-smi reported none)"),
+                    }
+                }
                 Some(not_ready) => {
-                    println!("not ready: {}", not_ready.reason());
+                    println!("GPU video not ready: {}", not_ready.reason());
+                    let cfg = Config::load_or_default(&config::default_config_path()).unwrap_or_default();
+                    if c0mpute_core::video_cpu::installed() {
+                        let serving = if c0mpute_core::video_cpu::can_serve(&cfg.video) {
+                            "yes"
+                        } else {
+                            "no (disabled, busy, low RAM, small CPU budget or no ffmpeg)"
+                        };
+                        println!(
+                            "CPU video: installed ({}); can take a clip right now: {serving}",
+                            c0mpute_core::video_cpu::MODEL_ID
+                        );
+                    } else {
+                        println!("CPU video: not installed (`c0mpute video setup --cpu` opts in)");
+                    }
                     return Ok(());
                 }
             }

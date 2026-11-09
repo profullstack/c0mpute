@@ -48,6 +48,7 @@ pub mod temporal;
 pub mod text;
 pub mod train;
 pub mod video;
+pub mod video_cpu;
 pub mod webhook;
 pub mod workflow;
 

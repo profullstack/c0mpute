@@ -935,7 +935,7 @@ fn audio_format(headers: &HeaderMap) -> ApiResult<&'static str> {
 /// `POST /v1/images`: CPU txt2img on a c0mpute worker (`diffusion.txt2img`).
 /// Body: `{prompt, width?, height?, steps?, seed?}` (see `diffusion::Txt2ImgSpec`).
 /// Returns `image/png`. Expect ~90-150 s.
-/// `POST /v1/videos`: a video job (Wan 2.2 / LTX-2.3) as a JSON body of
+/// `POST /v1/videos`: a video job (Wan 2.2 / 2.1, LTX-2.3) as a JSON body of
 /// [`crate::video::VideoJobInline`] fields. Send `image_base64` for
 /// image-to-video; this gateway stores and serves the image to the worker
 /// itself. Answers `video/mp4`.
@@ -950,11 +950,23 @@ struct VideoRequest {
 async fn generate_video(
     State(state): State<GatewayState>,
     headers: HeaderMap,
-    Json(input): Json<VideoRequest>,
+    Json(mut raw): Json<serde_json::Value>,
 ) -> ApiResult<Response> {
     use base64::Engine;
     authenticate(&state, &headers)?;
+    // A buyer who names only the model gets that model's own defaults (the
+    // small Wan 2.1 model is 33 frames of 480x272, not 81 of 1280x704).
+    crate::video::apply_model_defaults(&mut raw);
+    let input: VideoRequest = serde_json::from_value(raw)
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, format!("invalid video request: {error}")))?;
     let mut job = input.job;
+    if crate::video::manifest_model(&job.model).is_none() {
+        let known: Vec<&str> = crate::video::manifest_models().iter().map(|m| m.id.as_str()).collect();
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("unknown video model {}; have {}", job.model, known.join(", ")),
+        ));
+    }
     let workload = match input.image_base64.as_deref() {
         Some(b64) => {
             let bytes = base64::engine::general_purpose::STANDARD
@@ -1002,7 +1014,9 @@ async fn generate_video(
         &state,
         workload,
         spec,
-        vec![crate::video::ROLE_TAG.to_string()],
+        // The model tag: only a node that can run this model (a big enough
+        // card, or CPU video for the small one) is eligible.
+        vec![crate::video::ROLE_TAG.to_string(), crate::video::model_tag(&job.model)],
         crate::video::MAX_RESULT_BYTES,
     )
     .await?;

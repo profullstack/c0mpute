@@ -32,7 +32,10 @@
 #   worker, as with render.
 #
 #   Model choice: Wan 2.2 (Apache-2.0, so commercial use is clean) is the
-#   default family. HunyuanVideo was the other candidate — quality is
+#   default family. Wan 2.1 T2V 1.3B is the small one: 8 GiB of VRAM with
+#   model offload (the runner keeps the 11 GB UMT5 text encoder on the CPU
+#   when the card is too small to hold everything), and the only model a
+#   CPU-only node can serve at all (below). HunyuanVideo was the other candidate — quality is
 #   comparable, but it is markedly slower per clip, which is the wrong trade
 #   on a network billing by the second.
 #
@@ -46,26 +49,38 @@
 #   at $10M+ revenue needs their own commercial license from Lightricks.
 #   Rejected: HyperFlow H3 / MiniMax H3 (license excludes the US, EU, UK and
 #   Korea), Ovi and Kandinsky 6 (both load MMAudio weights, CC-BY-NC).
+#
+#   CPU video (slow, batch): a node with no usable GPU can serve
+#   `wan2.1-t2v-1.3b` text-to-video through the same stable-diffusion.cpp
+#   build the diffusion plugin pins (`sd-cli -M vid_gen`), with Apache-2.0
+#   GGUF weights pinned by SHA-256 in node/crates/c0mpute-core/src/video_cpu.rs:
+#   Wan2.1-T2V-1.3B Q8_0 (off-grid-ai, converted with sd.cpp), the UMT5-XXL
+#   encoder Q4_K_M (city96) and the Wan 2.1 VAE (Comfy-Org), 5.4 GB in all.
+#   No container, no GPU; ffmpeg encodes the frames to H.264. A small clip
+#   (33 frames, 480x272) takes 20-30 minutes of a 16-thread box, so it is
+#   opt-in: `c0mpute video setup --cpu`, or `[video] cpu = true` /
+#   C0MPUTE_VIDEO_CPU=1 to install in the background. Bids only while the box
+#   has the RAM and is idle enough, like CPU images.
 
 [module]
 id          = "video"
-name        = "Video — generation (Wan 2.2, LTX-2.3 with audio)"
-version     = "0.2.85"
+name        = "Video — generation (Wan 2.2, Wan 2.1 1.3B on 8 GiB or CPU, LTX-2.3 with audio)"
+version     = "0.2.86"
 kind        = "workload"
 category    = "ai"
 status      = "available"
 builtin     = true
-description = "Decentralized video generation on consumer/prosumer GPUs: Wan 2.2 text/image-to-video, and LTX-2.3 video with a synchronized soundtrack."
+description = "Decentralized video generation: Wan 2.2 text/image-to-video and LTX-2.3 video with a synchronized soundtrack on 24-48 GiB GPUs, Wan 2.1 1.3B text-to-video on an 8 GiB card, and the same small model on CPU-only nodes (slow, batch)."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["video", "wan", "wan2.2", "ltx-2", "ltx-2.3", "audio", "txt2vid", "img2vid", "generation", "diffusion"]
+keywords    = ["video", "wan", "wan2.2", "wan2.1", "cpu", "stable-diffusion.cpp", "ltx-2", "ltx-2.3", "audio", "txt2vid", "img2vid", "generation", "diffusion"]
 
 [module.requirements]
 c0mpute      = ">=0.2.82"
 os           = ["linux"]
 arch         = ["x86_64"]
-capabilities = ["gpu:nvidia", "model-runtime", "container-runtime"]
-hardware     = "NVIDIA GPU (24 GiB VRAM for the default model, 48 GiB for the 14B and LTX models) + docker with the NVIDIA container runtime"
+capabilities = ["model-runtime"]
+hardware     = "GPU path: NVIDIA GPU + docker with the NVIDIA container runtime (8 GiB VRAM for Wan 2.1 1.3B, 24 GiB for the default Wan 2.2 5B, 48 GiB for the 14B and LTX models). CPU path (opt-in, slow batch): Linux x86_64, 16 GiB RAM, 16 threads, ffmpeg, 6 GB of disk; Wan 2.1 1.3B text-to-video only"
 
 [module.workloads]
 "video.txt2vid" = { command = "txt2vid", validation = "schema_and_ffprobe" }
@@ -78,11 +93,19 @@ hardware     = "NVIDIA GPU (24 GiB VRAM for the default model, 48 GiB for the 14
 #
 # `backend` picks the diffusers pipeline family (default "wan"); `audio`
 # means the clip carries a soundtrack, and the runner refuses to return one
-# without it. LTX-2 needs frames = 8k+1 and width/height divisible by 32.
+# without it. LTX-2 needs frames = 8k+1 and width/height divisible by 32;
+# every Wan model needs frames = 4k+1.
+#
+# `full_vram_gib` is what holding every component on the card at once takes.
+# On a smaller card (but at least `vram_gib`) the runner switches to model
+# CPU offload and encodes the prompt on the CPU. `frames`/`fps`/`steps`/
+# `width`/`height` are this model's defaults for a job that leaves them out.
+# `cpu` means a CPU-only node can serve it too (see the header).
 [module.models]
 "wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", diffusers_repo = "Wan-AI/Wan2.2-TI2V-5B-Diffusers", default = true, params = "5B", precision = "fp16", vram_gib = 24, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
 "wan2.2-t2v-a14b" = { repo = "Wan-AI/Wan2.2-T2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-T2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.txt2vid"], license = "apache-2.0" }
 "wan2.2-i2v-a14b" = { repo = "Wan-AI/Wan2.2-I2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.img2vid"], license = "apache-2.0" }
+"wan2.1-t2v-1.3b" = { repo = "Wan-AI/Wan2.1-T2V-1.3B", diffusers_repo = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", params = "1.3B", precision = "bf16", vram_gib = 8, full_vram_gib = 20, resolution = "480p@16fps", frames = 33, fps = 16, steps = 20, width = 480, height = 272, workloads = ["video.txt2vid"], license = "apache-2.0", cpu = "16 GiB RAM, 16 threads, ~20-30 min per 33-frame 480x272 clip (batch)" }
 "ltx2.3-av-distilled" = { repo = "Lightricks/LTX-2.3", diffusers_repo = "diffusers/LTX-2.3-Distilled-Diffusers", backend = "ltx2", audio = true, distilled = true, params = "22B", precision = "bf16", vram_gib = 48, resolution = "768x512@24fps + 48kHz stereo", workloads = ["video.txt2vid", "video.img2vid"], license = "ltx-2-community" }
 
 [module.dispatch]

@@ -410,6 +410,69 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Video on a box with no usable GPU: CPU text-to-video (Wan 2.1
+            // 1.3B on stable-diffusion.cpp) if the operator opted in. Same
+            // shape as CPU images: provision in the background, subscribe
+            // once it works, re-check RAM and load on every offer.
+            if workload_type == crate::video::WORKLOAD_TXT2VID
+                && crate::video::readiness(crate::video::RUNNER_IMAGE).is_some()
+            {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::video_cpu::ensure(&config.video).await {
+                        info!(
+                            "no GPU video and CPU video is not enabled; not subscribing to video.txt2vid \
+                             (`c0mpute video setup --cpu` opts in)"
+                        );
+                        return;
+                    }
+                    let runner_tx = crate::video_cpu::spawn_cpu_video_runner(
+                        net.clone(),
+                        store,
+                        cache_root,
+                        load.clone(),
+                    );
+                    info!(
+                        workload_type = crate::video::WORKLOAD_TXT2VID,
+                        model = crate::video_cpu::MODEL_ID,
+                        "subscribing to job topic (CPU video)"
+                    );
+                    let gate = config.video.clone();
+                    let filter: dispatch::OfferFilter = std::sync::Arc::new(move |offer| {
+                        let fits = offer
+                            .spec_inline
+                            .as_ref()
+                            .and_then(|spec| {
+                                serde_json::from_value::<crate::video::VideoJobInline>(spec.clone()).ok()
+                            })
+                            .is_some_and(|job| {
+                                crate::video_cpu::fits(&job, crate::video::WORKLOAD_TXT2VID).is_ok()
+                            });
+                        fits && crate::video_cpu::can_serve(&gate)
+                    });
+                    // The tag set is fixed at subscribe time and the box may
+                    // have been busy then; the filter is the live gate.
+                    let mut tags = capabilities::tags_from_config(&config);
+                    for tag in crate::video_cpu::tags() {
+                        if !tags.contains(&tag) {
+                            tags.push(tag);
+                        }
+                    }
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::video::WORKLOAD_TXT2VID.to_string(),
+                        tags,
+                        Some(runner_tx),
+                        Some(filter),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             info!(%workload_type, "subscribing to job topic");
             let runner_tx = match workload_type.as_str() {
                 "ffmpeg.transcode" => {
