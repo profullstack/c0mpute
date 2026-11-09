@@ -9,6 +9,7 @@ pub mod apps;
 pub mod ads;
 pub mod auction_stats;
 pub mod buyer;
+pub mod buyer_queue;
 pub mod canary;
 pub mod capabilities;
 pub mod captcha;
