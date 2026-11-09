@@ -510,6 +510,13 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
         .current_dir(job_dir)
         .env("HF_HOME", music_root().join("hf-home"))
         .env("ACESTEP_TMPDIR", job_dir)
+        // ACE-Step aborts its own diffusion loop after 600 s, which an 8-thread
+        // CPU budget passes on a 2-minute song (vienna, 2026-11-09). Our job
+        // timeout is the real limit; leave a margin for model load and decode.
+        .env(
+            "ACESTEP_GENERATION_TIMEOUT",
+            JOB_TIMEOUT.saturating_sub(Duration::from_secs(3 * 60)).as_secs().to_string(),
+        )
         .env("TMPDIR", job_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
