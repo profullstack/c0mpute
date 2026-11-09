@@ -241,6 +241,47 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Music: the same shape (ACE-Step 1.5, ~8 GB, only on boxes with
+            // the RAM and disk), subscribe once it works.
+            if workload_type == crate::music::WORKLOAD_TXT2MUSIC {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::music::ensure(&config.music).await {
+                        info!(
+                            "music not available on this node; not subscribing to music.txt2music"
+                        );
+                        return;
+                    }
+                    let runner_tx = crate::music::spawn_music_runner(
+                        net.clone(),
+                        store,
+                        cache_root,
+                        load.clone(),
+                    );
+                    info!(
+                        workload_type = crate::music::WORKLOAD_TXT2MUSIC,
+                        "subscribing to job topic"
+                    );
+                    // Re-check free memory on every offer: the tag set is
+                    // fixed at subscribe time, the box's load is not.
+                    let gate = config.music.clone();
+                    let filter: dispatch::OfferFilter =
+                        std::sync::Arc::new(move |_offer| crate::music::can_serve(&gate));
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::music::WORKLOAD_TXT2MUSIC.to_string(),
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        Some(filter),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // OCR runs the operator's own Tesseract: subscribe only where it
             // exists, and bid only on languages/formats this box has.
             if workload_type == crate::ocr::WORKLOAD {

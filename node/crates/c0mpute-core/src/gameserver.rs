@@ -1075,7 +1075,7 @@ async fn auction(net: Arc<Libp2pNetwork>, workload: &str, spec: Value, caps: Vec
         bail!("worker {} reported {:?}", o.accepted_bid.bidder_peer_id, o.receipt.status);
     }
     let hash = o.receipt.output_hash.clone().context("worker returned no result hash")?;
-    let bytes = crate::gateway_util::fetch_verified(&net, &hash, &o.accepted_bid.bidder_peer_id, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow::anyhow!("fetch result: {e:?}"))?;
+    let bytes = crate::gateway_util::fetch_result(&net, &hash, &o.accepted_bid.bidder_peer_id, 64 * 1024, Duration::from_secs(30)).await.map_err(|e| anyhow::anyhow!("fetch result: {e:?}"))?;
     let v: Value = serde_json::from_slice(&bytes)?;
     if v["ok"] != json!(true) {
         bail!("worker result: {v}");

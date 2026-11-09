@@ -426,8 +426,8 @@ enum WorkerCmd {
     /// Start the worker daemon and accept jobs.
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
-        /// verifier, workflow-step, video, diffusion. Default: the config's
-        /// roles plus tts, stt, workflow-step and diffusion.
+        /// verifier, workflow-step, video, diffusion, music. Default: the config's
+        /// roles plus tts, stt, workflow-step, diffusion and music.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -508,6 +508,10 @@ enum TranscodeCmd {
         /// that is not overloaded, the default) or `cheapest` (lowest bid).
         #[arg(long, default_value = "smart")]
         policy: c0mpute_core::routing::SelectionPolicy,
+        /// Download the transcoded output to this file (streamed to disk,
+        /// checked against the receipt). Without it only the hash is printed.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
     },
     /// Manage transcode presets.
     Preset {
@@ -1578,6 +1582,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Stt,
                     Role::WorkflowStep,
                     Role::Diffusion,
+                    Role::Music,
                     Role::Crawl,
                     Role::Hosting,
                     Role::Ocr,
@@ -1617,7 +1622,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             if default_speech_roles {
                 eprintln!(
-                    "TTS, STT, workflow-step and diffusion (CPU images, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
+                    "TTS, STT, workflow-step, diffusion and music (CPU images and songs, on boxes with the RAM) are enabled by default; pass --roles to choose a specific role set"
                 );
             }
             // Only gateway workers run the Infernet provider bootstrap. A
@@ -2244,6 +2249,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
             max_price,
             external_ref,
             policy,
+            output,
         } => {
             // Phase 1: only HTTP(S) URLs are supported as inputs (the
             // worker fetches via reqwest). Local-file submission needs
@@ -2276,7 +2282,7 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 .with_max_price_usd(max_price.unwrap_or(1.0))
                 .with_external_ref(external_ref)
                 .with_policy(policy);
-            let outcome = run_auction(net, auction).await?;
+            let outcome = run_auction(net.clone(), auction).await?;
             println!("job_id        : {}", outcome.job_id);
             if let Some(r) = &outcome.external_ref {
                 println!("external_ref  : {r}");
@@ -2288,6 +2294,22 @@ async fn run_transcode(cmd: TranscodeCmd) -> Result<()> {
                 // The worker stored the output in its chunk store under this
                 // hash and announced it on the DHT.
                 println!("output_hash   : {h}");
+                if let Some(path) = &output {
+                    // Pieced outputs (anything over 1 MiB from a current
+                    // worker) are written a piece at a time.
+                    let written = c0mpute_core::gateway_util::fetch_result_to_file(
+                        &net,
+                        h,
+                        &outcome.accepted_bid.bidder_peer_id,
+                        c0mpute_core::runner::MAX_OUTPUT_BYTES as usize,
+                        std::time::Duration::from_secs(30),
+                        path,
+                    )
+                    .await?;
+                    println!("output        : {} ({written} bytes)", path.display());
+                }
+            } else if output.is_some() {
+                anyhow::bail!("the worker returned no output to download");
             }
             Ok(())
         }
@@ -3993,6 +4015,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "workflow-step" | "workflow_step" | "workflow" => Some(Role::WorkflowStep),
         "video" => Some(Role::Video),
         "diffusion" | "image" | "images" => Some(Role::Diffusion),
+        "music" | "song" | "songs" => Some(Role::Music),
         "crawl" | "fetch" => Some(Role::Crawl),
         "hosting" | "host" | "sites" => Some(Role::Hosting),
         "ocr" => Some(Role::Ocr),

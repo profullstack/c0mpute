@@ -44,6 +44,9 @@ pub struct Config {
     /// CPU image generation (`diffusion.txt2img`) provisioning and gates.
     #[serde(default)]
     pub diffusion: DiffusionConfig,
+    /// Music generation (`music.txt2music`, ACE-Step 1.5) provisioning and gates.
+    #[serde(default)]
+    pub music: MusicConfig,
     /// Static-site hosting: how much this node holds for the network.
     #[serde(default)]
     pub hosting: HostingConfig,
@@ -310,6 +313,58 @@ impl DiffusionConfig {
     }
 }
 
+/// Music generation: ACE-Step 1.5, ~8 GB on disk and ~7-9 GB of RAM per
+/// song (bf16 on CPU). On by default, installed only with `min_ram_gb` total
+/// RAM and `min_free_disk_gb` free disk; bids only while `min_free_ram_gb` is
+/// available. Opt out with `C0MPUTE_MUSIC_AUTO=0` or `auto_install = false`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MusicConfig {
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+    #[serde(default = "default_music_min_ram_gb")]
+    pub min_ram_gb: u64,
+    #[serde(default = "default_music_min_free_ram_gb")]
+    pub min_free_ram_gb: u64,
+    #[serde(default = "default_music_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+    /// Smallest per-job CPU thread budget worth serving songs with.
+    #[serde(default = "default_diffusion_min_cpu_threads")]
+    pub min_cpu_threads: usize,
+    /// Busiest the box may be (1-minute load per logical CPU) and still take a song.
+    #[serde(default = "default_diffusion_max_load_per_cpu")]
+    pub max_load_per_cpu: f64,
+}
+
+impl Default for MusicConfig {
+    fn default() -> Self {
+        Self {
+            auto_install: true,
+            min_ram_gb: default_music_min_ram_gb(),
+            min_free_ram_gb: default_music_min_free_ram_gb(),
+            min_free_disk_gb: default_music_min_free_disk_gb(),
+            min_cpu_threads: default_diffusion_min_cpu_threads(),
+            max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+        }
+    }
+}
+
+fn default_music_min_ram_gb() -> u64 {
+    24
+}
+fn default_music_min_free_ram_gb() -> u64 {
+    // A bf16 DiT-only job peaks around 9 GB; keep some to spare.
+    12
+}
+fn default_music_min_free_disk_gb() -> u64 {
+    30
+}
+
+impl MusicConfig {
+    pub fn auto_install_enabled(&self) -> bool {
+        auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_MUSIC_AUTO").ok())
+    }
+}
+
 /// CPU text-to-speech provisioning.
 ///
 /// Kokoro is small enough — an int8 ONNX export of hexgrad/Kokoro-82M, about
@@ -379,6 +434,7 @@ impl Default for Config {
                 Role::Stt,
                 Role::WorkflowStep,
                 Role::Diffusion,
+                Role::Music,
                 Role::Crawl,
                 Role::Hosting,
                 Role::Ocr,
@@ -394,6 +450,7 @@ impl Default for Config {
             private: Default::default(),
             speech: SpeechConfig::default(),
             diffusion: DiffusionConfig::default(),
+            music: MusicConfig::default(),
             hosting: HostingConfig::default(),
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),

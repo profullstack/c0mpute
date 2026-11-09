@@ -32,6 +32,10 @@ const MAX_CONCURRENT_IMAGE_JOBS: usize = 4;
 const IMAGE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 /// How long an image request waits for a busy worker to free up.
 const IMAGE_QUEUE_WAIT: Duration = Duration::from_secs(4 * 60);
+/// Songs in flight through one gateway; each holds a whole worker for minutes.
+const MAX_CONCURRENT_MUSIC_JOBS: usize = 4;
+/// How long to keep re-auctioning a song while every music worker is busy.
+const MUSIC_QUEUE_WAIT: Duration = Duration::from_secs(3 * 60);
 const MAX_CONCURRENT_OCR_JOBS: usize = 4;
 const MAX_CONCURRENT_EMBED_JOBS: usize = 8;
 
@@ -45,6 +49,7 @@ struct GatewayState {
     stt_slots: Arc<Semaphore>,
     /// Image jobs in flight from this gateway (each holds a worker ~2 min).
     image_slots: Arc<Semaphore>,
+    music_slots: Arc<Semaphore>,
     /// OCR jobs in flight (each holds an input of up to 32 MiB here).
     ocr_slots: Arc<Semaphore>,
     /// Embedding jobs in flight.
@@ -142,6 +147,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         tts_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SPEECH_JOBS)),
         stt_slots: Arc::new(Semaphore::new(2)),
         image_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_JOBS)),
+        music_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_MUSIC_JOBS)),
         ocr_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_OCR_JOBS)),
         embed_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EMBED_JOBS)),
         sessions: crate::speech_session::SessionStore::new(),
@@ -157,6 +163,7 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
         .route("/v1/images", post(generate_image))
+        .route("/v1/music", post(generate_music))
         .route("/v1/videos", post(generate_video))
         // OCR takes a 32 MiB document, above the router-wide audio limit.
         .route(
@@ -485,6 +492,8 @@ async fn run_speech_auction(
             crate::video::JOB_TIMEOUT + Duration::from_secs(5 * 60)
         } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
             IMAGE_RECEIPT_TIMEOUT + Duration::from_secs(60)
+        } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
+            crate::music::JOB_TIMEOUT + Duration::from_secs(60)
         } else {
             Duration::from_secs(20 * 60)
         })
@@ -492,6 +501,8 @@ async fn run_speech_auction(
             crate::video::JOB_TIMEOUT
         } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
             IMAGE_RECEIPT_TIMEOUT
+        } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
+            crate::music::JOB_TIMEOUT
         } else {
             Duration::from_secs(15 * 60)
         });
@@ -570,7 +581,8 @@ async fn run_checked_job(
             // with one (~2 min each): wait and re-auction instead of failing,
             // without spending one of the real attempts.
             Err((error, None))
-                if workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT =>
+                if (workload == crate::diffusion::WORKLOAD_TXT2IMG && started.elapsed() < IMAGE_QUEUE_WAIT)
+                    || (workload == crate::music::WORKLOAD_TXT2MUSIC && started.elapsed() < MUSIC_QUEUE_WAIT) =>
             {
                 tracing::info!(workload, waited_secs = started.elapsed().as_secs(), "no free image worker yet; waiting");
                 attempt -= 1;
@@ -639,6 +651,7 @@ fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
         w if is_video(w) => crate::video::is_mp4(bytes),
         "tts.synthesize" => bytes.len() >= 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
         crate::diffusion::WORKLOAD_TXT2IMG => crate::diffusion::is_png(bytes),
+        crate::music::WORKLOAD_TXT2MUSIC => crate::music::audio_content_type(bytes).is_some(),
         "stt.transcribe" => {
             serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|value| value.is_object())
         }
@@ -648,24 +661,28 @@ fn valid_speech_result(workload: &str, bytes: &[u8]) -> bool {
     }
 }
 
+/// How long a result may take to arrive. The receipt's chunk gets at most
+/// 20 s of it (a worker that never answers fails as fast as before); the
+/// rest is for the 1 MiB pieces of a large result (a 20 MiB WAV, a
+/// hundreds-of-MB video), about 3 s per MiB of the cap, at most 10 min.
+fn result_fetch_budget(max_bytes: usize) -> Duration {
+    let mib = (max_bytes / (1024 * 1024)) as u64;
+    Duration::from_secs((20 + 3 * mib).min(10 * 60))
+}
+
 async fn fetch_result(
     state: &GatewayState,
     hash: &str,
     provider_peer_id: &str,
     max_bytes: usize,
 ) -> ApiResult<Vec<u8>> {
-    use crate::gateway_util::{FetchError, fetch_verified};
-    match fetch_verified(
+    use crate::gateway_util::FetchError;
+    match crate::gateway_util::fetch_result(
         &state.net,
         hash,
         provider_peer_id,
         max_bytes,
-        // A video result can be hundreds of MB; speech and images are small.
-        if max_bytes > MAX_AUDIO_BYTES {
-            Duration::from_secs(10 * 60)
-        } else {
-            Duration::from_secs(20)
-        },
+        result_fetch_budget(max_bytes),
     )
     .await
     {
@@ -940,6 +957,53 @@ async fn generate_video(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    set_job_headers(
+        response.headers_mut(),
+        &outcome.job_id,
+        &outcome.accepted_bid.bidder_peer_id,
+    );
+    Ok(response)
+}
+
+/// `POST /v1/music`: a song on a c0mpute worker (`music.txt2music`, ACE-Step
+/// 1.5). Body: `{prompt, lyrics?, duration?, steps?, seed?}` (see
+/// `music::Txt2MusicSpec`); empty lyrics = instrumental. Answers `audio/mpeg`
+/// (or `audio/flac` from a worker without ffmpeg). Expect minutes on CPU.
+async fn generate_music(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::music::Txt2MusicSpec>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    input
+        .validate()
+        .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
+    let _slot = state
+        .music_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "music queue is unavailable".into()))?;
+    let spec = serde_json::to_value(&input).map_err(|error| gateway_failure(error.into()))?;
+    let (outcome, bytes) = run_speech_job(
+        &state,
+        crate::music::WORKLOAD_TXT2MUSIC,
+        spec,
+        vec![
+            crate::music::ROLE_TAG.to_string(),
+            crate::music::MODEL_TAG.to_string(),
+        ],
+        crate::music::MAX_RESULT_BYTES,
+    )
+    .await?;
+    let content_type = crate::music::audio_content_type(&bytes).unwrap_or("audio/mpeg");
+    let mut response = (StatusCode::OK, bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
