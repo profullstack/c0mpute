@@ -191,8 +191,36 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
         }
     })
     .await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let holders = hosts[0].holders(&site).await;
+    // Converged: every host sees the same three copies (both preferred) and
+    // keeps seeing them for longer than the trim grace (one holder TTL), so a
+    // copy that was briefly extra has been released and none comes back.
+    // Bounded, rather than a fixed sleep that races the trim.
+    let stable_for = fast().holder_ttl + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut since: Option<(tokio::time::Instant, Vec<String>)> = None;
+    let holders = loop {
+        publisher.regossip(&rec).await;
+        let view = hosts[0].holders(&site).await;
+        let mut agree = view.len() == 3 && preferred.iter().all(|x| view.contains(x));
+        for h in &hosts[1..] {
+            agree &= h.holders(&site).await == view;
+        }
+        since = match since {
+            Some((t, v)) if agree && v == view => Some((t, v)),
+            _ if agree => Some((tokio::time::Instant::now(), view.clone())),
+            _ => None,
+        };
+        if let Some((t, v)) = &since
+            && t.elapsed() >= stable_for
+        {
+            break v.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never settled at three copies on every host: hosts[0] sees {view:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(holders.len(), 3, "stays at three: {holders:?}");
     for x in &preferred {
         assert!(holders.contains(x), "preferred {x} holds a copy");
