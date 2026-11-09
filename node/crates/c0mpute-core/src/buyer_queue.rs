@@ -216,9 +216,143 @@ impl QueueBoard {
     }
 }
 
+/// Whose turn it is to auction, per queue (workload + required tags).
+///
+/// Every queued request used to run its own auction loop with its own
+/// backoff, so when a worker freed up whichever request happened to be
+/// re-offering won it: the newest requests (shortest backoff) jumped ahead
+/// and the oldest could wait the whole two hours behind them. Now only the
+/// oldest waiting request of a queue auctions; it keeps the turn through its
+/// no-bid rounds and passes it on as soon as a worker accepted it (or it
+/// gives up), so workers are handed out first-in first-out.
+#[derive(Clone, Default)]
+pub struct AuctionTurns {
+    inner: Arc<Mutex<HashMap<String, QueueTurn>>>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Default)]
+struct QueueTurn {
+    /// Auctioning now; keeps the turn until it lets go.
+    holder: Option<(u64, String)>,
+    /// Waiting for the turn, oldest first.
+    waiting: std::collections::BTreeSet<(u64, String)>,
+}
+
+/// Holding the turn of one queue; dropping it hands the turn on.
+pub struct AuctionTurn {
+    turns: AuctionTurns,
+    queue: String,
+    entry: (u64, String),
+}
+
+impl AuctionTurns {
+    /// The queue a request waits in: its workload and the tags it needs.
+    pub fn queue_of(workload: &str, required: &[String]) -> String {
+        let mut tags: Vec<&str> = required.iter().map(String::as_str).collect();
+        tags.sort_unstable();
+        format!("{workload}|{}", tags.join(","))
+    }
+
+    /// Wait until `key` (queued at `queued_at_ms`) is the oldest request
+    /// waiting to auction in `queue`.
+    pub async fn acquire(&self, queue: &str, key: &str, queued_at_ms: u64) -> AuctionTurn {
+        let entry = (queued_at_ms, key.to_string());
+        if let Ok(mut map) = self.inner.lock() {
+            map.entry(queue.to_string()).or_default().waiting.insert(entry.clone());
+        }
+        // Built before the guard so a drop between the check and the wait
+        // still wakes us.
+        let turn = AuctionTurn { turns: self.clone(), queue: queue.to_string(), entry };
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.try_take(queue, &turn.entry) {
+                return turn;
+            }
+            notified.await;
+        }
+    }
+
+    /// Take the turn if nobody holds it and `entry` is the oldest waiting.
+    fn try_take(&self, queue: &str, entry: &(u64, String)) -> bool {
+        let Ok(mut map) = self.inner.lock() else { return true };
+        let Some(q) = map.get_mut(queue) else { return true };
+        if q.holder.is_some() || q.waiting.first() != Some(entry) {
+            return false;
+        }
+        q.waiting.remove(entry);
+        q.holder = Some(entry.clone());
+        true
+    }
+
+    /// Requests waiting for (or holding) the turn of `queue`.
+    pub fn waiting(&self, queue: &str) -> usize {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(queue).map(|q| q.waiting.len() + usize::from(q.holder.is_some())))
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for AuctionTurn {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.turns.inner.lock()
+            && let Some(q) = map.get_mut(&self.queue)
+        {
+            // Holding the turn, or still waiting (gave up or was dropped).
+            if q.holder.as_ref() == Some(&self.entry) {
+                q.holder = None;
+            } else {
+                q.waiting.remove(&self.entry);
+            }
+            if q.holder.is_none() && q.waiting.is_empty() {
+                map.remove(&self.queue);
+            }
+        }
+        self.turns.changed.notify_waiters();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn auction_turns_go_oldest_first_whatever_the_arrival_order() {
+        let turns = AuctionTurns::default();
+        let q = AuctionTurns::queue_of("diffusion.txt2img", &["b".into(), "a".into()]);
+        assert_eq!(q, "diffusion.txt2img|a,b");
+        // The newest request arrives first and takes the free turn.
+        let newest = turns.acquire(&q, "new", 300).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut tasks = Vec::new();
+        // Then a middle and the oldest request queue behind it.
+        for (key, at) in [("mid", 200u64), ("old", 100u64)] {
+            let (turns, q, order) = (turns.clone(), q.clone(), order.clone());
+            tasks.push(tokio::spawn(async move {
+                let _t = turns.acquire(&q, key, at).await;
+                order.lock().unwrap().push(key);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(turns.waiting(&q), 3);
+        drop(newest);
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), vec!["old", "mid"]);
+        assert_eq!(turns.waiting(&q), 0);
+        // Another queue is never held up by this one.
+        let other = AuctionTurns::queue_of("music.txt2music", &[]);
+        let _a = turns.acquire(&q, "x", 1).await;
+        let _b = tokio::time::timeout(Duration::from_millis(50), turns.acquire(&other, "y", 2))
+            .await
+            .expect("other queue has its own turn");
+    }
 
     #[test]
     fn config_reads_env_per_workload_and_caps() {
