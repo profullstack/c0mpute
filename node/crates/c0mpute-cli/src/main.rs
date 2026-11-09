@@ -1879,8 +1879,19 @@ async fn run_doctor(fix: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn print_worker_census(_fix: bool) {
+    println!("INFO  workers: the duplicate-worker census needs Linux (systemd, /proc)");
+}
+
+#[cfg(not(unix))]
+fn install_worker_unit(_system: bool, _no_start: bool) -> Result<()> {
+    anyhow::bail!("`worker install` writes a systemd unit; it is Linux only")
+}
+
 /// `c0mpute doctor`: every worker process, unit and identity lock on this
 /// machine, what is wrong, and (`--fix`) the fixes it may apply.
+#[cfg(unix)]
 fn print_worker_census(fix: bool) {
     use c0mpute_core::instance;
     let report = instance::scan();
@@ -1951,6 +1962,7 @@ fn print_worker_census(fix: bool) {
 }
 
 /// `c0mpute worker install`: one systemd unit for this user's worker.
+#[cfg(unix)]
 fn install_worker_unit(system: bool, no_start: bool) -> Result<()> {
     use c0mpute_core::instance;
     // SAFETY: getuid has no preconditions.

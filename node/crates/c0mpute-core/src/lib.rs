@@ -46,6 +46,10 @@ pub mod pricing;
 pub mod reachability;
 pub mod render;
 pub mod inference;
+#[cfg(unix)]
+pub mod instance;
+#[cfg(not(unix))]
+#[path = "instance_stub.rs"]
 pub mod instance;
 pub mod private;
 pub mod register;

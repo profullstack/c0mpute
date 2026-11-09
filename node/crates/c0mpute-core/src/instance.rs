@@ -458,7 +458,7 @@ impl Holder {
     }
 }
 
-/// What a lock file says about its holder: the record, or (pre-0.3.19
+/// What a lock file says about its holder: the record, or (pre-0.3.20
 /// workers wrote only a pid) a minimal one.
 pub fn read_holder(text: &str) -> Option<Holder> {
     if let Ok(h) = serde_json::from_str::<Holder>(text) {
@@ -475,7 +475,7 @@ pub fn read_holder(text: &str) -> Option<Holder> {
         uid,
         user: user_name(uid),
         instance: String::new(),
-        version: "older than 0.3.19".into(),
+        version: "older than 0.3.20".into(),
     })
 }
 
