@@ -468,6 +468,25 @@ impl Supervisor {
             None
         };
 
+        // Secure chat: mailbox nodes hold sealed messages for offline
+        // recipients; any node (gateways included) receives direct messages
+        // for this machine's own `c0mpute dm` user once it has a home record.
+        let roles = &self.config.roles;
+        let dm_mailbox = roles.contains(&c0mpute_proto::Role::Mailbox) || roles.contains(&c0mpute_proto::Role::Gateway);
+        match crate::dm::Dm::start(
+            self.libp2p.clone(),
+            crate::dm::Options {
+                serve_mailbox: dm_mailbox,
+                paths: Some(crate::dm::Paths::under(&self.config.storage.root)),
+                ..Default::default()
+            },
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(err = %e, "secure-chat: not started"),
+        }
+
         // Ads: every node that runs hosting keeps the campaign index and
         // relays c0mpute/ads/v1 (gossipsub forwards only through subscribed
         // peers); only gateways answer ad requests.

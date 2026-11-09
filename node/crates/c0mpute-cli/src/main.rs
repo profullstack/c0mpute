@@ -22,6 +22,8 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod ai_chat;
+mod dm_cli;
+use dm_cli::run_chat;
 mod gameserver;
 mod peers;
 mod storage;
@@ -39,7 +41,6 @@ use c0mpute_core::{
     run_register,
 };
 use c0mpute_proto::Role;
-use c0mpute_secure_chat as chat;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -588,7 +589,7 @@ enum SpeechCmd {
 
 /// `c0mpute dm` subcommands, still accepted after `c0mpute chat` for old scripts.
 const SECURE_CHAT_CMDS: &[&str] = &[
-    "keygen", "key", "restore", "send", "pull", "lookup", "contacts", "block",
+    "keygen", "key", "restore", "send", "pull", "inbox", "lookup", "contacts", "block", "unblock",
 ];
 
 #[derive(Parser, Debug)]
@@ -1063,31 +1064,67 @@ enum ChatCmd {
         #[arg(long = "from-backup")]
         from_backup: PathBuf,
     },
-    /// Send an encrypted DM to a recipient DID. [v0.2: transport not yet live]
+    /// Send an end-to-end encrypted message. TO is a contact name, an
+    /// address, a fingerprint, or a `c0dm1.` identity string. Delivered
+    /// directly to the recipient's node when it is online, otherwise held on
+    /// three mailbox nodes for up to --ttl-days.
     Send {
         to: String,
         message: String,
-        /// Hide sender identity from relay nodes.
-        #[arg(long)]
+        /// Days mailboxes keep the message for an offline recipient (max 30).
+        #[arg(long, default_value_t = 30)]
+        ttl_days: u64,
+        /// Accepted for old scripts; every message is sealed now.
+        #[arg(long, hide = true)]
         sealed: bool,
     },
-    /// Fetch queued messages from the relay. [v0.2: relay not yet live]
+    /// Fetch new messages (this machine's node spool and the mailboxes),
+    /// decrypt, verify, and delete them from the network.
     Pull,
-    /// Resolve a DID to its chat public key. [v0.2: DHT not yet live]
-    Lookup { did: String },
-    /// List saved contacts.
-    Contacts,
-    /// Block a DID (messages dropped locally).
-    Block { did: String },
+    /// Show received messages.
+    Inbox {
+        /// Most recent N messages.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Resolve a fingerprint or address to a full public key.
+    Lookup { query: String },
+    /// Contacts (stored locally, encrypted under your key). Lists by default.
+    Contacts {
+        #[command(subcommand)]
+        cmd: Option<ContactsCmd>,
+    },
+    /// Block a sender: their messages are dropped (and deleted) on receipt.
+    Block { who: String },
+    /// Unblock a sender.
+    Unblock { who: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ContactsCmd {
+    /// Add a contact by address, fingerprint, or `c0dm1.` identity string.
+    Add {
+        who: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List contacts.
+    Ls,
+    /// Remove a contact.
+    Rm { who: String },
 }
 
 #[derive(Subcommand, Debug)]
 enum KeyCmd {
-    /// Print the public key, fingerprint, and DID.
-    Show,
+    /// Print your address and fingerprint (and, with --full, the shareable identity).
+    Show {
+        /// Also print the `c0dm1.` identity string others can paste.
+        #[arg(long)]
+        full: bool,
+    },
     /// Re-export the encrypted backup JSON (pipe to a file for safe storage).
     Export,
-    /// Generate a new keypair and re-announce (old key still valid until revoked).
+    /// How to replace your keypair.
     Rotate,
 }
 
@@ -1363,12 +1400,12 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Podcasting { cmd } => run_podcasting(cmd).await,
         Cmd::Podcasts { cmd } => run_podcasts(cmd).await,
         Cmd::Ads { cmd } => run_ads(cmd).await,
-        Cmd::Dm { cmd } => run_chat(cmd),
+        Cmd::Dm { cmd } => run_chat(cmd).await,
         // The old secure-chat forms (`c0mpute chat keygen|send|...`) keep working.
         Cmd::Chat { args } if args.first().is_some_and(|a| SECURE_CHAT_CMDS.contains(&a.as_str())) => {
             let dm = DmCli::try_parse_from(std::iter::once("c0mpute dm".to_string()).chain(args))
                 .unwrap_or_else(|e| e.exit());
-            run_chat(dm.cmd)
+            run_chat(dm.cmd).await
         }
         Cmd::Chat { args } => ai_chat::run(&args).await,
         Cmd::Tui { args } => run_tui(&args),
@@ -1625,6 +1662,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     Role::Embed,
                     Role::LiveStream,
                     Role::Render,
+                    Role::Mailbox,
                 ] {
                     if !cfg.roles.contains(&role) {
                         cfg.roles.push(role);
@@ -3856,124 +3894,6 @@ async fn run_jobs(cmd: JobsCmd) -> Result<()> {
 // secure-chat plugin (in-process)
 // ────────────────────────────────────────────────────────────────────────
 
-fn run_chat(cmd: ChatCmd) -> Result<()> {
-    match cmd {
-        ChatCmd::Keygen => {
-            let path = chat::key_file_path()?;
-            if path.exists() {
-                eprintln!(
-                    "A keyfile already exists at {}.\n\
-                     Use `c0mpute dm key rotate` to generate a new one, or\n\
-                     delete the file manually to start fresh.",
-                    path.display()
-                );
-                anyhow::bail!("keyfile already exists");
-            }
-            let key = chat::ChatKey::generate();
-            let password = prompt_new_password()?;
-            let kf = key.encrypt_to_keyfile(&password, None)?;
-            chat::save_keyfile(&path, &kf)?;
-
-            println!("keypair generated");
-            println!("  enc pubkey  : {}", kf.pubkey_enc);
-            println!("  sig pubkey  : {}", kf.pubkey_sig);
-            println!("  fingerprint : {}", key.fingerprint());
-            println!("  keyfile     : {}", path.display());
-            println!();
-            println!("── encrypted backup (save this somewhere safe) ──");
-            println!("{}", serde_json::to_string_pretty(&kf)?);
-            println!("─────────────────────────────────────────────────");
-            println!();
-            println!("restore with: c0mpute dm restore --from-backup <file>");
-            Ok(())
-        }
-
-        ChatCmd::Key { cmd } => match cmd {
-            KeyCmd::Show => {
-                let path = chat::key_file_path()?;
-                let kf = chat::load_keyfile(&path)?;
-                println!("enc pubkey  : {}", kf.pubkey_enc);
-                println!("sig pubkey  : {}", kf.pubkey_sig);
-                if let Some(did) = &kf.did {
-                    println!("did         : {did}");
-                }
-                // Fingerprint needs decryption — show pubkey hash instead
-                use base64::prelude::*;
-                let enc_bytes = BASE64_URL_SAFE_NO_PAD.decode(&kf.pubkey_enc)?;
-                let fingerprint: String = enc_bytes[..8]
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(":");
-                println!("fingerprint : {fingerprint}");
-                Ok(())
-            }
-            KeyCmd::Export => {
-                let path = chat::key_file_path()?;
-                let kf = chat::load_keyfile(&path)?;
-                println!("{}", serde_json::to_string_pretty(&kf)?);
-                Ok(())
-            }
-            KeyCmd::Rotate => {
-                println!("[v0.2] key rotation requires DHT re-announcement (not yet live)");
-                println!("       Generate a new keypair manually:");
-                println!("         1. Delete ~/.config/c0mpute/chat.key");
-                println!("         2. Run: c0mpute dm keygen");
-                Ok(())
-            }
-        },
-
-        ChatCmd::Restore { from_backup } => {
-            let dest = chat::key_file_path()?;
-            if dest.exists() {
-                eprintln!(
-                    "A keyfile already exists at {}. Remove it first.",
-                    dest.display()
-                );
-                anyhow::bail!("keyfile already exists");
-            }
-            let raw = std::fs::read_to_string(&from_backup)?;
-            let kf: chat::KeyFile = serde_json::from_str(&raw)?;
-            let password = rpassword::prompt_password("Password: ")?;
-            // Verify the password decrypts correctly before saving.
-            chat::decrypt_keyfile(&kf, &password)?;
-            chat::save_keyfile(&dest, &kf)?;
-            println!("keyfile restored to {}", dest.display());
-            Ok(())
-        }
-
-        ChatCmd::Send {
-            to,
-            message: _,
-            sealed: _,
-        } => {
-            println!("[v0.2] direct send to {to} requires p2p transport (not yet live)");
-            println!("       DHT key lookup and gossip relay land in v0.2.");
-            Ok(())
-        }
-
-        ChatCmd::Pull => {
-            println!("[v0.2] pull requires relay node support (not yet live)");
-            Ok(())
-        }
-
-        ChatCmd::Lookup { did } => {
-            println!("[v0.2] DHT lookup for {did} not yet live");
-            Ok(())
-        }
-
-        ChatCmd::Contacts => {
-            println!("[v0.2] contact list not yet implemented");
-            Ok(())
-        }
-
-        ChatCmd::Block { did } => {
-            println!("[v0.2] block list for {did} not yet implemented");
-            Ok(())
-        }
-    }
-}
-
 fn prompt_new_password() -> Result<String> {
     loop {
         let pw = rpassword::prompt_password("New password (min 10 chars): ")?;
@@ -4217,6 +4137,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "gameserver" | "gameservers" | "games" => Some(Role::Gameserver),
         "live-stream" | "live_stream" | "livestream" | "live" | "stream" => Some(Role::LiveStream),
         "render" | "blender" => Some(Role::Render),
+        "mailbox" | "dm" | "secure-chat" | "chat-mailbox" => Some(Role::Mailbox),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

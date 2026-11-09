@@ -5,6 +5,9 @@
 //!   - kad DHT under `/c0mpute/kad/1.0.0` for peer + content discovery
 //!   - identify + ping for housekeeping
 //!   - request/response under `/c0mpute/chunk-fetch/1.0.0` for chunk bytes
+//!   - request/response under `/c0mpute/rpc/1.0.0`: small named-service
+//!     calls between peers (secure-chat mailboxes use it); services register
+//!     an [`RpcHandler`] with [`Libp2pNetwork::register_rpc`]
 //!
 //! The swarm runs on a tokio task; the `Network` trait impl talks to it
 //! through mpsc channels.
@@ -30,6 +33,20 @@ use crate::{ChunkSource, Network, identity as id_mod};
 
 const KAD_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/kad/1.0.0");
 const FETCH_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/chunk-fetch/1.0.0");
+const RPC_PROTOCOL: StreamProtocol = StreamProtocol::new("/c0mpute/rpc/1.0.0");
+/// Largest RPC request body accepted.
+pub const RPC_MAX_REQUEST: u64 = 1024 * 1024;
+/// Largest RPC response body accepted.
+pub const RPC_MAX_RESPONSE: u64 = 8 * 1024 * 1024;
+
+/// Serves one named RPC service (see [`Libp2pNetwork::register_rpc`]).
+#[async_trait]
+pub trait RpcHandler: Send + Sync + 'static {
+    /// Answer a request from `peer`. `Err` is sent back as an error string.
+    async fn handle(&self, peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String>;
+}
+
+type RpcHandlers = Arc<std::sync::RwLock<HashMap<String, Arc<dyn RpcHandler>>>>;
 const IDENTIFY_PROTOCOL: &str = "/c0mpute/id/1.0.0";
 
 /// What the swarm task accepts from the public API.
@@ -77,6 +94,19 @@ enum Cmd {
     },
     Addrs {
         reply: oneshot::Sender<Vec<Multiaddr>>,
+    },
+    Rpc {
+        peer: PeerId,
+        service: String,
+        body: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>>>,
+    },
+    RpcRespond {
+        channel: request_response::ResponseChannel<RpcResponse>,
+        resp: RpcResponse,
+    },
+    ConnectedPeers {
+        reply: oneshot::Sender<Vec<PeerId>>,
     },
     Publish {
         topic: String,
@@ -150,6 +180,7 @@ pub struct Libp2pNetwork {
     cmd_tx: mpsc::Sender<Cmd>,
     gossip_tx: broadcast::Sender<GossipMessage>,
     peer_id: PeerId,
+    rpc_handlers: RpcHandlers,
 }
 
 impl Libp2pNetwork {
@@ -162,7 +193,15 @@ impl Libp2pNetwork {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
         let (gossip_tx, _) = broadcast::channel::<GossipMessage>(256);
 
-        let task = SwarmTask::new(keypair, config.local_source, gossip_tx.clone()).await?;
+        let rpc_handlers: RpcHandlers = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let task = SwarmTask::new(
+            keypair,
+            config.local_source,
+            gossip_tx.clone(),
+            rpc_handlers.clone(),
+            cmd_tx.downgrade(),
+        )
+        .await?;
         for addr in &config.listen {
             task.swarm
                 .lock()
@@ -184,7 +223,48 @@ impl Libp2pNetwork {
             cmd_tx,
             gossip_tx,
             peer_id,
+            rpc_handlers,
         })
+    }
+
+    /// Serve `service` over `/c0mpute/rpc/1.0.0`. Replaces any handler
+    /// already registered under the name.
+    pub fn register_rpc(&self, service: &str, handler: Arc<dyn RpcHandler>) {
+        if let Ok(mut h) = self.rpc_handlers.write() {
+            h.insert(service.to_string(), handler);
+        }
+    }
+
+    /// Call `service` on `peer` (dialing it if needed) and wait for the
+    /// answer. The request times out after 20 s.
+    pub async fn rpc(&self, peer: PeerId, service: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+        if peer == self.peer_id {
+            let handler = self.rpc_handlers.read().ok().and_then(|h| h.get(service).cloned());
+            return match handler {
+                Some(h) => h.handle(peer, body).await.map_err(|e| anyhow!("{e}")),
+                None => Err(anyhow!("{service}: not served here")),
+            };
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Rpc {
+                peer,
+                service: service.to_string(),
+                body,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("swarm task closed"))?;
+        rx.await.map_err(|_| anyhow!("swarm task closed"))?
+    }
+
+    /// Peers with an open connection now.
+    pub async fn connected_peers(&self) -> Vec<PeerId> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::ConnectedPeers { reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
     }
 
     /// Publish bytes to a gossipsub topic. The topic must have been
@@ -364,6 +444,7 @@ struct C0mputeBehaviour {
     identify: identify::Behaviour,
     ping: ping::Behaviour,
     fetch: request_response::cbor::Behaviour<FetchRequest, FetchResponse>,
+    rpc: request_response::Behaviour<request_response::cbor::codec::Codec<RpcRequest, RpcResponse>>,
     gossipsub: gossipsub::Behaviour,
     mdns: mdns::tokio::Behaviour,
 }
@@ -377,6 +458,58 @@ struct FetchRequest {
 enum FetchResponse {
     Ok { bytes: Vec<u8> },
     NotFound,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct RpcRequest {
+    service: String,
+    #[serde(with = "cbor_bytes")]
+    body: Vec<u8>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+enum RpcResponse {
+    Ok {
+        #[serde(with = "cbor_bytes")]
+        body: Vec<u8>,
+    },
+    Err {
+        msg: String,
+    },
+}
+
+/// Encode `Vec<u8>` as a CBOR byte string (serde's default is an array of
+/// integers, up to twice the size).
+mod cbor_bytes {
+    use serde::{Deserializer, Serializer, de};
+
+    pub fn serialize<S: Serializer>(b: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(b)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        struct V;
+        impl<'de> de::Visitor<'de> for V {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("bytes")
+            }
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(v.to_vec())
+            }
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(v)
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut out = Vec::new();
+                while let Some(b) = seq.next_element::<u8>()? {
+                    out.push(b);
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_byte_buf(V)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -395,6 +528,12 @@ struct SwarmTask {
     /// Track which chunk a fetch is for, so we can re-issue against another
     /// provider if the first one says NotFound.
     fetch_targets: HashMap<request_response::OutboundRequestId, Hash>,
+    /// Pending outbound RPC calls.
+    pending_rpcs: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
+    rpc_handlers: RpcHandlers,
+    /// For handler tasks to hand their answer back to the swarm loop (weak,
+    /// so the loop still ends when the last `Libp2pNetwork` drops).
+    cmd_weak: mpsc::WeakSender<Cmd>,
     /// Broadcast channel for gossipsub messages delivered to subscribed
     /// topics. Senders are upstream consumers that called `messages()`.
     gossip_tx: broadcast::Sender<GossipMessage>,
@@ -405,6 +544,8 @@ impl SwarmTask {
         keypair: identity::Keypair,
         local_source: Option<Arc<dyn ChunkSource>>,
         gossip_tx: broadcast::Sender<GossipMessage>,
+        rpc_handlers: RpcHandlers,
+        cmd_weak: mpsc::WeakSender<Cmd>,
     ) -> Result<Self> {
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
@@ -430,6 +571,13 @@ impl SwarmTask {
                     [(FETCH_PROTOCOL, request_response::ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );
+                let rpc = request_response::Behaviour::with_codec(
+                    request_response::cbor::codec::Codec::<RpcRequest, RpcResponse>::default()
+                        .set_request_size_maximum(RPC_MAX_REQUEST)
+                        .set_response_size_maximum(RPC_MAX_RESPONSE),
+                    [(RPC_PROTOCOL, request_response::ProtocolSupport::Full)],
+                    request_response::Config::default().with_request_timeout(Duration::from_secs(20)),
+                );
                 let gossipsub_cfg = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_secs(1))
                     .validation_mode(gossipsub::ValidationMode::Strict)
@@ -446,6 +594,7 @@ impl SwarmTask {
                     identify,
                     ping,
                     fetch,
+                    rpc,
                     gossipsub,
                     mdns,
                 })
@@ -460,6 +609,9 @@ impl SwarmTask {
             pending_kad_lookups: HashMap::new(),
             pending_fetches: HashMap::new(),
             fetch_targets: HashMap::new(),
+            pending_rpcs: HashMap::new(),
+            rpc_handlers,
+            cmd_weak,
             gossip_tx,
         })
     }
@@ -575,6 +727,28 @@ impl SwarmTask {
                 self.fetch_targets.insert(request_id, req.chunk_hash);
                 debug!(%peer, chunk = %req.chunk_hash, "direct chunk fetch issued");
             }
+            Cmd::Rpc {
+                peer,
+                service,
+                body,
+                reply,
+            } => {
+                let id = self
+                    .swarm
+                    .lock()
+                    .await
+                    .behaviour_mut()
+                    .rpc
+                    .send_request(&peer, RpcRequest { service, body });
+                self.pending_rpcs.insert(id, reply);
+            }
+            Cmd::RpcRespond { channel, resp } => {
+                let _ = self.swarm.lock().await.behaviour_mut().rpc.send_response(channel, resp);
+            }
+            Cmd::ConnectedPeers { reply } => {
+                let peers = self.swarm.lock().await.connected_peers().copied().collect();
+                let _ = reply.send(peers);
+            }
             Cmd::Publish {
                 topic,
                 payload,
@@ -655,6 +829,56 @@ impl SwarmTask {
                 if let Some(reply) = self.pending_fetches.remove(&request_id) {
                     self.fetch_targets.remove(&request_id);
                     let _ = reply.send(Err(anyhow!("fetch failed: {error}")));
+                }
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Rpc(request_response::Event::Message {
+                peer, message, ..
+            })) => match message {
+                request_response::Message::Request { request, channel, .. } => {
+                    let handler = self
+                        .rpc_handlers
+                        .read()
+                        .ok()
+                        .and_then(|h| h.get(&request.service).cloned());
+                    match handler {
+                        Some(h) => {
+                            let weak = self.cmd_weak.clone();
+                            tokio::spawn(async move {
+                                let resp = match h.handle(peer, request.body).await {
+                                    Ok(body) => RpcResponse::Ok { body },
+                                    Err(msg) => RpcResponse::Err { msg },
+                                };
+                                if let Some(tx) = weak.upgrade() {
+                                    let _ = tx.send(Cmd::RpcRespond { channel, resp }).await;
+                                }
+                            });
+                        }
+                        None => {
+                            let resp = RpcResponse::Err {
+                                msg: format!("{}: not served here", request.service),
+                            };
+                            let _ = self.swarm.lock().await.behaviour_mut().rpc.send_response(channel, resp);
+                        }
+                    }
+                }
+                request_response::Message::Response {
+                    request_id, response, ..
+                } => {
+                    if let Some(reply) = self.pending_rpcs.remove(&request_id) {
+                        let _ = reply.send(match response {
+                            RpcResponse::Ok { body } => Ok(body),
+                            RpcResponse::Err { msg } => Err(anyhow!("{msg}")),
+                        });
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Rpc(request_response::Event::OutboundFailure {
+                request_id,
+                error,
+                ..
+            })) => {
+                if let Some(reply) = self.pending_rpcs.remove(&request_id) {
+                    let _ = reply.send(Err(anyhow!("rpc failed: {error}")));
                 }
             }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Gossipsub(
@@ -901,6 +1125,52 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("node never bound a listen addr");
+    }
+
+    struct Echo;
+
+    #[async_trait]
+    impl RpcHandler for Echo {
+        async fn handle(&self, _peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+            if body == b"fail" {
+                return Err("asked to fail".into());
+            }
+            let mut out = b"echo:".to_vec();
+            out.extend(body);
+            Ok(out)
+        }
+    }
+
+    /// Named-service RPC between two nodes: answers, errors, unknown service.
+    #[tokio::test]
+    async fn two_node_rpc_roundtrip() {
+        let net_a = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("rpc-a")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        net_a.register_rpc("echo", Arc::new(Echo));
+        let a_full = wait_for_listen(&net_a)
+            .await
+            .with(libp2p::multiaddr::Protocol::P2p(net_a.peer_id()));
+        let net_b = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("rpc-b"))
+                .with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()])
+                .with_bootstrap(vec![a_full]),
+        )
+        .await
+        .unwrap();
+        let big = vec![7u8; 200_000];
+        let got = net_b.rpc(net_a.peer_id(), "echo", big.clone()).await.unwrap();
+        assert_eq!(&got[..5], b"echo:");
+        assert_eq!(&got[5..], &big[..]);
+        let err = net_b.rpc(net_a.peer_id(), "echo", b"fail".to_vec()).await.unwrap_err();
+        assert!(err.to_string().contains("asked to fail"), "{err}");
+        let err = net_b.rpc(net_a.peer_id(), "nope", vec![]).await.unwrap_err();
+        assert!(err.to_string().contains("not served"), "{err}");
+        assert!(net_b.connected_peers().await.contains(&net_a.peer_id()));
+        // Calling yourself runs the local handler.
+        assert_eq!(net_a.rpc(net_a.peer_id(), "echo", b"x".to_vec()).await.unwrap(), b"echo:x");
     }
 
     /// gossipsub publish/subscribe across two nodes.

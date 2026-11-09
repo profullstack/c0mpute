@@ -109,6 +109,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                 }
             }
             Role::LiveStream => tags.push(crate::live::ROLE_TAG.to_string()),
+            Role::Mailbox => tags.push(crate::dm::ROLE_TAG.to_string()),
             Role::Render => {
                 // Only where `blender` runs. The probe (a few seconds) runs
                 // once at worker start; until it finishes, nothing is shown.

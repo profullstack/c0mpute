@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod config;
 pub mod crawl;
 pub mod diffusion;
+pub mod dm;
 pub mod music;
 pub mod hosting;
 pub mod live;
