@@ -4013,6 +4013,15 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                     c0mpute_core::hosting::TARGET_REPLICAS
                 );
             }
+            // Some copies held = published (the network heals the rest);
+            // none held = nothing is serving the site yet, so fail loudly.
+            if copies == 0 {
+                eprintln!(
+                    "status:  not yet held by any hosting node after {wait_secs}s (exit 1); \
+                     re-run publish with the same --name"
+                );
+                std::process::exit(1);
+            }
             Ok(())
         }
         HostingCmd::Disks {

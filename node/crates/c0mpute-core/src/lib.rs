@@ -8,6 +8,7 @@ pub mod activity;
 pub mod apps;
 pub mod ads;
 pub mod auction_stats;
+pub mod backoff;
 pub mod buyer;
 pub mod canary;
 pub mod capabilities;
