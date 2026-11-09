@@ -87,10 +87,52 @@ function loadBlockedRollback(): string[] {
   }
 }
 
-function loadManifest(): ReleaseManifest {
+/**
+ * The newest *published* GitHub release, cached for two minutes.
+ *
+ * Without an env override this feed used to announce FALLBACK_VERSION, which
+ * goes live when the version-bump PR merges and the site redeploys, minutes
+ * before the release workflow has built and published that tag's binaries.
+ * Every node polling in that gap fetched a 404 for the archive or its .sha256
+ * ("auto-upgrade: poll failed", 2026-11-09, v0.2.92/v0.2.93). The release
+ * workflow publishes a release (draft until then) only once every platform
+ * uploaded, so GitHub's latest release always has its assets.
+ */
+const RELEASE_CACHE_MS = 120_000;
+let cachedRelease: { version: string; at: number } | null = null;
+
+async function publishedVersion(): Promise<string | null> {
+  const now = Date.now();
+  if (cachedRelease && now - cachedRelease.at < RELEASE_CACHE_MS) return cachedRelease.version;
+  try {
+    const headers: Record<string, string> = { accept: "application/vnd.github+json" };
+    if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const r = await fetch("https://api.github.com/repos/profullstack/c0mpute/releases/latest", {
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (r.ok) {
+      const tag = ((await r.json()) as { tag_name?: unknown }).tag_name;
+      if (typeof tag === "string" && /^v?\d+\.\d+\.\d+$/.test(tag)) {
+        cachedRelease = { version: tag.replace(/^v/, ""), at: now };
+        return cachedRelease.version;
+      }
+    }
+  } catch {
+    // Fall through: keep serving the last good answer.
+  }
+  // Rate-limited or down: the last published version we saw (retried after
+  // the cache period), else the build-time fallback.
+  if (cachedRelease) cachedRelease = { ...cachedRelease, at: now };
+  return cachedRelease?.version ?? null;
+}
+
+async function loadManifest(): Promise<ReleaseManifest> {
   const channelRaw = process.env.C0MPUTE_RELEASE_CHANNEL;
   return {
-    version: process.env.C0MPUTE_LATEST_VERSION || FALLBACK_VERSION,
+    version:
+      process.env.C0MPUTE_LATEST_VERSION || (await publishedVersion()) || FALLBACK_VERSION,
     channel: isChannel(channelRaw) ? channelRaw : "stable",
     min_required: process.env.C0MPUTE_MIN_REQUIRED || FALLBACK_MIN_REQUIRED,
     artifacts: loadArtifacts(),
@@ -99,7 +141,7 @@ function loadManifest(): ReleaseManifest {
 }
 
 export async function GET() {
-  return NextResponse.json(loadManifest(), {
+  return NextResponse.json(await loadManifest(), {
     headers: { "cache-control": "public, max-age=60, s-maxage=60" },
   });
 }
