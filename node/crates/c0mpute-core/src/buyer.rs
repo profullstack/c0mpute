@@ -414,8 +414,11 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     let (sealed, result_key) =
         session.seal_for(&job_id, &auction.workload_type, &offer.buyer_peer_id, &winner)?;
     drop(session);
-    // Held until this function returns (receipt or timeout); served only to
-    // the winner over request-response, never on gossip.
+    // Pushed on the direct accept when it fits one request; also held until
+    // this function returns (receipt or timeout) for the winner to fetch over
+    // request-response. Never on gossip.
+    let sealed_b64 = (sealed.len() <= crate::job_e2e::MAX_PUSHED_SPEC)
+        .then(|| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &sealed));
     let _payload = crate::job_e2e::hold_payload(&net, &job_id, winner_peer, sealed);
 
     // ── publish accept ──────────────────────────────────────────────
@@ -433,21 +436,21 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             &offer.buyer_peer_id,
         ),
         e2e: Some(c0mpute_net::topics::JOB_E2E_VERSION),
+        sealed_spec: None,
         result_key: None,
     };
     // Tell the winner directly as well as on the topic: an accept lost on
     // the mesh used to leave the buyer waiting out the whole receipt timeout.
-    let accept_bytes = serde_json::to_vec(&accept)?;
-    let direct = async {
-        match winner.bidder_peer_id.parse::<c0mpute_net::PeerId>() {
-            Ok(peer) => {
-                net.send_direct(peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
-                    .await
-            }
-            Err(e) => Err(anyhow::anyhow!("winner peer id: {e}")),
-        }
-    };
-    let (direct, gossip) = tokio::join!(direct, publish_json(&net, &topic, &accept));
+    // The direct accept carries the sealed spec, so the winner starts without
+    // a round trip back (and without having to dial us at all); it goes
+    // first, so it is normally the one the winner acts on.
+    let mut direct_accept = accept.clone();
+    direct_accept.sealed_spec = sealed_b64;
+    let accept_bytes = serde_json::to_vec(&direct_accept)?;
+    let direct = net
+        .send_direct(winner_peer, &topic, &accept_bytes, DIRECT_ACCEPT_TIMEOUT)
+        .await;
+    let gossip = publish_json(&net, &topic, &accept).await;
     match (&direct, gossip) {
         (Ok(()), _) => debug!(%job_id, "buyer: accept delivered to the winner"),
         (Err(e), Ok(())) => debug!(%job_id, err = %e, "buyer: accept on gossip only"),

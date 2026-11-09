@@ -295,6 +295,12 @@ pub struct JobAccept {
     /// the winner fetches the sealed spec from the buyer point to point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2e: Option<u8>,
+    /// The spec sealed to the winner (base64), only on the accept the buyer
+    /// sends the winner directly (request-response, never gossip), and only
+    /// when it fits one request. Without it the winner fetches it from the
+    /// buyer over `c0mpute.job.payload.v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_spec: Option<String>,
     /// Worker side only, set once the sealed spec is opened: the key the
     /// result is sealed to the buyer with. Never serialized.
     #[serde(skip)]
