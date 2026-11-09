@@ -10,7 +10,10 @@ open an issue; this page is meant to be checkable against the code.
 
 - Downloads the `c0mpute`, `infernet` and `coinpay` release binaries and
   **verifies each one's minisign signature** against the public key in
-  [`minisign.pub`](../minisign.pub) before installing it. A bad signature aborts the install.
+  [`minisign.pub`](../minisign.pub) before installing it. A missing or bad signature aborts the
+  install. Without minisign installed, it downloads a pinned minisign build (checked by sha256)
+  to do the check; on Intel Macs, which upstream does not build for, it asks you to
+  `brew install minisign` first.
 - Installs everything under your home directory: binaries in `~/.c0mpute/bin`,
   data in `~/.local/share/c0mpute` (or a bigger volume it symlinks, unless
   `NO_STORAGE_RELOCATE=1`).
@@ -36,8 +39,11 @@ open an issue; this page is meant to be checkable against the code.
   not acceptable for your main machine, run the node in a VM, a container or
   on a spare box. It earns the same there.
 - The node keeps itself up to date (`C0MPUTE_NO_AUTO_UPDATE=1` turns that
-  off). Updates are verified against the same minisign key before the binary
-  is swapped.
+  off). From v0.2.91 on, updates are verified against the same minisign key before
+  the binary is swapped; a node on an older version checks only the sha256 until it
+  is on v0.2.91 or later.
+- `c0mpute plugin install` still runs the plugin's own install script without a
+  signature check. Only install plugins you trust.
 
 ## Models it serves
 
