@@ -8,7 +8,8 @@
 //!   and SHA-256 checked: Z-Image-Turbo Q4_K (the diffusion model), Qwen3-4B
 //!   Instruct Q4_K_M (its text encoder) and the FLUX autoencoder.
 //!
-//! About 6.7 GB on disk and 9 GB of RAM while a job runs. A 768x512 image
+//! About 6.7 GB on disk and ~4 GB of RAM while a job runs (weights stream
+//! from disk with --params-backend disk). A 768x512 image
 //! takes 90-120 s on a 16-core Ryzen, so this is for asynchronous work (ad
 //! heroes, chat images), not interactive previews.
 //!
@@ -484,6 +485,10 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
         .arg("--vae")
         .arg(models.join(WEIGHTS[2].name))
         .args(["--cfg-scale", "1.0"])
+        // Weights stay on disk and stream in per module: 4.0 GB peak RSS
+        // instead of 7.6 GB, same ~125 s on dev2 (measured 2026-11-09). On a
+        // busy host the bigger footprint got the render killed by earlyoom.
+        .args(["--params-backend", "disk"])
         .arg("--steps")
         .arg(spec.steps.to_string())
         .arg("-W")
@@ -696,7 +701,7 @@ mod tests {
         };
         let big_busy = MemorySnapshot {
             total: 91 * GIB,
-            available: 9 * GIB,
+            available: 7 * GIB,
         };
         let small = MemorySnapshot {
             total: 8 * GIB,
