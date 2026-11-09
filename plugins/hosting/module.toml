@@ -24,7 +24,7 @@
 [module]
 id          = "hosting"
 name        = "Hosting — p2p static sites"
-version     = "0.2.74"
+version     = "0.2.75"
 kind        = "service"
 category    = "data"
 status      = "available"
