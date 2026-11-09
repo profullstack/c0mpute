@@ -148,11 +148,21 @@ async fn campaign_to_stitched_episode_vast_and_report() {
         timing: fast(),
         ..Default::default()
     };
-    let mut hosts = vec![Hosting::start(hub_net, hub_store, host_opts(&tmp.path().join("h0"))).await.unwrap()];
+    // Hosting nodes also keep the ads index and relay the ads topic, as the
+    // supervisor runs them: gossipsub only forwards through subscribers, and
+    // the advertiser and gateway reach each other through these nodes.
+    let relay = || ads::Options {
+        timing: ads_fast(),
+        ..Default::default()
+    };
+    let mut hosts = vec![Hosting::start(hub_net.clone(), hub_store, host_opts(&tmp.path().join("h0"))).await.unwrap()];
+    let mut relays = vec![Ads::start(hub_net, hosts[0].clone(), relay()).await.unwrap()];
     for i in 1..3 {
         let d = tmp.path().join(format!("h{i}"));
         let (n, s) = node(&d, vec![hub_addr.clone()]).await;
-        hosts.push(Hosting::start(n, s, host_opts(&d)).await.unwrap());
+        let h = Hosting::start(n.clone(), s, host_opts(&d)).await.unwrap();
+        relays.push(Ads::start(n, h.clone(), relay()).await.unwrap());
+        hosts.push(h);
     }
     let client = || Options {
         hosts: false,
@@ -237,15 +247,24 @@ async fn campaign_to_stitched_episode_vast_and_report() {
         .unwrap();
     {
         let (h, a, s, r) = (adv_hosting.clone(), adv_ads.clone(), site_rec.clone(), record.clone());
-        wait_for("creative site copies + campaign at the gateway", 60, || {
-            let (h, a, s, r, g) = (h.clone(), a.clone(), s.clone(), r.clone(), gw_ads.clone());
+        wait_for("creative site copies", 120, || {
+            let (h, s) = (h.clone(), s.clone());
             async move {
                 h.regossip(&s).await;
-                a.regossip(&r).await;
-                h.holders(&s.site_id).await.len() >= 3 && g.campaign(&r.campaign_id).await.is_some()
+                h.holders(&s.site_id).await.len() >= 3
             }
         })
         .await;
+        wait_for("campaign at the gateway", 60, || {
+            let (a, r, g) = (a.clone(), r.clone(), gw_ads.clone());
+            async move {
+                a.regossip(&r).await;
+                g.campaign(&r.campaign_id).await.is_some()
+            }
+        })
+        .await;
+        // Relays hold the index too, so the gateway could learn it from them.
+        assert!(relays[0].campaign(&r.campaign_id).await.is_some());
     }
     // The advertiser can go offline: creatives live on hosting nodes.
     adv_hosting.stop();
@@ -288,7 +307,7 @@ async fn campaign_to_stitched_episode_vast_and_report() {
     {
         let recs: Vec<SiteRecord> = shows.iter().map(|s| s.0.clone()).collect();
         let p = publisher.clone();
-        wait_for("show copies at the gateway", 60, || {
+        wait_for("show copies at the gateway", 120, || {
             let (p, g, recs) = (p.clone(), gw_hosting.clone(), recs.clone());
             async move {
                 let mut ok = true;

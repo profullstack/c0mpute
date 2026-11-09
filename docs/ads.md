@@ -132,6 +132,9 @@ fill is the empty `<VAST version="4.2"/>`.
 
 ## Gateway config
 
+Every node that runs hosting (the `hosting` or `gateway` role) keeps the
+campaign index and relays `c0mpute/ads/v1`. Only gateways answer ad requests.
+
 ```toml
 [ads]
 serve = true              # answer ad requests (false: empty VAST, clean episodes)
