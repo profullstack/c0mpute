@@ -26,6 +26,7 @@ mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;
 mod gameserver;
+mod git_cli;
 mod peers;
 mod promo;
 mod storage;
@@ -210,6 +211,12 @@ enum Cmd {
     /// Game server plugin: rent a Minecraft, Factorio or Valheim server for a
     /// few hours (`c0mpute gameserver start minecraft --hours 4 --ram 4g --accept-eula`).
     Gameserver {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Git plugin: repos kept by the network, signed by your key
+    /// (`c0mpute git init my-repo`, then `git push`/`git clone c0mpute://<owner>/<repo>`).
+    Git {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1222,6 +1229,11 @@ fn main() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Run as `git-remote-c0mpute` (a link to this binary): the git remote helper.
+    if let Some(code) = git_cli::as_remote_helper() {
+        std::process::exit(code);
+    }
+
     let cli = Cli::parse();
 
     // Opportunistic self-update on any command (throttled), so c0mpute stays
@@ -1372,6 +1384,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
         Cmd::Train { args } => train::run(&args).await,
         Cmd::Gameserver { args } => gameserver::run(&args).await,
+        Cmd::Git { args } => git_cli::run(&args).await,
         Cmd::Stream { cmd } => run_stream(cmd).await,
         Cmd::Ocr {
             file,

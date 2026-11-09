@@ -20,6 +20,8 @@ Paths resolve like a static host: `/` and directories map to `index.html`, an
 extensionless `/about` tries `about.html` and `about/index.html`, and a `404.html`
 is used for misses.
 
+Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
+
 ## How it works
 
 | Piece | What it is |

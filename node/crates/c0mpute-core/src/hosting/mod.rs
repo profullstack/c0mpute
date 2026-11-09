@@ -20,6 +20,7 @@
 //!   through [`crate::payments`], off unless the operator turns it on).
 
 pub mod dns;
+pub mod git;
 pub mod market;
 pub mod proof;
 pub mod replicas;
@@ -1108,14 +1109,16 @@ impl Hosting {
         resp
     }
 
-    /// Gateway routes: `/s/{site}/...`, `/hosting/v1/sites`, and custom
-    /// domains (any other Host whose DNS names a site).
+    /// Gateway routes: `/s/{site}/...`, `/hosting/v1/sites`, git repos
+    /// (`/git/...`, see [`git`]), and custom domains (any other Host whose
+    /// DNS names a site).
     pub fn router(&self) -> Router {
         Router::new()
             .route("/hosting/v1/sites", get(list_sites))
             .route("/s/{site}", get(serve_root))
             .route("/s/{site}/", get(serve_root))
             .route("/s/{site}/{*path}", get(serve_path))
+            .merge(git::router())
             .fallback(serve_by_host)
             .with_state(self.clone())
     }

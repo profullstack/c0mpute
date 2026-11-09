@@ -23,6 +23,7 @@ pub mod dispatch;
 pub mod embed;
 pub mod gameserver;
 pub mod gateway_util;
+pub mod git;
 pub mod handoff;
 pub mod jobs_gateway;
 pub mod net_guard;

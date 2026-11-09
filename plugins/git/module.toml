@@ -1,0 +1,67 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# First-party, compiled into the c0mpute binary. Rides on the hosting role
+# (ON BY DEFAULT): no role of its own, no new gossip topic. Code:
+# node/crates/c0mpute-core/src/git/ (client, remote helper) and
+# node/crates/c0mpute-core/src/hosting/git.rs (gateway routes). Docs:
+# docs/git-hosting.md.
+#
+# Fully peer to peer, no coordinator, no central index:
+#   - A repo is the hosting site `git-<repo>` of its owner's ed25519 key, so
+#     its id, signed + versioned record, 3 self-healing copies, proxying from
+#     every gateway and the d1sks marketplace are hosting's, unchanged. Hosting
+#     nodes that predate this plugin already replicate repos.
+#   - The site holds a dumb-HTTP git repo (HEAD, info/refs, objects/info/packs,
+#     packfiles) plus c0mpute-git.json, the ref map (refs -> commit ids, pack
+#     list, prev = the version it replaces). Owner signs the record, the record
+#     pins the manifest, the manifest pins every file: refs are signed.
+#   - Push: git-remote-c0mpute builds one pack of the new objects, signs a new
+#     version and POSTs it to any gateway. The gateway checks the signature,
+#     that the push builds on the version it knows (no lost updates), that a
+#     non-forced push keeps every pack, and its hosting budget; then it holds
+#     the repo and gossips the record. Fast-forward is checked by the pusher's
+#     git and helper; the owner key is the only writer.
+#   - Clone: `git clone c0mpute://<owner>/<repo>` (helper verifies the owner
+#     signature and every chunk, so gateways are untrusted), or plain
+#     `git clone https://<gateway>/git/<owner>/<repo>.git` (dumb HTTP, any git).
+#
+# Not yet: smart-HTTP (pack negotiation), multi-writer repos (collaborators),
+# git-lfs, sha256 object format, a web UI. Repos are limited to hosting's
+# 256 MiB per site.
+
+[module]
+id          = "git"
+name        = "Git — p2p repo hosting"
+version     = "0.2.94"
+kind        = "service"
+category    = "data"
+status      = "partial"
+status_note = "Push and clone work end to end on loopback networks; needs nodes on this release to accept pushes (any hosting node keeps copies). Single owner key per repo; 256 MiB per repo."
+builtin     = true
+description = "Git repos kept alive by the network: owner-signed, three self-healing copies on hosting nodes, clone from any gateway with `git clone c0mpute://<owner>/<repo>` or plain HTTPS. Built on hosting and OpenDisk, no coordinator, no central index."
+author      = "Profullstack"
+license     = "MIT"
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/git"
+keywords    = ["git", "repos", "p2p", "censorship-resistant", "self-healing", "remote-helper", "d1sks", "opendisk"]
+
+[module.requirements]
+c0mpute      = ">=0.2.95"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+# git on the client only; gateways need no git binary.
+capabilities = ["disk", "network:ingress?", "bin:git?"]
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli    = "c0mpute git"
+helper = "git-remote-c0mpute (c0mpute git install-helper)"
+api    = "GET/POST /git/v1/repos/<owner>/<repo>, GET /git/<owner>/<repo>.git/* (every gateway)"
+
+[module.config.defaults]
+# [hosting] git_pushes in config.toml; replicas and budgets are hosting's.
+git_pushes   = true
+replicas     = 3
+max_repo_mib = 256
+repack_after = 16
