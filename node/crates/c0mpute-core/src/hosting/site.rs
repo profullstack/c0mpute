@@ -1373,7 +1373,8 @@ mod tests {
         let e = check_site_size(70 * GIB, false).unwrap_err().to_string();
         assert!(e.contains("--disks auto"), "{e}");
         assert!(check_site_size(70 * GIB, true).is_ok());
-        assert!(check_site_size(300 * GIB, true).unwrap_err().to_string().contains("Split"));
+        assert!(check_site_size(300 * GIB, true).is_ok(), "300 GiB is under the 4 TiB cap");
+        assert!(check_site_size(MAX_SITE_BYTES + GIB, true).unwrap_err().to_string().contains("Split"));
     }
 
     #[test]
