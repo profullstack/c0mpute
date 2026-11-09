@@ -22,7 +22,7 @@
 [module]
 id          = "captcha"
 name        = "Captcha — image, slider, audio and math solving"
-version     = "0.2.94"
+version     = "0.2.96"
 kind        = "workload"
 category    = "ai"
 status      = "available"
@@ -33,7 +33,7 @@ license     = "MIT"
 keywords    = ["captcha", "ocr", "ddddocr", "slider", "audio-captcha", "solver", "mcp"]
 
 [module.requirements]
-c0mpute      = ">=0.2.95"
+c0mpute      = ">=0.2.96"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["cpu", "python:>=3.9"]
