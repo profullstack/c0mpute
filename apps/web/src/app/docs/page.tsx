@@ -263,6 +263,64 @@ c0mpute infernet reservation --help`}
         </Code>
       </Section>
 
+      <Section h="crawl" title="[ distributed scraping ]">
+        <P>
+          <code>crawl.fetch</code> fetches one public page from a worker&apos;s
+          own connection: a static <code>GET</code> (no JavaScript), robots.txt
+          honoured, public addresses only (re-checked on every redirect), 1 MiB
+          per page, 15 s default and 30 s maximum. Every worker takes crawl
+          jobs by default, up to 8 at once. Send one job per URL through the
+          jobs bridge and each URL gets its own auction, so a list of pages
+          spreads over the network&apos;s workers and their IPs.
+        </P>
+        <Code>
+{`# one page, no bridge
+c0mpute crawl fetch https://example.com/ --max-price 0.01
+c0mpute crawl fetch https://mysite.example/ --ignore-robots   # only a site you own
+
+# many pages: start a buyer bridge (runs up to 32 jobs at once)
+export C0MPUTE_JOBS_TOKEN=$(openssl rand -hex 24)
+c0mpute jobs serve --listen 127.0.0.1:8788 --max-price 0.01
+
+# one request per URL
+curl -s http://127.0.0.1:8788/v1/jobs \\
+  -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" \\
+  -d '{"workload": "crawl.fetch",
+       "spec": {"v": 1, "url": "https://example.com/",
+                "headers": {"accept-language": "en"}, "timeout_ms": 20000},
+       "max_price": 0.005, "timeout_ms": 60000}'
+# {"job_id":"…","worker":"12D3KooW…","price":0.0,"output_hash":"…",
+#  "result":{"v":1,"ok":true,"duration_ms":412,
+#            "output":{"url":"https://example.com/","status":200,"headers":{…},"body":"<!doctype html>…"}}}
+
+# fan a list out, 8 in flight
+grep -v '^#' urls.txt | xargs -P 8 -I{} curl -s http://127.0.0.1:8788/v1/jobs \\
+  -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" \\
+  -d '{"workload":"crawl.fetch","spec":{"v":1,"url":"{}"}}' \\
+  | jq -c '{url: .result.output.url, worker, status: .result.output.status}'`}
+        </Code>
+        <P>
+          Request: <code>workload</code>, <code>spec</code> (<code>v</code>,{" "}
+          <code>url</code>, optional <code>headers</code>,{" "}
+          <code>timeout_ms</code>, <code>ignore_robots</code>), optional{" "}
+          <code>max_price</code> (may only lower the bridge&apos;s{" "}
+          <code>--max-price</code>), <code>allow_peers</code> and{" "}
+          <code>timeout_ms</code> for the whole job (1 s to 300 s). A refused
+          or failed fetch answers 200 with <code>&quot;ok&quot;: false</code>{" "}
+          and an <code>error</code>. Bridge errors are{" "}
+          <code>{`{"error": "<code>", "detail": "…"}`}</code>: 401{" "}
+          <code>unauthorized</code>, 503 <code>no_bids</code>, 502{" "}
+          <code>worker_failed</code>, 504 <code>timeout</code>; a retry is a
+          fresh auction. The worker sees the URL and headers, so keep secrets
+          out or pin trusted workers with <code>allow_peers</code>. Runnable
+          script:{" "}
+          <a href="https://github.com/profullstack/c0mpute/tree/master/examples/distributed-scraper">
+            examples/distributed-scraper
+          </a>
+          .
+        </P>
+      </Section>
+
       <Section h="jobs" title="[ track jobs ]">
         <Code>
 {`c0mpute job status <job-id>          # one-shot status

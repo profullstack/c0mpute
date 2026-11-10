@@ -197,13 +197,15 @@ enum Cmd {
         cmd: SpeechCmd,
     },
     /// Run the authenticated HTTP buyer bridge for generic jobs
-    /// (`workflow.step`, DIP 0030): POST /v1/jobs, GET /healthz.
+    /// (`workflow.step`, `crawl.fetch`, DIP 0030): POST /v1/jobs, GET /healthz.
+    #[command(after_help = JOBS_EXAMPLES)]
     Jobs {
         #[command(subcommand)]
         cmd: JobsCmd,
     },
     /// Crawl plugin: fetch a public web page through a c0mpute worker
     /// (`crawl.fetch`: static, robots.txt-aware, private addresses refused).
+    #[command(after_help = CRAWL_EXAMPLES)]
     Crawl {
         #[command(subcommand)]
         cmd: CrawlCmd,
@@ -1311,10 +1313,44 @@ enum StreamCmd {
     },
 }
 
+const CRAWL_EXAMPLES: &str = "\
+Examples:
+  # one page, fetched from a worker's IP (static GET, robots.txt honoured)
+  c0mpute crawl fetch https://example.com/ --max-price 0.01
+  c0mpute crawl fetch https://mysite.example/ --ignore-robots   # only a site you own
+
+  # many pages, spread over the network: one crawl.fetch job per URL
+  # through the jobs bridge (each URL is its own auction)
+  export C0MPUTE_JOBS_TOKEN=$(openssl rand -hex 24)
+  c0mpute jobs serve --max-price 0.01 &
+  grep -v '^#' urls.txt | xargs -P 8 -I{} curl -s http://127.0.0.1:8788/v1/jobs \\
+    -H \"Authorization: Bearer $C0MPUTE_JOBS_TOKEN\" \\
+    -d '{\"workload\":\"crawl.fetch\",\"spec\":{\"v\":1,\"url\":\"{}\"}}'
+
+Full guide: https://c0mpute.com/getting-started#distributed-scraper
+Runnable script: examples/distributed-scraper in github.com/profullstack/c0mpute";
+
+const JOBS_EXAMPLES: &str = "\
+Examples:
+  export C0MPUTE_JOBS_TOKEN=$(openssl rand -hex 24)
+  c0mpute jobs serve --listen 127.0.0.1:8788 --max-price 0.01
+
+  # distributed scraper: one crawl.fetch per URL, each its own auction
+  curl -s http://127.0.0.1:8788/v1/jobs -H \"Authorization: Bearer $C0MPUTE_JOBS_TOKEN\" \\
+    -d '{\"workload\":\"crawl.fetch\",\"spec\":{\"v\":1,\"url\":\"https://example.com/\"},\"max_price\":0.005}'
+
+  # webhook workflow step (meshhook)
+  curl -s http://127.0.0.1:8788/v1/jobs -H \"Authorization: Bearer $C0MPUTE_JOBS_TOKEN\" \\
+    -d '{\"workload\":\"workflow.step\",\"spec\":{\"v\":1,\"kind\":\"transform\",
+         \"config\":{\"expression\":\"items[].name\"},\"input\":{\"items\":[{\"name\":\"a\"}]}}}'
+
+Full guide: https://c0mpute.com/docs#crawl";
+
 #[derive(Subcommand, Debug)]
 enum CrawlCmd {
     /// Fetch one URL from a worker and print the result JSON
     /// (`{v, ok, output: {url, status, headers, body}}`).
+    #[command(after_help = CRAWL_EXAMPLES)]
     Fetch {
         url: String,
         /// Highest price in USD you will pay for the fetch.
@@ -1340,7 +1376,7 @@ enum JobsCmd {
     ///
     /// Step payloads (inputs, URLs, headers, bodies) are visible to the
     /// winning worker: keep secrets off the network or pin trusted workers.
-    #[command(verbatim_doc_comment)]
+    #[command(verbatim_doc_comment, after_help = JOBS_EXAMPLES)]
     Serve {
         #[arg(long, env = "C0MPUTE_JOBS_LISTEN", default_value = c0mpute_core::jobs_gateway::DEFAULT_BIND)]
         listen: std::net::SocketAddr,

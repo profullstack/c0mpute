@@ -107,6 +107,7 @@ c0mpute worker start --gpu
 # submit jobs
 c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p --max-price 1.25
 c0mpute infernet chat --model qwen2.5:7b "hello"
+c0mpute crawl fetch https://example.com/ --max-price 0.01   # scrape a page from a worker's IP
 
 # free local CPU speech models + P2P speech worker roles
 c0mpute tts setup --engine all      # Kokoro, Piper, and Pocket; models install per user
@@ -260,6 +261,38 @@ Step payloads (inputs, URLs, headers, bodies) are visible to the worker that
 runs them. Keep secrets out of steps, or pin trusted workers with
 `allow_peers` per request or `C0MPUTE_JOBS_ALLOW_PEERS=peerA,peerB` on the
 bridge.
+
+### Distributed scraping (`crawl.fetch`)
+
+Every worker runs the crawl role by default: it fetches one public page for a
+buyer from its own connection (static `GET`, no JavaScript; robots.txt
+honoured; public addresses only; 1 MiB and 30 s per page). Send one job per
+URL through the same bridge and each URL gets its own auction, so a list of
+pages spreads over the network's crawl workers and their IPs:
+
+```sh
+export C0MPUTE_JOBS_TOKEN=$(openssl rand -hex 24)
+c0mpute jobs serve --listen 127.0.0.1:8788 --max-price 0.01 &
+
+curl -s http://127.0.0.1:8788/v1/jobs -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" -d '{
+  "workload": "crawl.fetch",
+  "spec": {"v": 1, "url": "https://example.com/", "timeout_ms": 20000},
+  "max_price": 0.005
+}'
+# {"job_id":"…","worker":"12D3KooW…","price":0.0,"output_hash":"…",
+#  "result":{"v":1,"ok":true,"duration_ms":412,
+#            "output":{"url":"https://example.com/","status":200,"headers":{…},"body":"<!doctype html>…"}}}
+
+# fan a list out, 8 at a time (the bridge runs up to 32 jobs at once)
+grep -v '^#' urls.txt | xargs -P 8 -I{} curl -s http://127.0.0.1:8788/v1/jobs \
+  -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" \
+  -d '{"workload":"crawl.fetch","spec":{"v":1,"url":"{}"}}' \
+  | jq -c '{url: .result.output.url, worker, status: .result.output.status}'
+```
+
+One page without a bridge: `c0mpute crawl fetch <url>`. A runnable scraper
+(Node, no dependencies, JSON lines out) is in
+[examples/distributed-scraper](examples/distributed-scraper/).
 
 ### Run the worker in the background
 
