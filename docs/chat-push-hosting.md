@@ -25,6 +25,26 @@ but from the chat.
 spinner, elapsed time, and the node's latest progress line (downloading,
 hashing, picking hosts, copies), then the site url.
 
+## CLI and MCP
+
+The same pushes, from a terminal (signed in with `c0mpute chat login`):
+
+```sh
+c0mpute chat push hosting ls                     # your sites
+c0mpute chat push hosting nodes                  # your linked nodes
+c0mpute chat push hosting status <name> -w       # follow live progress (spinner)
+c0mpute chat push hosting rm <name> -w
+c0mpute chat push hosting <name> ./site -w       # push a folder of text files (1 MiB in all)
+```
+
+A folder pushed this way travels inline, so it is text only. For media or big
+folders, run `c0mpute hosting publish <dir> --name <name> --disks auto` on a
+machine that has the files.
+
+MCP (`https://c0mpute.com/api/mcp`, Bearer `c0k_` key) has `hosting_nodes`,
+`hosting_push`, `hosting_push_status`, `hosting_pushes` and `hosting_push_rm`,
+on the same per-account pushes.
+
 ## Linking a node
 
 c0mpute.com never publishes anything itself. On the machine that should

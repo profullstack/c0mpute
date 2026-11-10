@@ -183,6 +183,34 @@ export function publicNode(n: HostingNode, at = Date.now()) {
   };
 }
 
+/**
+ * Which node a push goes to: the one named, else the one seen most recently.
+ * Paid pushes need a node that pays its hosts through CoinPay.
+ */
+export function chooseNode(nodes: HostingNode[], name: unknown): HostingNode | { error: string; code: number } {
+  if (!nodes.length) {
+    return {
+      error:
+        "no hosting node linked to this account yet. Run on the machine that should publish: c0mpute chat login && c0mpute chat connect hosting --name <node>",
+      code: 409,
+    };
+  }
+  let node: HostingNode | undefined;
+  if (typeof name === "string" && name) {
+    node = nodes.find((n) => n.name === name.toLowerCase() || n.id === name);
+    if (!node) return { error: `no node named ${name} on this account (yours: ${nodes.map((n) => n.name).join(", ")})`, code: 404 };
+  } else {
+    node = [...nodes].sort((a, b) => String(b.last_seen_at ?? "").localeCompare(String(a.last_seen_at ?? "")))[0];
+  }
+  if (node.payments !== "coinpay") {
+    return {
+      error: `node ${node.name} cannot pay hosts: enable CoinPay payments on it ([payments] enabled = true, rail = "coinpay", the API key in its env), then restart c0mpute chat connect hosting`,
+      code: 402,
+    };
+  }
+  return node;
+}
+
 export class PushError extends Error {
   constructor(
     message: string,

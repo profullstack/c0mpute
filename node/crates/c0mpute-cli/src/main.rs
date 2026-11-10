@@ -24,6 +24,7 @@
 mod apps_mcp;
 mod ai_chat;
 mod chat_connect;
+mod chat_push;
 mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;

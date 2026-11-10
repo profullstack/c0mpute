@@ -3,6 +3,8 @@
 // c0k_ API key as the REST API.
 import { chatText, listModels, parseChatRequest, type ChatMessage, type Upstream } from "./completions";
 import { describePromoProgress, parsePromoRequest, sanitizePromoProgress, PROMO_STYLES } from "./promo";
+import { HOSTING_TOOL_NAMES, HOSTING_TOOLS, hostingTool } from "./push-mcp";
+import type { PushStore } from "./push";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -67,7 +69,7 @@ export const TOOLS = [
 ] as const;
 
 type Rpc = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-export type McpCtx = { user: { id: string; did: string; name: string | null }; upstream: Upstream };
+export type McpCtx = { user: { id: string; did: string; name: string | null }; upstream: Upstream; push?: PushStore };
 
 const ok = (id: Rpc["id"], result: unknown) => ({ jsonrpc: "2.0", id: id ?? null, result });
 const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
@@ -83,16 +85,22 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "c0mpute-chat", version: "1.0.0" },
-        instructions: "Chat with models on the c0mpute network. Call list_models, then chat. promo_video makes a promo video of a website; poll promo_status.",
+        instructions:
+          "Chat with models on the c0mpute network. Call list_models, then chat. promo_video makes a promo video of a website; poll promo_status. hosting_push publishes files as a site through one of your linked nodes (hosting_nodes); poll hosting_push_status.",
       });
     case "ping":
       return ok(id, {});
     case "tools/list":
-      return ok(id, { tools: TOOLS });
+      return ok(id, { tools: ctx.push ? [...TOOLS, ...HOSTING_TOOLS] : TOOLS });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
       try {
+        if (HOSTING_TOOL_NAMES.has(name)) {
+          if (!ctx.push) return fail(id, -32602, `unknown tool: ${name}`);
+          const r = await hostingTool(name, args, ctx.user.id, ctx.push);
+          return ok(id, text(r.text, r.isError));
+        }
         if (name === "whoami") return ok(id, text(JSON.stringify({ did: ctx.user.did, name: ctx.user.name })));
         if (name === "list_models") return ok(id, text((await listModels(ctx.upstream)).join("\n") || "(no models online)"));
         if (name === "promo_video") {
