@@ -150,9 +150,15 @@ fn serve(
                 public: public_setting(&local),
                 ..Default::default()
             };
-            match rt.block_on(client::push(
-                &local, &gws, &keypair, &owner, &repo, &specs, &opts,
-            )) {
+            // Sign with the key that owns the repo: this machine's own, or
+            // one added with `c0mpute git key import`.
+            let pushed = match super::keys::keypair_for(&owner) {
+                Ok(kp) => rt.block_on(client::push(
+                    &local, &gws, &kp, &owner, &repo, &specs, &opts,
+                )),
+                Err(e) => Err(e),
+            };
+            match pushed {
                 Ok(report) => {
                     if let Some(gw) = &report.gateway {
                         eprintln!(

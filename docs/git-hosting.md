@@ -39,7 +39,7 @@ That is the whole setup. Everything after it is ordinary git.
 | `c0mpute git unshare <repo> --from <c0ps1...>` | Stop sharing. Run inside a clone: re-keys the repo and re-encrypts every object. |
 | `c0mpute git readers <repo>` | Who can read a private repo of yours. |
 | `c0mpute git url <repo>` | Print the clone URL of one of your repos. |
-| `c0mpute git key` | Print this machine's owner key (the `<owner-key>` in URLs). |
+| `c0mpute git key` | Print this machine's owner key (the `<owner-key>` in URLs). `key export` / `key import` / `key list` / `key remove`: push from your other machines too (see A second machine). |
 | `c0mpute git clone <url> [dir]` | `git clone` with the helper on PATH, so it works before `install`. `--gateway <url>` to pick a gateway. |
 | `c0mpute git push [git args]` | `git push` with the helper on PATH. `--gateway <url>` goes before git's arguments: `c0mpute git push --gateway https://gateway.c0mpute.com origin main`. |
 | `c0mpute git ls` | Repos a gateway knows, with live copy counts (`--gateway <url>`; default your node, else the public gateway). |
@@ -141,8 +141,23 @@ push today, keep a GitHub mirror with Actions, or run them before you push.
 ## A second machine
 
 The owner key is the machine's c0mpute identity, `<data_dir>/buyer/identity.key`
-(`~/.local/share/c0mpute/buyer/identity.key` on Linux). To push from another machine,
-copy that file there. Multi-writer repos (a signed list of keys) are not built yet.
+(`~/.local/share/c0mpute/buyer/identity.key` on Linux). Any machine can clone. To push from
+another machine too, carry the key over; the other machine keeps its own key as well:
+
+```sh
+laptop$  c0mpute git key export > key.txt   # secret: copy it over privately, then delete it
+desktop$ c0mpute git key import < key.txt
+desktop$ git clone c0mpute://<laptop key>/my-project && cd my-project
+desktop$ git push                            # signed with the laptop's key
+desktop$ c0mpute git key list                # this machine's key + imported ones
+```
+
+A push signs with whichever key owns the repo in the URL. The key is a full credential for
+everything published under it (repos and sites), so import it only on your own machines;
+`c0mpute git key remove <key>` forgets it. **Private repos** also need the owner's storage
+identity on that machine (`c0mpute dm restore` from its backup); a machine that is only a
+reader can clone but not push. Multi-writer repos (several people, a signed list of keys)
+are not built yet.
 
 ## Gateways
 
@@ -212,7 +227,8 @@ push rewrites the repo in the current layout (one full pack) with its whole hist
 | `no such repo on the network (yet)` | That gateway has not heard of it. Wait a few minutes, or use the gateway you pushed to. |
 | `the repo moved on since you fetched it` | Someone (your other machine) pushed first. `git pull`, then push. |
 | `non-fast-forward` | Your branch is behind. Pull, or `git push --force` if you mean to rewrite. |
-| `belongs to key ...; this machine's key is ...` | Pushing to another key's repo. Only its owner can push. |
+| `belongs to key ...; this machine's key is ...` | Pushing to another key's repo. If it is yours from another machine: `c0mpute git key export` there, `c0mpute git key import` here (see A second machine). |
+| `... can clone but not push` | A private repo, and this machine has a reader's storage identity. Push from the owner's machine, or `c0mpute dm restore` the owner's identity here. |
 | Anything slow | `C0MPUTE_GIT_TRACE=1 git push ...` prints phase timings. |
 
 ## How it works
@@ -257,7 +273,7 @@ published today is a free (v1) site.
 
 - **Smart HTTP.** Clones are dumb HTTP: a clone downloads every pack (bounded by repacking
   every 16 pushes), there is no object negotiation. Fine at the 1 GiB repo cap.
-- **Collaborators.** One key writes a repo. Multi-writer repos need a signed writer list in
+- **Collaborators.** One key writes a repo (from any of your machines: `c0mpute git key import`). Multi-writer repos need a signed writer list in
   the ref map and gateways checking it.
 - **Server-side fast-forward.** Gateways enforce `prev` and pack retention, not commit
   ancestry (that would need git on every gateway). The pusher's git and helper refuse
