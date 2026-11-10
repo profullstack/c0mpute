@@ -594,6 +594,7 @@ dependencies = [
  "url",
  "uuid",
  "x25519-dalek",
+ "x402-gateway",
  "zeroize",
  "zip",
 ]
@@ -5301,6 +5302,21 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "x402-gateway"
+version = "0.1.0"
+source = "git+https://github.com/profullstack/x402-ports?rev=5d0cd434c0a4556c264cb0c8ecd2f5791501abde#5d0cd434c0a4556c264cb0c8ecd2f5791501abde"
+dependencies = [
+ "base64 0.22.1",
+ "hmac",
+ "http",
+ "num-bigint",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
