@@ -11,7 +11,7 @@ export default function GettingStartedPage() {
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">getting-started</h1>
-        <p className="comment">// install → identity → register → run → host → store privately</p>
+        <p className="comment">// install → identity → register → run → host → store privately → scrape</p>
       </header>
 
       <Section number="1" label="install the cli stack">
@@ -43,7 +43,12 @@ $ c0mpute worker start --gpu`}</CodeBlock>
       <Section number="4" label="submit a job">
         <CodeBlock>{`$ c0mpute transcode submit input.mov --preset hls --max-price 1.25
 $ c0mpute infernet chat --model qwen2.5:7b "hello"
+$ c0mpute crawl fetch https://example.com/ --max-price 0.01
 $ c0mpute job status <job-id>`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          Scraping many pages at once? See{" "}
+          <a className="accent" href="#distributed-scraper">step 10</a>.
+        </p>
       </Section>
 
       <Section number="5" label="interactive tui">
@@ -199,6 +204,48 @@ $ c0mpute storage put press-kit.zip --public  # plaintext, on purpose`}</CodeBlo
             docs/private-storage.md
           </a>
           .
+        </p>
+      </Section>
+
+      <Section number="10" label="run a distributed scraper" id="distributed-scraper">
+        <p className="text-sm text-[var(--color-dim)]">
+          Every worker fetches public pages for buyers by default
+          (<code>crawl.fetch</code>): a static <code>GET</code> from the
+          worker&apos;s own connection, robots.txt honoured, public addresses
+          only, 1 MiB and 30 s per page. Send one job per URL and each gets its
+          own auction, so a list spreads over the network&apos;s workers and
+          their IPs.
+        </p>
+        <p className="text-sm">start a local buyer bridge once:</p>
+        <CodeBlock>{`$ export C0MPUTE_JOBS_TOKEN=$(openssl rand -hex 24)
+$ c0mpute jobs serve --listen 127.0.0.1:8788 --max-price 0.01`}</CodeBlock>
+        <p className="text-sm">one request per URL:</p>
+        <CodeBlock>{`$ curl -s http://127.0.0.1:8788/v1/jobs \\
+    -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" \\
+    -d '{"workload": "crawl.fetch",
+         "spec": {"v": 1, "url": "https://example.com/", "timeout_ms": 20000},
+         "max_price": 0.005}'
+{"job_id":"…","worker":"12D3KooW…","price":0.0,"output_hash":"…",
+ "result":{"v":1,"ok":true,"duration_ms":412,
+           "output":{"url":"https://example.com/","status":200,"headers":{…},"body":"<!doctype html>…"}}}`}</CodeBlock>
+        <p className="text-sm">fan a list out, 8 in flight:</p>
+        <CodeBlock>{`$ grep -v '^#' urls.txt | xargs -P 8 -I{} curl -s http://127.0.0.1:8788/v1/jobs \\
+    -H "Authorization: Bearer $C0MPUTE_JOBS_TOKEN" \\
+    -d '{"workload":"crawl.fetch","spec":{"v":1,"url":"{}"}}' \\
+  | jq -c '{url: .result.output.url, worker, status: .result.output.status}'
+{"url":"https://example.com/","worker":"12D3KooWA…","status":200}
+{"url":"https://example.org/","worker":"12D3KooWQ…","status":200}`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          A refused or failed fetch still returns 200 with{" "}
+          <code>&quot;ok&quot;: false</code> and an <code>error</code>; 503{" "}
+          <code>no_bids</code> means no worker bid under your price. The worker
+          sees the URL and headers you send, so keep secrets out of them or pin
+          trusted workers with <code>allow_peers</code>. A runnable scraper
+          (Node, no dependencies) is in{" "}
+          <a className="accent" href="https://github.com/profullstack/c0mpute/tree/master/examples/distributed-scraper">
+            examples/distributed-scraper
+          </a>
+          ; full reference at <a className="accent" href="/docs#crawl">/docs#crawl</a>.
         </p>
       </Section>
     </div>
