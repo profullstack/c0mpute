@@ -429,16 +429,7 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
     let disks = job.disks.clone().unwrap_or_else(|| "auto".into());
     let exe = std::env::current_exe().context("own executable")?;
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("hosting")
-        .arg("publish")
-        .arg(&dir)
-        .arg("--name")
-        .arg(&job.name)
-        .arg("--wait-secs")
-        .arg(wait_secs.to_string());
-    if disks != "free" {
-        cmd.arg("--disks").arg(&disks);
-    }
+    cmd.args(publish_args(&dir, &job.name, wait_secs, &disks));
     let (ok, stdout, tail) = run_streaming(api, job, cmd).await?;
     let (site, version, copies, url) = parse_publish(&stdout);
     match (ok, site) {
@@ -466,7 +457,7 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
     api.progress(job, "removing the site from the network").await;
     let exe = std::env::current_exe().context("own executable")?;
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("hosting").arg("rm").arg(&job.name);
+    cmd.args(rm_args(&job.name));
     let (ok, _stdout, tail) = run_streaming(api, job, cmd).await?;
     if !ok {
         bail!("hosting rm failed: {}", tail.unwrap_or_else(|| "no output".into()));
@@ -474,6 +465,29 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
     api.report(job, json!({"ok": true, "deleted": true})).await?;
     println!("removed:  {}", job.name);
     Ok(())
+}
+
+/// `c0mpute hosting publish <dir> --name <n> --wait-secs <s> [--disks <q>]`.
+pub(crate) fn publish_args(dir: &Path, name: &str, wait_secs: u64, disks: &str) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = vec![
+        "hosting".into(),
+        "publish".into(),
+        dir.as_os_str().to_owned(),
+        "--name".into(),
+        name.into(),
+        "--wait-secs".into(),
+        wait_secs.to_string().into(),
+    ];
+    if disks != "free" {
+        a.push("--disks".into());
+        a.push(disks.into());
+    }
+    a
+}
+
+/// `c0mpute hosting rm --name <n>`.
+pub(crate) fn rm_args(name: &str) -> Vec<std::ffi::OsString> {
+    vec!["hosting".into(), "rm".into(), "--name".into(), name.into()]
 }
 
 /// Run a child, sending its latest stderr line to the chat at most every 2 s.
@@ -496,6 +510,7 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
     let mut last_line_seen: Option<String> = None;
     let mut last_sent = Instant::now() - Duration::from_secs(10);
     let mut sent: Option<String> = None;
+    let mut first_error: Option<String> = None;
     loop {
         let n = err.read(&mut buf).await.unwrap_or(0);
         if n == 0 {
@@ -504,6 +519,13 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
         let chunk = String::from_utf8_lossy(&buf[..n]);
         eprint!("{chunk}");
         pending.push_str(&chunk);
+        if first_error.is_none() {
+            first_error = pending
+                .split(['\r', '\n'])
+                .map(strip_ansi)
+                .map(|l| l.trim().to_string())
+                .find(|l| l.starts_with("error") || l.starts_with("Error"));
+        }
         if let Some(l) = last_line(&pending) {
             last_line_seen = Some(l);
         }
@@ -521,7 +543,9 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
     }
     let status = child.wait().await?;
     let stdout = reader.await.unwrap_or_default();
-    Ok((status.success(), stdout, last_line_seen))
+    // On failure the first `error:` line says why; clap's last line is only "try --help".
+    let tail = if status.success() { last_line_seen } else { first_error.or(last_line_seen) };
+    Ok((status.success(), stdout, tail))
 }
 
 #[cfg(test)]
@@ -552,6 +576,21 @@ mod tests {
         assert_eq!(last_line("  hashing 10%\r\x1b[2K  hashing 50%\r").as_deref(), Some("hashing 50%"));
         assert_eq!(last_line("a\nb\n").as_deref(), Some("b"));
         assert_eq!(last_line("\r\n"), None);
+    }
+
+    /// The child command lines must parse with the real CLI (a bare `hosting
+    /// rm <name>` shipped once and failed every delete).
+    #[test]
+    fn child_commands_parse_with_the_real_cli() {
+        use clap::Parser;
+        let parse = |args: Vec<std::ffi::OsString>| {
+            crate::Cli::try_parse_from(std::iter::once(std::ffi::OsString::from("c0mpute")).chain(args))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        parse(publish_args(Path::new("/tmp/site"), "seed2", 600, "auto")).unwrap();
+        parse(publish_args(Path::new("/tmp/site"), "seed2", 600, "free")).unwrap();
+        parse(rm_args("seed2")).unwrap();
     }
 
     #[test]
