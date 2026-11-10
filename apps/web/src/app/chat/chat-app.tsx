@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
 import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodeProgress, type MusicCommand } from "@/lib/chat/music";
+import { describeAlbumStage, sanitizeAlbum, trackFileBase, parseAlbumCommand, type AlbumCommand, type AlbumTrack } from "@/lib/chat/album";
 import { describePromoProgress, detectPromoRequest, parsePromoCommand, type PromoCommand, type PromoScene } from "@/lib/chat/promo";
 
 // An image turn keeps its picture only for this session (a blob: URL); what is
@@ -20,6 +21,8 @@ type Msg = {
   musicJob?: string;
   /** A promo video: storyboard frames while it renders, then the MP4 (served by /api/v1/promo/<id>). */
   promo?: { id: string; scenes: PromoScene[]; vertical: boolean; video?: string; captions?: string; duration?: number; title?: string; motion?: string };
+  /** An album: band, title, cover and tracks (each plays from /api/v1/music/<track id>), then the zip. */
+  album?: { id: string; band: string | null; album: string | null; genre: string | null; concept: string | null; cover: string | null; zip: string | null; tracks: AlbumTrack[] };
 };
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
@@ -358,6 +361,91 @@ export function ChatApp({ error }: { error: string | null }) {
     }
   }
 
+  async function makeAlbum(convo: Convo, text: string, cmd: AlbumCommand) {
+    const id = convo.id;
+    const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
+    setInput("");
+    setFailure(null);
+    setBusy(true);
+    const started = Date.now();
+    const setLast = (patch: Partial<Msg>) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    setConvos((all) => {
+      const exists = all.some((c) => c.id === id);
+      const base = exists ? all : [convo, ...all];
+      const next = base.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              title,
+              messages: [
+                ...c.messages,
+                { role: "user" as const, content: text, imageTurn: true },
+                { role: "assistant" as const, content: "// naming the band and writing the album…", imageTurn: true },
+              ],
+              updated: Date.now(),
+            }
+          : c,
+      );
+      save(next);
+      return next;
+    });
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    try {
+      const res = await fetch("/api/v1/album", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: cmd.prompt }),
+        signal: ctrl.signal,
+      });
+      const start = await res.json().catch(() => ({}));
+      if (res.status !== 202 || !start.poll) throw new Error(start.error?.message ?? `HTTP ${res.status}`);
+      const note = start.limited ? `\n// only ${start.tracks} free songs left today, so this album has ${start.tracks} tracks` : "";
+      // Planning, lyrics, then every track through the network's queue.
+      const deadline = Date.now() + 2 * QUEUE_DEADLINE_MS;
+      for (;;) {
+        if (Date.now() > deadline) throw new Error("album timed out");
+        await new Promise((r) => setTimeout(r, 5000));
+        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const poll = await fetch(start.poll, { cache: "no-store", signal: ctrl.signal });
+        const p = await poll.json().catch(() => ({}));
+        if (poll.status !== 202 && poll.status !== 200) throw new Error(p.error?.message ?? `HTTP ${poll.status}`);
+        const secs = Math.round((Date.now() - started) / 1000);
+        const view = sanitizeAlbum({ ...p, cover: p.cover ? "ready" : null });
+        const album = {
+          id: start.id as string,
+          band: view.band,
+          album: view.album,
+          genre: view.genre,
+          concept: view.concept,
+          cover: typeof p.cover === "string" ? p.cover : null,
+          zip: typeof p.zip === "string" ? p.zip : null,
+          tracks: view.tracks,
+        };
+        const head = album.album ? `"${album.album}" by ${album.band}` : "album";
+        if (poll.status === 200) {
+          const done = album.tracks.filter((t) => t.status === "done").length;
+          setLast({ content: `${head}${album.genre ? ` · ${album.genre}` : ""} · ${done}/${album.tracks.length} tracks (${clock(secs)} on c0mpute workers)`, album });
+          break;
+        }
+        setLast({ content: `// ${head} · ${describeAlbumStage(view)} · ${clock(secs)}${note}`, album });
+      }
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+      setLast({ content: "// album not made" });
+    } finally {
+      setBusy(false);
+      abort.current = null;
+    }
+  }
+
   async function makePromo(convo: Convo, text: string, req: PromoCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
@@ -452,6 +540,11 @@ export function ChatApp({ error }: { error: string | null }) {
     const promo = parsePromoCommand(text) ?? detectPromoRequest(text);
     if (promo) {
       await makePromo(convo, text, promo);
+      return;
+    }
+    const albumCmd = parseAlbumCommand(text);
+    if (albumCmd) {
+      await makeAlbum(convo, text, albumCmd);
       return;
     }
     const music = parseMusicCommand(text);
@@ -645,7 +738,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -707,6 +800,66 @@ export function ChatApp({ error }: { error: string | null }) {
                     )}
                   </figure>
                 )}
+                {m.album && (
+                  <figure className="mt-2 max-w-[640px]">
+                    <div className="flex flex-wrap items-start gap-3">
+                      {m.album.cover ? (
+                        // eslint-disable-next-line @next/next/no-img-element -- same-origin album cover
+                        <img src={m.album.cover} alt={m.album.album ?? "album cover"} className="w-40 aspect-square object-cover border border-[var(--color-rule)]" />
+                      ) : (
+                        <div className="w-40 aspect-square border border-dashed border-[var(--color-rule)] flex items-center justify-center text-xs text-[var(--color-dim)]">cover…</div>
+                      )}
+                      <div className="min-w-0 flex-1 text-xs">
+                        {m.album.album && <p className="text-sm accent">{m.album.album}</p>}
+                        {m.album.band && <p>{m.album.band}</p>}
+                        {m.album.genre && <p className="text-[var(--color-dim)]">{m.album.genre}</p>}
+                        {m.album.concept && <p className="mt-1 text-[var(--color-dim)]">{m.album.concept}</p>}
+                        {m.album.zip && (
+                          <a href={m.album.zip} download className="mt-2 inline-block underline hover:text-[var(--color-fg)]">
+                            download album .zip (mp3s, lyrics, cover)
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                    <ol className="mt-2 space-y-1 text-xs">
+                      {m.album.tracks.map((t) => (
+                        <li key={t.n} className="border border-[var(--color-rule)] px-2 py-1">
+                          <div className="flex justify-between gap-2">
+                            <span>
+                              {String(t.n).padStart(2, "0")}. {t.title}
+                            </span>
+                            <span className={t.status === "failed" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}>
+                              {t.status === "pending" && t.node
+                                ? describeNodeProgress(t.node)
+                                : t.status === "done"
+                                  ? ""
+                                  : t.status === "written"
+                                    ? "lyrics written"
+                                    : t.status === "pending"
+                                      ? "recording"
+                                      : t.status}
+                            </span>
+                          </div>
+                          {t.status === "done" && t.id && (
+                            <div className="flex items-center gap-2 mt-1">
+                              <audio controls preload="none" src={`/api/v1/music/${t.id}`} className="w-full h-8" />
+                              <a href={`/api/v1/music/${t.id}`} download={`${trackFileBase(t.n, t.title)}.mp3`} className="underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
+                                mp3
+                              </a>
+                            </div>
+                          )}
+                          {t.error && <p className="text-[var(--color-warn)]">{t.error}</p>}
+                          {t.lyrics && (
+                            <details className="text-[var(--color-dim)]">
+                              <summary className="cursor-pointer">lyrics</summary>
+                              <p className="whitespace-pre-wrap">{t.lyrics}</p>
+                            </details>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  </figure>
+                )}
                 {m.audio && (
                   <figure className="mt-2">
                     <audio controls src={m.audio} className="w-full max-w-[640px]" />
@@ -741,7 +894,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, /music <style>, or /promo <url> (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, /image <prompt>, /music <style>, /album <idea>, or /promo <url> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
