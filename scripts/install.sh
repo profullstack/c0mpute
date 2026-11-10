@@ -378,6 +378,11 @@ EOF
   chmod +x "$C0MPUTE_HOME/bin/c0mpute"
   rm -rf "$tmp"
   ok "installed c0mpute → $C0MPUTE_HOME/bin/c0mpute"
+  # git's remote helper for c0mpute:// URLs is this same binary under another
+  # name. Relative, so it survives `c0mpute update` replacing the binary.
+  # Without it: "git: 'remote-c0mpute' is not a git command".
+  ln -sf c0mpute "$C0MPUTE_HOME/bin/git-remote-c0mpute" \
+    && ok "git clone/push c0mpute:// ready (git-remote-c0mpute → c0mpute)"
 }
 
 # ────────────────────────────────────────────────────────────────────────
@@ -546,9 +551,11 @@ link_system_bin() {
   for sysbin in /usr/local/bin /usr/bin /opt/bin; do
     [ -d "$sysbin" ] || continue
     if ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
+      ln -sf "$target" "$sysbin/git-remote-c0mpute" 2>/dev/null || true
       linked="$sysbin/c0mpute"; ok "symlinked $linked → $target"; break
     fi
     if [ -n "$SUDO" ] && $SUDO ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
+      $SUDO ln -sf "$target" "$sysbin/git-remote-c0mpute" 2>/dev/null || true
       linked="$sysbin/c0mpute"; ok "symlinked $linked → $target (via sudo)"; break
     fi
   done
