@@ -119,6 +119,13 @@ pub(crate) fn safe_rel(p: &str) -> Option<PathBuf> {
     (depth > 0 && depth <= 4).then_some(out)
 }
 
+/// `XDG_DATA_HOME` for the `hosting publish` / `hosting rm` children: their
+/// data dir (and so their publisher identity) is `<root>/.node/c0mpute`, apart
+/// from the node's own `buyer` key that manual publishes use.
+pub(crate) fn node_data_home(root: &Path) -> PathBuf {
+    root.join(".node")
+}
+
 /// "coinpay" when this node can pay hosts through CoinPay, else "off".
 fn payments_mode() -> String {
     let cfg = c0mpute_core::Config::load_or_default(&c0mpute_core::config::default_config_path()).unwrap_or_default();
@@ -203,6 +210,8 @@ struct Api {
     key: String,
     http: reqwest::Client,
     node: String,
+    /// XDG_DATA_HOME for the publish/rm children (see [`node_data_home`]).
+    data_home: PathBuf,
 }
 
 impl Api {
@@ -305,11 +314,15 @@ pub async fn run(args: &[String]) -> Result<()> {
         .unwrap_or_else(|| c0mpute_core::config::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("pushes"));
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
 
-    let peer_id = c0mpute_core::hosting::publisher_keypair()
+    // Pushes get their own data dir (identity, scan cache) under <root>/.node:
+    // two processes publishing with one libp2p identity fight over the peer id
+    // (a manual `hosting publish` on this machine stalled at 0 MB/s that way).
+    let node_data = node_data_home(&root);
+    let peer_id = c0mpute_net::identity::load_or_create(&node_data.join("c0mpute").join("buyer"))
         .map(|k| k.public().to_peer_id().to_string())
-        .context("this node's publisher identity")?;
+        .context("the push publisher identity")?;
     let payments = payments_mode();
-    let mut api = Api { base: base.clone(), key, http: client()?, node: String::new() };
+    let mut api = Api { base: base.clone(), key, http: client()?, node: String::new(), data_home: node_data.clone() };
     let reg = api
         .post(
             "/api/v1/hosting/nodes",
@@ -320,7 +333,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     api.node = reg["node"]["id"].as_str().ok_or_else(|| anyhow!("no node id in {reg}"))?.to_string();
 
     println!("linked:   {name} ({}) on {base}", api.node);
-    println!("identity: {peer_id} (signs every site this node publishes)");
+    println!("identity: {peer_id} (signs every site pushed through this node; kept in {})", node_data.display());
     if payments == "coinpay" {
         println!("payments: CoinPay: paid hosts (--disks auto) are paid from this node's wallet");
     } else {
@@ -416,16 +429,7 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
     let disks = job.disks.clone().unwrap_or_else(|| "auto".into());
     let exe = std::env::current_exe().context("own executable")?;
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("hosting")
-        .arg("publish")
-        .arg(&dir)
-        .arg("--name")
-        .arg(&job.name)
-        .arg("--wait-secs")
-        .arg(wait_secs.to_string());
-    if disks != "free" {
-        cmd.arg("--disks").arg(&disks);
-    }
+    cmd.args(publish_args(&dir, &job.name, wait_secs, &disks));
     let (ok, stdout, tail) = run_streaming(api, job, cmd).await?;
     let (site, version, copies, url) = parse_publish(&stdout);
     match (ok, site) {
@@ -453,7 +457,7 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
     api.progress(job, "removing the site from the network").await;
     let exe = std::env::current_exe().context("own executable")?;
     let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("hosting").arg("rm").arg(&job.name);
+    cmd.args(rm_args(&job.name));
     let (ok, _stdout, tail) = run_streaming(api, job, cmd).await?;
     if !ok {
         bail!("hosting rm failed: {}", tail.unwrap_or_else(|| "no output".into()));
@@ -463,9 +467,35 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
     Ok(())
 }
 
+/// `c0mpute hosting publish <dir> --name <n> --wait-secs <s> [--disks <q>]`.
+pub(crate) fn publish_args(dir: &Path, name: &str, wait_secs: u64, disks: &str) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = vec![
+        "hosting".into(),
+        "publish".into(),
+        dir.as_os_str().to_owned(),
+        "--name".into(),
+        name.into(),
+        "--wait-secs".into(),
+        wait_secs.to_string().into(),
+    ];
+    if disks != "free" {
+        a.push("--disks".into());
+        a.push(disks.into());
+    }
+    a
+}
+
+/// `c0mpute hosting rm --name <n>`.
+pub(crate) fn rm_args(name: &str) -> Vec<std::ffi::OsString> {
+    vec!["hosting".into(), "rm".into(), "--name".into(), name.into()]
+}
+
 /// Run a child, sending its latest stderr line to the chat at most every 2 s.
 /// Returns (exit ok, stdout, last stderr line).
 async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -> Result<(bool, String, Option<String>)> {
+    // Linux: ProjectDirs follows XDG_DATA_HOME, so the child publishes with the
+    // push identity; [payments] still comes from the usual config dir.
+    cmd.env("XDG_DATA_HOME", &api.data_home).env("C0MPUTE_NO_AUTO_UPDATE", "1");
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().context("start c0mpute hosting")?;
     let mut out = child.stdout.take().unwrap();
@@ -480,6 +510,7 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
     let mut last_line_seen: Option<String> = None;
     let mut last_sent = Instant::now() - Duration::from_secs(10);
     let mut sent: Option<String> = None;
+    let mut first_error: Option<String> = None;
     loop {
         let n = err.read(&mut buf).await.unwrap_or(0);
         if n == 0 {
@@ -488,6 +519,13 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
         let chunk = String::from_utf8_lossy(&buf[..n]);
         eprint!("{chunk}");
         pending.push_str(&chunk);
+        if first_error.is_none() {
+            first_error = pending
+                .split(['\r', '\n'])
+                .map(strip_ansi)
+                .map(|l| l.trim().to_string())
+                .find(|l| l.starts_with("error") || l.starts_with("Error"));
+        }
         if let Some(l) = last_line(&pending) {
             last_line_seen = Some(l);
         }
@@ -505,7 +543,9 @@ async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -
     }
     let status = child.wait().await?;
     let stdout = reader.await.unwrap_or_default();
-    Ok((status.success(), stdout, last_line_seen))
+    // On failure the first `error:` line says why; clap's last line is only "try --help".
+    let tail = if status.success() { last_line_seen } else { first_error.or(last_line_seen) };
+    Ok((status.success(), stdout, tail))
 }
 
 #[cfg(test)]
@@ -536,6 +576,21 @@ mod tests {
         assert_eq!(last_line("  hashing 10%\r\x1b[2K  hashing 50%\r").as_deref(), Some("hashing 50%"));
         assert_eq!(last_line("a\nb\n").as_deref(), Some("b"));
         assert_eq!(last_line("\r\n"), None);
+    }
+
+    /// The child command lines must parse with the real CLI (a bare `hosting
+    /// rm <name>` shipped once and failed every delete).
+    #[test]
+    fn child_commands_parse_with_the_real_cli() {
+        use clap::Parser;
+        let parse = |args: Vec<std::ffi::OsString>| {
+            crate::Cli::try_parse_from(std::iter::once(std::ffi::OsString::from("c0mpute")).chain(args))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        parse(publish_args(Path::new("/tmp/site"), "seed2", 600, "auto")).unwrap();
+        parse(publish_args(Path::new("/tmp/site"), "seed2", 600, "free")).unwrap();
+        parse(rm_args("seed2")).unwrap();
     }
 
     #[test]

@@ -231,6 +231,12 @@ export function createPushStore(sql: Sql) {
           now(),
           existing.id,
         ]);
+        // The node restarted: whatever it had claimed died with the old
+        // process, so hand those jobs out again now instead of after the timeout.
+        await sql.run(
+          `UPDATE chat_pushes SET claimed_at = NULL, progress = 'node restarted; picking it up again' WHERE node_id = ? AND status IN ('publishing','deleting')`,
+          [existing.id],
+        );
         return (await store.node(userId, String(existing.id)))!;
       }
       const count = await one(`SELECT COUNT(*) AS n FROM chat_nodes WHERE user_id = ?`, [userId]);

@@ -175,6 +175,16 @@ describe("push store", () => {
     expect(await s.push("u1", "hosting", "site")).toBeNull();
   });
 
+  test("a restarted node gets its in-flight jobs back at once", async () => {
+    const { s, node } = await setup();
+    await s.upsertPush("u1", { target: "hosting", name: "site", node, files: FILES });
+    expect(await s.claimJobs("u1", node.id)).toHaveLength(1);
+    expect(await s.claimJobs("u1", node.id)).toHaveLength(0);
+    await s.registerNode("u1", { name: "seed2", payments: "coinpay" });
+    const [again] = await s.claimJobs("u1", node.id);
+    expect(again?.name).toBe("site");
+  });
+
   test("a node that registers again keeps its id", async () => {
     const { s, node } = await setup();
     const again = await s.registerNode("u1", { name: "seed2", payments: "off" });
