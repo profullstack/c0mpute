@@ -1684,36 +1684,42 @@ impl Hosting {
     /// machine's globally unique addresses. A copy there sits on the
     /// publisher's own disk, so it is no copy at all.
     pub async fn on_this_machine(&self, peers: &[String]) -> HashSet<String> {
-        let mine: HashSet<std::net::IpAddr> = self
-            .0
+        let mine = self.my_ips().await;
+        if mine.is_empty() {
+            return HashSet::new();
+        }
+        self.machine_ips(peers)
+            .await
+            .into_iter()
+            .filter(|(_, ips)| !ips.is_disjoint(&mine))
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    /// This machine's globally unique addresses.
+    async fn my_ips(&self) -> HashSet<std::net::IpAddr> {
+        self.0
             .net
             .listen_addrs()
             .await
             .unwrap_or_default()
             .iter()
             .filter_map(unique_ip)
-            .collect();
-        if mine.is_empty() {
-            return HashSet::new();
-        }
+            .collect()
+    }
+
+    /// Each peer's globally unique addresses (empty when unknown, e.g. a node
+    /// behind NAT): two peers sharing one run on the same machine.
+    pub async fn machine_ips(&self, peers: &[String]) -> HashMap<String, HashSet<std::net::IpAddr>> {
         let lookups = peers.iter().filter_map(|p| {
             let id: c0mpute_net::PeerId = p.parse().ok()?;
             let net = self.0.net.clone();
-            let mine = &mine;
             Some(async move {
                 let addrs = net.find_peer(id, Duration::from_secs(8)).await;
-                addrs
-                    .iter()
-                    .filter_map(unique_ip)
-                    .any(|ip| mine.contains(&ip))
-                    .then(|| p.clone())
+                (p.clone(), addrs.iter().filter_map(unique_ip).collect())
             })
         });
-        futures::future::join_all(lookups)
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+        futures::future::join_all(lookups).await.into_iter().collect()
     }
 
     pub async fn wait_for_hosts(&self, want: &[String], max: Duration) -> Vec<String> {
@@ -2903,6 +2909,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn copies_go_to_different_machines() {
+        let disk = |p: &str| market::HostDisk {
+            peer_id: p.into(),
+            name: p.into(),
+            price: 4000,
+            free_bytes: 1 << 40,
+            standing: None,
+            countries: vec![],
+            reachable: None,
+            heartbeat_age_secs: None,
+            live: true,
+        };
+        let ip = |s: &str| -> std::net::IpAddr { s.parse().unwrap() };
+        let ips: HashMap<String, HashSet<std::net::IpAddr>> = [
+            ("source-box", vec!["152.53.47.37"]),
+            ("big-a", vec!["203.0.113.9"]),
+            ("big-a-twin", vec!["203.0.113.9"]),
+            ("other", vec!["198.51.100.7"]),
+            ("behind-nat", vec![]),
+        ]
+        .into_iter()
+        .map(|(p, v)| (p.to_string(), v.into_iter().map(ip).collect()))
+        .collect();
+        let ranked = ["source-box", "big-a", "big-a-twin", "other", "behind-nat"]
+            .map(disk)
+            .to_vec();
+        let mine: HashSet<_> = [ip("152.53.47.37")].into();
+        let picked: Vec<String> = one_per_machine(ranked, &ips, mine)
+            .into_iter()
+            .map(|d| d.peer_id)
+            .collect();
+        // Not the publisher's own box, and one of the twins only.
+        assert_eq!(picked, ["big-a", "other", "behind-nat"]);
+    }
+
+    #[test]
     fn only_addresses_unique_to_one_machine_identify_it() {
         let ip = |s: &str| unique_ip(&s.parse::<c0mpute_net::Multiaddr>().unwrap());
         // Public and tailscale addresses name one machine.
@@ -3191,6 +3233,28 @@ fn unique_ip(addr: &c0mpute_net::Multiaddr) -> Option<std::net::IpAddr> {
     })
 }
 
+/// `ranked` with at most one disk per machine, in order, and none on a
+/// machine in `taken` (addresses already holding a copy: the publisher's, a
+/// kept host's). Disks with unknown addresses are kept: nothing says they
+/// share a machine.
+fn one_per_machine(
+    ranked: Vec<market::HostDisk>,
+    ips: &HashMap<String, HashSet<std::net::IpAddr>>,
+    mut taken: HashSet<std::net::IpAddr>,
+) -> Vec<market::HostDisk> {
+    let mut out = Vec::new();
+    for d in ranked {
+        let mine = ips.get(&d.peer_id).cloned().unwrap_or_default();
+        if !mine.is_disjoint(&taken) {
+            eprintln!("marketplace: skipping {} ({}): same machine as a copy already placed", d.peer_id, d.name);
+            continue;
+        }
+        taken.extend(mine);
+        out.push(d);
+    }
+    out
+}
+
 /// The preferred hosts of `rec` that cannot make a copy now: not seen live
 /// on the hosting gossip, or running on this (the publishing) machine.
 async fn unusable_hosts(hosting: &Hosting, rec: &SiteRecord) -> Vec<String> {
@@ -3215,13 +3279,16 @@ async fn replacement_terms(
     avoid: &[String],
 ) -> Option<site::HostingTerms> {
     let mut disks = market_disks(m, Some(hosting)).await.ok()?;
-    let ids: Vec<String> = disks.iter().map(|d| d.peer_id.clone()).collect();
-    let here = hosting.on_this_machine(&ids).await;
-    disks.retain(|d| {
-        d.live && !here.contains(&d.peer_id) && !keep.contains(&d.peer_id) && !avoid.contains(&d.peer_id)
-    });
+    disks.retain(|d| d.live && !keep.contains(&d.peer_id) && !avoid.contains(&d.peer_id));
+    let mut ids: Vec<String> = disks.iter().map(|d| d.peer_id.clone()).collect();
+    ids.extend(keep.iter().cloned());
+    let ips = hosting.machine_ips(&ids).await;
+    let mut taken = hosting.my_ips().await;
+    for k in keep {
+        taken.extend(ips.get(k).cloned().unwrap_or_default());
+    }
     let want = m.copies.clamp(1, site::MAX_PREFERRED_HOSTS).saturating_sub(keep.len());
-    let ranked = market::rank(&disks, &m.query, size);
+    let ranked = one_per_machine(market::rank(&disks, &m.query, size), &ips, taken);
     let (chosen, _) = market::choose(&ranked, want, None)?;
     let old_price = rec
         .price_per_gib_month
@@ -3275,23 +3342,20 @@ pub async fn market_disks(m: &MarketOptions, hosting: Option<&Hosting>) -> Resul
 /// when d1sks is unreachable or nothing matches: the site then publishes as
 /// a plain free site, which the network still keeps.
 pub async fn pick_terms(m: &MarketOptions, size: u64, hosting: Option<&Hosting>) -> Option<site::HostingTerms> {
-    let mut disks = match market_disks(m, hosting).await {
+    let disks = match market_disks(m, hosting).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("d1sks: {e}; publishing without preferred hosts (the network still keeps 3 free copies)");
             return None;
         }
     };
-    // A node on this machine would hold its copy on the source's own disk.
+    let mut ranked = market::rank(&disks, &m.query, size);
+    // One copy per machine, and none on this one (the source's own disk).
     if let Some(h) = hosting {
-        let ids: Vec<String> = disks.iter().map(|d| d.peer_id.clone()).collect();
-        let here = h.on_this_machine(&ids).await;
-        for p in &here {
-            eprintln!("marketplace: skipping {p}: it runs on this machine");
-        }
-        disks.retain(|d| !here.contains(&d.peer_id));
+        let ids: Vec<String> = ranked.iter().map(|d| d.peer_id.clone()).collect();
+        let ips = h.machine_ips(&ids).await;
+        ranked = one_per_machine(ranked, &ips, h.my_ips().await);
     }
-    let ranked = market::rank(&disks, &m.query, size);
     match market::choose(&ranked, m.copies, None) {
         Some((chosen, terms)) => {
             eprintln!(
