@@ -631,7 +631,8 @@ pub async fn push(
     let site_id = site_id(owner, repo);
     if me != owner {
         bail!(
-            "{} belongs to key {owner}; this machine's key is {me}",
+            "{} belongs to key {owner}; this machine's key is {me}. To push from here: run \
+             `c0mpute git key export` on the machine that owns it, then `c0mpute git key import` here",
             url_for(owner, repo)
         );
     }
@@ -674,6 +675,22 @@ pub async fn push(
     };
     if let (Some(st), Some(sec)) = (state.as_mut(), secret.as_ref()) {
         unseal(gws, st, owner, repo, sec).await?;
+        // A reader can open the ref map but must not re-seal it: the repo's
+        // files are named and signed by the owner's storage identity. (A
+        // machine with the owner's signing key from `c0mpute git key import`
+        // still needs that identity for private repos.)
+        if let (Some(blob), Some(k)) = (&st.0.sealed_refs, &st.0.key) {
+            let opened = c0mpute_sealed::open(blob, k, None)
+                .map_err(|e| anyhow!("open the ref map: {e}"))?;
+            if opened.meta.name != sealed_name(sec, repo) {
+                bail!(
+                    "{} is private and this machine has a reader's identity, not its owner's, so it \
+                     can clone but not push. Push from the owner's machine, or restore the owner's \
+                     identity here with `c0mpute dm restore`",
+                    url_for(owner, repo)
+                );
+            }
+        }
     }
     let rekey = !opts.remove_readers.is_empty();
     let readers_change = !opts.add_readers.is_empty() || rekey;

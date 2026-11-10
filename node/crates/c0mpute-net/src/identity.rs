@@ -33,6 +33,14 @@ pub fn load_or_create(dir: &Path) -> Result<Keypair> {
     Ok(kp)
 }
 
+/// Persist `kp` as `<dir>/identity.key` (mode 600). Refuses to overwrite an
+/// existing key: losing one is not recoverable.
+pub fn save(dir: &Path, kp: &Keypair) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let encoded = kp.to_protobuf_encoding().context("encode keypair")?;
+    write_locked_down(&dir.join(KEY_FILE), &encoded)
+}
+
 /// A read error on an identity file, with the fix when it is a permission
 /// problem: almost always the file was created by `sudo c0mpute ...` (or a
 /// root service with this HOME) and now belongs to root.

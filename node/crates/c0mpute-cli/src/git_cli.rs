@@ -111,6 +111,20 @@ struct GitCli {
 }
 
 #[derive(Subcommand, Debug)]
+enum KeyCmd {
+    /// Print this machine's owner key as a secret token for `key import` on
+    /// another machine. Whoever holds it can push to every repo of this key.
+    Export,
+    /// Let this machine push to the repos of another machine's key. Reads the
+    /// token from the argument, or from stdin (keeps it out of shell history).
+    Import { token: Option<String> },
+    /// This machine's key and the keys imported here.
+    List,
+    /// Forget an imported key.
+    Remove { owner: String },
+}
+
+#[derive(Subcommand, Debug)]
 enum Sub {
     /// Print the c0mpute:// URL of a repo under this machine's key and, inside
     /// a git work tree, add it as a remote. Nothing is published until you push.
@@ -191,7 +205,15 @@ enum Sub {
         gateway: Option<String>,
     },
     /// This machine's owner key (the <owner> in c0mpute://<owner>/<repo>).
-    Key,
+    /// This machine's owner key (the <owner> in c0mpute://<owner>/<repo>),
+    /// or carry it to another machine so you can push from there too.
+    #[command(
+        after_help = "Push from a second machine:\n  laptop$  c0mpute git key export > key.txt     (copy key.txt over privately, then delete it)\n  desktop$ c0mpute git key import < key.txt\n  desktop$ git push                                (to c0mpute://<laptop key>/...)"
+    )]
+    Key {
+        #[command(subcommand)]
+        action: Option<KeyCmd>,
+    },
     /// The clone URL of a repo under this machine's key.
     Url { repo: String },
     /// Put `git-remote-c0mpute` (a link to this binary) in a directory on
@@ -507,8 +529,55 @@ pub async fn run(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
-        Sub::Key => {
+        Sub::Key { action: None } => {
             println!("{}", my_key()?);
+            Ok(())
+        }
+        Sub::Key { action: Some(KeyCmd::Export) } => {
+            let kp = c0mpute_core::hosting::publisher_keypair()?;
+            println!("{}", git::keys::export_token(&kp)?);
+            eprintln!(
+                "This is the secret key of {}: whoever has it can push to (and replace) every repo \
+                 and site of it. Move it privately, run `c0mpute git key import` on the other \
+                 machine, then delete any copy.",
+                my_key()?
+            );
+            Ok(())
+        }
+        Sub::Key { action: Some(KeyCmd::Import { token }) } => {
+            let token = match token {
+                Some(t) if t != "-" => t,
+                _ => {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                        .context("read the key from stdin")?;
+                    s
+                }
+            };
+            let owner = git::keys::import(&token)?;
+            if owner == my_key()? {
+                println!("{owner} is this machine's own key; nothing to import");
+            } else {
+                println!(
+                    "imported {owner}: this machine can now push to {}",
+                    git::url_for(&owner, "<repo>")
+                );
+            }
+            Ok(())
+        }
+        Sub::Key { action: Some(KeyCmd::List) } => {
+            println!("{}  (this machine)", my_key()?);
+            for o in git::keys::imported() {
+                println!("{o}  (imported)");
+            }
+            Ok(())
+        }
+        Sub::Key { action: Some(KeyCmd::Remove { owner }) } => {
+            if git::keys::remove(&owner.to_ascii_lowercase())? {
+                println!("removed {owner}");
+            } else {
+                println!("{owner} was not imported here");
+            }
             Ok(())
         }
         Sub::Url { repo } => {
