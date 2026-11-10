@@ -272,7 +272,7 @@ pub async fn install() -> Result<()> {
         .await
         .context("run sd-cli self-test")?;
     if !String::from_utf8_lossy(&output.stdout).contains("vid_gen") {
-        bail!("sd-cli has no vid_gen mode (exit {:?})", output.status.code());
+        bail!("sd-cli has no vid_gen mode ({})", crate::job_process::describe_exit(&output.status));
     }
     tokio::fs::write(ready_marker(), ready_stamp()).await?;
     Ok(())
@@ -397,7 +397,11 @@ pub async fn generate(job: &VideoJobInline, job_dir: &Path) -> Result<PathBuf> {
     let result =
         crate::job_process::run_with_timeout(&mut command, video::JOB_TIMEOUT, "sd-cli").await?;
     if !result.status.success() {
-        bail!("sd-cli failed (exit {:?}): {}", result.status.code(), stderr_tail(&result.stderr));
+        bail!(
+            "sd-cli failed ({}): {}",
+            crate::job_process::describe_exit(&result.status),
+            stderr_tail(&result.stderr)
+        );
     }
 
     // sd-cli numbers from 0 when the pattern has %d; ffmpeg starts there too.

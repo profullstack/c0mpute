@@ -58,6 +58,39 @@ pub async fn run_with_timeout(command: &mut Command, timeout: Duration, what: &s
     }
 }
 
+/// How a job child ended, for error messages: "exit 1", or on unix the
+/// signal that killed it. `ExitStatus::code()` alone prints "None" for a
+/// signal, which hid that dev2's earlyoom was SIGTERMing every sd-cli render
+/// under host memory pressure (2026-11-10).
+pub fn describe_exit(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = match sig {
+                libc::SIGKILL => "SIGKILL",
+                libc::SIGTERM => "SIGTERM",
+                libc::SIGINT => "SIGINT",
+                libc::SIGSEGV => "SIGSEGV",
+                libc::SIGABRT => "SIGABRT",
+                libc::SIGBUS => "SIGBUS",
+                libc::SIGILL => "SIGILL",
+                _ => "signal",
+            };
+            let hint = if sig == libc::SIGKILL || sig == libc::SIGTERM {
+                "; likely the host's OOM guard (earlyoom, systemd-oomd, kernel) or a shutdown, see `journalctl -u earlyoom`"
+            } else {
+                ""
+            };
+            return format!("killed by {name} ({sig}){hint}");
+        }
+    }
+    "no exit status".to_string()
+}
+
 async fn drain<R: AsyncRead + Unpin>(pipe: Option<R>) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     if let Some(mut pipe) = pipe {
@@ -172,6 +205,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         done()
+    }
+
+    #[test]
+    fn describe_exit_names_the_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        let term = std::process::ExitStatus::from_raw(libc::SIGTERM);
+        let text = describe_exit(&term);
+        assert!(text.starts_with("killed by SIGTERM (15)"), "{text}");
+        assert!(text.contains("earlyoom"), "{text}");
+        let code = std::process::ExitStatus::from_raw(3 << 8);
+        assert_eq!(describe_exit(&code), "exit 3");
     }
 
     #[tokio::test]
