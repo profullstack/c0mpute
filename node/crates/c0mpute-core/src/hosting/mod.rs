@@ -722,11 +722,20 @@ impl Hosting {
         budget.saturating_sub(held).min(by_disk)
     }
 
-    /// Keep a connection open to the hosting peers that announced a public
-    /// address. c0mpute has no relay: a node behind NAT cannot be dialled, so
-    /// other nodes could never fetch the copies it holds, or the site it is
-    /// publishing. Dialling out to them gives every such peer a connection it
-    /// can fetch over (gossipsub keeps it open).
+    /// Keep a connection open to the hosting peers, and the publishers seeding
+    /// a site, that announced a public address. c0mpute has no relay: a node
+    /// behind NAT cannot be dialled, so other nodes could never fetch the
+    /// copies it holds, and it can only fetch from a source it dials itself.
+    /// Dialling out gives every such peer a connection both sides can fetch
+    /// over (gossipsub keeps it open).
+    ///
+    /// Publishers announce `hosts: false`, and they used to be skipped here,
+    /// so a NAT'd host replicating a site reached its only source by a
+    /// peer-id dial that works only when the DHT already holds the
+    /// publisher's address. When it did not, every chunk request fell back to
+    /// slow DHT lookups: a 582 GiB site crawled at ~0 MB/s to NAT'd hosts
+    /// with 1.6 TiB free each. So seeding publishers come first, and every
+    /// target is dialled at the addresses it announced.
     pub async fn connect_hosts(&self) {
         let connected: HashSet<String> = self
             .0
@@ -736,21 +745,38 @@ impl Hosting {
             .iter()
             .map(|p| p.to_base58())
             .collect();
-        let targets: Vec<String> = {
+        let targets: Vec<(String, Vec<String>)> = {
             let map = self.0.map.read().await;
-            let mut v: Vec<String> = map
+            let mut v: Vec<(bool, String, Vec<String>)> = map
                 .peers
                 .iter()
-                .filter(|(p, h)| h.hosts && **p != self.0.me && !connected.contains(*p))
-                .filter(|(_, h)| h.addrs.iter().any(|a| public_tcp_addr(a)))
-                .map(|(p, _)| p.clone())
+                .filter(|(p, h)| (h.hosts || !h.sites.is_empty()) && **p != self.0.me && !connected.contains(*p))
+                .filter_map(|(p, h)| {
+                    let addrs: Vec<String> = h.addrs.iter().filter(|a| public_tcp_addr(a)).cloned().collect();
+                    (!addrs.is_empty()).then(|| (h.hosts, p.clone(), addrs))
+                })
                 .collect();
+            // Seeding publishers (hosts == false) first: a site being
+            // replicated may have no other source yet.
             v.sort();
-            v
+            v.into_iter().map(|(_, p, a)| (p, a)).collect()
         };
         let room = CONNECT_HOSTS_MAX.saturating_sub(connected.len().min(CONNECT_HOSTS_MAX));
-        for p in targets.into_iter().take(room.max(4)) {
-            if let Ok(pid) = p.parse::<c0mpute_net::PeerId>() {
+        for (p, addrs) in targets.into_iter().take(room.max(4)) {
+            let Ok(pid) = p.parse::<c0mpute_net::PeerId>() else {
+                continue;
+            };
+            let mut dialled = false;
+            for a in addrs.iter().take(4) {
+                let Some(ma) = dial_addr(a, pid) else {
+                    continue;
+                };
+                self.0.net.add_peer_address(pid, ma.clone()).await;
+                if self.0.net.dial(ma).await.is_ok() {
+                    dialled = true;
+                }
+            }
+            if !dialled {
                 let _ = self.0.net.connect(pid).await;
             }
         }
@@ -2721,6 +2747,23 @@ pub fn auto_budget(held: u64, disk_free: u64, disk_total: u64) -> u64 {
 }
 
 /// A multiaddr string with a public IP over TCP.
+/// An announced address as a dialable multiaddr for `pid`: `/p2p/<pid>` is
+/// appended when missing, and an address naming another peer is refused.
+fn dial_addr(a: &str, pid: c0mpute_net::PeerId) -> Option<c0mpute_net::Multiaddr> {
+    let ma: c0mpute_net::Multiaddr = a.parse().ok()?;
+    let mut named = None;
+    for p in ma.iter() {
+        if let c0mpute_net::Protocol::P2p(id) = p {
+            named = Some(id);
+        }
+    }
+    match named {
+        Some(id) if id == pid => Some(ma),
+        Some(_) => None,
+        None => Some(ma.with(c0mpute_net::Protocol::P2p(pid))),
+    }
+}
+
 fn public_tcp_addr(a: &str) -> bool {
     let Ok(ma) = a.parse::<c0mpute_net::Multiaddr>() else {
         return false;
@@ -2912,6 +2955,18 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dial_addr_names_the_peer_it_dials() {
+        let pid = c0mpute_net::PeerId::random();
+        let other = c0mpute_net::PeerId::random();
+        let bare = dial_addr("/ip4/152.53.47.37/tcp/46343", pid).unwrap();
+        assert_eq!(bare.to_string(), format!("/ip4/152.53.47.37/tcp/46343/p2p/{pid}"));
+        let named = format!("/ip4/152.53.47.37/tcp/46343/p2p/{pid}");
+        assert_eq!(dial_addr(&named, pid).unwrap().to_string(), named);
+        assert!(dial_addr(&format!("/ip4/152.53.47.37/tcp/46343/p2p/{other}"), pid).is_none());
+        assert!(dial_addr("not an address", pid).is_none());
+    }
 
     #[test]
     fn copies_go_to_different_machines() {
