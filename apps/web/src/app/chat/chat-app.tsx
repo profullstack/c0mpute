@@ -6,6 +6,74 @@ import { parseImageCommand, textHistory } from "@/lib/chat/images";
 import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodeProgress, type MusicCommand } from "@/lib/chat/music";
 import { describeAlbumStage, sanitizeAlbum, trackFileBase, parseAlbumCommand, type AlbumCommand, type AlbumTrack } from "@/lib/chat/album";
 import { describePromoProgress, detectPromoRequest, parsePromoCommand, type PromoCommand, type PromoScene } from "@/lib/chat/promo";
+import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "@/lib/chat/push-shared";
+
+const PUSH_NODE = "c0_push_node";
+const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/** A terminal spinner: one braille frame every 80 ms. */
+function Spinner() {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setI((n) => (n + 1) % SPIN.length), 80);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span className="accent inline-block w-[1ch]" aria-hidden>
+      {SPIN[i]}
+    </span>
+  );
+}
+
+/** Seconds since a push started, ticking once a second. */
+function Elapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <span className="text-[var(--color-dim)]">{clock(Math.max(0, Math.round((now - since) / 1000)))}</span>;
+}
+
+const PUSH_STAGE: Record<string, string> = {
+  queued: "waiting for your node to pick it up",
+  publishing: "your node is publishing",
+  deleting: "your node is taking the site down",
+};
+
+function PushCard({ p }: { p: PushView }) {
+  const running = !PUSH_FINAL.has(p.status);
+  return (
+    <div className="mt-2 border border-[var(--color-rule)] p-3 text-xs space-y-1 max-w-[640px]" aria-live="polite">
+      <p className="flex items-center gap-2">
+        {running ? <Spinner /> : <span className={p.status === "failed" ? "text-[var(--color-warn)]" : "accent"}>{p.status === "failed" ? "✗" : "✓"}</span>}
+        <span>
+          {p.action === "rm" ? "rm" : "push"} hosting <b>{p.name}</b>
+          {p.node ? <span className="text-[var(--color-dim)]"> via {p.node}</span> : null}
+        </span>
+        <span className="ml-auto">{running ? <Elapsed since={p.started} /> : null}</span>
+      </p>
+      {running && (
+        <p className="text-[var(--color-dim)]">
+          {PUSH_STAGE[p.status] ?? p.status}
+          {p.progress ? <> · <span className="text-[var(--color-fg)]">{p.progress}</span></> : null}
+        </p>
+      )}
+      {p.action === "publish" && <p className="text-[var(--color-dim)]">{p.files} files · paid hosts from the d1sks marketplace (--disks auto)</p>}
+      {p.status === "live" && p.url && (
+        <p>
+          live:{" "}
+          <a href={p.url} target="_blank" rel="noreferrer" className="accent underline break-all">
+            {p.url}
+          </a>
+          {p.copies != null ? <span className="text-[var(--color-dim)]"> · {p.copies} copies</span> : null}
+        </p>
+      )}
+      {p.status === "deleted" && <p className="text-[var(--color-dim)]">site removed from the network</p>}
+      {p.error && <p className="text-[var(--color-warn)] break-words">{p.error}</p>}
+    </div>
+  );
+}
 
 // An image turn keeps its picture only for this session (a blob: URL); what is
 // saved to localStorage is the text placeholder, and the model never sees it.
@@ -23,7 +91,26 @@ type Msg = {
   promo?: { id: string; scenes: PromoScene[]; vertical: boolean; video?: string; captions?: string; duration?: number; title?: string; motion?: string };
   /** An album: band, title, cover and tracks (each plays from /api/v1/music/<track id>), then the zip. */
   album?: { id: string; band: string | null; album: string | null; genre: string | null; concept: string | null; cover: string | null; zip: string | null; tracks: AlbumTrack[] };
+  /** The image job a picture came from, so /push can publish it later. */
+  imageJob?: string;
+  /** A `/push hosting` turn: polled live until the site is up (or gone). */
+  push?: PushView;
 };
+type PushView = {
+  id: string;
+  name: string;
+  action: "publish" | "rm";
+  status: string;
+  progress: string | null;
+  node: string | null;
+  files: number;
+  url: string | null;
+  site_id: string | null;
+  copies: number | null;
+  error: string | null;
+  started: number;
+};
+const PUSH_FINAL = new Set(["live", "failed", "deleted"]);
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
 type Me = { id: string; did: string; name: string | null; balance?: Balance | null };
@@ -231,7 +318,8 @@ export function ChatApp({ error }: { error: string | null }) {
         done = poll;
       }
       const url = URL.createObjectURL(await done.blob());
-      setLast({ content: `[image: ${prompt}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute CPU worker)`, image: url });
+      const imageJob = String(start.poll).split("/").pop() || undefined;
+      setLast({ content: `[image: ${prompt}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute CPU worker)`, image: url, imageJob });
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         setFailure(e instanceof Error ? e.message : String(e));
@@ -540,6 +628,213 @@ export function ChatApp({ error }: { error: string | null }) {
     }
   }
 
+  // ── /connect hosting + /push hosting ───────────────────────────────────────
+  /** Append a user turn and an assistant turn; returns the assistant turn's index. */
+  function addTurn(convo: Convo, text: string, reply: Msg): number {
+    const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
+    const index = convo.messages.length + 1;
+    setInput("");
+    setFailure(null);
+    setConvos((all) => {
+      const base = all.some((c) => c.id === convo.id) ? all : [convo, ...all];
+      const next = base
+        .map((c) =>
+          c.id === convo.id ? { ...c, title, messages: [...c.messages, { role: "user" as const, content: text, imageTurn: true }, { ...reply, imageTurn: true }], updated: Date.now() } : c,
+        )
+        .sort((a, b) => b.updated - a.updated);
+      save(next);
+      return next;
+    });
+    return index;
+  }
+
+  /** Patch one message by index (a push keeps polling while the chat moves on). */
+  const patchMsg = useCallback(
+    (convoId: string, index: number, fn: (m: Msg) => Msg) =>
+      update(convoId, (c) => {
+        if (!c.messages[index]) return c;
+        const msgs = c.messages.slice();
+        msgs[index] = fn(msgs[index]);
+        return { ...c, messages: msgs };
+      }),
+    [update],
+  );
+
+  const polling = useRef(new Set<string>());
+
+  /** Poll a push every 2 s until it is live, failed or deleted, updating its card. */
+  const pollPush = useCallback(
+    async (convoId: string, index: number, view: PushView) => {
+      const key = `${convoId}:${index}`;
+      if (polling.current.has(key)) return;
+      polling.current.add(key);
+      const set = (patch: Partial<PushView>) => patchMsg(convoId, index, (m) => (m.push ? { ...m, push: { ...m.push, ...patch } } : m));
+      const deadline = Date.now() + QUEUE_DEADLINE_MS;
+      try {
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const res = await fetch(`/api/v1/hosting/pushes/${view.id}`, { cache: "no-store" }).catch(() => null);
+          if (!res) continue;
+          if (res.status === 404 && view.action === "rm") {
+            set({ status: "deleted", progress: null, error: null });
+            return;
+          }
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            if (res.status >= 500) continue;
+            set({ status: "failed", error: j.error?.message ?? `HTTP ${res.status}` });
+            return;
+          }
+          const p = j.push;
+          if (view.action === "rm" && p.status === "live") {
+            // The node reported the delete failed: the site is still up.
+            set({ status: "failed", progress: null, error: p.error ?? "delete failed", url: p.url });
+            return;
+          }
+          set({ status: p.status, progress: p.progress, node: p.node, url: p.url, site_id: p.site_id, copies: p.copies, error: p.error });
+          if (view.action === "publish" && (p.status === "live" || p.status === "failed")) return;
+        }
+        set({ status: "failed", error: "gave up waiting; /push hosting ls shows where it got to" });
+      } finally {
+        polling.current.delete(key);
+      }
+    },
+    [patchMsg],
+  );
+
+  // After a reload, pick unfinished pushes back up.
+  useEffect(() => {
+    for (const c of convos)
+      c.messages.forEach((m, i) => {
+        if (m.push && !PUSH_FINAL.has(m.push.status)) void pollPush(c.id, i, m.push);
+      });
+  }, [convos, pollPush]);
+
+  async function runConnect(convo: Convo, text: string, cmd: ConnectCommand) {
+    const index = addTurn(convo, text, { role: "assistant", content: "// looking up your hosting nodes…" });
+    const say = (content: string) => patchMsg(convo.id, index, (m) => ({ ...m, content }));
+    if (!me) return say("// sign in with CoinPay first (top right): pushes and nodes belong to your account.");
+    if (cmd.error) return say(`// ${cmd.error}`);
+    const res = await fetch("/api/v1/hosting/nodes", { cache: "no-store" }).catch(() => null);
+    const j = res ? await res.json().catch(() => ({})) : {};
+    if (!res?.ok) return say(`// could not list nodes: ${j.error?.message ?? "network error"}`);
+    const nodes: { name: string; online: boolean; payments: string | null; version: string | null }[] = j.nodes ?? [];
+    const howTo =
+      "Link a node: on the machine that should publish, run\n\n  c0mpute chat login\n  c0mpute chat connect hosting --name <node>\n\nIt signs in with this CoinPay account, then publishes your pushes with its own key and pays hosts from its CoinPay wallet ([payments] rail = \"coinpay\"). Leave it running (or run it as a service).";
+    let chosen: string | null = null;
+    try {
+      chosen = localStorage.getItem(PUSH_NODE);
+    } catch {}
+    if (cmd.node) {
+      const n = nodes.find((x) => x.name === cmd.node);
+      if (!n) return say(`// no node named ${cmd.node} on your account.\n\n${howTo}`);
+      try {
+        localStorage.setItem(PUSH_NODE, n.name);
+      } catch {}
+      chosen = n.name;
+    }
+    if (!nodes.length) return say(`// no hosting node linked yet.\n\n${howTo}`);
+    const lines = nodes.map(
+      (n) =>
+        `${n.name === chosen ? "*" : " "} ${n.name.padEnd(20)} ${n.online ? "online " : "offline"}  ${n.payments === "coinpay" ? "pays via CoinPay" : "NO CoinPay payments: cannot push"}${n.version ? `  v${n.version}` : ""}`,
+    );
+    say(
+      `${cmd.node ? `// /push hosting now publishes through ${cmd.node}.\n\n` : ""}your hosting nodes (* = used by /push):\n${lines.join("\n")}\n\n/connect hosting <node> picks one. /push hosting <name> publishes this chat's files as a site.\n\n${howTo}`,
+    );
+  }
+
+  async function runPush(convo: Convo, text: string, cmd: PushCommand) {
+    if (cmd.kind === "help") {
+      addTurn(convo, text, {
+        role: "assistant",
+        content: `${cmd.error ? `// ${cmd.error}\n\n` : ""}/push hosting <name>     publish this chat's files (images, songs, albums, videos, transcript) as a site on the c0mpute network
+/push hosting ls         your sites
+/push hosting rm <name>  take a site down
+/connect hosting [node]  link or pick the node that publishes them`,
+      });
+      return;
+    }
+    const index = addTurn(convo, text, { role: "assistant", content: "" });
+    const say = (content: string) => patchMsg(convo.id, index, (m) => ({ ...m, content }));
+    if (!me) return say("// sign in with CoinPay first (top right): pushes belong to your account and are paid through CoinPay.");
+
+    if (cmd.kind === "ls") {
+      say("// listing your sites…");
+      const res = await fetch("/api/v1/hosting/pushes", { cache: "no-store" }).catch(() => null);
+      const j = res ? await res.json().catch(() => ({})) : {};
+      if (!res?.ok) return say(`// could not list: ${j.error?.message ?? "network error"}`);
+      const ps: { name: string; status: string; node: string | null; url: string | null; files: unknown[]; copies: number | null; progress: string | null; error: string | null; updated_at: string }[] = j.pushes ?? [];
+      if (!ps.length) return say("// no sites yet. /push hosting <name> publishes this chat's files.");
+      return say(
+        `your sites (${ps.length}):\n` +
+          ps
+            .map(
+              (p) =>
+                `${p.name.padEnd(24)} ${p.status.padEnd(10)} ${String(p.files.length).padStart(3)} files  ${p.node ?? "?"}  ${p.url ?? p.progress ?? ""}${p.error ? `\n${" ".repeat(25)}! ${p.error}` : ""}`,
+            )
+            .join("\n"),
+      );
+    }
+
+    if (cmd.kind === "rm") {
+      say(`// taking ${cmd.name} down…`);
+      const res = await fetch(`/api/v1/hosting/pushes/${cmd.name}`, { method: "DELETE" }).catch(() => null);
+      const j = res ? await res.json().catch(() => ({})) : {};
+      if (!res?.ok) return say(`// ${j.error?.message ?? "network error"}`);
+      const view: PushView = {
+        id: (j.poll ?? "").split("/").pop() || cmd.name,
+        name: cmd.name,
+        action: "rm",
+        status: j.status === "deleted" ? "deleted" : "deleting",
+        progress: null,
+        node: null,
+        files: 0,
+        url: null,
+        site_id: null,
+        copies: null,
+        error: null,
+        started: Date.now(),
+      };
+      patchMsg(convo.id, index, (m) => ({ ...m, content: `// rm hosting ${cmd.name}`, push: view }));
+      if (view.status !== "deleted") void pollPush(convo.id, index, view);
+      return;
+    }
+
+    const files = collectPushFiles(convo.title, convo.messages);
+    say(`// sending ${files.length} files to your hosting node…`);
+    let node: string | null = null;
+    try {
+      node = localStorage.getItem(PUSH_NODE);
+    } catch {}
+    const res = await fetch("/api/v1/hosting/pushes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: cmd.name, node: node || undefined, files }),
+    }).catch(() => null);
+    const j = res ? await res.json().catch(() => ({})) : {};
+    if (!res || res.status !== 202) {
+      const msg = j.error?.message ?? "network error";
+      return say(`// push failed: ${msg}${res?.status === 409 && /no hosting node/.test(msg) ? "\n\nTry /connect hosting." : ""}`);
+    }
+    const p = j.push;
+    const view: PushView = {
+      id: p.id,
+      name: p.name,
+      action: "publish",
+      status: p.status,
+      progress: p.progress,
+      node: p.node,
+      files: p.files.length,
+      url: p.url,
+      site_id: p.site_id,
+      copies: p.copies,
+      error: null,
+      started: Date.now(),
+    };
+    patchMsg(convo.id, index, (m) => ({ ...m, content: `// push hosting ${cmd.name} (rev ${p.rev})`, push: view }));
+    void pollPush(convo.id, index, view);
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || busy) return;
@@ -555,6 +850,16 @@ export function ChatApp({ error }: { error: string | null }) {
       setActiveId(c.id);
     }
     const id = convo.id;
+    const pushCmd = parsePushCommand(text);
+    if (pushCmd) {
+      await runPush(convo, text, pushCmd);
+      return;
+    }
+    const connectCmd = parseConnectCommand(text);
+    if (connectCmd) {
+      await runConnect(convo, text, connectCmd);
+      return;
+    }
     const promo = parsePromoCommand(text) ?? detectPromoRequest(text);
     if (promo) {
       await makePromo(convo, text, promo);
@@ -756,7 +1061,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it).</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -766,6 +1071,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 <div className="whitespace-pre-wrap break-words">
                   {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
                 </div>
+                {m.push && <PushCard p={m.push} />}
                 {m.image && (
                   <figure className="mt-2">
                     {/* eslint-disable-next-line @next/next/no-img-element -- a session blob: URL */}
@@ -912,7 +1218,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, /music <style>, /album <idea>, or /promo <url> (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, /image <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (

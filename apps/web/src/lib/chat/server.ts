@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 export const env = (name: string): string => (process.env as Record<string, string | undefined>)[name] ?? "";
 
 import { createStore, type Sql, type Store, type User } from "./store";
+import { createPushStore, type PushStore } from "./push";
 
 // ── store ────────────────────────────────────────────────────────────────────
 let client: Database | null = null;
@@ -38,6 +39,10 @@ const cloudSql: Sql = {
 
 let _store: Store | null = null;
 export const store = () => (_store ??= createStore(cloudSql));
+
+let _pushStore: PushStore | null = null;
+/** `/push hosting` + `/connect hosting`: linked nodes and pushes, per account. */
+export const pushStore = () => (_pushStore ??= createPushStore(cloudSql));
 
 // ── request auth ─────────────────────────────────────────────────────────────
 export const SESSION_COOKIE = "c0_session";
