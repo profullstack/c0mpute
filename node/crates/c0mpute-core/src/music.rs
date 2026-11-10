@@ -555,8 +555,8 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
         bail!(
-            "ACE-Step failed (exit {:?}): {}",
-            result.status.code(),
+            "ACE-Step failed ({}): {}",
+            crate::job_process::describe_exit(&result.status),
             tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
         );
     }

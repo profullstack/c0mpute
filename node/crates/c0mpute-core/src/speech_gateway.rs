@@ -786,6 +786,18 @@ async fn run_checked_job(
             // with backoff instead of failing, without spending one of the
             // real attempts, for as long as this workload is worth waiting.
             Err((error, None)) if waited() < max_wait => {
+                // Nobody else bid, so let the workers that failed this request
+                // try again. Otherwise a request whose only capable worker
+                // failed it once (dev2's one image worker, SIGTERMed by
+                // earlyoom on 2026-11-10) holds the oldest-first auction turn
+                // with no possible bidder for its whole 2 h wait, and every
+                // image queued behind it waits too. Real attempts stay capped
+                // by MAX_SPEECH_WORKER_ATTEMPTS.
+                if !excluded_bidders.is_empty() {
+                    tracing::info!(workload, excluded = excluded_bidders.len(),
+                        "no other worker bid; letting workers that failed this request retry");
+                    excluded_bidders.clear();
+                }
                 let pause = state.queue.backoff(no_bid_rounds, max_wait.saturating_sub(waited()));
                 no_bid_rounds += 1;
                 tracing::info!(workload, waited_secs = waited().as_secs(), max_wait_secs = max_wait.as_secs(),

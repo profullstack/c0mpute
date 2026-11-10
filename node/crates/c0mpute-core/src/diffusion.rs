@@ -349,8 +349,8 @@ pub(crate) async fn install_runtime() -> Result<()> {
     let text = String::from_utf8_lossy(&output.stdout);
     if !text.contains("--diffusion-model") {
         bail!(
-            "sd-cli self-test failed (exit {:?}): {}",
-            output.status.code(),
+            "sd-cli self-test failed ({}): {}",
+            crate::job_process::describe_exit(&output.status),
             String::from_utf8_lossy(&output.stderr)
                 .chars()
                 .take(300)
@@ -603,7 +603,7 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
             .rev()
             .collect::<Vec<_>>()
             .join(" | ");
-        bail!("sd-cli failed (exit {:?}): {tail}", result.status.code());
+        bail!("sd-cli failed ({}): {tail}", crate::job_process::describe_exit(&result.status));
     }
     Ok(())
 }
