@@ -380,7 +380,7 @@ export function createPushStore(sql: Sql) {
       userId: string,
       nodeId: string,
       pid: string,
-      r: { rev?: unknown; progress?: unknown; bytes?: unknown; ok?: unknown; site_id?: unknown; version?: unknown; url?: unknown; copies?: unknown; error?: unknown; deleted?: unknown },
+      r: { rev?: unknown; progress?: unknown; bytes?: unknown; note?: unknown; ok?: unknown; site_id?: unknown; version?: unknown; url?: unknown; copies?: unknown; error?: unknown; deleted?: unknown },
     ): Promise<Push | "deleted"> {
       const p = await store.pushById(userId, pid);
       if (!p || p.node_id !== nodeId) throw new PushError("no such push on this node", 404);
@@ -418,8 +418,17 @@ export function createPushStore(sql: Sql) {
         const url = typeof r.url === "string" && /^https?:\/\//.test(r.url) ? r.url.slice(0, 500) : null;
         const bytes = Number.isFinite(Number(r.bytes)) ? Math.max(0, Math.floor(Number(r.bytes))) : 0;
         await sql.run(
-          `UPDATE chat_pushes SET status = 'live', site_id = ?, version = ?, bytes = ?, url = ?, copies = ?, error = NULL, progress = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`,
-          [siteId, Number.isFinite(Number(r.version)) ? Number(r.version) : null, bytes, url, Number(r.copies) || 0, t, p.id],
+          `UPDATE chat_pushes SET status = 'live', site_id = ?, version = ?, bytes = ?, url = ?, copies = ?, error = ?, progress = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`,
+          [
+            siteId,
+            Number.isFinite(Number(r.version)) ? Number(r.version) : null,
+            bytes,
+            url,
+            Number(r.copies) || 0,
+            typeof r.note === "string" && r.note ? r.note.slice(0, 1000) : null, // e.g. files left out
+            t,
+            p.id,
+          ],
         );
       } else {
         await sql.run(`UPDATE chat_pushes SET status = 'failed', error = ?, progress = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`, [

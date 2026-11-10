@@ -378,6 +378,7 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
     tokio::fs::create_dir_all(&dir).await?;
     let total = job.files.len();
     let mut bytes = 0u64;
+    let mut skipped: Vec<String> = Vec::new();
     let mut last = Instant::now() - Duration::from_secs(10);
     for (i, f) in job.files.iter().enumerate() {
         let rel = safe_rel(&f.path).ok_or_else(|| anyhow!("refusing file path {:?}", f.path))?;
@@ -396,7 +397,16 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
             if !url.starts_with("/api/v1/hosting/pushes/") {
                 bail!("refusing file url {url:?}");
             }
-            bytes += api.download(url, &to).await.with_context(|| f.path.clone())?;
+            // Old results expire from the network's media store: publish the
+            // rest and say what was left out, rather than failing the push.
+            match api.download(url, &to).await {
+                Ok(n) => bytes += n,
+                Err(e) if e.to_string().starts_with("HTTP 404") || e.to_string().starts_with("HTTP 409") => {
+                    eprintln!("  skipped {}: {e:#}", f.path);
+                    skipped.push(f.path.clone());
+                }
+                Err(e) => return Err(e.context(f.path.clone())),
+            }
         } else {
             bail!("{}: no text or url", f.path);
         }
@@ -422,7 +432,11 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
         (true, Some(site)) => {
             api.report(
                 job,
-                json!({"ok": true, "site_id": site, "version": version, "url": url, "copies": copies.unwrap_or(0), "bytes": bytes}),
+                json!({
+                    "ok": true, "site_id": site, "version": version, "url": url,
+                    "copies": copies.unwrap_or(0), "bytes": bytes,
+                    "note": (!skipped.is_empty()).then(|| format!("left out (expired on the network): {}", skipped.join(", "))),
+                }),
             )
             .await?;
             println!("live:     {} -> {}", job.name, url.unwrap_or_default());

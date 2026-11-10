@@ -129,8 +129,17 @@ describe("push store", () => {
     expect(mid !== "deleted" && mid.progress).toBe("copies 1/3");
     expect(mid !== "deleted" && publicPush(mid).progress).toBe("copies 1/3");
 
-    const live = await s.report("u1", node.id, p.id, { rev: 1, ok: true, site_id: "abcdef1234", version: 7, url: "https://g/s/abcdef1234/", copies: 3, bytes: 99 });
-    expect(live).toMatchObject({ status: "live", site_id: "abcdef1234", copies: 3, bytes: 99, progress: null });
+    const live = await s.report("u1", node.id, p.id, {
+      rev: 1,
+      ok: true,
+      site_id: "abcdef1234",
+      version: 7,
+      url: "https://g/s/abcdef1234/",
+      copies: 3,
+      bytes: 99,
+      note: "left out (expired on the network): images/01.png",
+    });
+    expect(live).toMatchObject({ status: "live", site_id: "abcdef1234", copies: 3, bytes: 99, progress: null, error: "left out (expired on the network): images/01.png" });
 
     const again = await s.upsertPush("u1", { target: "hosting", name: "site", node, files: FILES });
     expect(again.rev).toBe(2);
