@@ -68,6 +68,9 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
+# x402 day passes for crawlers (profullstack/x402-ports, Rust port of @profullstack/x402-gateway).
+# Default features off: the node brings its own HTTP client (reqwest) instead of ureq.
+x402-gateway = { git = "https://github.com/profullstack/x402-ports", rev = "5d0cd434c0a4556c264cb0c8ecd2f5791501abde", default-features = false }
 zeroize = { version = "1", features = ["derive"] }
 base64 = "0.22"
 bs58 = "0.5"

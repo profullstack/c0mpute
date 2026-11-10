@@ -1,0 +1,56 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# First-party, compiled into the c0mpute binary, OFF by default. Code:
+# node/crates/c0mpute-core/src/x402.rs. Docs: docs/x402-hosting.md.
+#
+# Charge bots for files this node's gateway serves. AI training crawlers
+# (GPTBot, ClaudeBot, CCBot, Bytespider, meta-externalagent, ...) fetching
+# hosted sites (/s/<site>/..., custom domains, optionally /storage/v1 reads)
+# get HTTP 402 with an x402 v2 offer, pay USDC through CoinPay straight to
+# the operator's wallet, and get a signed day pass. People, retrieval agents
+# (ChatGPT-User, Claude-User, PerplexityBot) and the network's own hosting
+# API are never charged. Same protocol as every Profullstack site
+# (@profullstack/x402-gateway; Rust port profullstack/x402-ports).
+#
+# Turn on:
+#   [x402]
+#   enabled = true
+#   pay_to  = "0x..."          # your EVM wallet
+#   # CoinPay key (x402 scope) in $C0MPUTE_X402_COINPAY_KEY, never in config
+
+[module]
+id          = "x402"
+name        = "x402 — charge bots for hosted files"
+version     = "0.3.23"
+kind        = "service"
+category    = "applications"
+status      = "available"
+builtin     = true
+description = "Sell day passes to AI training crawlers that fetch the sites and files your gateway serves: HTTP 402 with an x402 offer, paid in USDC through CoinPay to your own wallet. People and search/retrieval agents stay free. Off by default."
+author      = "Profullstack"
+license     = "MIT"
+homepage    = "https://c0mpute.com/plugins/x402"
+source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/x402.rs"
+keywords    = ["x402", "paywall", "crawlers", "ai-bots", "coinpay", "usdc", "monetize", "hosting"]
+
+[module.requirements]
+c0mpute      = ">=0.3.29"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["network:ingress"]
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute config"
+
+[module.config.defaults]
+enabled                 = false
+price_cents             = 100
+pass_minutes            = 1440
+max_days                = 30
+path                    = "/_x402/crawl"
+api_key_env             = "C0MPUTE_X402_COINPAY_KEY"  # env var NAME, not a key  gitleaks:allow
+gate_storage            = false
+charge_spoofed_browsers = false

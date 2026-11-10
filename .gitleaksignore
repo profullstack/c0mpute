@@ -40,3 +40,12 @@ c429b7a6b38238f67f348c2323c1fbff41348a5e:node/crates/c0mpute-core/src/webhook.rs
 # in minisign.pub, scripts/install.sh and c0mpute-update. Covers the
 # pre-squash commit on branch `fix/release-signing`.
 7fb45f20b3a3f28fa802e813cfdceda3ae236d1a:.github/workflows/release.yml:generic-api-key:171
+
+# The NAME of the env var that holds the x402 CoinPay key
+# ("C0MPUTE_X402_COINPAY_KEY"), not a key; generic-api-key matches on the
+# `api_key_env = "..."` shape. The lines carry an inline `gitleaks:allow`; these
+# entries cover the pre-squash commit on branch `feat/x402-threatcrush-plugins`
+# (PR #276) until that branch is deleted.
+2f8c73c34a463a3285cfba1418a206e9fed8e214:plugins/x402/module.toml:generic-api-key:54
+2f8c73c34a463a3285cfba1418a206e9fed8e214:node/crates/c0mpute-core/src/x402.rs:generic-api-key:21
+2f8c73c34a463a3285cfba1418a206e9fed8e214:node/crates/c0mpute-core/src/x402.rs:generic-api-key:519

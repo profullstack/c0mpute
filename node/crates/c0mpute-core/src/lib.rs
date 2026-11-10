@@ -72,6 +72,8 @@ pub mod video;
 pub mod video_cpu;
 pub mod webhook;
 pub mod workflow;
+pub mod threatcrush;
+pub mod x402;
 
 pub use buyer::{AuctionOutcome, JobAuction, run_auction};
 pub use capabilities::{Registry, advertise_loop, tags_from_config};

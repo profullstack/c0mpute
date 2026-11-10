@@ -701,8 +701,17 @@ impl Supervisor {
                 net: self.net.clone(),
             };
             let mut app = c0mpute_gateway::router(state);
+            // x402: charge training crawlers for hosted files (off by default).
+            let x402 = crate::x402::HostingGate::from_config(&self.config);
+            if let Some(g) = &x402 {
+                app = app.merge(crate::x402::sales_router(g.clone()));
+            }
             if self.config.roles.contains(&c0mpute_proto::Role::Storage) {
-                app = app.merge(self.storage_router());
+                let mut s = self.storage_router();
+                if let Some(g) = x402.as_ref().filter(|g| g.gate_storage) {
+                    s = s.layer(axum::middleware::from_fn_with_state(g.clone(), crate::x402::gate));
+                }
+                app = app.merge(s);
             }
             if let Some(l) = &live {
                 app = app.merge(l.router());
@@ -714,7 +723,16 @@ impl Supervisor {
                 app = app.merge(a.router());
             }
             if let Some(h) = &hosting {
-                app = app.merge(h.router());
+                let mut r = h.router();
+                if let Some(g) = &x402 {
+                    // Layers the custom-domain fallback too.
+                    r = r.layer(axum::middleware::from_fn_with_state(g.clone(), crate::x402::gate));
+                }
+                app = app.merge(r);
+            }
+            // ThreatCrush: one access-log line per request (off by default).
+            if let Some(log) = crate::threatcrush::AccessLog::from_config(&self.config) {
+                app = app.layer(axum::middleware::from_fn_with_state(log, crate::threatcrush::log));
             }
             tokio::spawn(async move {
                 if let Err(e) = c0mpute_gateway::serve_router(app, bind).await {
