@@ -2869,9 +2869,9 @@ mod tests {
     #[test]
     fn a_first_striped_copy_is_held_group_by_group() {
         let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
-        let v1 = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 1, 1 << 40, vec![]).unwrap();
-        let v1_again = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 2, 1 << 40, vec![]).unwrap();
-        let v2 = SiteRecord::sign(&kp, "big", &Hash::of(b"v2"), 3, 1 << 40, vec![]).unwrap();
+        let v1 = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 1, 1 << 35, vec![]).unwrap();
+        let v1_again = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 2, 1 << 35, vec![]).unwrap();
+        let v2 = SiteRecord::sign(&kp, "big", &Hash::of(b"v2"), 3, 1 << 35, vec![]).unwrap();
         // Nothing held yet: each group counts as soon as it lands.
         assert!(holds_each_group_on_arrival(None, &v1));
         // More groups of the version held (or a re-publish of it): same.
