@@ -1249,6 +1249,7 @@ impl Hosting {
         let same_version = previous
             .as_ref()
             .is_some_and(|p| p.manifest == rec.manifest);
+        let incremental = holds_each_group_on_arrival(previous.as_ref(), rec);
         let mine: BTreeSet<u32> = if same_version {
             self.0
                 .catalog
@@ -1336,7 +1337,7 @@ impl Hosting {
                     continue;
                 }
                 added.insert(g);
-                if same_version {
+                if incremental {
                     // Hold each group as soon as it is complete, so the copy
                     // counts (and a restart resumes) group by group.
                     {
@@ -1355,7 +1356,7 @@ impl Hosting {
                 }
             }
         }
-        if !same_version && !added.is_empty() {
+        if !incremental && !added.is_empty() {
             {
                 let mut cat = self.0.catalog.write().await;
                 cat.sites.insert(rec.site_id.clone(), rec.clone());
@@ -2652,6 +2653,19 @@ fn slice_chunk(i: u64, bytes: &[u8], start: u64, end_incl: u64) -> &[u8] {
 /// already holds plus [`AUTO_BUDGET_PERCENT`] of the free space above the
 /// free-disk floor. It follows the disk: a nearly full disk takes nothing new,
 /// a big empty one takes a lot.
+/// Whether [`Hosting::replicate_groups`] commits each group to the catalog
+/// (and announces it) as soon as it lands, rather than all at the end.
+///
+/// Yes for a first copy and for more groups of the version already held: a
+/// large site takes hours to copy, and until a group is held it neither
+/// counts toward the site's copies (so a publisher waiting on progress gives
+/// up and stops serving) nor survives a restart. Only a new version replacing
+/// an older one switches over at the end, since the catalog holds one
+/// version of a site at a time.
+fn holds_each_group_on_arrival(previous: Option<&SiteRecord>, rec: &SiteRecord) -> bool {
+    previous.is_none_or(|p| p.manifest == rec.manifest)
+}
+
 pub fn auto_budget(held: u64, disk_free: u64, disk_total: u64) -> u64 {
     if disk_total == 0 {
         return held + 5 * GIB_BYTES;
@@ -2851,6 +2865,21 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_first_striped_copy_is_held_group_by_group() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let v1 = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 1, 1 << 35, vec![]).unwrap();
+        let v1_again = SiteRecord::sign(&kp, "big", &Hash::of(b"v1"), 2, 1 << 35, vec![]).unwrap();
+        let v2 = SiteRecord::sign(&kp, "big", &Hash::of(b"v2"), 3, 1 << 35, vec![]).unwrap();
+        // Nothing held yet: each group counts as soon as it lands.
+        assert!(holds_each_group_on_arrival(None, &v1));
+        // More groups of the version held (or a re-publish of it): same.
+        assert!(holds_each_group_on_arrival(Some(&v1), &v1));
+        assert!(holds_each_group_on_arrival(Some(&v1), &v1_again));
+        // A new version replaces the old one only once its groups are in.
+        assert!(!holds_each_group_on_arrival(Some(&v1), &v2));
+    }
 
     #[test]
     fn ranges_parse_like_browsers_send_them() {
