@@ -18,6 +18,10 @@ use crate::hosting::site::owner_hex;
 /// Prefix of an exported key: `c0gitkey1.<hex of the protobuf keypair>`.
 pub const TOKEN_PREFIX: &str = "c0gitkey1.";
 
+fn owner_of(kp: &Keypair) -> Result<String> {
+    owner_hex(kp).context("only ed25519 keys own repos")
+}
+
 fn keys_dir() -> PathBuf {
     crate::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -52,7 +56,7 @@ pub fn import(token: &str) -> Result<String> {
 
 fn import_into(dir: &Path, token: &str, own: Option<&str>) -> Result<String> {
     let kp = parse_token(token)?;
-    let owner = owner_hex(&kp)?;
+    let owner = owner_of(&kp)?;
     if own == Some(owner.as_str()) {
         return Ok(owner);
     }
@@ -101,7 +105,7 @@ fn remove_in(dir: &Path, owner: &str) -> Result<bool> {
 }
 
 fn own_owner() -> Result<String> {
-    owner_hex(&crate::hosting::publisher_keypair()?)
+    owner_of(&crate::hosting::publisher_keypair()?)
 }
 
 /// The key to sign a push to a repo of `owner` with: this machine's own key,
@@ -112,7 +116,7 @@ pub fn keypair_for(owner: &str) -> Result<Keypair> {
 }
 
 fn keypair_in(dir: &Path, own: Keypair, owner: &str) -> Result<Keypair> {
-    let me = owner_hex(&own)?;
+    let me = owner_of(&own)?;
     if me == owner {
         return Ok(own);
     }
