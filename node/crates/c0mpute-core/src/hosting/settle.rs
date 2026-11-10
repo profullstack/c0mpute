@@ -1,15 +1,19 @@
-//! Settlement for marketplace sites: what a payer owes each preferred holder
-//! for a window of time, from the availability receipts it trusts.
+//! Settlement for marketplace sites: what a payer owes each holder for a
+//! window of time, from the availability receipts it trusts.
 //!
 //! Pure functions, no I/O. The node runs them over its own receipts and
 //! hands the result to a [`crate::payments::Rail`]; with payments off
 //! (the default) it only logs what it would pay.
 //!
-//! The rule, per preferred holder of a site whose payer is this node:
+//! The rule, per holder of a site whose payer is this node:
 //!
 //! ```text
-//! owed = price_per_gib_month × site_GiB × (window / 30 days) × passed / challenged
+//! owed = price_per_gib_month × held_GiB × (window / 30 days) × passed / challenged
 //! ```
+//!
+//! A preferred host's `held_GiB` is its agreed share ([`paid_share`]). Any
+//! other hosting node holding part of a paid site (a striped site spreads its
+//! groups over whatever nodes have room) is paid for the bytes it holds now.
 //!
 //! counting only receipts in the window signed by the site's owner or payer.
 //! A holder that passed fewer than half its challenges, or was never
@@ -64,11 +68,14 @@ pub fn paid_share(rec: &SiteRecord) -> u64 {
     }
 }
 
-/// Everything `payer` owes for `[from, to)` (unix seconds).
+/// Everything `payer` owes for `[from, to)` (unix seconds). `held` is the
+/// bytes each (site id, holder) holds now, for holders that are not preferred
+/// hosts; they are paid for those bytes.
 pub fn dues(
     records: &[SiteRecord],
     receipts: &[Receipt],
     payouts: &HashMap<String, Payee>,
+    held: &HashMap<(String, String), u64>,
     payer: &str,
     from: u64,
     to: u64,
@@ -85,7 +92,19 @@ pub fn dues(
             continue;
         }
         let trusted = [rec.owner.as_str(), rec.payer_key()];
-        for holder in &terms.preferred_hosts {
+        let mut holders: Vec<(String, u64)> = terms
+            .preferred_hosts
+            .iter()
+            .map(|h| (h.clone(), paid_share(rec)))
+            .collect();
+        let mut others: Vec<(String, u64)> = held
+            .iter()
+            .filter(|((site, h), bytes)| *site == rec.site_id && **bytes > 0 && !rec.prefers(h))
+            .map(|((_, h), bytes)| (h.clone(), *bytes))
+            .collect();
+        others.sort();
+        holders.extend(others);
+        for (holder, bytes) in &holders {
             let mut seen = std::collections::HashSet::new();
             let (mut passed, mut challenged) = (0u64, 0u64);
             for r in receipts {
@@ -102,7 +121,7 @@ pub fn dues(
                     }
                 }
             }
-            let amount = owed(terms.price_per_gib_month, paid_share(rec), to - from, passed, challenged);
+            let amount = owed(terms.price_per_gib_month, *bytes, to - from, passed, challenged);
             out.push(Due {
                 site_id: rec.site_id.clone(),
                 holder: holder.clone(),
@@ -229,7 +248,7 @@ mod tests {
                 coin: "USDC_POL".into(),
             },
         );
-        let ds = dues(&[rec.clone()], &receipts, &payouts, &owner_hex, 0, MONTH_SECS);
+        let ds = dues(&[rec.clone()], &receipts, &payouts, &HashMap::new(), &owner_hex, 0, MONTH_SECS);
         assert_eq!(ds.len(), 2);
         let da = ds.iter().find(|d| d.holder == a).unwrap();
         let db = ds.iter().find(|d| d.holder == b).unwrap();
@@ -243,6 +262,59 @@ mod tests {
         assert_eq!(ts[0].amount, 2_000_000);
         assert_eq!(ts[0].key, da.key);
         // Somebody else's sites are not ours to pay.
-        assert!(dues(&[rec], &receipts, &payouts, &"c".repeat(64), 0, MONTH_SECS).is_empty());
+        assert!(dues(&[rec], &receipts, &payouts, &HashMap::new(), &"c".repeat(64), 0, MONTH_SECS).is_empty());
+    }
+
+    #[test]
+    fn any_holder_of_a_paid_site_is_paid_for_what_it_holds() {
+        let owner = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let owner_hex = crate::hosting::site::owner_hex(&owner).unwrap();
+        let (pref, spare, idle) = (pid(), pid(), pid());
+        let rec = SiteRecord::sign_with_terms(
+            &owner,
+            "spread",
+            &Hash::of(b"m"),
+            1,
+            4096 * MIB,
+            vec![],
+            Some(HostingTerms {
+                preferred_hosts: vec![pref.clone()],
+                price_per_gib_month: 1_000_000,
+                payer: None,
+            }),
+        )
+        .unwrap();
+        let chunk = Hash::of(b"c").to_hex();
+        let r = |holder: &str| {
+            Receipt::sign(
+                &owner,
+                Challenge {
+                    site_id: &rec.site_id,
+                    manifest: &rec.manifest,
+                    holder,
+                    chunk: &chunk,
+                    ok: true,
+                    rtt_ms: 1,
+                    at: 10,
+                },
+            )
+            .unwrap()
+        };
+        let receipts = vec![r(&pref), r(&spare), r(&idle)];
+        let mut held = HashMap::new();
+        // `spare` holds a quarter GiB of groups; `idle` holds nothing now.
+        held.insert((rec.site_id.clone(), spare.clone()), 256 * MIB);
+        held.insert((rec.site_id.clone(), idle.clone()), 0);
+        // A preferred host listed in `held` is still paid its agreed share.
+        held.insert((rec.site_id.clone(), pref.clone()), MIB);
+        // Another site's holding is not this site's.
+        held.insert(("other".into(), spare.clone()), 1024 * MIB);
+        let ds = dues(&[rec.clone()], &receipts, &HashMap::new(), &held, &owner_hex, 0, MONTH_SECS);
+        assert_eq!(ds.len(), 2, "the preferred host and the spare holder");
+        let dp = ds.iter().find(|d| d.holder == pref).unwrap();
+        let dsp = ds.iter().find(|d| d.holder == spare).unwrap();
+        assert_eq!(dp.amount, 4_000_000, "whole 4 GiB site at $1/GiB-month");
+        assert_eq!(dsp.amount, 250_000, "a quarter GiB at $1/GiB-month");
+        assert_ne!(dp.key, dsp.key);
     }
 }

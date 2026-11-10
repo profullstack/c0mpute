@@ -1079,8 +1079,8 @@ impl Hosting {
         });
     }
 
-    /// The per-owner limit applies to free copies only: a preferred host was
-    /// picked (and is paid) for the site.
+    /// Bytes this node holds of the owner's other free sites (the per-owner
+    /// limit applies to free sites only: every holder of a paid site is paid).
     async fn owner_bytes_excluding(&self, rec: &SiteRecord) -> u64 {
         let recs: Vec<SiteRecord> = self
             .0
@@ -1089,7 +1089,7 @@ impl Hosting {
             .await
             .sites
             .values()
-            .filter(|r| r.owner == rec.owner && r.site_id != rec.site_id && !r.prefers(&self.0.me))
+            .filter(|r| r.owner == rec.owner && r.site_id != rec.site_id && r.terms().is_none())
             .cloned()
             .collect();
         let stripes = self.0.catalog.read().await.stripes.clone();
@@ -1124,7 +1124,10 @@ impl Hosting {
                 free_disk_floor(disk_total) / GIB_BYTES
             );
         }
-        if !rec.prefers(&self.0.me) {
+        // Free sites only: a paid (v2) site's payer pays every holder for the
+        // bytes it holds (settle::dues), so its groups spread over any node
+        // with room instead of stopping at 16 GiB per node.
+        if rec.terms().is_none() {
             let owner = self.owner_bytes_excluding(rec).await;
             if owner + this_site_held + extra > MAX_BYTES_PER_OWNER {
                 bail!(
@@ -1976,11 +1979,13 @@ impl Hosting {
 
     // ── settlement ───────────────────────────────────────────────────────
 
-    /// What this node (as payer) owes preferred holders for `[from, to)`.
+    /// What this node (as payer) owes the holders of its paid sites for
+    /// `[from, to)`.
     pub async fn dues(&self, from: u64, to: u64) -> Vec<settle::Due> {
         let Some(payer) = self.0.challenger_hex.clone() else {
             return Vec::new();
         };
+        let held = self.held_by_others(&payer).await;
         let (records, payouts, mut receipts) = {
             let map = self.0.map.read().await;
             let records: Vec<SiteRecord> = map.records.values().cloned().collect();
@@ -1993,7 +1998,58 @@ impl Hosting {
             (records, payouts, receipts)
         };
         receipts.extend(self.own_receipts().await);
-        settle::dues(&records, &receipts, &payouts, &payer, from, to)
+        settle::dues(&records, &receipts, &payouts, &held, &payer, from, to)
+    }
+
+    /// Bytes each hosting peer holds now of the paid sites `payer` pays for,
+    /// keyed (site id, peer), leaving out preferred hosts (they are paid
+    /// their agreed share). A peer holding a striped site in part holds the
+    /// bytes of its groups; one holding it whole holds all of it.
+    async fn held_by_others(&self, payer: &str) -> HashMap<(String, String), u64> {
+        let holdings: Vec<(SiteRecord, Vec<(String, Option<BTreeSet<u32>>)>)> = {
+            let map = self.0.map.read().await;
+            map.records
+                .values()
+                .filter(|r| r.terms().is_some() && r.payer_key() == payer)
+                .map(|r| {
+                    let hs = map
+                        .peers
+                        .iter()
+                        .filter(|(p, h)| {
+                            h.hosts
+                                && !r.prefers(p)
+                                && h.sites.get(&r.site_id).is_some_and(|(m, _)| *m == r.manifest)
+                        })
+                        .map(|(p, h)| (p.clone(), h.groups.get(&r.site_id).cloned()))
+                        .collect();
+                    (r.clone(), hs)
+                })
+                .filter(|(_, hs): &(SiteRecord, Vec<_>)| !hs.is_empty())
+                .collect()
+        };
+        let mut out = HashMap::new();
+        for (rec, hs) in holdings {
+            let layout = if hs.iter().any(|(_, g)| g.is_some()) {
+                match self.layout(&rec).await {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        debug!(site = %rec.site_id, err = %e, "hosting: no layout to price held groups");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            for (peer, groups) in hs {
+                let bytes = match (&groups, &layout) {
+                    (None, _) => rec.size,
+                    (Some(gs), Some(l)) => l.bytes_of(gs),
+                    (Some(_), None) => continue,
+                };
+                out.insert((rec.site_id.clone(), peer), bytes);
+            }
+        }
+        out
     }
 
     /// One settlement round for `[from, to)`: work out the dues and pay them
