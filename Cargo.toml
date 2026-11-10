@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.27"
+version = "0.3.28"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/profullstack/c0mpute"
