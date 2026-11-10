@@ -24,7 +24,13 @@ if command -v threatcrush >/dev/null 2>&1; then
 else
   UPSTREAM="${THREATCRUSH_INSTALL_URL:-https://threatcrush.com/install.sh}"
   say "installing threatcrush via $UPSTREAM"
-  curl -fsSL "$UPSTREAM" | sh
+  # Download to a file, then run it: never pipe the network into a shell, so a
+  # truncated or failed transfer cannot execute half a script.
+  TMP_INSTALL="$(mktemp)"
+  trap 'rm -f "$TMP_INSTALL"' EXIT
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$TMP_INSTALL" "$UPSTREAM"
+  sh "$TMP_INSTALL"
+  rm -f "$TMP_INSTALL"
   if ! command -v threatcrush >/dev/null 2>&1; then
     warn "threatcrush is not on PATH yet; open a new shell, then re-run this installer"
     exit 1

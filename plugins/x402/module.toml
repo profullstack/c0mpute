@@ -51,6 +51,6 @@ price_cents             = 100
 pass_minutes            = 1440
 max_days                = 30
 path                    = "/_x402/crawl"
-api_key_env             = "C0MPUTE_X402_COINPAY_KEY"
+api_key_env             = "C0MPUTE_X402_COINPAY_KEY"  # env var NAME, not a key  gitleaks:allow
 gate_storage            = false
 charge_spoofed_browsers = false

@@ -18,7 +18,7 @@
 //! [x402]
 //! enabled = true
 //! pay_to = "0x..."                      # your EVM wallet (USDC on Base/Polygon/Ethereum)
-//! api_key_env = "C0MPUTE_X402_COINPAY_KEY"  # env var holding a CoinPay key (x402 scope)
+//! api_key_env = "C0MPUTE_X402_COINPAY_KEY"  # env var holding a CoinPay key (x402 scope) gitleaks:allow
 //! price_cents = 100                     # per day
 //! ```
 //!
@@ -516,6 +516,6 @@ mod tests {
         let c: X402Config = toml::from_str("").unwrap();
         assert!(!c.enabled);
         assert_eq!(c.path, "/_x402/crawl");
-        assert_eq!(c.api_key_env, "C0MPUTE_X402_COINPAY_KEY");
+        assert_eq!(c.api_key_env, "C0MPUTE_X402_COINPAY_KEY"); // gitleaks:allow
     }
 }
