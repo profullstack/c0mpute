@@ -431,6 +431,24 @@ export function ChatApp({ error }: { error: string | null }) {
         if (poll.status === 200) {
           const done = album.tracks.filter((t) => t.status === "done").length;
           setLast({ content: `${head}${album.genre ? ` · ${album.genre}` : ""} · ${done}/${album.tracks.length} tracks (${clock(secs)} on c0mpute workers)`, album });
+          // The cover queues on the image workers separately and can land
+          // after the songs: keep looking (up to 2 h). The zip picks it up
+          // on the next download.
+          if (!album.cover) {
+            const albumId = album.id;
+            const coverPath = `/api/v1/album/${albumId}/cover`;
+            void (async () => {
+              const until = Date.now() + 2 * 60 * 60_000;
+              while (Date.now() < until) {
+                await new Promise((r) => setTimeout(r, 30_000));
+                const c = await fetch(coverPath, { cache: "no-store" }).catch(() => null);
+                if (!c?.ok) continue;
+                await c.body?.cancel().catch(() => {});
+                update(id, (cv) => ({ ...cv, messages: cv.messages.map((m) => (m.album?.id === albumId ? { ...m, album: { ...m.album, cover: coverPath } } : m)) }));
+                return;
+              }
+            })();
+          }
           break;
         }
         setLast({ content: `// ${head} · ${describeAlbumStage(view)} · ${clock(secs)}${note}`, album });
