@@ -1715,7 +1715,12 @@ impl Hosting {
             let id: c0mpute_net::PeerId = p.parse().ok()?;
             let net = self.0.net.clone();
             Some(async move {
-                let addrs = net.find_peer(id, Duration::from_secs(8)).await;
+                // What its connections and identify showed; the DHT only for
+                // a peer we never met (it often knows nothing of direct peers).
+                let mut addrs = net.peer_addrs(id).await;
+                if addrs.is_empty() {
+                    addrs = net.find_peer(id, Duration::from_secs(8)).await;
+                }
                 (p.clone(), addrs.iter().filter_map(unique_ip).collect())
             })
         });

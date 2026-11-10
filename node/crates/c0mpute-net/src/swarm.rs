@@ -129,6 +129,10 @@ enum Cmd {
         peer: PeerId,
         reply: oneshot::Sender<bool>,
     },
+    PeerAddrs {
+        peer: PeerId,
+        reply: oneshot::Sender<Vec<Multiaddr>>,
+    },
     /// Teach Kad an address for `peer` (learned from gossip), so a later
     /// dial or fetch by peer id can reach it.
     AddAddress {
@@ -597,6 +601,17 @@ impl Libp2pNetwork {
         rx.await.unwrap_or_default()
     }
 
+    /// Addresses seen for `peer` on this swarm: the remote end of each
+    /// connection to it, and what it listed via identify. Empty for a peer we
+    /// have not connected to.
+    pub async fn peer_addrs(&self, peer: PeerId) -> Vec<Multiaddr> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd_tx.send(Cmd::PeerAddrs { peer, reply: tx }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Whether a connection to `peer` is open now.
     pub async fn is_connected(&self, peer: PeerId) -> bool {
         let (tx, rx) = oneshot::channel();
@@ -749,6 +764,9 @@ struct SwarmTask {
     pending_kad_lookups: HashMap<kad::QueryId, oneshot::Sender<Result<Vec<u8>>>>,
     /// Pending request-response calls.
     pending_fetches: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Vec<u8>>>>,
+    /// Addresses seen per peer (connection remote ends, identify listen
+    /// addrs), for [`Libp2pNetwork::peer_addrs`]. Bounded per peer.
+    peer_addrs: HashMap<PeerId, Vec<Multiaddr>>,
     /// Track which chunk a fetch is for, so we can re-issue against another
     /// provider if the first one says NotFound.
     fetch_targets: HashMap<request_response::OutboundRequestId, Hash>,
@@ -771,6 +789,21 @@ struct SwarmTask {
 }
 
 impl SwarmTask {
+    /// Remember addresses seen for `peer` (newest last, at most 16, and at
+    /// most 4096 peers so a busy node does not grow without bound).
+    fn note_addrs(&mut self, peer: PeerId, addrs: impl IntoIterator<Item = Multiaddr>) {
+        if !self.peer_addrs.contains_key(&peer) && self.peer_addrs.len() >= 4096 {
+            return;
+        }
+        let known = self.peer_addrs.entry(peer).or_default();
+        for a in addrs {
+            known.retain(|k| *k != a);
+            known.push(a);
+        }
+        let over = known.len().saturating_sub(16);
+        known.drain(..over);
+    }
+
     async fn new(
         keypair: identity::Keypair,
         local_source: Option<Arc<dyn ChunkSource>>,
@@ -856,6 +889,7 @@ impl SwarmTask {
             local_source,
             pending_kad_lookups: HashMap::new(),
             pending_fetches: HashMap::new(),
+            peer_addrs: HashMap::new(),
             fetch_targets: HashMap::new(),
             pending_fetches2: HashMap::new(),
             fetch_v1_only: std::collections::HashSet::new(),
@@ -927,6 +961,9 @@ impl SwarmTask {
             }
             Cmd::IsConnected { peer, reply } => {
                 let _ = reply.send(self.swarm.lock().await.is_connected(&peer));
+            }
+            Cmd::PeerAddrs { peer, reply } => {
+                let _ = reply.send(self.peer_addrs.get(&peer).cloned().unwrap_or_default());
             }
             Cmd::Connect { peer, reply } => {
                 let mut swarm = self.swarm.lock().await;
@@ -1068,8 +1105,9 @@ impl SwarmTask {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!(%address, "listening");
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 debug!(%peer_id, "connection established");
+                self.note_addrs(peer_id, [endpoint.get_remote_address().clone()]);
             }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
@@ -1077,6 +1115,7 @@ impl SwarmTask {
                 ..
             })) => {
                 // Add the peer's listen addrs to Kad so it can be routed to.
+                self.note_addrs(peer_id, info.listen_addrs.iter().cloned());
                 let mut sw = self.swarm.lock().await;
                 for addr in info.listen_addrs {
                     sw.behaviour_mut().kad.add_address(&peer_id, addr);
