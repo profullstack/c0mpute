@@ -12,14 +12,18 @@ export function parseImageCommand(text: string): string | null {
 export const IMAGE_SIZES = ["landscape", "square", "portrait"] as const;
 export type ImageSize = (typeof IMAGE_SIZES)[number];
 
-/** Validate a POST body; returns the body to forward or an error string. */
-export function parseImageRequest(body: unknown): { prompt: string; size: ImageSize } | string {
+/**
+ * Validate a POST body; returns the body to forward or an error string.
+ * `adult: true` asks for adult (18+) mode; the route decides whether this
+ * person may use it. Image inputs are not accepted here at all.
+ */
+export function parseImageRequest(body: unknown): { prompt: string; size: ImageSize; adult?: true } | string {
   const b = (body ?? {}) as Record<string, unknown>;
   const prompt = typeof b.prompt === "string" ? b.prompt.trim() : "";
   if (!prompt || prompt.length > 2000) return "prompt must contain 1 to 2000 characters";
   const size = (b.size ?? "landscape") as ImageSize;
   if (!IMAGE_SIZES.includes(size)) return `size must be one of: ${IMAGE_SIZES.join(", ")}`;
-  return { prompt, size };
+  return b.adult === true ? { prompt, size, adult: true } : { prompt, size };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

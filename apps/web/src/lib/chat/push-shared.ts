@@ -120,6 +120,8 @@ export function validatePushFiles(raw: unknown): PushFile[] | string {
 export type PushMsg = {
   role: string;
   content: string;
+  /** An adult (18+) result: never published, shared or pushed. */
+  adult?: boolean;
   imageJob?: string;
   musicJob?: string;
   audioType?: string;
@@ -157,6 +159,8 @@ export function collectPushFiles(title: string, messages: PushMsg[]): PushFile[]
   const two = (n: number) => String(n).padStart(2, "0");
   messages.forEach((m, i) => {
     if (m.role !== "assistant") return;
+    // Adult results stay private to the person who made them.
+    if (m.adult) return;
     if (m.imageJob) add(i, { path: `images/${two(++img)}.png`, type: "image/png", src: `/api/v1/images/${m.imageJob}` });
     if (m.musicJob) {
       // Song turns read `"Title" [music: caption ...]`; untitled ones are just "song".

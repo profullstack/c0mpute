@@ -87,6 +87,35 @@ pub struct Config {
     /// plugin). Off by default.
     #[serde(default)]
     pub threatcrush: crate::threatcrush::ThreatcrushConfig,
+    /// Adult (18+) image and video jobs. Off on both sides by default; the
+    /// child-safety guard in `content_policy` is always on regardless.
+    #[serde(default)]
+    pub adult: AdultConfig,
+}
+
+/// Adult mode. A worker serves adult jobs only with `serve = true` (or
+/// `C0MPUTE_ADULT=1`) and then advertises `c0mpute:adult`; a gateway accepts
+/// adult requests only with `buyer = true` (or `C0MPUTE_ADULT_BUYER=1`) and
+/// awards them only to workers advertising that tag.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AdultConfig {
+    #[serde(default)]
+    pub serve: bool,
+    #[serde(default)]
+    pub buyer: bool,
+}
+
+impl AdultConfig {
+    /// This worker takes adult jobs: the config and `C0MPUTE_ADULT` agree.
+    pub fn serve_enabled(&self) -> bool {
+        env_switch("C0MPUTE_ADULT", self.serve)
+    }
+
+    /// This gateway accepts adult requests: the config and
+    /// `C0MPUTE_ADULT_BUYER` agree.
+    pub fn buyer_enabled(&self) -> bool {
+        env_switch("C0MPUTE_ADULT_BUYER", self.buyer)
+    }
 }
 
 /// Ads on a gateway (`ads-manager`, `ctv-ads`, `podcast-ads`). Every gateway
@@ -661,6 +690,7 @@ impl Default for Config {
             crowdgpt: Default::default(),
             x402: Default::default(),
             threatcrush: Default::default(),
+            adult: Default::default(),
         }
     }
 }
@@ -910,6 +940,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adult_mode_is_off_on_both_sides_by_default() {
+        let cfg = Config::default();
+        assert!(!cfg.adult.serve && !cfg.adult.buyer);
+        let cfg: Config = toml::from_str("[adult]\nserve = true\nbuyer = true\n").unwrap();
+        assert!(cfg.adult.serve && cfg.adult.buyer);
+        let partial: Config = toml::from_str("[storage]\nenabled = true\n").unwrap();
+        assert!(!partial.adult.serve);
+    }
 
     #[test]
     fn an_explicit_role_list_still_provides_disk() {

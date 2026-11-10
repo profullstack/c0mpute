@@ -500,6 +500,11 @@ pub struct Txt2ImgSpec {
     pub steps: u32,
     #[serde(default)]
     pub seed: Option<u32>,
+    /// Adult (18+) job: only for verified buyers and opted-in workers
+    /// (`content_policy`). Left off the wire when false, so the spec of an
+    /// ordinary job is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adult: bool,
 }
 
 fn default_model() -> String {
@@ -516,6 +521,15 @@ fn default_steps() -> u32 {
 }
 
 impl Txt2ImgSpec {
+    /// What the content policy reads of this job. txt2img has no image input.
+    pub fn policy(&self) -> crate::content_policy::PolicyRequest<'_> {
+        crate::content_policy::PolicyRequest {
+            prompt: &self.prompt,
+            adult: self.adult,
+            ..Default::default()
+        }
+    }
+
     /// Shared by the gateway (reject early) and the worker (never trust the buyer).
     pub fn validate(&self) -> std::result::Result<(), String> {
         let chars = self.prompt.trim().chars().count();
@@ -695,6 +709,7 @@ pub fn spawn_diffusion_runner(
     load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
     kill_orphaned_renders();
+    crate::nsfw::warm_up();
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -739,6 +754,12 @@ async fn run_job(
         .context("accept missing spec_inline")?;
     let spec: Txt2ImgSpec = serde_json::from_value(spec.clone()).context("decode txt2img job")?;
     spec.validate().map_err(anyhow::Error::msg)?;
+    // Never trust the buyer's gateway: the child-safety guard and the adult
+    // opt-in are checked again here, before any compute is spent.
+    if let Err(refusal) = crate::content_policy::worker_check(&spec.policy()) {
+        crate::content_policy::record(refusal, "worker", Some(&job.accept.job_id));
+        bail!(refusal.job_error());
+    }
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     tokio::fs::create_dir_all(&job_dir).await?;
     let output = job_dir.join("image.png");
@@ -746,6 +767,12 @@ async fn run_job(
     let bytes = tokio::fs::read(&output).await?;
     if !is_png(&bytes) || bytes.len() > MAX_IMAGE_BYTES {
         bail!("sd-cli output is not a PNG under the 8 MiB result limit");
+    }
+    // SFW jobs: an explicit image is discarded, not delivered. Z-Image-Turbo
+    // runs at cfg 1.0, where a negative prompt has no effect, so this check
+    // is the SFW guarantee for images.
+    if !spec.adult {
+        crate::nsfw::sfw_gate(std::slice::from_ref(&output), &job.accept.job_id).await?;
     }
     crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
 }
@@ -822,6 +849,15 @@ mod tests {
 
     fn spec() -> Txt2ImgSpec {
         serde_json::from_value(serde_json::json!({ "prompt": "a red bicycle" })).unwrap()
+    }
+
+    #[test]
+    fn adult_is_off_by_default_and_off_the_wire_when_false() {
+        let s = spec();
+        assert!(!s.adult);
+        assert!(serde_json::to_value(&s).unwrap().get("adult").is_none());
+        let a: Txt2ImgSpec = serde_json::from_value(serde_json::json!({ "prompt": "a lighthouse", "adult": true })).unwrap();
+        assert!(a.adult && a.policy().adult);
     }
 
     #[test]

@@ -14,6 +14,7 @@ export async function GET(req: Request) {
     did: user.did,
     name: user.name,
     auth: user.token_kind,
+    adult_verified_at: user.adult_verified_at ?? null,
     balance: balance
       ? {
           spendable_usd: balance.total_spendable_usd ?? "0.000000",

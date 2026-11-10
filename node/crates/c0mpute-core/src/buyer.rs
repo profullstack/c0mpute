@@ -70,6 +70,11 @@ pub struct JobAuction {
     /// ([`crate::job_e2e::InFlightJob`], no secrets), so a buyer that
     /// restarts can [`resume_auction`] instead of re-auctioning.
     pub on_accept: Option<Arc<dyn Fn(&crate::job_e2e::InFlightJob) + Send + Sync>>,
+    /// Only bidders this accepts (by peer id) are considered. The gateway
+    /// uses it for adult offers: a bid counts only from a peer whose own
+    /// capability ad carries `c0mpute:adult`, on top of the worker-side tag
+    /// check, so a modified worker that bids anyway is never awarded one.
+    pub bidder_check: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 impl JobAuction {
@@ -90,7 +95,13 @@ impl JobAuction {
             accept_notify: None,
             confidential: false,
             on_accept: None,
+            bidder_check: None,
         }
+    }
+
+    pub fn with_bidder_check(mut self, check: Arc<dyn Fn(&str) -> bool + Send + Sync>) -> Self {
+        self.bidder_check = Some(check);
+        self
     }
 
     pub fn with_on_accept(mut self, f: Arc<dyn Fn(&crate::job_e2e::InFlightJob) + Send + Sync>) -> Self {
@@ -313,6 +324,10 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             && !auction.allowed_bidders.contains(&bid.bidder_peer_id)
                         {
                             debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a worker outside the allowlist ignored");
+                            continue;
+                        }
+                        if auction.bidder_check.as_ref().is_some_and(|ok| !ok(&bid.bidder_peer_id)) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a worker that fails the bidder check ignored");
                             continue;
                         }
                         if auction.excluded_bidders.contains(&bid.bidder_peer_id) {

@@ -5,7 +5,7 @@ export default function TermsPage() {
     <div className="max-w-3xl mx-auto px-6 py-16 space-y-8 text-sm leading-7">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">terms of service</h1>
-        <p className="comment">// last updated 2026-05-03 — v1 placeholder</p>
+        <p className="comment">// last updated 2026-11-10 — v1 placeholder</p>
       </header>
 
       <Block title="agreement">
@@ -32,9 +32,51 @@ export default function TermsPage() {
         <ul className="list-disc pl-6 space-y-1">
           <li>Process content that is illegal in your jurisdiction or where workers run.</li>
           <li>Distribute CSAM, malware, or content that infringes third-party copyright.</li>
+          <li>Generate sexual content involving minors or real, identifiable people (see below).</li>
           <li>Impersonate other DIDs or attempt to forge signed receipts.</li>
           <li>Submit jobs designed to compromise worker hosts.</li>
         </ul>
+      </Block>
+
+      <Block title="generated images and video">
+        <p>
+          Image and video generation is safe-for-work by default: explicit
+          requests are refused and generated results are checked before they
+          are delivered.
+        </p>
+        <p>
+          <strong>Adult content</strong> is allowed only in adult mode, which is
+          for verified adults: you must attest that you are 18 or older (and
+          that adult content is legal where you are) in the chat settings, and
+          have a paid compute balance. Anonymous and free-tier use never
+          includes adult mode. Only node operators who opt in ever run adult
+          jobs. Adult results are shown blurred until you open them and are
+          never used for previews, public galleries, shares or published sites.
+          Adult mode is text only: no uploaded images, photos or face references.
+        </p>
+        <p>Never allowed, in any mode, on any node:</p>
+        <ul className="list-disc pl-6 space-y-1">
+          <li>
+            Child sexual abuse material, or any sexual or sexualized depiction of
+            minors, including fictional, drawn, animated or &quot;young-looking&quot;
+            characters, and any request that combines sexual content with
+            indicators of a minor.
+          </li>
+          <li>
+            Sexual or intimate content of a real, identifiable person
+            (deepfakes, &quot;nudify&quot; requests, non-consensual intimate
+            imagery), including celebrities, public figures, exes, partners,
+            coworkers or anyone else.
+          </li>
+        </ul>
+        <p>
+          Requests are screened automatically on c0mpute.com, on every gateway
+          and again on every worker. Detection of real people is a heuristic and
+          does not make such requests acceptable when it misses them. Breaking
+          these rules leads to termination of the account, and suspected child
+          sexual abuse material and non-consensual intimate imagery are reported
+          to the relevant authorities (including NCMEC) as the law requires.
+        </p>
       </Block>
 
       <Block title="payments">

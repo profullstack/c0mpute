@@ -233,6 +233,50 @@ c0mpute infernet model recommend --use-case coding`}
         </Code>
       </Section>
 
+      <Section h="videos" title="[ generate video (API) ]">
+        <P>
+          <code>POST /api/v1/videos</code> renders a clip on a c0mpute worker
+          (Wan 2.1 1.3B on CPU by default, about 20 to 30 minutes once a worker
+          is free; the network queues a clip for up to 2 hours). Authenticate
+          with an API key from the chat&apos;s keys tab. It answers 202 with a
+          status URL; send <code>Prefer: wait=N</code> (up to 7200 seconds) to
+          get the MP4 in the same response when it finishes within N seconds,
+          else the same 202. Billed per clip to your compute balance, or one
+          free daily query.
+        </P>
+        <Code>
+{`# An API key (c0k_...) from the chat's keys tab
+export C0MPUTE_KEY=...
+
+# Start a clip and hold the request until it is ready (up to 2 h)
+curl -sS https://c0mpute.com/api/v1/videos \
+  -H "Authorization: Bearer $C0MPUTE_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Prefer: wait=7200" \
+  -d '{"prompt": "YOUR PROMPT HERE"}' \
+  -o clip.mp4 -w '%{http_code}\n'
+
+# Or start it and poll
+curl -sS https://c0mpute.com/api/v1/videos -H "Authorization: Bearer $C0MPUTE_KEY" \
+  -H "Content-Type: application/json" -d '{"prompt": "YOUR PROMPT HERE"}'
+# -> 202 {"id":"<id>","status":"pending","poll":"/api/v1/videos/<id>","video":"/api/v1/videos/<id>/video"}
+curl -sS https://c0mpute.com/api/v1/videos/<id> -H "Authorization: Bearer $C0MPUTE_KEY"
+curl -sS https://c0mpute.com/api/v1/videos/<id>/video -H "Authorization: Bearer $C0MPUTE_KEY" -o clip.mp4`}
+        </Code>
+        <P>
+          Body: <code>prompt</code> (required), <code>model</code>{" "}
+          (<code>wan2.1-t2v-1.3b</code> default, or <code>wan2.2-ti2v-5b</code>{" "}
+          on GPU nodes), <code>negative_prompt</code>, <code>seed</code>,{" "}
+          <code>adult</code>. Text to video only. If a 202 comes back before
+          N seconds have passed, the hold was cut short by a proxy: keep polling
+          the status URL. Every request passes the content policy (see{" "}
+          <Link href="/terms">terms</Link>): sexual content involving minors or
+          real, identifiable people is always refused, and{" "}
+          <code>adult: true</code> needs an account with the 18+ attestation and
+          a paid balance.
+        </P>
+      </Section>
+
       <Section h="temporal" title="[ temporal policies ]">
         <P>
           Train and serve small liquid neural networks (CfC, LTC) and GRU

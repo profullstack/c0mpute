@@ -53,6 +53,21 @@ describe("store", () => {
     expect(await s.userForToken(session)).toBeNull();
   });
 
+  test("adult mode: off by default, attested with a time, cleared on opt-out", async () => {
+    const sql = memSql();
+    const s = createStore(sql);
+    const u = await s.upsertCoinpayUser({ sub: "adult-1", did: DID });
+    const session = await s.createSession(u.id);
+    expect((await s.userForToken(session))?.adult_verified_at ?? null).toBeNull();
+    const at = await s.setAdultVerified(u.id, true);
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect((await s.userForToken(session))?.adult_verified_at).toBe(at);
+    await s.setAdultVerified(u.id, false);
+    expect((await s.userForToken(session))?.adult_verified_at ?? null).toBeNull();
+    // The migration is idempotent: a second store on the same database starts cleanly.
+    await createStore(sql).init();
+  });
+
   test("device flow: pending, approve once, key issued once", async () => {
     const s = createStore(memSql());
     const u = await s.upsertCoinpayUser({ sub: "d", did: DID });

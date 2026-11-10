@@ -1,3 +1,4 @@
+import { gateGeneration } from "@/lib/chat/adult";
 import { parsePromoRequest } from "@/lib/chat/promo";
 import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 
@@ -23,6 +24,10 @@ export async function POST(req: Request) {
   if (!rl.ok) return err(429, "rate limit: too many promos this hour", { "retry-after": String(rl.retryAfter) });
   const parsed = parsePromoRequest(await req.json().catch(() => null));
   if (typeof parsed === "string") return err(400, parsed);
+  // Promos are always SFW (never adult mode): the brief steers the
+  // storyboard, so it passes the same content policy as an image prompt.
+  const gate = gateGeneration(user, { prompt: parsed.brief || parsed.url });
+  if (!gate.ok) return json({ error: { message: gate.message, type: "content_policy", code: gate.code } }, gate.status);
   let upstream: Response;
   try {
     upstream = await infernetFor(user.coinpay_sub)("/api/chat/promo", {

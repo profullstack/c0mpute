@@ -12,7 +12,14 @@ export interface Sql {
   run(query: string, params?: unknown[]): Promise<void>;
 }
 
-export type User = { id: string; coinpay_sub: string; did: string; name: string | null };
+export type User = {
+  id: string;
+  coinpay_sub: string;
+  did: string;
+  name: string | null;
+  /** When this person attested they are 18 or older (adult mode), or null. */
+  adult_verified_at?: string | null;
+};
 export type TokenKind = "session" | "key";
 export type Token = {
   token_hash: string;
@@ -53,6 +60,14 @@ const SCHEMA = [
    )`,
 ];
 
+// Columns added after a table first shipped. SQLite has no ADD COLUMN IF NOT
+// EXISTS, so each runs once and "duplicate column" means it already did.
+// (chat_* tables are created here, not by drizzle, which only owns blog_posts.)
+const MIGRATIONS = [
+  // Adult mode: the 18+ attestation (checkbox + confirm), with its time.
+  `ALTER TABLE chat_users ADD COLUMN adult_verified_at TEXT`,
+];
+
 export const SESSION_PREFIX = "c0s_";
 export const KEY_PREFIX = "c0k_";
 export const DEVICE_PREFIX = "c0d_";
@@ -87,6 +102,11 @@ export function createStore(sql: Sql) {
   const init = () =>
     (ready ??= (async () => {
       for (const q of SCHEMA) await sql.run(q);
+      for (const q of MIGRATIONS) {
+        await sql.run(q).catch((e: unknown) => {
+          if (!/duplicate column/i.test(String((e as Error)?.message ?? e))) throw e;
+        });
+      }
     })().catch((e) => {
       ready = null;
       throw e;
@@ -136,6 +156,17 @@ export function createStore(sql: Sql) {
         [id, info.sub, info.did, name, now(), now()],
       );
       return { id, coinpay_sub: info.sub, did: info.did, name };
+    },
+
+    /**
+     * Adult mode on (an 18+ attestation, stored with its time) or off. Off
+     * clears it, so turning it back on needs a fresh attestation.
+     */
+    async setAdultVerified(userId: string, on: boolean): Promise<string | null> {
+      await init();
+      const at = on ? now() : null;
+      await sql.run(`UPDATE chat_users SET adult_verified_at = ? WHERE id = ?`, [at, userId]);
+      return at;
     },
 
     createSession: (userId: string) =>

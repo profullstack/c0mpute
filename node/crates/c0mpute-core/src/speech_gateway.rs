@@ -72,6 +72,72 @@ struct GatewayState {
     results: crate::job_progress::ResultStore,
     /// Unfinished tracked requests, re-run after a gateway restart.
     pending: crate::job_progress::PendingStore,
+    /// Peers whose own capability ads carry `c0mpute:adult`; adult jobs are
+    /// awarded only to them.
+    adult_peers: AdultPeers,
+}
+
+static ADULT_BUYER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Accept adult (18+) requests on this gateway (`[adult] buyer = true` or
+/// `C0MPUTE_ADULT_BUYER=1`). Off by default. Set before serving.
+pub fn set_adult_buyer(on: bool) {
+    ADULT_BUYER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn adult_buyer() -> bool {
+    ADULT_BUYER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Peers seen advertising `c0mpute:adult`, by base58 peer id (the gossip
+/// source of their capability ad, not a self-claimed field), with when.
+#[derive(Clone, Default)]
+pub struct AdultPeers(Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>);
+
+impl AdultPeers {
+    /// Record one capability ad from `source`.
+    pub fn observe(&self, source: &str, tags: &[String]) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if tags.iter().any(|t| t == crate::content_policy::ADULT_TAG) {
+            map.insert(source.to_string(), std::time::Instant::now());
+        } else {
+            // An operator who turns adult off stops getting adult jobs at
+            // its next ad, not when the old one expires.
+            map.remove(source);
+        }
+    }
+
+    /// `peer` advertised `c0mpute:adult` within the capability ad TTL.
+    pub fn allows(&self, peer: &str) -> bool {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(peer).is_some_and(|seen| seen.elapsed() <= crate::capabilities::MAX_AD_AGE)
+    }
+
+    fn watch(&self, net: Arc<Libp2pNetwork>) {
+        let peers = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = net.subscribe(c0mpute_net::topics::CAPABILITY_TOPIC).await {
+                tracing::debug!(err = %e, "gateway: capability topic subscribe failed");
+            }
+            let mut rx = net.messages();
+            loop {
+                match rx.recv().await {
+                    Ok(msg) if msg.topic == c0mpute_net::topics::CAPABILITY_TOPIC => {
+                        let (Some(source), Ok(ad)) = (
+                            msg.source,
+                            serde_json::from_slice::<c0mpute_net::topics::CapabilityAd>(&msg.data),
+                        ) else {
+                            continue;
+                        };
+                        peers.observe(&source.to_base58(), &ad.tags);
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => return,
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +216,11 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         bail!("maximum job price must be a non-negative number");
     }
 
+    // Only the `[adult]` section of the operator's config matters here.
+    let file = Config::load_raw(&crate::config::default_config_path()).unwrap_or_default();
+    set_adult_buyer(file.adult.buyer_enabled());
+    tracing::info!(adult = adult_buyer(), "content policy: child-safety guard on; adult requests {}",
+        if adult_buyer() { "accepted (verified callers only)" } else { "refused" });
     let supervisor = Supervisor::boot_buyer(Config::default()).await?;
     // Queued jobs wake when a node advertising their tags shows up.
     if let Err(e) = supervisor.libp2p.subscribe(c0mpute_net::topics::CAPABILITY_TOPIC).await {
@@ -223,12 +294,16 @@ pub fn router_with(
         results,
         pending,
         penalties,
+        adult_peers: AdultPeers::default(),
     };
+    state.adult_peers.watch(state.net.clone());
     resume_pending(&state);
     Router::new()
         .route("/healthz", get(healthz))
         // Per-workload auction outcomes over the last hour (no secrets).
         .route("/v1/auctions", get(auction_stats))
+        // Content-policy refusals by reason code since start (no prompts).
+        .route("/v1/policy", get(policy_stats))
         .route("/v1/voices", get(voices))
         .route("/v1/tts", post(synthesize))
         .route("/v1/stt", post(transcribe))
@@ -252,6 +327,58 @@ pub fn router_with(
         .layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn policy_stats() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "adult_buyer": adult_buyer(),
+        "refusals": crate::content_policy::counts_json(),
+    }))
+}
+
+/// Who is asking, for hashed refusal logs: the app's own end-user id when it
+/// sends one (`x-c0mpute-requester`), else the bearer token. Only a short
+/// SHA-256 prefix is ever logged.
+fn requester(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-c0mpute-requester")
+        .or_else(|| headers.get(header::AUTHORIZATION))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// The content policy at the gateway, before anything is auctioned:
+/// adult requests need this gateway to opt in, and every request passes the
+/// child-safety guard (always on) and the SFW / adult rules. A refusal never
+/// reaches a worker.
+fn policy_gate(headers: &HeaderMap, req: &crate::content_policy::PolicyRequest<'_>) -> ApiResult<()> {
+    use crate::content_policy::{Refusal, check, record};
+    let who = requester(headers);
+    let refusal = if req.adult && !adult_buyer() {
+        Some(Refusal::AdultNotEnabled)
+    } else {
+        check(req).err()
+    };
+    match refusal {
+        None => Ok(()),
+        Some(r) => {
+            record(r, "gateway", who.as_deref());
+            let status = if r == Refusal::AdultNotEnabled {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            Err(ApiError(status, r.message().into()))
+        }
+    }
+}
+
+/// The required tags plus `c0mpute:adult` for an adult job.
+fn with_adult_tag(mut required: Vec<String>, adult: bool) -> Vec<String> {
+    if adult && !required.iter().any(|t| t == crate::content_policy::ADULT_TAG) {
+        required.push(crate::content_policy::ADULT_TAG.to_string());
+    }
+    required
 }
 
 async fn auction_stats() -> Json<serde_json::Value> {
@@ -579,6 +706,7 @@ async fn run_speech_auction(
     excluded_bidders: &[String],
     fallback_bidders: &[String],
 ) -> Result<crate::AuctionOutcome, (ApiError, Option<String>)> {
+    let adult_offer = required.iter().any(|t| t == crate::content_policy::ADULT_TAG);
     // Learn the winner as soon as it is chosen, so a winner that then goes
     // silent can be benched and the job re-auctioned.
     let (winner_tx, mut winner_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -599,6 +727,13 @@ async fn run_speech_auction(
             Duration::from_secs(20 * 60)
         })
         .with_receipt_timeout(receipt_timeout_for(workload));
+    // Adult offers: only peers whose own capability ad says c0mpute:adult.
+    let auction = if adult_offer {
+        let peers = state.adult_peers.clone();
+        auction.with_bidder_check(Arc::new(move |peer: &str| peers.allows(peer)))
+    } else {
+        auction
+    };
     // A tracked request records the job it awarded, so a restart collects it
     // from the worker instead of auctioning it again (DIP-0032).
     let auction = match crate::job_progress::current_key() {
@@ -1154,6 +1289,11 @@ async fn generate_video(
     let input: VideoRequest = serde_json::from_value(raw)
         .map_err(|error| ApiError(StatusCode::BAD_REQUEST, format!("invalid video request: {error}")))?;
     let mut job = input.job;
+    {
+        let mut policy = job.policy();
+        policy.has_image_input |= input.image_base64.is_some();
+        policy_gate(&headers, &policy)?;
+    }
     if crate::video::manifest_model(&job.model).is_none() {
         let known: Vec<&str> = crate::video::manifest_models().iter().map(|m| m.id.as_str()).collect();
         return Err(ApiError(
@@ -1204,7 +1344,10 @@ async fn generate_video(
         spec,
         // The model tag: only a node that can run this model (a big enough
         // card, or CPU video for the small one) is eligible.
-        vec![crate::video::ROLE_TAG.to_string(), crate::video::model_tag(&job.model)],
+        with_adult_tag(
+            vec![crate::video::ROLE_TAG.to_string(), crate::video::model_tag(&job.model)],
+            job.adult,
+        ),
         crate::video::MAX_RESULT_BYTES,
         |_| "video/mp4",
     )
@@ -1585,6 +1728,7 @@ async fn generate_image(
     Json(input): Json<crate::diffusion::Txt2ImgSpec>,
 ) -> ApiResult<Response> {
     authenticate(&state, &headers)?;
+    policy_gate(&headers, &input.policy())?;
     input
         .validate()
         .map_err(|message| ApiError(StatusCode::BAD_REQUEST, message))?;
@@ -1596,10 +1740,13 @@ async fn generate_image(
         state.image_slots.clone(),
         crate::diffusion::WORKLOAD_TXT2IMG,
         spec,
-        vec![
-            crate::diffusion::ROLE_TAG.to_string(),
-            crate::diffusion::MODEL_TAG.to_string(),
-        ],
+        with_adult_tag(
+            vec![
+                crate::diffusion::ROLE_TAG.to_string(),
+                crate::diffusion::MODEL_TAG.to_string(),
+            ],
+            input.adult,
+        ),
         crate::diffusion::MAX_IMAGE_BYTES,
         |_| "image/png",
     )
@@ -2051,6 +2198,54 @@ fn default_stt_model() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adult_jobs_route_only_to_peers_advertising_the_adult_tag() {
+        let peers = AdultPeers::default();
+        let tags = |adult: bool| {
+            let mut t = vec![crate::diffusion::ROLE_TAG.to_string()];
+            if adult {
+                t.push(crate::content_policy::ADULT_TAG.to_string());
+            }
+            t
+        };
+        peers.observe("opted-in", &tags(true));
+        peers.observe("ordinary", &tags(false));
+        assert!(peers.allows("opted-in"));
+        assert!(!peers.allows("ordinary"));
+        assert!(!peers.allows("never-seen"));
+        // Turning adult off takes effect at the next ad.
+        peers.observe("opted-in", &tags(false));
+        assert!(!peers.allows("opted-in"));
+
+        // The offer itself requires the tag, so a worker without it does not
+        // bid (dispatch's capability check), and an SFW offer is unchanged.
+        let base = vec![crate::diffusion::ROLE_TAG.to_string()];
+        assert!(with_adult_tag(base.clone(), true).contains(&crate::content_policy::ADULT_TAG.to_string()));
+        assert_eq!(with_adult_tag(base.clone(), false), base);
+    }
+
+    #[test]
+    fn the_policy_gate_refuses_before_any_auction() {
+        use crate::content_policy::PolicyRequest;
+        let headers = HeaderMap::new();
+        set_adult_buyer(false);
+        let sfw = PolicyRequest { prompt: "a lighthouse at dusk", ..Default::default() };
+        assert!(policy_gate(&headers, &sfw).is_ok());
+        let adult = PolicyRequest { prompt: "a lighthouse at dusk", adult: true, ..Default::default() };
+        assert_eq!(policy_gate(&headers, &adult).unwrap_err().0, StatusCode::FORBIDDEN, "gateway not opted in");
+        let minor = PolicyRequest { prompt: "sexual content involving a minor", ..Default::default() };
+        let err = policy_gate(&headers, &minor).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!err.1.contains("minor"), "the message is generic");
+        set_adult_buyer(true);
+        assert!(policy_gate(&headers, &adult).is_ok());
+        let minor_adult = PolicyRequest { prompt: "sexual content involving a minor", adult: true, ..Default::default() };
+        assert_eq!(policy_gate(&headers, &minor_adult).unwrap_err().0, StatusCode::UNPROCESSABLE_ENTITY);
+        set_adult_buyer(false);
+        let counts = crate::content_policy::counts_json();
+        assert!(counts["minor_sexual"].as_u64().unwrap() >= 2);
+    }
 
     #[test]
     fn cpu_video_requests_are_clipped_to_what_cpu_nodes_take() {

@@ -49,6 +49,7 @@ futures = { workspace = true }
 sysinfo = { workspace = true }
 zip = { workspace = true }
 flate2 = "1"
+unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
