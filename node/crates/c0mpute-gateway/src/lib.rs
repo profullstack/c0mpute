@@ -58,7 +58,8 @@ pub async fn serve_with_storage(
 pub async fn serve_router(app: Router, addr: SocketAddr) -> Result<()> {
     info!(%addr, "gateway listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Peer addresses reach handlers as ConnectInfo<SocketAddr> (access log).
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 

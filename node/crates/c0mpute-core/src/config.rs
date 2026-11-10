@@ -79,6 +79,14 @@ pub struct Config {
     /// earns nothing; stops the moment paid work arrives.
     #[serde(default)]
     pub crowdgpt: crate::crowdgpt::CrowdgptConfig,
+    /// Charge AI training crawlers for hosted files over x402, settled by
+    /// CoinPay to the operator's wallet (`x402` plugin). Off by default.
+    #[serde(default)]
+    pub x402: crate::x402::X402Config,
+    /// Write the gateway access log ThreatCrush tails (`threatcrush`
+    /// plugin). Off by default.
+    #[serde(default)]
+    pub threatcrush: crate::threatcrush::ThreatcrushConfig,
 }
 
 /// Ads on a gateway (`ads-manager`, `ctv-ads`, `podcast-ads`). Every gateway
@@ -651,6 +659,8 @@ impl Default for Config {
             apps: AppsConfig::default(),
             payments: Default::default(),
             crowdgpt: Default::default(),
+            x402: Default::default(),
+            threatcrush: Default::default(),
         }
     }
 }

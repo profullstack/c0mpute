@@ -1,0 +1,49 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Optional. ThreatCrush (https://threatcrush.com, @profullstack/threatcrush)
+# is a host security daemon: it tails web and auth logs, scores requests
+# against attack rules and bans repeat offenders in nftables. Its source
+# lives upstream; this directory is the marketplace wrapper plus the node
+# side, which is compiled into c0mpute (node/crates/c0mpute-core/src/threatcrush.rs).
+#
+# `c0mpute plugin install threatcrush`:
+#   1. installs the ThreatCrush CLI/daemon (threatcrush.com/install.sh),
+#   2. sets `[threatcrush] enabled = true` in the c0mpute config, so the
+#      gateway (:7777) writes an nginx-vhost access log at
+#      <data_dir>/gateway/access.log (real client IPs behind a local proxy),
+#   3. registers that log with the daemon in
+#      threatcrushd.conf.d/c0mpute.conf ([log-watcher] paths).
+# Restart the c0mpute worker and the ThreatCrush daemon afterwards. Bans
+# need the daemon running as root (`sudo threatcrush install-service`).
+
+[module]
+id          = "threatcrush"
+name        = "ThreatCrush — protect this node"
+version     = "0.3.23"
+kind        = "service"
+category    = "infrastructure"
+status      = "available"
+description = "Optional host security for c0mpute nodes: the ThreatCrush daemon reads your gateway's access log and the box's auth logs, flags attacks and scanners, and bans repeat offenders in nftables."
+author      = "Profullstack"
+license     = "MIT"
+homepage    = "https://threatcrush.com"
+source      = "https://github.com/profullstack/threatcrush"
+keywords    = ["security", "ids", "waf", "ban", "nftables", "threatcrush", "gateway"]
+
+[module.requirements]
+c0mpute      = ">=0.3.29"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = []
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "threatcrush"
+# Standalone CLI on PATH. `c0mpute threatcrush <args>` forwards straight through.
+
+[module.surfaces]
+cli = "threatcrush"
+
+[module.config.defaults]
+enabled     = false
+max_log_mib = 256
