@@ -12,6 +12,7 @@
 //! c0mpute chat models | whoami | logout
 //! c0mpute chat mcp                       # stdio MCP bridge to https://c0mpute.com/api/mcp
 //! c0mpute chat connect hosting --name n1 # publish what you /push hosting from c0mpute.com/chat
+//! c0mpute chat push hosting ls           # your pushed sites (also nodes, status, rm, <name> <dir>)
 //! ```
 //!
 //! The key lives in `~/.c0mpute/chat.json` (0600). `C0MPUTE_API_KEY` and
@@ -39,7 +40,8 @@ c0mpute chat                      # interactive\n  \
 cat file.md | c0mpute chat --system \"summarize this\"\n  \
 c0mpute chat models | whoami | logout\n  \
 c0mpute chat mcp                  # stdio MCP server for Claude Code, Cursor, ...\n  \
-c0mpute chat connect hosting --name <node>  # publish what you /push hosting in the chat\n\n\
+c0mpute chat connect hosting --name <node>  # publish what you /push hosting in the chat\n  \
+c0mpute chat push hosting ls | nodes | status <name> -w | rm <name> | <name> <dir>\n\n\
 Secure p2p messaging moved to `c0mpute dm`."
 )]
 struct Args {
@@ -163,6 +165,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         Some("models") => return models(&base_url(None)).await,
         Some("mcp") => return mcp_stdio(&base_url(None)).await,
         Some("connect") => return crate::chat_connect::run(args.get(1..).unwrap_or_default()).await,
+        Some("push") => return crate::chat_push::run(args.get(1..).unwrap_or_default()).await,
         _ => {}
     }
     let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))

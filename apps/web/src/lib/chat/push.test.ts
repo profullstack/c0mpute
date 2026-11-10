@@ -12,6 +12,48 @@ import {
   PushError,
   validatePushFiles,
 } from "./push";
+import { handleRpc } from "./mcp";
+
+describe("mcp hosting tools", () => {
+  const upstream = (async () => new Response("{}")) as never;
+  type Push = ReturnType<typeof createPushStore>;
+  const call = async (push: Push, userId: string, name: string, args: Record<string, unknown> = {}) => {
+    const r = (await handleRpc(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+      { user: { id: userId, did: "did:key:x", name: null }, upstream, push },
+    )) as { result: { content: { text: string }[]; isError?: boolean } };
+    return { err: !!r.result.isError, body: r.result.content[0].text };
+  };
+  const files = [{ path: "index.html", type: "text/html", text: "<h1>hi</h1>" }];
+
+  test("listed only when the store is wired", async () => {
+    const push = createPushStore(memSql());
+    const list = async (p?: Push) =>
+      ((await handleRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { user: { id: "u1", did: "d", name: null }, upstream, push: p })) as {
+        result: { tools: { name: string }[] };
+      }).result.tools.map((t) => t.name);
+    expect(await list(push)).toContain("hosting_push");
+    expect(await list()).not.toContain("hosting_push");
+  });
+
+  test("push, status, list and rm, scoped to the caller", async () => {
+    const push = createPushStore(memSql());
+    expect((await call(push, "u1", "hosting_push", { name: "site", files })).body).toMatch(/no hosting node/);
+    await push.registerNode("u1", { name: "seed2", payments: "off" });
+    expect((await call(push, "u1", "hosting_push", { name: "site", files })).body).toMatch(/cannot pay hosts/);
+    await push.registerNode("u1", { name: "seed2", payments: "coinpay" });
+    const made = await call(push, "u1", "hosting_push", { name: "site", files });
+    expect(made.err).toBe(false);
+    expect(JSON.parse(made.body).push).toMatchObject({ name: "site", status: "queued", node: "seed2" });
+    expect(JSON.parse((await call(push, "u1", "hosting_push_status", { name: "site" })).body).push.status).toBe("queued");
+    expect(JSON.parse((await call(push, "u1", "hosting_pushes")).body).pushes).toHaveLength(1);
+    expect(JSON.parse((await call(push, "u2", "hosting_pushes")).body).pushes).toHaveLength(0);
+    expect((await call(push, "u2", "hosting_push_status", { name: "site" })).err).toBe(true);
+    expect((await call(push, "u2", "hosting_push_rm", { name: "site" })).err).toBe(true);
+    expect(JSON.parse((await call(push, "u1", "hosting_push_rm", { name: "site" })).body).status).toBe("deleted");
+    expect((await call(push, "u1", "hosting_push", { name: "x", files: [{ path: "../a", text: "" }] })).body).toMatch(/bad file path/);
+  });
+});
 
 function memSql(): Sql {
   const db = new Database(":memory:");
