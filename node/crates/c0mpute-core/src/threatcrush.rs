@@ -214,12 +214,20 @@ pub async fn log(State(l): State<AccessLog>, req: Request, next: Next) -> Respon
         .unwrap_or_else(|| "/".into());
     let request = format!("{} {} {:?}", req.method(), target, req.version());
     let resp = next.run(req).await;
+    // axum sets Content-Length after middleware runs; the body's exact size
+    // hint is known for buffered bodies. Streams (chunked) log 0, like nginx
+    // logs a client that went away.
     let bytes = resp
         .headers()
         .get("content-length")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("0")
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| {
+            axum::body::HttpBody::size_hint(resp.body())
+                .exact()
+                .map(|n| n.to_string())
+        })
+        .unwrap_or_else(|| "0".into());
     let line = format_line(
         &host,
         &client,
