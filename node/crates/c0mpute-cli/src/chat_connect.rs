@@ -119,6 +119,13 @@ pub(crate) fn safe_rel(p: &str) -> Option<PathBuf> {
     (depth > 0 && depth <= 4).then_some(out)
 }
 
+/// `XDG_DATA_HOME` for the `hosting publish` / `hosting rm` children: their
+/// data dir (and so their publisher identity) is `<root>/.node/c0mpute`, apart
+/// from the node's own `buyer` key that manual publishes use.
+pub(crate) fn node_data_home(root: &Path) -> PathBuf {
+    root.join(".node")
+}
+
 /// "coinpay" when this node can pay hosts through CoinPay, else "off".
 fn payments_mode() -> String {
     let cfg = c0mpute_core::Config::load_or_default(&c0mpute_core::config::default_config_path()).unwrap_or_default();
@@ -203,6 +210,8 @@ struct Api {
     key: String,
     http: reqwest::Client,
     node: String,
+    /// XDG_DATA_HOME for the publish/rm children (see [`node_data_home`]).
+    data_home: PathBuf,
 }
 
 impl Api {
@@ -305,11 +314,15 @@ pub async fn run(args: &[String]) -> Result<()> {
         .unwrap_or_else(|| c0mpute_core::config::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("pushes"));
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
 
-    let peer_id = c0mpute_core::hosting::publisher_keypair()
+    // Pushes get their own data dir (identity, scan cache) under <root>/.node:
+    // two processes publishing with one libp2p identity fight over the peer id
+    // (a manual `hosting publish` on this machine stalled at 0 MB/s that way).
+    let node_data = node_data_home(&root);
+    let peer_id = c0mpute_net::identity::load_or_create(&node_data.join("c0mpute").join("buyer"))
         .map(|k| k.public().to_peer_id().to_string())
-        .context("this node's publisher identity")?;
+        .context("the push publisher identity")?;
     let payments = payments_mode();
-    let mut api = Api { base: base.clone(), key, http: client()?, node: String::new() };
+    let mut api = Api { base: base.clone(), key, http: client()?, node: String::new(), data_home: node_data.clone() };
     let reg = api
         .post(
             "/api/v1/hosting/nodes",
@@ -320,7 +333,7 @@ pub async fn run(args: &[String]) -> Result<()> {
     api.node = reg["node"]["id"].as_str().ok_or_else(|| anyhow!("no node id in {reg}"))?.to_string();
 
     println!("linked:   {name} ({}) on {base}", api.node);
-    println!("identity: {peer_id} (signs every site this node publishes)");
+    println!("identity: {peer_id} (signs every site pushed through this node; kept in {})", node_data.display());
     if payments == "coinpay" {
         println!("payments: CoinPay: paid hosts (--disks auto) are paid from this node's wallet");
     } else {
@@ -466,6 +479,9 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
 /// Run a child, sending its latest stderr line to the chat at most every 2 s.
 /// Returns (exit ok, stdout, last stderr line).
 async fn run_streaming(api: &Api, job: &Job, mut cmd: tokio::process::Command) -> Result<(bool, String, Option<String>)> {
+    // Linux: ProjectDirs follows XDG_DATA_HOME, so the child publishes with the
+    // push identity; [payments] still comes from the usual config dir.
+    cmd.env("XDG_DATA_HOME", &api.data_home).env("C0MPUTE_NO_AUTO_UPDATE", "1");
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn().context("start c0mpute hosting")?;
     let mut out = child.stdout.take().unwrap();
