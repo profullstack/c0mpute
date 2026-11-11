@@ -6,20 +6,28 @@
 
 export const VIDEO_MODELS = ["wan2.1-t2v-1.3b", "wan2.2-ti2v-5b"] as const;
 export const DEFAULT_VIDEO_MODEL = "wan2.1-t2v-1.3b";
+/**
+ * Adult clips on the default model render on Wan 2.2 5B (720p on a 24 GiB
+ * GPU) instead: the 1.3B is clipped to 33 frames of 480x272 for CPU workers
+ * and cannot draw what adult mode is for. C0MPUTE_ADULT_VIDEO_MODEL overrides
+ * it (set it to wan2.1-t2v-1.3b when no GPU video node is online).
+ */
+export const ADULT_VIDEO_MODEL = "wan2.2-ti2v-5b";
 /** The network queues a clip for a worker up to 2 h; so may a caller wait. */
 export const MAX_WAIT_S = 7200;
 
 export type VideoRequest = { prompt: string; model: string; negative_prompt?: string; seed?: number; adult?: true };
 
 /** Validate a POST body; returns the body to forward or an error string. Text to video only. */
-export function parseVideoRequest(body: unknown): VideoRequest | string {
+export function parseVideoRequest(body: unknown, opts: { adultModel?: string } = {}): VideoRequest | string {
   const b = (body ?? {}) as Record<string, unknown>;
   const prompt = typeof b.prompt === "string" ? b.prompt.trim() : "";
   if (!prompt || prompt.length > 2000) return "prompt must contain 1 to 2000 characters";
   const model = b.model === undefined ? DEFAULT_VIDEO_MODEL : b.model;
   if (typeof model !== "string" || !(VIDEO_MODELS as readonly string[]).includes(model)) return `model must be one of: ${VIDEO_MODELS.join(", ")}`;
   if (b.image !== undefined || b.image_base64 !== undefined || b.image_url !== undefined) return "image inputs are not accepted; send a text prompt";
-  const out: VideoRequest = { prompt, model };
+  const adultModel = opts.adultModel && (VIDEO_MODELS as readonly string[]).includes(opts.adultModel) ? opts.adultModel : ADULT_VIDEO_MODEL;
+  const out: VideoRequest = { prompt, model: b.adult === true && model === DEFAULT_VIDEO_MODEL ? adultModel : model };
   if (typeof b.negative_prompt === "string" && b.negative_prompt.trim()) out.negative_prompt = b.negative_prompt.trim().slice(0, 2000);
   if (b.seed !== undefined && b.seed !== null) {
     const seed = Number(b.seed);
