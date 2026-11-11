@@ -16,11 +16,13 @@ free -g | head -2
 # The bench runs once per version before a worker advertises; do it while
 # the weights download instead of after.
 (c0mpute bench > "$LOGS/bench.log" 2>&1; echo "bench exit $?" >> "$LOGS/bench.log") &
+bench_pid=$!
 
 echo "== $(date -u +%FT%TZ) prefetching: ${C0MPUTE_PREFETCH_MODELS}"
 python3 /opt/c0mpute-salad/prefetch.py ${C0MPUTE_PREFETCH_MODELS} || echo "prefetch failed (the runner will pull on first job)"
 echo "== $(date -u +%FT%TZ) prefetch done"
-wait
+# Only the bench: a bare `wait` would also wait on the status server forever.
+wait "$bench_pid"
 c0mpute video check || true
 
 echo "== $(date -u +%FT%TZ) starting worker (video only)"
