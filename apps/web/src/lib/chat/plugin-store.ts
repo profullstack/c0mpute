@@ -120,7 +120,7 @@ export function pluginKey(raw: string | undefined): Buffer | null {
 /** v1.<iv>.<tag>.<ciphertext>, all base64url. Additional data binds it to its row. */
 export function seal(key: Buffer, plain: string, aad: string): string {
   const iv = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
+  const c = createCipheriv("aes-256-gcm", key, iv);
   c.setAAD(Buffer.from(aad));
   const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
   return ["v1", iv.toString("base64url"), c.getAuthTag().toString("base64url"), ct.toString("base64url")].join(".");
@@ -130,9 +130,13 @@ export function unseal(key: Buffer, sealed: string, aad: string): string | null 
   const [v, iv, tag, ct] = sealed.split(".");
   if (v !== "v1" || !iv || !tag || ct === undefined) return null;
   try {
+    // Pin the tag to the full 16 bytes: GCM otherwise accepts a truncated tag,
+    // which makes forging a ciphertext far cheaper.
+    const t = Buffer.from(tag, "base64url");
+    if (t.length !== 16) return null;
     const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"), { authTagLength: 16 });
     d.setAAD(Buffer.from(aad));
-    d.setAuthTag(Buffer.from(tag, "base64url"));
+    d.setAuthTag(t);
     return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
   } catch {
     return null;

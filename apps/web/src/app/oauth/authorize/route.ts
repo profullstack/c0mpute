@@ -27,7 +27,7 @@ button.ok{background:var(--ok);border-color:var(--ok);color:var(--okfg)}small{di
 </style></head><body><main>${body}</main></body></html>`;
   return new Response(html, {
     status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "no-referrer" },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "same-origin" },
   });
 }
 
@@ -85,8 +85,12 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // The consent form is CSRF-bound to the session (consentToken below). The
+  // origin check is extra: refuse a real foreign origin, but not `null`, which
+  // browsers send for a form POST from a page with a strict referrer policy
+  // (a cached copy of this page from before same-origin was set, privacy modes).
   const origin = req.headers.get("origin");
-  if (origin && origin !== siteUrl() && origin !== new URL(req.url).origin) return errorPage("Cross-site request refused.");
+  if (origin && origin !== "null" && origin !== siteUrl() && origin !== new URL(req.url).origin) return errorPage("Cross-site request refused.");
   const form = await req.formData().catch(() => null);
   if (!form) return errorPage("Bad request.");
   const get = (k: string) => {
