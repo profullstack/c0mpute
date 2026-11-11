@@ -98,6 +98,30 @@ pub fn torch_variant() -> &'static str {
 fn on_gpu() -> bool {
     torch_variant() != "cpu"
 }
+
+/// The card's memory in MiB, probed once (a card does not change size under
+/// a running node). `None` on a box without `nvidia-smi`.
+fn vram_mib() -> Option<u64> {
+    static VRAM: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *VRAM.get_or_init(crate::video::nvidia_vram_mib)
+}
+
+/// RAM floors for this device as (total, free) GiB. A GPU node needs far
+/// less host RAM than a CPU one, which holds the whole model in memory.
+pub fn ram_floors(config: &crate::config::MusicConfig, gpu: bool) -> (u64, u64) {
+    if gpu {
+        (config.gpu_min_ram_gb, config.gpu_min_free_ram_gb)
+    } else {
+        (config.min_ram_gb, config.min_free_ram_gb)
+    }
+}
+
+/// Pure decision: is this card big enough for songs? An unknown size (the
+/// probe failed) is let through; a too-small card fails its first job and
+/// the buyer benches it.
+pub fn vram_ok_with(config: &crate::config::MusicConfig, vram_mib: Option<u64>) -> bool {
+    vram_mib.is_none_or(|mib| mib + 512 >= config.min_vram_gb.saturating_mul(1024))
+}
 /// What ACE-Step imports at inference time. Its own dependency list adds
 /// gradio, the training stack and CUDA-only wheels, none of which a worker
 /// runs, so it is installed with --no-deps on top of these.
@@ -180,9 +204,10 @@ const GIB: u64 = 1024 * 1024 * 1024;
 pub fn has_headroom_with(
     config: &crate::config::MusicConfig,
     mem: crate::diffusion::MemorySnapshot,
+    gpu: bool,
 ) -> bool {
-    mem.total >= config.min_ram_gb.saturating_mul(GIB)
-        && mem.available >= config.min_free_ram_gb.saturating_mul(GIB)
+    let (total, free) = ram_floors(config, gpu);
+    mem.total >= total.saturating_mul(GIB) && mem.available >= free.saturating_mul(GIB)
 }
 
 /// Pure decision: is this per-job thread budget fast enough for songs?
@@ -201,7 +226,8 @@ pub fn can_serve(config: &crate::config::MusicConfig) -> bool {
     config.auto_install_enabled()
         && installed()
         && fast_enough(config)
-        && has_headroom_with(config, crate::diffusion::memory())
+        && has_headroom_with(config, crate::diffusion::memory(), on_gpu())
+        && (!on_gpu() || vram_ok_with(config, vram_mib()))
         && (on_gpu()
             || crate::diffusion::idle_enough_with(
             sysinfo::System::load_average().one,
@@ -222,7 +248,8 @@ pub fn gate_reason(config: &crate::config::MusicConfig) -> Option<String> {
     gate_reason_with(
         config,
         installed(),
-        installed() && on_gpu(),
+        on_gpu(),
+        if on_gpu() { vram_mib() } else { None },
         crate::diffusion::HostNow::probe(),
     )
 }
@@ -232,6 +259,7 @@ pub fn gate_reason_with(
     config: &crate::config::MusicConfig,
     installed: bool,
     gpu: bool,
+    vram_mib: Option<u64>,
     host: crate::diffusion::HostNow,
 ) -> Option<String> {
     if !config.auto_install_enabled() {
@@ -243,16 +271,18 @@ pub fn gate_reason_with(
             host.job_threads, config.min_cpu_threads
         ));
     }
-    if !installed {
-        return Some(crate::diffusion::not_installed_reason(config.min_ram_gb, host, "~8 GB"));
+    if gpu && !vram_ok_with(config, vram_mib) {
+        return Some(format!(
+            "GPU too small for songs: {} MiB VRAM, needs {} GiB",
+            vram_mib.unwrap_or(0),
+            config.min_vram_gb
+        ));
     }
-    crate::diffusion::resource_gate(
-        config.min_ram_gb,
-        config.min_free_ram_gb,
-        config.max_load_per_cpu,
-        host,
-        !gpu,
-    )
+    let (min_ram, min_free) = ram_floors(config, gpu);
+    if !installed {
+        return Some(crate::diffusion::not_installed_reason(min_ram, host, "~8 GB"));
+    }
+    crate::diffusion::resource_gate(min_ram, min_free, config.max_load_per_cpu, host, !gpu)
 }
 
 fn now_secs() -> u64 {
@@ -292,11 +322,21 @@ pub async fn ensure(config: &crate::config::MusicConfig) -> bool {
         return true;
     }
     let mem = crate::diffusion::memory();
-    if mem.total < config.min_ram_gb.saturating_mul(GIB) {
+    let (min_ram, _) = ram_floors(config, on_gpu());
+    if mem.total < min_ram.saturating_mul(GIB) {
         info!(
             total_gb = mem.total / GIB,
-            required_gb = config.min_ram_gb,
+            required_gb = min_ram,
+            gpu = on_gpu(),
             "skipping music install: not enough RAM"
+        );
+        return false;
+    }
+    if on_gpu() && !vram_ok_with(config, vram_mib()) {
+        info!(
+            vram_mib = vram_mib().unwrap_or(0),
+            required_gb = config.min_vram_gb,
+            "skipping music install: GPU too small for songs"
         );
         return false;
     }
@@ -769,12 +809,42 @@ mod tests {
             cpus: 8,
             job_threads: 2,
         };
-        assert_eq!(super::gate_reason_with(&cfg, true, true, busy), None);
-        assert!(super::gate_reason_with(&cfg, true, false, busy).unwrap().starts_with("CPU budget too small"));
+        assert_eq!(super::gate_reason_with(&cfg, true, true, Some(24_576), busy), None);
+        assert!(super::gate_reason_with(&cfg, true, false, None, busy).unwrap().starts_with("CPU budget too small"));
         let idle = crate::diffusion::HostNow { load_1m: 0.1, job_threads: 8, ..busy };
-        assert_eq!(super::gate_reason_with(&cfg, true, false, idle), None);
+        assert_eq!(super::gate_reason_with(&cfg, true, false, None, idle), None);
         let full = crate::diffusion::HostNow { mem: crate::diffusion::MemorySnapshot { total: 64 << 30, available: 4 << 30 }, ..idle };
-        assert!(super::gate_reason_with(&cfg, true, false, full).unwrap().contains("GiB RAM free, needs 10 GiB free"));
+        assert!(super::gate_reason_with(&cfg, true, false, None, full).unwrap().contains("GiB RAM free, needs 10 GiB free"));
+    }
+
+    #[test]
+    fn a_small_ram_gpu_box_qualifies_on_vram() {
+        let cfg = crate::config::MusicConfig::default();
+        // A 9 GB-RAM rig with an 8 GB card: too small for CPU songs, fine on CUDA.
+        let rig = crate::diffusion::HostNow {
+            mem: crate::diffusion::MemorySnapshot { total: 9 << 30, available: 6 << 30 },
+            load_1m: 3.0,
+            cpus: 12,
+            job_threads: 2,
+        };
+        assert_eq!(super::gate_reason_with(&cfg, true, true, Some(8_192), rig), None);
+        assert!(super::gate_reason_with(&cfg, true, false, None, rig).is_some(), "same box on CPU stays out");
+        // A 4 GB card is refused with a reason that says why.
+        assert!(super::gate_reason_with(&cfg, true, true, Some(4_096), rig).unwrap().starts_with("GPU too small for songs"));
+        // Unknown size (nvidia-smi failed) is let through.
+        assert_eq!(super::gate_reason_with(&cfg, true, true, None, rig), None);
+        // Below the GPU RAM floor still says no.
+        let tiny = crate::diffusion::HostNow { mem: crate::diffusion::MemorySnapshot { total: 6 << 30, available: 5 << 30 }, ..rig };
+        assert!(super::gate_reason_with(&cfg, true, true, Some(8_192), tiny).unwrap().contains("GiB RAM, needs 8 GiB"));
+    }
+
+    #[test]
+    fn vram_floor() {
+        let cfg = crate::config::MusicConfig::default();
+        assert!(super::vram_ok_with(&cfg, Some(6_144)));
+        assert!(super::vram_ok_with(&cfg, Some(5_800)), "a 6 GB card reporting a little under 6144 MiB still counts");
+        assert!(!super::vram_ok_with(&cfg, Some(4_096)));
+        assert!(super::vram_ok_with(&cfg, None));
     }
 
     use super::*;
@@ -864,9 +934,12 @@ mod tests {
         let idle = MemorySnapshot { total: 32 * GIB, available: 20 * GIB };
         let busy = MemorySnapshot { total: 91 * GIB, available: 6 * GIB };
         let small = MemorySnapshot { total: 8 * GIB, available: 7 * GIB };
-        assert!(has_headroom_with(&config, idle));
-        assert!(!has_headroom_with(&config, busy));
-        assert!(!has_headroom_with(&config, small));
+        assert!(has_headroom_with(&config, idle, false));
+        assert!(!has_headroom_with(&config, busy, false));
+        assert!(!has_headroom_with(&config, small, false));
+        // On a GPU the 8 GB box qualifies; host RAM only feeds the card.
+        assert!(has_headroom_with(&config, small, true));
+        assert!(has_headroom_with(&config, busy, true));
         assert!(fast_enough_with(&config, 8));
         assert!(!fast_enough_with(&config, 3));
     }
