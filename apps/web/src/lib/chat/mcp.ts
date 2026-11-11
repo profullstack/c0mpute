@@ -84,9 +84,24 @@ export type McpCtx = {
   /** Chat plugins: the store plus the add/run functions (plugins.ts), when wired. */
   plugins?: PluginMcpDeps & {
     hasEnabled: (userId: string) => Promise<boolean>;
-    run: (o: { userId: string; upstream: Upstream; req: ChatRequest; emit: (e: PluginEvent) => void }) => Promise<{ text: string }>;
+    run: (o: { userId: string; upstream: Upstream; req: ChatRequest; emit: (e: PluginEvent) => void; signal?: AbortSignal }) => Promise<{ text: string }>;
   };
+  /** The HTTP request's signal: the client hanging up stops the call. */
+  signal?: AbortSignal;
 };
+
+/**
+ * tools/call requests still running, by user and JSON-RPC id, so a client's
+ * `notifications/cancelled` (Esc in Claude Code, Stop in a chat app) can
+ * interrupt a chat and its plugin tool loop instead of letting it run on.
+ */
+const inflight = new Map<string, AbortController>();
+const inflightKey = (userId: string, id: unknown) => `${userId}\u0000${JSON.stringify(id)}`;
+
+/** Tests: how many calls are running. */
+export function inflightCalls(): number {
+  return inflight.size;
+}
 
 const ok = (id: Rpc["id"], result: unknown) => ({ jsonrpc: "2.0", id: id ?? null, result });
 const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
@@ -107,11 +122,20 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       });
     case "ping":
       return ok(id, {});
+    case "notifications/cancelled": {
+      const requestId = (params as { requestId?: unknown }).requestId;
+      if (requestId !== undefined) inflight.get(inflightKey(ctx.user.id, requestId))?.abort();
+      return null;
+    }
     case "tools/list":
       return ok(id, { tools: [...TOOLS, ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
+      const stop = new AbortController();
+      const key = isNotification ? null : inflightKey(ctx.user.id, id);
+      if (key) inflight.set(key, stop);
+      const signal = ctx.signal ? AbortSignal.any([ctx.signal, stop.signal]) : stop.signal;
       try {
         if (HOSTING_TOOL_NAMES.has(name)) {
           if (!ctx.push) return fail(id, -32602, `unknown tool: ${name}`);
@@ -165,15 +189,18 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
           if (typeof req === "string") return ok(id, text(req, true));
           if (ctx.plugins && args.plugins !== false && (await ctx.plugins.hasEnabled(ctx.user.id))) {
             const events: PluginEvent[] = [];
-            const r = await ctx.plugins.run({ userId: ctx.user.id, upstream: ctx.upstream, req, emit: (e) => events.push(e) });
+            const r = await ctx.plugins.run({ userId: ctx.user.id, upstream: ctx.upstream, req, emit: (e) => events.push(e), signal });
             return ok(id, text(r.text + describeSteps(events)));
           }
-          const r = await chatText(ctx.upstream, req);
+          const r = await chatText(ctx.upstream, req, signal);
           return ok(id, text(r.text));
         }
         return fail(id, -32602, `unknown tool: ${name}`);
       } catch (e) {
+        if (stop.signal.aborted) return ok(id, text("cancelled", true));
         return ok(id, text(e instanceof Error ? e.message : String(e), true));
+      } finally {
+        if (key && inflight.get(key) === stop) inflight.delete(key);
       }
     }
     default:

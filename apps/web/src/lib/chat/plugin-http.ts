@@ -29,7 +29,14 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
     })();
   }
   const enc = new TextEncoder();
+  // The client hanging up (Stop, Esc, Ctrl+C) cancels the stream; abort the
+  // tool loop with it instead of finishing a turn nobody will read.
+  const stop = new AbortController();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
   const stream = new ReadableStream({
+    cancel() {
+      stop.abort();
+    },
     async start(ctrl) {
       const send = (o: unknown) => {
         try {
@@ -48,6 +55,7 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
         const asked: PluginEvent[] = [];
         const r = await runPluginChat({
           ...opts,
+          signal,
           emit: (event) => (opts.events ? send({ object: PLUGIN_EVENT_OBJECT, event }) : asked.push(event)),
         });
         if (!opts.events) r.text += approvalNote(asked);

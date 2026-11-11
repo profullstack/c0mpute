@@ -108,7 +108,10 @@ function chatTyping(ctl: Controller, e: KeyEvent): void {
   }
   if (is(e, "pageup")) return ctl.scrollChat(Math.max(3, s.rows - 8));
   if (is(e, "pagedown")) return ctl.scrollChat(-Math.max(3, s.rows - 8));
-  if (is(e, "up")) return ctl.recall(-1);
+  if (is(e, "up")) {
+    if (!s.chat.input.value && ctl.unqueueLast()) return;
+    return ctl.recall(-1);
+  }
   if (is(e, "down")) return ctl.recall(1);
   if (is(e, "ctrl+n")) return ctl.newChat();
   const next = editText(s.chat.input, e);

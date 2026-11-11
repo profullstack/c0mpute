@@ -89,8 +89,11 @@ export async function forwardChat(upstream: Upstream, req: ChatRequest, signal?:
 }
 
 /** Non-streaming convenience for MCP and server callers: the answer text. */
-export async function chatText(upstream: Upstream, req: ChatRequest): Promise<{ text: string; model: string }> {
-  const res = await forwardChat(upstream, { ...req, stream: false }, AbortSignal.timeout(300_000));
+export async function chatText(upstream: Upstream, req: ChatRequest, signal?: AbortSignal): Promise<{ text: string; model: string }> {
+  // The caller's signal (a closed connection, Stop, MCP cancel) ends the
+  // upstream request at once, not at the 5-minute ceiling.
+  const timeout = AbortSignal.timeout(300_000);
+  const res = await forwardChat(upstream, { ...req, stream: false }, signal ? AbortSignal.any([timeout, signal]) : timeout);
   const body = (await res.json().catch(() => ({}))) as {
     model?: string;
     choices?: { message?: { content?: string } }[];

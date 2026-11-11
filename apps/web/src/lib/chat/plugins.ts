@@ -273,6 +273,21 @@ export type PluginChatResult = { text: string; model: string; stopped: "done" | 
  * same messages back with `approvals: [token]` resumes the loop by running
  * exactly that call first.
  */
+/**
+ * Thread an interrupt into every plugin request (tool calls, tools/list): the
+ * tool loop has no signal of its own, so a Stop used to wait for the running
+ * tool (up to 60 s) and only took effect at the next model step.
+ */
+export function withSignal(net: cp.NetOptions, signal?: AbortSignal): cp.NetOptions {
+  if (!signal) return net;
+  const base = net.fetch ?? fetch;
+  const wrapped = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const s = init?.signal ? AbortSignal.any([init.signal, signal]) : signal;
+    return base(input, { ...init, signal: s });
+  }) as typeof fetch;
+  return { ...net, fetch: wrapped };
+}
+
 export async function runPluginChat(opts: {
   userId: string;
   upstream: Upstream;
@@ -285,11 +300,11 @@ export async function runPluginChat(opts: {
   net?: cp.NetOptions;
 }): Promise<PluginChatResult> {
   const store = opts.store ?? pluginStore();
-  const net = opts.net ?? NET;
+  const net = withSignal(opts.net ?? NET, opts.signal);
   const plugins = await livePlugins(opts.userId, store, opts.emit, net);
   let model = opts.req.model ?? "auto";
   if (!plugins.length) {
-    const r = await chatText(opts.upstream, { ...opts.req, stream: false });
+    const r = await chatText(opts.upstream, { ...opts.req, stream: false }, opts.signal);
     return { text: r.text, model: r.model, stopped: "done" };
   }
 
@@ -298,7 +313,7 @@ export async function runPluginChat(opts: {
     const messages = msgs
       .filter((m) => m.role === "system" || m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "system" | "user" | "assistant", content: typeof m.content === "string" ? m.content : "" }));
-    const r = await chatText(opts.upstream, { ...opts.req, messages, stream: false });
+    const r = await chatText(opts.upstream, { ...opts.req, messages, stream: false }, opts.signal);
     model = r.model;
     return r.text;
   };

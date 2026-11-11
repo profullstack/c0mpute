@@ -266,7 +266,6 @@ function createWindow() {
 // ── agent ──────────────────────────────────────────────────────────────
 
 const pendingConfirms = new Map<string, (d: Decision) => void>();
-let agentAbort: AbortController | null = null;
 
 function currentSkills() {
   return loadSkills(defaultSkillsDir(), settings.skillsDisabled);
@@ -506,11 +505,14 @@ const handlers: Record<string, Handler> = {
     pollMedia();
   },
 
-  "agent:send": async (text: string) => {
-    agentAbort = new AbortController();
-    agent.send(text, agentAbort.signal);
+  // Not awaited: a message sent while the agent works is queued and the
+  // call returns at once.
+  "agent:send": (text: string) => {
+    void agent.submit(String(text));
   },
-  "agent:stop": () => agentAbort?.abort(),
+  "agent:stop": () => agent.stop(),
+  "agent:unqueue": (index: number) => agent.unqueue(Number(index)) ?? null,
+  "agent:queued": () => [...agent.queued],
   "agent:reset": () => {
     agent.reset();
     agent.allowed.clear();

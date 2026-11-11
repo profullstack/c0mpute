@@ -26,7 +26,9 @@ export type AgentEvent =
   | { type: "tool_result"; id: string; name: string; output: string; error: boolean }
   | { type: "status"; text: string }
   | { type: "error"; text: string }
-  | { type: "done" };
+  | { type: "done" }
+  /** Messages waiting for the current run to finish (sent on every change). */
+  | { type: "queued"; items: string[] };
 
 export interface AgentDeps {
   complete(messages: ChatMessage[], model: string | undefined, signal?: AbortSignal): Promise<{ content: string; message?: unknown; model?: string }>;
@@ -47,6 +49,8 @@ export class AgentSession {
   /** Sources the user allowed for this session ("always" answers). */
   allowed = new Set<string>();
   private running = false;
+  private queue: string[] = [];
+  private abort: AbortController | null = null;
 
   constructor(
     private deps: AgentDeps,
@@ -61,7 +65,52 @@ export class AgentSession {
   }
 
   reset() {
+    this.stop();
     this.messages = [];
+    this.setQueue([]);
+  }
+
+  get queued(): readonly string[] {
+    return this.queue;
+  }
+
+  private setQueue(items: string[]) {
+    this.queue = items;
+    this.deps.emit({ type: "queued", items: [...items] });
+  }
+
+  /**
+   * Send a message now, or queue it while a run (model steps and tool calls)
+   * is going. Queued messages go out in order as each run ends; stop() ends
+   * the current run, so the next one goes at once.
+   */
+  async submit(text: string): Promise<void> {
+    const t = text.trim();
+    if (!t) return;
+    if (this.running) {
+      this.setQueue([...this.queue, t]);
+      return;
+    }
+    let next: string | undefined = t;
+    while (next !== undefined) {
+      this.abort = new AbortController();
+      await this.send(next, this.abort.signal);
+      this.abort = null;
+      next = this.queue[0];
+      if (next !== undefined) this.setQueue(this.queue.slice(1));
+    }
+  }
+
+  /** Interrupt the current run (the queue keeps going). */
+  stop() {
+    this.abort?.abort();
+  }
+
+  /** Take a queued message out (to edit or drop it); returns its text. */
+  unqueue(index: number): string | undefined {
+    const item = this.queue[index];
+    if (item !== undefined) this.setQueue(this.queue.filter((_, i) => i !== index));
+    return item;
   }
 
   private system(tools: AgentTool[]): string {

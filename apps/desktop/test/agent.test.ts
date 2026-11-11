@@ -123,3 +123,60 @@ describe("agent loop", () => {
     expect(h.events.some((e) => e.type === "error" && e.text.includes("3 tool steps"))).toBe(true);
   });
 });
+
+describe("agent queue", () => {
+  test("a message sent while the agent works waits, then goes after the run", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const seen: string[] = [];
+    const events: AgentEvent[] = [];
+    const agent = new AgentSession({
+      complete: async (messages) => {
+        seen.push(String(messages.at(-1)!.content));
+        if (seen.length === 1) await gate;
+        return { content: `answer ${seen.length}` };
+      },
+      tools: async () => [],
+      systemExtra: () => "",
+      confirm: async () => "deny",
+      emit: (e) => events.push(e),
+    });
+    const first = agent.submit("one");
+    await new Promise((r) => setTimeout(r, 5));
+    await agent.submit("two");
+    expect(agent.queued).toEqual(["two"]);
+    expect(seen).toEqual(["one"]);
+    release();
+    await first;
+    expect(seen).toEqual(["one", "two"]);
+    expect(agent.queued).toEqual([]);
+    const q = events.filter((e) => e.type === "queued").map((e) => (e as { items: string[] }).items);
+    expect(q).toEqual([["two"], []]);
+  });
+
+  test("stop interrupts the run and the next queued message goes at once; unqueue takes one back", async () => {
+    const seen: string[] = [];
+    const agent = new AgentSession({
+      complete: async (messages, _model, signal) => {
+        seen.push(String(messages.at(-1)!.content));
+        if (seen.length === 1) {
+          await new Promise((_, rej) => signal?.addEventListener("abort", () => rej(new Error("stopped"))));
+        }
+        return { content: "ok" };
+      },
+      tools: async () => [],
+      systemExtra: () => "",
+      confirm: async () => "deny",
+      emit: () => {},
+    });
+    const run = agent.submit("long task");
+    await new Promise((r) => setTimeout(r, 5));
+    await agent.submit("draft");
+    await agent.submit("next");
+    expect(agent.unqueue(0)).toBe("draft");
+    expect(agent.queued).toEqual(["next"]);
+    agent.stop();
+    await run;
+    expect(seen).toEqual(["long task", "next"]);
+  });
+});

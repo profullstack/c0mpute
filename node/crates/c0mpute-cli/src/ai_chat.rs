@@ -351,22 +351,141 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
     Ok(Turn { answer, approvals: waiting })
 }
 
+/// What happened to a turn run through [`Input::during`].
+enum TurnOutcome<T> {
+    Done(T),
+    /// Ctrl+C: the request was dropped (which closes it, so the server stops
+    /// the model and any plugin tool loop).
+    Interrupted,
+}
+
+/// The interactive session's keyboard: lines arrive from a reader thread, so
+/// the person can keep typing while an answer streams. A line typed during a
+/// turn is queued and sent when the turn ends; Ctrl+C interrupts the turn and
+/// the next queued line goes at once. Ctrl+C at an empty prompt exits.
+struct Input {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    queue: std::collections::VecDeque<String>,
+    closed: bool,
+}
+
+impl Input {
+    fn spawn() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            loop {
+                let mut line = String::new();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if tx.send(line.trim_end_matches(['\r', '\n']).to_string()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        Self::from_receiver(rx)
+    }
+
+    fn from_receiver(rx: tokio::sync::mpsc::UnboundedReceiver<String>) -> Self {
+        Self { rx, queue: Default::default(), closed: false }
+    }
+
+    /// The next line to act on: a queued one first, else wait for the
+    /// keyboard. None on end of input or Ctrl+C.
+    async fn next(&mut self) -> Option<String> {
+        if let Some(q) = self.queue.pop_front() {
+            eprintln!("\x1b[32m> \x1b[0m{q}  \x1b[2m(queued)\x1b[0m");
+            return Some(q);
+        }
+        if self.closed {
+            return None;
+        }
+        eprint!("\x1b[32m> \x1b[0m");
+        std::io::stderr().flush().ok();
+        tokio::select! {
+            l = self.rx.recv() => {
+                if l.is_none() {
+                    self.closed = true;
+                    eprintln!();
+                }
+                l
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!();
+                None
+            }
+        }
+    }
+
+    /// One raw line (approval prompts), bypassing the queue.
+    async fn line(&mut self) -> Option<String> {
+        if self.closed {
+            return None;
+        }
+        let l = self.rx.recv().await;
+        if l.is_none() {
+            self.closed = true;
+        }
+        l
+    }
+
+    /// Run a turn while still listening: typed lines queue, Ctrl+C interrupts.
+    async fn during<T>(&mut self, fut: impl std::future::Future<Output = T>) -> TurnOutcome<T> {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                r = &mut fut => return TurnOutcome::Done(r),
+                l = self.rx.recv(), if !self.closed => match l {
+                    None => self.closed = true,
+                    Some(l) if l.trim().is_empty() => {}
+                    Some(l) => {
+                        self.queue.push_back(l.trim().to_string());
+                        eprintln!(
+                            "\x1b[2m(queued {}: sends when this answer finishes · Ctrl+C stops it now)\x1b[0m",
+                            self.queue.len()
+                        );
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    println!();
+                    eprintln!(
+                        "\x1b[33m(stopped{})\x1b[0m",
+                        if self.queue.is_empty() { String::new() } else { format!("; sending {} queued", self.queue.len()) }
+                    );
+                    return TurnOutcome::Interrupted;
+                }
+            }
+        }
+    }
+}
+
+/// y/N for each waiting call, read through the session's [`Input`].
+async fn ask_approvals_in(input: &mut Input, waiting: &[(String, String)]) -> Vec<String> {
+    let mut ok = Vec::new();
+    for (what, token) in waiting {
+        eprint!("approve {what}? [y/N] ");
+        std::io::stderr().flush().ok();
+        let line = input.line().await.unwrap_or_default();
+        if matches!(line.trim(), "y" | "Y" | "yes") {
+            ok.push(token.clone());
+        }
+    }
+    ok
+}
+
 async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Result<()> {
     let mut model = a.model.clone();
     eprintln!(
-        "c0mpute chat · {} · /model <id>, /models, /reset, /exit",
+        "c0mpute chat · {} · /model <id>, /models, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
         model.as_deref().unwrap_or("any live model")
     );
-    let stdin = std::io::stdin();
+    let mut input = Input::spawn();
     let base = messages.clone();
     loop {
-        eprint!("\x1b[32m> \x1b[0m");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            eprintln!();
-            return Ok(());
-        }
+        let Some(line) = input.next().await else { return Ok(()) };
         let line = line.trim();
         match line {
             "" => continue,
@@ -390,22 +509,26 @@ async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Resul
         }
         messages.push(json!({"role": "user", "content": line}));
         let args = Args { model: model.clone(), ..clone_args(a) };
-        let mut result = complete(url, key, &args, &messages, false, &[]).await;
-        while let Ok(turn) = &result {
+        let mut result = input.during(complete(url, key, &args, &messages, false, &[])).await;
+        while let TurnOutcome::Done(Ok(turn)) = &result {
             if turn.approvals.is_empty() {
                 break;
             }
-            let ok = ask_approvals(&turn.approvals)?;
+            let ok = ask_approvals_in(&mut input, &turn.approvals).await;
             if ok.is_empty() {
                 break;
             }
-            result = complete(url, key, &args, &messages, false, &ok).await;
+            result = input.during(complete(url, key, &args, &messages, false, &ok)).await;
         }
         match result {
-            Ok(turn) => messages.push(json!({"role": "assistant", "content": turn.answer})),
-            Err(e) => {
+            TurnOutcome::Done(Ok(turn)) => messages.push(json!({"role": "assistant", "content": turn.answer})),
+            TurnOutcome::Done(Err(e)) => {
                 messages.pop();
                 eprintln!("error: {e:#}");
+            }
+            // The cut-off answer is not kept, so the next message starts clean.
+            TurnOutcome::Interrupted => {
+                messages.pop();
             }
         }
     }
@@ -476,17 +599,14 @@ impl P2pChat {
 
     async fn repl(&self, a: &Args, mut messages: Vec<Value>) -> Result<()> {
         let mut model = a.model.clone();
-        eprintln!("c0mpute chat (peer to peer) · {} · /model <id>, /reset, /exit", model.as_deref().unwrap_or("any served model"));
-        let stdin = std::io::stdin();
+        eprintln!(
+            "c0mpute chat (peer to peer) · {} · /model <id>, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
+            model.as_deref().unwrap_or("any served model")
+        );
+        let mut input = Input::spawn();
         let base = messages.clone();
         loop {
-            eprint!("\x1b[32m> \x1b[0m");
-            std::io::stderr().flush().ok();
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line)? == 0 {
-                eprintln!();
-                return Ok(());
-            }
+            let Some(line) = input.next().await else { return Ok(()) };
             let line = line.trim();
             match line {
                 "" => continue,
@@ -505,14 +625,17 @@ impl P2pChat {
                 _ => {}
             }
             messages.push(json!({"role": "user", "content": line}));
-            match self.ask(a, model.clone(), &messages).await {
-                Ok((answer, _)) => {
+            match input.during(self.ask(a, model.clone(), &messages)).await {
+                TurnOutcome::Done(Ok((answer, _))) => {
                     println!("{answer}");
                     messages.push(json!({"role": "assistant", "content": answer}));
                 }
-                Err(e) => {
+                TurnOutcome::Done(Err(e)) => {
                     messages.pop();
                     eprintln!("error: {e:#}");
+                }
+                TurnOutcome::Interrupted => {
+                    messages.pop();
                 }
             }
         }
@@ -704,6 +827,37 @@ fn rpc_error(id: Option<Value>, msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lines_typed_during_a_turn_queue_and_come_back_first_in_order() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut input = Input::from_receiver(rx);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<&str>();
+        let typing = tx.clone();
+        let turn = async move { done_rx.await.unwrap() };
+        let feeder = tokio::spawn(async move {
+            typing.send("second".into()).unwrap();
+            typing.send("   ".into()).unwrap();
+            typing.send("third".into()).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            done_tx.send("answer").unwrap();
+        });
+        match input.during(turn).await {
+            TurnOutcome::Done(a) => assert_eq!(a, "answer"),
+            TurnOutcome::Interrupted => panic!("not interrupted"),
+        }
+        feeder.await.unwrap();
+        assert_eq!(input.queue, ["second", "third"]);
+        tx.send("typed later".into()).unwrap();
+        assert_eq!(input.next().await.as_deref(), Some("second"));
+        assert_eq!(input.next().await.as_deref(), Some("third"));
+        assert_eq!(input.next().await.as_deref(), Some("typed later"));
+        drop(tx);
+        assert_eq!(input.next().await, None);
+        // End of input during a turn does not spin or end the turn early.
+        let r = input.during(async { tokio::time::sleep(Duration::from_millis(5)).await; 7 }).await;
+        assert!(matches!(r, TurnOutcome::Done(7)));
+    }
 
     #[test]
     fn parses_prompt_and_flags() {

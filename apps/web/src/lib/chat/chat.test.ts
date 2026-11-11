@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createStore, isValidDid, NoDidError, normalizeUserCode, type Sql } from "./store";
 import { forwardChat, parseChatRequest, withHousePrompt, C0_SYSTEM_PROMPT, type Upstream } from "./completions";
-import { handleRpc } from "./mcp";
+import { handleRpc, inflightCalls } from "./mcp";
+import { withSignal } from "./plugins";
 
 function memSql(): Sql {
   const db = new Database(":memory:");
@@ -164,5 +165,59 @@ describe("mcp", () => {
       { role: "system", content: "terse" },
       { role: "user", content: "2+2?" },
     ]);
+  });
+});
+
+describe("interrupting a chat", () => {
+  const user = { id: "u-cancel", did: DID, name: null };
+
+  test("notifications/cancelled aborts the running MCP chat call", async () => {
+    let upstreamSignal: AbortSignal | undefined;
+    const upstream: Upstream = (_path, init) => {
+      upstreamSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    };
+    const pending = handleRpc({ id: 41, method: "tools/call", params: { name: "chat", arguments: { prompt: "a long answer" } } }, { user, upstream });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(inflightCalls()).toBe(1);
+    // Another user's cancel for the same id does nothing.
+    expect(await handleRpc({ method: "notifications/cancelled", params: { requestId: 41 } }, { user: { ...user, id: "other" }, upstream })).toBeNull();
+    expect(upstreamSignal?.aborted).toBe(false);
+    expect(await handleRpc({ method: "notifications/cancelled", params: { requestId: 41, reason: "user pressed Esc" } }, { user, upstream })).toBeNull();
+    const r = (await pending) as { result: { content: { text: string }[]; isError?: boolean } };
+    expect(r.result.content[0].text).toBe("cancelled");
+    expect(r.result.isError).toBe(true);
+    expect(upstreamSignal?.aborted).toBe(true);
+    expect(inflightCalls()).toBe(0);
+  });
+
+  test("the HTTP request closing aborts the call too", async () => {
+    const upstream: Upstream = (_path, init) =>
+      new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    const hangup = new AbortController();
+    const pending = handleRpc({ id: 42, method: "tools/call", params: { name: "chat", arguments: { prompt: "hi" } } }, { user, upstream, signal: hangup.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    hangup.abort();
+    const r = (await pending) as { result: { isError?: boolean; content: { text: string }[] } };
+    expect(r.result.isError).toBe(true);
+    expect(inflightCalls()).toBe(0);
+  });
+
+  test("withSignal threads Stop into plugin tool requests", async () => {
+    const seen: (AbortSignal | null | undefined)[] = [];
+    const base = (async (_input: unknown, init?: RequestInit) => {
+      seen.push(init?.signal);
+      return new Response("{}");
+    }) as unknown as typeof fetch;
+    const stop = new AbortController();
+    const net = withSignal({ fetch: base, timeoutMs: 1000 }, stop.signal);
+    expect(net.timeoutMs).toBe(1000);
+    const own = new AbortController();
+    await net.fetch!("https://x.test/mcp", { signal: own.signal });
+    await net.fetch!("https://x.test/mcp");
+    stop.abort();
+    expect(seen[0]?.aborted).toBe(true);
+    expect(seen[1]?.aborted).toBe(true);
+    expect(withSignal({ timeoutMs: 5 })).toEqual({ timeoutMs: 5 });
   });
 });
