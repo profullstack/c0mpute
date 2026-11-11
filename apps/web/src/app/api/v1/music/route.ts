@@ -8,7 +8,7 @@ const err = (status: number, message: string, headers: Record<string, string> = 
 
 /**
  * Start a song on the c0mpute network (ACE-Step 1.5 on c0mpute workers).
- *   POST { prompt, lyrics?, duration?: 10..120 }  ->  202 { id, poll }
+ *   POST { prompt, lyrics?, duration?: 10..600 }  ->  202 { id, poll }
  * Poll GET /api/v1/music/<id> until it returns audio (a few minutes).
  * No lyrics = instrumental. Billed to the person's compute balance when they
  * have one (flat per track); otherwise it spends one of Infernet's free

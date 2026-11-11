@@ -17,7 +17,7 @@ describe("chat album", () => {
     expect(parseAlbumRequest({ prompt: "punk", tracks: 10, duration: 90 })).toEqual({ prompt: "punk", tracks: 10, duration: 90 });
     expect(typeof parseAlbumRequest({ prompt: "punk", tracks: 1 })).toBe("string");
     expect(typeof parseAlbumRequest({ prompt: "punk", tracks: 13 })).toBe("string");
-    expect(typeof parseAlbumRequest({ prompt: "punk", duration: 500 })).toBe("string");
+    expect(typeof parseAlbumRequest({ prompt: "punk", duration: 601 })).toBe("string");
     expect(typeof parseAlbumRequest({ prompt: "" })).toBe("string");
   });
 
