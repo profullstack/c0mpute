@@ -120,6 +120,14 @@ impl Stats {
             .inflight += 1;
     }
 
+    /// Give back a slot taken for a request that was abandoned (a hedge
+    /// that lost, or a fetch whose caller went away): no verdict on the peer.
+    fn release(&self, peer: &str) {
+        if let Some(s) = self.peers.lock().expect("stats lock").get_mut(peer) {
+            s.inflight = s.inflight.saturating_sub(1);
+        }
+    }
+
     fn finish(&self, peer: &str, ok: Option<(Duration, usize)>, timeout: Duration) {
         let mut peers = self.peers.lock().expect("stats lock");
         let s = peers.entry(peer.to_string()).or_default();
@@ -174,6 +182,36 @@ impl Stats {
     }
 }
 
+/// Slots taken by [`fetch_one`] whose requests have not reported back yet.
+/// Dropping it (an early return with a hedge still in flight, or the caller
+/// cancelling the fetch) gives every such slot back; without this each lost
+/// hedge leaked a slot for good, until a peer looked permanently busy and
+/// fetches failed with "no holders" while it sat idle.
+struct Pending<'a> {
+    stats: &'a Stats,
+    peers: Vec<String>,
+}
+
+impl Pending<'_> {
+    fn add(&mut self, peer: &str) {
+        self.peers.push(peer.to_string());
+    }
+
+    fn done(&mut self, peer: &str) {
+        if let Some(i) = self.peers.iter().position(|p| p == peer) {
+            self.peers.swap_remove(i);
+        }
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        for p in self.peers.drain(..) {
+            self.stats.release(&p);
+        }
+    }
+}
+
 /// How long to wait on a request before hedging it with another source.
 fn hedge_after(ms: Option<f64>) -> Duration {
     let base = ms.unwrap_or(UNKNOWN_MS) * 3.0;
@@ -198,6 +236,10 @@ pub async fn fetch_one(
         shard_index: None,
     };
     let mut tried: Vec<String> = Vec::new();
+    let mut pending = Pending {
+        stats,
+        peers: Vec::new(),
+    };
     let mut inflight = FuturesUnordered::new();
     let mut last = String::from("no holders");
     let launch = |peer: String| {
@@ -222,6 +264,7 @@ pub async fn fetch_one(
             Some(p) => {
                 hedge = hedge_after(stats.ms(&p));
                 tried.push(p.clone());
+                pending.add(&p);
                 inflight.push(launch(p));
             }
             None if tried.len() >= sources.len() => break,
@@ -232,6 +275,7 @@ pub async fn fetch_one(
         tokio::select! {
             done = inflight.next() => {
                 let Some((peer, got, took)) = done else { break };
+                pending.done(&peer);
                 match got {
                     Ok(bytes) if Hash::of(&bytes) == *hash => {
                         stats.finish(&peer, Some((took, bytes.len())), timeout);
@@ -252,6 +296,7 @@ pub async fn fetch_one(
                         Some(p) => {
                             hedge = hedge_after(stats.ms(&p));
                             tried.push(p.clone());
+                            pending.add(&p);
                             inflight.push(launch(p));
                         }
                         None => tokio::time::sleep(Duration::from_millis(40)).await,
@@ -262,6 +307,7 @@ pub async fn fetch_one(
                 // Slow for this peer: ask the next best one too, if it has room.
                 if let Some(p) = stats.take(&sources, &tried, turn) {
                     tried.push(p.clone());
+                    pending.add(&p);
                     inflight.push(launch(p));
                 } else {
                     hedge = timeout;
@@ -306,6 +352,28 @@ mod tests {
         s.start("new");
         s.finish("new", None, Duration::from_secs(20));
         assert_eq!(s.rank(&peers, 0).last().unwrap(), "new");
+    }
+
+    #[test]
+    fn abandoned_requests_give_their_slots_back() {
+        let s = Stats::default();
+        let one = vec!["p".to_string()];
+        {
+            let mut pending = Pending {
+                stats: &s,
+                peers: Vec::new(),
+            };
+            for _ in 0..4 {
+                let p = s.take(&one, &[], 0).expect("a free slot");
+                pending.add(&p);
+            }
+            assert!(s.take(&one, &[], 0).is_none(), "at its limit");
+            // Dropped with every request still in flight (a lost hedge, a
+            // cancelled fetch).
+        }
+        for _ in 0..4 {
+            assert!(s.take(&one, &[], 0).is_some(), "slots were leaked");
+        }
     }
 
     #[test]

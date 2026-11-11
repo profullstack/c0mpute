@@ -24,38 +24,112 @@ use tokio::process::Command;
 /// Spawn `command`, collect its piped stdout/stderr, and wait at most
 /// `timeout`. `what` names the program in errors ("sd-cli").
 pub async fn run_with_timeout(command: &mut Command, timeout: Duration, what: &str) -> Result<Output> {
+    run_watched(command, timeout, what, LIVENESS_POLL, LIVENESS_GRACE).await
+}
+
+/// How often a waiting job checks that its child still exists.
+const LIVENESS_POLL: Duration = Duration::from_secs(5);
+/// How long the child may be gone while the wait has not returned.
+///
+/// dev2 2026-11-11: a diffusion worker logged "applying per-job compute
+/// limits" (sd-cli about to start), then nothing for 12+ minutes, with no
+/// sd-cli process left in the container. The render had ended, but the wait
+/// never did (a pipe still held open, or an exit status nobody delivered),
+/// so the node sat on a won frame until its 15-minute deadline and a promo
+/// stalled at 2/7 frames. Once the leader has been gone this long, the job
+/// fails now and its buyer can re-award it.
+const LIVENESS_GRACE: Duration = Duration::from_secs(30);
+
+async fn run_watched(
+    command: &mut Command,
+    timeout: Duration,
+    what: &str,
+    poll: Duration,
+    grace: Duration,
+) -> Result<Output> {
     command.kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().with_context(|| format!("start {what}"))?;
+    let pid = child.id();
+    tracing::debug!(pid = ?pid, "{what} started");
     // Declared after `child`, so on a drop it runs first, while the leader's
     // pid (and with it the group id) is still held by its zombie at worst.
-    let mut guard = TreeGuard { pid: child.id() };
+    let mut guard = TreeGuard { pid };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let waited = tokio::time::timeout(timeout, async {
-        tokio::try_join!(child.wait(), drain(stdout), drain(stderr))
-    })
-    .await;
-    match waited {
-        Ok(Ok((status, stdout, stderr))) => {
+    let outcome = {
+        let work = async { tokio::try_join!(child.wait(), drain(stdout), drain(stderr)) };
+        tokio::pin!(work);
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut ticker = tokio::time::interval(poll);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut gone_since: Option<std::time::Instant> = None;
+        loop {
+            tokio::select! {
+                done = &mut work => break Waited::Done(done),
+                _ = &mut deadline => break Waited::TimedOut,
+                _ = ticker.tick() => {
+                    if pid.is_some_and(leader_gone) {
+                        let since = *gone_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= grace {
+                            break Waited::Lost;
+                        }
+                    } else {
+                        gone_since = None;
+                    }
+                }
+            }
+        }
+    };
+    match outcome {
+        Waited::Done(Ok((status, stdout, stderr))) => {
             // The leader is reaped: its pid may be reused, so never signal it.
             guard.pid = None;
             Ok(Output { status, stdout, stderr })
         }
-        Ok(Err(err)) => {
+        Waited::Done(Err(err)) => {
             guard.kill();
             let _ = child.kill().await;
             Err(err).with_context(|| format!("wait for {what}"))
         }
-        Err(_) => {
+        Waited::TimedOut => {
             guard.kill();
             // SIGKILL the leader too (already dead from the group kill on
             // unix) and wait for it, so no zombie is left.
             let _ = child.kill().await;
             bail!("{what} timed out after {} s", timeout.as_secs())
         }
+        Waited::Lost => {
+            // Whatever still holds its pipes dies with the group.
+            guard.kill();
+            let _ = child.kill().await;
+            tracing::warn!(pid = ?pid, "{what} is gone but its wait never finished; failing the job");
+            bail!("{what} exited but its wait never finished (gone for {} s)", grace.as_secs())
+        }
     }
+}
+
+enum Waited<T> {
+    Done(std::io::Result<T>),
+    TimedOut,
+    Lost,
+}
+
+/// The leader no longer runs: no such process, or a zombie nobody reaped.
+/// A reused pid reads as alive, which only means the deadline decides.
+#[cfg(target_os = "linux")]
+fn leader_gone(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => crate::diffusion::parse_stat(&stat).is_none_or(|(state, _)| state == 'Z'),
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn leader_gone(_pid: u32) -> bool {
+    false
 }
 
 /// How a job child ended, for error messages: "exit 1", or on unix the
@@ -266,5 +340,42 @@ mod tests {
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(output.stdout, b"out\n");
         assert_eq!(output.stderr, b"err\n");
+    }
+
+    /// dev2 2026-11-11: the render was gone, the wait was not. A leader that
+    /// exits while something it started still holds its stdout used to sit
+    /// out the whole deadline; now it fails once the grace has passed, and
+    /// the holder dies with the group.
+    #[tokio::test]
+    async fn a_gone_leader_fails_the_job_after_the_grace_not_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("sleep 300 & echo $! > {}/holder; exit 0", dir.path().display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let started = Instant::now();
+        let err = run_watched(&mut command, Duration::from_secs(600), "sd-cli", Duration::from_millis(50), Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("wait never finished"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+        let holder: u32 = std::fs::read_to_string(dir.path().join("holder")).unwrap().trim().parse().unwrap();
+        assert!(wait_until(|| !alive(holder)).await, "the pipe holder survived");
+    }
+
+    #[tokio::test]
+    async fn a_running_leader_is_not_mistaken_for_a_gone_one() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 1; echo done"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = run_watched(&mut command, Duration::from_secs(10), "sh", Duration::from_millis(50), Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, b"done\n");
     }
 }

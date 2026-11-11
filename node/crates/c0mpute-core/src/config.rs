@@ -482,6 +482,14 @@ pub struct MusicConfig {
     /// Busiest the box may be (1-minute load per logical CPU) and still take a song.
     #[serde(default = "default_diffusion_max_load_per_cpu")]
     pub max_load_per_cpu: f64,
+    /// On an NVIDIA node the model sits in VRAM, so the CPU-sized RAM floors
+    /// above do not apply; these do instead (plus `min_vram_gb`).
+    #[serde(default = "default_music_gpu_min_ram_gb")]
+    pub gpu_min_ram_gb: u64,
+    #[serde(default = "default_music_gpu_min_free_ram_gb")]
+    pub gpu_min_free_ram_gb: u64,
+    #[serde(default = "default_music_min_vram_gb")]
+    pub min_vram_gb: u64,
 }
 
 impl Default for MusicConfig {
@@ -493,6 +501,9 @@ impl Default for MusicConfig {
             min_free_disk_gb: default_music_min_free_disk_gb(),
             min_cpu_threads: default_diffusion_min_cpu_threads(),
             max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+            gpu_min_ram_gb: default_music_gpu_min_ram_gb(),
+            gpu_min_free_ram_gb: default_music_gpu_min_free_ram_gb(),
+            min_vram_gb: default_music_min_vram_gb(),
         }
     }
 }
@@ -507,6 +518,19 @@ fn default_music_min_free_ram_gb() -> u64 {
 }
 fn default_music_min_free_disk_gb() -> u64 {
     30
+}
+fn default_music_gpu_min_ram_gb() -> u64 {
+    // On CUDA the weights load to the card; the process keeps a few GB of
+    // host RAM. 8 GB boxes (most small GPU rigs) qualify.
+    8
+}
+fn default_music_gpu_min_free_ram_gb() -> u64 {
+    4
+}
+fn default_music_min_vram_gb() -> u64 {
+    // ACE-Step 1.5 in bf16 fits a 6 GB card; a smaller one fails its first
+    // song and the buyer benches it.
+    6
 }
 
 impl MusicConfig {
