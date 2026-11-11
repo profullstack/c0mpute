@@ -13,6 +13,7 @@
 //! c0mpute chat mcp                       # stdio MCP bridge to https://c0mpute.com/api/mcp
 //! c0mpute chat connect hosting --name n1 # publish what you /push hosting from c0mpute.com/chat
 //! c0mpute chat push hosting ls           # your pushed sites (also nodes, status, rm, <name> <dir>)
+//! c0mpute chat plugins add threatcrush   # chat plugins: remote MCP tools the model can use (ls, add, rm, on, off)
 //! ```
 //!
 //! The key lives in `~/.c0mpute/chat.json` (0600). `C0MPUTE_API_KEY` and
@@ -41,7 +42,8 @@ cat file.md | c0mpute chat --system \"summarize this\"\n  \
 c0mpute chat models | whoami | logout\n  \
 c0mpute chat mcp                  # stdio MCP server for Claude Code, Cursor, ...\n  \
 c0mpute chat connect hosting --name <node>  # publish what you /push hosting in the chat\n  \
-c0mpute chat push hosting ls | nodes | status <name> -w | rm <name> | <name> <dir>\n\n\
+c0mpute chat push hosting ls | nodes | status <name> -w | rm <name> | <name> <dir>\n  \
+c0mpute chat plugins ls | add <url|name> | rm | on | off <name>  # tools from remote MCP servers\n\n\
 Secure p2p messaging moved to `c0mpute dm`."
 )]
 struct Args {
@@ -166,6 +168,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         Some("mcp") => return mcp_stdio(&base_url(None)).await,
         Some("connect") => return crate::chat_connect::run(args.get(1..).unwrap_or_default()).await,
         Some("push") => return crate::chat_push::run(args.get(1..).unwrap_or_default()).await,
+        Some("plugins") | Some("plugin") => return crate::chat_plugins::run(args.get(1..).unwrap_or_default()).await,
         _ => {}
     }
     let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
@@ -211,16 +214,78 @@ pub async fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let key = require_key()?;
-    let answer = complete(&url, &key, &a, &messages, a.json).await?;
+    let mut turn = complete(&url, &key, &a, &messages, a.json, &[]).await?;
     if a.json {
-        println!("{answer}");
+        println!("{}", turn.answer);
+        return Ok(());
+    }
+    // A chat plugin wants to run a destructive tool: ask on the terminal.
+    while !turn.approvals.is_empty() && std::io::stdin().is_terminal() {
+        let ok = ask_approvals(&turn.approvals)?;
+        if ok.is_empty() {
+            break;
+        }
+        turn = complete(&url, &key, &a, &messages, false, &ok).await?;
     }
     Ok(())
 }
 
+/// One answer from c0mpute.com, plus any plugin calls waiting for approval.
+pub(crate) struct Turn {
+    answer: String,
+    /// (what it wants to run, signed approval token)
+    approvals: Vec<(String, String)>,
+}
+
+/// "plugin · tool {args}" for a plugin event.
+fn describe_call(e: &Value) -> String {
+    let args = e.get("arguments").map(|a| a.to_string()).unwrap_or_default();
+    let args = if args.len() > 200 { format!("{}…", &args[..args.char_indices().nth(200).map(|(i, _)| i).unwrap_or(args.len())]) } else { args };
+    format!("{} · {} {}", e["plugin"].as_str().unwrap_or("?"), e["tool"].as_str().unwrap_or("?"), if args == "{}" { String::new() } else { args })
+}
+
+/// Print a chat plugin step to stderr (the answer itself goes to stdout).
+fn show_plugin_event(e: &Value, approvals: &mut Vec<(String, String)>) {
+    match e["type"].as_str() {
+        Some("tool_call") => eprintln!("\x1b[2m[plugin] {}\x1b[0m", describe_call(e)),
+        Some("tool_result") => {
+            let ok = e["ok"].as_bool().unwrap_or(false);
+            let text: String = e["text"].as_str().unwrap_or("").chars().take(160).collect::<String>().replace('\n', " ");
+            eprintln!("\x1b[2m[plugin] {} {} {}\x1b[0m", if ok { "ok" } else { "failed" }, e["tool"].as_str().unwrap_or(""), text);
+        }
+        Some("approval_needed") => {
+            let what = describe_call(e);
+            eprintln!("\x1b[33m[plugin] wants to run {what}\x1b[0m");
+            if let Some(t) = e["approval"].as_str() {
+                approvals.push((what, t.to_string()));
+            }
+        }
+        Some("plugin_error") => eprintln!("\x1b[33m[plugin] {}\x1b[0m", e["message"].as_str().unwrap_or("")),
+        _ => {}
+    }
+}
+
+/// y/N on the terminal for each waiting call; returns the approved tokens.
+fn ask_approvals(waiting: &[(String, String)]) -> Result<Vec<String>> {
+    let mut ok = Vec::new();
+    for (what, token) in waiting {
+        eprint!("approve {what}? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        if matches!(line.trim(), "y" | "Y" | "yes") {
+            ok.push(token.clone());
+        }
+    }
+    Ok(ok)
+}
+
 /// One completion. Streams text to stdout (returns it too), or returns raw JSON with `json`.
-async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool) -> Result<String> {
-    let mut body = json!({"messages": messages, "stream": !json_out});
+async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool, approvals: &[String]) -> Result<Turn> {
+    let mut body = json!({"messages": messages, "stream": !json_out, "plugin_events": true});
+    if !approvals.is_empty() {
+        body["approvals"] = json!(approvals);
+    }
     if let Some(m) = &a.model {
         body["model"] = json!(m);
     }
@@ -246,11 +311,12 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
         return Err(api_error(status, &text));
     }
     if json_out {
-        return Ok(res.text().await?);
+        return Ok(Turn { answer: res.text().await?, approvals: Vec::new() });
     }
 
     let mut out = std::io::stdout();
     let mut answer = String::new();
+    let mut waiting = Vec::new();
     let mut buf = String::new();
     'read: while let Some(chunk) = res
         .chunk()
@@ -270,6 +336,10 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
                 out.flush().ok();
                 bail!("{msg}");
             }
+            if v["object"].as_str() == Some("c0mpute.plugin_event") {
+                show_plugin_event(&v["event"], &mut waiting);
+                continue;
+            }
             if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
                 answer.push_str(t);
                 print!("{t}");
@@ -278,7 +348,7 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
         }
     }
     println!();
-    Ok(answer)
+    Ok(Turn { answer, approvals: waiting })
 }
 
 async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Result<()> {
@@ -320,8 +390,19 @@ async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Resul
         }
         messages.push(json!({"role": "user", "content": line}));
         let args = Args { model: model.clone(), ..clone_args(a) };
-        match complete(url, key, &args, &messages, false).await {
-            Ok(answer) => messages.push(json!({"role": "assistant", "content": answer})),
+        let mut result = complete(url, key, &args, &messages, false, &[]).await;
+        while let Ok(turn) = &result {
+            if turn.approvals.is_empty() {
+                break;
+            }
+            let ok = ask_approvals(&turn.approvals)?;
+            if ok.is_empty() {
+                break;
+            }
+            result = complete(url, key, &args, &messages, false, &ok).await;
+        }
+        match result {
+            Ok(turn) => messages.push(json!({"role": "assistant", "content": turn.answer})),
             Err(e) => {
                 messages.pop();
                 eprintln!("error: {e:#}");
@@ -516,7 +597,7 @@ async fn login(rest: &[String]) -> Result<()> {
     bail!("the code expired before it was approved; run `c0mpute chat login` again")
 }
 
-fn open_browser(link: &str) {
+pub(crate) fn open_browser(link: &str) {
     if link.is_empty() || std::env::var_os("SSH_CONNECTION").is_some() {
         return;
     }

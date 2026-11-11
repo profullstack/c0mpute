@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
+    "@profullstack/chat-plugins": "^0.1.0",
     "@profullstack/footer": "latest",
     "@profullstack/x402-gateway": "^0.13.1",
     "@sqlitecloud/drivers": "^1.0.982",

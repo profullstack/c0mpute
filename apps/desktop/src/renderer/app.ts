@@ -667,6 +667,7 @@ async function settingsView() {
         : h("div", {}, h("p", {}, "Not signed in. Sign-in uses `c0mpute chat login`: approve the code on c0mpute.com with CoinPay (a DID is required). The key is kept by the CLI in ~/.c0mpute/chat.json."), btn("Sign in with CoinPay", () => call("account:login"), "b primary")),
       loginLog,
     ),
+    acct?.signedIn ? await pluginsCard() : "",
     h("h1", {}, "App"),
     h(
       "div",
@@ -682,6 +683,50 @@ async function settingsView() {
           if (r) toast(r.action === "skip" ? r.reason : `wrote ${r.shim} → ${r.target}`);
         }),
       ),
+    ),
+  );
+}
+
+// Chat plugins: remote MCP servers the account's chats (here, the web chat,
+// the CLI) can use. Not the Agent tab's local MCP servers.
+async function pluginsCard() {
+  const v = await call("account:plugins");
+  const input = h("input", { placeholder: "https://example.com/mcp or a catalog name", style: "flex:1" }) as HTMLInputElement;
+  const add = async (target: string) => {
+    if (!target) return;
+    const r = await call("account:pluginAdd", target);
+    if (r) toast(r.connect_url ? `${r.plugin.slug} added: finish signing in in the window that opened` : `${r.plugin.slug} added`);
+    show("settings");
+  };
+  const plugins: Any[] = v?.plugins ?? [];
+  const catalog: Any[] = (v?.catalog ?? []).filter((c: Any) => !c.added);
+  return h(
+    "div",
+    {},
+    h("h1", {}, "Chat plugins"),
+    h(
+      "div",
+      { class: "card" },
+      h("p", { class: "dim" }, "Remote MCP servers whose tools the model can use in your c0mpute chats (Chat tab, c0mpute.com, `c0mpute chat`). Sign-in opens in a window; nothing to configure."),
+      ...plugins.map((p: Any) =>
+        h(
+          "div",
+          { class: "row spread", style: "margin:6px 0" },
+          h("div", {}, h("b", {}, p.slug), " ", h("span", { class: `tag ${p.status === "on" ? "ok" : p.status === "needs_sign_in" ? "bad" : ""}` }, p.status === "needs_sign_in" ? "needs sign-in" : `${p.status} · ${p.tools.length} tools`), " ", h("span", { class: "dim mono" }, p.url)),
+          h(
+            "div",
+            { class: "row" },
+            p.status === "needs_sign_in"
+              ? btn("Sign in", async () => (await call("account:pluginConnect", p.slug), toast("finish signing in in the window that opened")), "b primary")
+              : h("label", {}, h("input", { type: "checkbox", checked: p.enabled, onchange: async (e: Event) => (await call("account:pluginToggle", p.slug, (e.target as HTMLInputElement).checked), show("settings")) }), "on"),
+            btn("Remove", async () => {
+              if (confirm(`Remove ${p.slug}?`)) (await call("account:pluginRemove", p.slug), show("settings"));
+            }, "b danger"),
+          ),
+        ),
+      ),
+      catalog.length ? h("div", { class: "row", style: "margin-top:8px" }, h("span", { class: "dim" }, "catalog:"), ...catalog.map((c: Any) => btn(`Add ${c.title || c.slug}`, () => add(c.slug)))) : null,
+      h("div", { class: "row", style: "margin-top:8px" }, input, btn("Add", () => add(input.value.trim()), "b primary"), btn("Refresh", () => show("settings"))),
     ),
   );
 }

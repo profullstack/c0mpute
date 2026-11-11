@@ -476,6 +476,25 @@ const handlers: Record<string, Handler> = {
     return cliOutput(r);
   },
   "account:nodes": () => api("/api/v1/hosting/nodes"),
+  // Chat plugins (remote MCP servers the account's chats use): the same
+  // c0mpute.com endpoints as the web chat and the CLI. Sign-in opens in an
+  // app window on a one-time link, so no cookie or key is handed over.
+  "account:plugins": () => api("/api/v1/chat/plugins"),
+  "account:pluginAdd": async (target: string) => {
+    const t = String(target ?? "").trim();
+    const body = /^https?:\/\//i.test(t) ? { url: t } : { slug: t.toLowerCase() };
+    const r = await api<{ plugin: { slug: string }; connect_url: string | null }>("/api/v1/chat/plugins", { method: "POST", body: JSON.stringify(body), timeoutMs: 60_000 });
+    if (r.connect_url) popup(r.connect_url);
+    return r;
+  },
+  "account:pluginConnect": async (slug: string) => {
+    const r = await api<{ connect_url: string }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}/connect`);
+    if (r.connect_url) popup(r.connect_url);
+    return r;
+  },
+  "account:pluginToggle": (slug: string, enabled: boolean) =>
+    api(`/api/v1/chat/plugins/${encodeURIComponent(slug)}/toggle`, { method: "POST", body: JSON.stringify({ enabled: !!enabled }) }),
+  "account:pluginRemove": (slug: string) => api(`/api/v1/chat/plugins/${encodeURIComponent(slug)}`, { method: "DELETE" }),
   "account:pushes": () => api("/api/v1/hosting/pushes"),
 
   "tasks:media": () =>

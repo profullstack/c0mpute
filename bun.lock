@@ -20,7 +20,7 @@
     },
     "apps/desktop": {
       "name": "@c0mpute/desktop",
-      "version": "0.3.28",
+      "version": "0.3.38",
       "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
         "@types/bun": "latest",
@@ -36,7 +36,7 @@
     },
     "apps/tui": {
       "name": "@c0mpute/tui",
-      "version": "0.3.28",
+      "version": "0.3.38",
       "bin": {
         "c0mpute-tui": "./src/index.ts",
       },
@@ -50,9 +50,10 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.3.28",
+      "version": "0.3.38",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
+        "@profullstack/chat-plugins": "^0.1.0",
         "@profullstack/footer": "latest",
         "@profullstack/x402-gateway": "^0.13.1",
         "@sqlitecloud/drivers": "^1.0.982",
@@ -75,14 +76,14 @@
     },
     "packages/captcha": {
       "name": "@profullstack/c0mpute-captcha",
-      "version": "0.3.23",
+      "version": "0.3.38",
       "bin": {
         "c0mpute-captcha": "./bin/c0mpute-captcha.js",
       },
     },
     "packages/shared": {
       "name": "@c0mpute/shared",
-      "version": "0.3.23",
+      "version": "0.3.38",
       "devDependencies": {
         "typescript": "^7.0.2",
       },
@@ -293,6 +294,8 @@
     "@posthog/types": ["@posthog/types@1.416.1", "", {}, "sha512-PG06HE2axHNyyZ9CKSSHKSW4pWfQwEtPA1dewFqIwggcIgk1BsQ+tHSNqvZz+IvE2WnBZ8OcOkF9SWI55VxQfA=="],
 
     "@profullstack/c0mpute-captcha": ["@profullstack/c0mpute-captcha@workspace:packages/captcha"],
+
+    "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.1.0", "", {}, "sha512-V6KwXpevLQFExiGwl3PlvX82s0GWae4VnajVOAeTF7+rl/ODfS+Yawmcf10VtjOdnK+JM45NRy0l95t8kX9jsg=="],
 
     "@profullstack/footer": ["@profullstack/footer@0.4.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-EJZnMUQmWDi9Gzx6BAjogloeaPFFSSCHtHJuC9dsXiOz8M87hfn6Z+Zx9AMYWk8s6xemPrPlkXKGB3PZugkcEA=="],
 

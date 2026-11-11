@@ -8,6 +8,7 @@ export const env = (name: string): string => (process.env as Record<string, stri
 import { createStore, type Sql, type Store, type User } from "./store";
 import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
+import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
 
 // ── store ────────────────────────────────────────────────────────────────────
 let client: Database | null = null;
@@ -48,6 +49,10 @@ export const pushStore = () => (_pushStore ??= createPushStore(cloudSql, { cloud
 let _oauthStore: OAuthStore | null = null;
 /** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
 export const oauthStore = () => (_oauthStore ??= createOAuthStore(cloudSql));
+
+let _pluginStore: PluginStoreDb | null = null;
+/** Chat plugins (remote MCP servers) per account, tokens sealed with C0MPUTE_PLUGIN_KEY. */
+export const pluginStore = () => (_pluginStore ??= createPluginStore(cloudSql, { key: pluginKey(env("C0MPUTE_PLUGIN_KEY")) }));
 
 // ── request auth ─────────────────────────────────────────────────────────────
 export const SESSION_COOKIE = "c0_session";
