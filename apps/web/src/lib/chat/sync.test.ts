@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { ConvoError, convoKey, createConvoStore, parseConversation } from "./convo-store";
 import { _resetRuns, cancelRun, getRun, listRuns, runStream, startRun } from "./runs";
 import type { Sql } from "./store";
+import { adopt, slimForSync, syncPlan } from "./sync-merge";
 
 function memSql(): { sql: Sql; db: Database } {
   const db = new Database(":memory:");
@@ -149,5 +150,46 @@ describe("resumable runs", () => {
     for (let i = 0; i < 6; i++) await startRun("busy", async () => new ReadableStream<Uint8Array>({ start() {} }));
     expect(startRun("busy", async () => null)).rejects.toThrow(/at most 6/);
     await startRun("someone-else", async () => new ReadableStream<Uint8Array>({ start() {} }));
+  });
+});
+
+describe("sync merge (client)", () => {
+  test("plan: pull newer or missing, push newer or unknown, drop deleted unless changed after", () => {
+    const local = [
+      { id: "same", updated: 5 },
+      { id: "mine-newer", updated: 9 },
+      { id: "theirs-newer", updated: 1 },
+      { id: "only-here", updated: 3 },
+      { id: "deleted-there", updated: 2 },
+      { id: "edited-after-delete", updated: 20 },
+    ];
+    const s = (id: string, updated: number, deleted = false) => ({ id, title: id, model: "auto", updated, deleted });
+    const plan = syncPlan(local, [s("same", 5), s("mine-newer", 4), s("theirs-newer", 8), s("only-there", 7), s("deleted-there", 10, true), s("edited-after-delete", 10, true)]);
+    expect(plan.pull.sort()).toEqual(["only-there", "theirs-newer"]);
+    expect(plan.push.sort()).toEqual(["edited-after-delete", "mine-newer", "only-here"]);
+    expect(plan.drop).toEqual(["deleted-there"]);
+  });
+
+  test("slim drops media, data: URLs and the live run id; adopt keeps this device's media", () => {
+    const local = {
+      id: "abcd",
+      title: "t",
+      model: "auto",
+      updated: 1,
+      messages: [
+        { role: "user", content: "/image a cat" },
+        { role: "assistant", content: "// image", image: "data:image/png;base64,AAA", imageJob: "job1", run: "run_x" },
+        { role: "weird", content: "x" },
+      ],
+    };
+    const slim = slimForSync(local);
+    expect(slim.messages).toEqual([
+      { role: "user", content: "/image a cat" },
+      { role: "assistant", content: "// image", imageJob: "job1" },
+    ]);
+    const back = adopt(local, { ...slim, updated: 2, messages: [...slim.messages, { role: "user", content: "more" }] });
+    expect(back.messages[1].image).toBe("data:image/png;base64,AAA");
+    expect(back.messages[2]).toEqual({ role: "user", content: "more" });
+    expect(back.updated).toBe(2);
   });
 });
