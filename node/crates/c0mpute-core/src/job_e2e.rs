@@ -561,6 +561,7 @@ fn public_keys(workload: &str) -> &'static [&'static str] {
         ],
         "gameserver.stop" => &["v", "id"],
         "captcha.solve" => &["v", "kind"],
+        "container.run" => crate::container_run::PUBLIC_KEYS,
         _ => &["v"],
     }
 }

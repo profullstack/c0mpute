@@ -115,7 +115,8 @@ async fn transform_step_round_trips_through_the_bridge() {
             "embed.text",
             "captcha.solve",
             "blender.render-frame",
-            "infernet.inference"
+            "infernet.inference",
+            "container.run"
         ])
     );
 

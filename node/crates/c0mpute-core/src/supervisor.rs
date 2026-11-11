@@ -358,6 +358,51 @@ impl Supervisor {
             if workload_type == crate::gameserver::WORKLOAD_STOP {
                 continue;
             }
+            // container.run (DIP 0033): probe docker + buildx off the async
+            // threads, then subscribe with its own job slots and the buyer
+            // gate (trusted buyers only unless `[containers] open`).
+            if workload_type == crate::container_run::WORKLOAD {
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    let rt = tokio::task::spawn_blocking(|| crate::container_run::runtime().clone())
+                        .await
+                        .unwrap_or_default();
+                    if !rt.ready() {
+                        info!(
+                            workload_type = crate::container_run::WORKLOAD,
+                            reason = rt.reason.as_deref().unwrap_or("docker is not ready"),
+                            "not subscribing"
+                        );
+                        return;
+                    }
+                    let cfg = config.containers.clone();
+                    if let Err(e) = std::fs::create_dir_all(cfg.work_dir()) {
+                        tracing::warn!(err = %e, dir = %cfg.work_dir().display(), "containers: cannot create the work dir; not subscribing");
+                        return;
+                    }
+                    let policy = crate::container_run::BuyerPolicy::from_config(&cfg, crate::private::local_identities());
+                    info!(open = policy.open, trusted_buyers = policy.trusted.len(), work_dir = %cfg.work_dir().display(), "containers: serving container.run");
+                    crate::container_run::install_policy(policy);
+                    let load = crate::container_run::worker_load(&cfg);
+                    let runner_tx =
+                        crate::container_run::spawn_container_runner(net.clone(), store, cfg.clone(), load.clone());
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::container_run::WORKLOAD.to_string(),
+                        with_workload_tags(
+                            capabilities::tags_from_config(&config),
+                            &[crate::container_run::ROLE_TAG],
+                        ),
+                        Some(runner_tx),
+                        Some(crate::container_run::offer_filter(cfg)),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // Rendering runs the operator's own Blender. Probe it (a few
             // seconds: version, then which Cycles GPU backends it sees) off the
             // async threads, then subscribe only if it works.

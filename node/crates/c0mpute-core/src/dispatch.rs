@@ -200,6 +200,14 @@ pub fn run_worker_subscriber_with_load(
                     debug!(job_id = %offer.job_id, buyer = %offer.buyer_peer_id, "dispatch: private mode, buyer not trusted");
                     continue;
                 }
+                // Builds run the buyer's Dockerfile: trusted buyers only
+                // unless the operator opened the role ([containers] open).
+                if offer.workload_type == crate::container_run::WORKLOAD
+                    && !crate::container_run::admits_buyer(&msg, &offer, &our_peer_id)
+                {
+                    debug!(job_id = %offer.job_id, buyer = %offer.buyer_peer_id, "dispatch: container.run buyer not trusted");
+                    continue;
+                }
                 if let Some(f) = &filter {
                     if !f(&offer) {
                         debug!(job_id = %offer.job_id, "dispatch: offer filtered out");
@@ -817,6 +825,9 @@ pub fn workload_types_from_roles(roles: &[c0mpute_proto::Role]) -> Vec<String> {
     }
     if roles.contains(&c0mpute_proto::Role::Render) {
         types.push(crate::render::WORKLOAD.to_string());
+    }
+    if roles.contains(&c0mpute_proto::Role::Containers) {
+        types.push(crate::container_run::WORKLOAD.to_string());
     }
     types
 }

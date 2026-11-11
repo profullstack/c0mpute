@@ -22,6 +22,7 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod apps_mcp;
+mod container_cli;
 mod ai_chat;
 mod chat_connect;
 mod chat_plugins;
@@ -259,6 +260,19 @@ enum Cmd {
     Git {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Build a Dockerfile on a trusted builder on the network and get the
+    /// image back (`container.run`, DIP 0033). No git: any directory or
+    /// tarball. `c0mpute build . --load -t app:latest`
+    Build(container_cli::BuildArgs),
+    /// Run a command in a container on a trusted builder and bring files
+    /// back: `c0mpute run --image node@sha256:... --in . --out dist -- npm run build`
+    Run(container_cli::RunArgs),
+    /// The `containers` role and builders: trust buyers, add builders, print
+    /// this machine's build identity (`c0mpute containers show`).
+    Containers {
+        #[command(subcommand)]
+        cmd: container_cli::ContainersCmd,
     },
     /// OCR plugin: extract the text of an image (PNG, JPEG, TIFF, WebP) or a
     /// PDF on a c0mpute worker running Tesseract (`ocr.extract`).
@@ -1796,6 +1810,9 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
         Cmd::Apps { cmd } => run_apps(cmd).await,
+        Cmd::Build(args) => container_cli::run_build(args, &config_path).await,
+        Cmd::Run(args) => container_cli::run_run(args, &config_path).await,
+        Cmd::Containers { cmd } => container_cli::run_containers(cmd, &config_path),
         Cmd::Train { args } => train::run(&args).await,
         Cmd::Gameserver { args } => gameserver::run(&args).await,
         Cmd::Git { args } => git_cli::run(&args).await,
@@ -5306,6 +5323,7 @@ fn parse_role(s: &str) -> Option<Role> {
         "render" | "blender" => Some(Role::Render),
         "inference" | "chat" | "llm" => Some(Role::Inference),
         "mailbox" | "dm" | "secure-chat" | "chat-mailbox" => Some(Role::Mailbox),
+        "containers" | "container" | "build" | "builds" | "builder" => Some(Role::Containers),
         other => {
             eprintln!("warning: unknown role '{other}' ignored");
             None

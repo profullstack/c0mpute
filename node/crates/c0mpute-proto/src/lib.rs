@@ -241,6 +241,11 @@ pub enum Role {
     /// keys, and receive direct messages for this machine's own `c0mpute dm`
     /// user. On by default; needs nothing.
     Mailbox,
+    /// `container.run` (DIP 0033): build Dockerfiles and run commands in
+    /// digest-pinned images for trusted buyers, returning images and output
+    /// files. Never a default role: it runs other people's builds and needs
+    /// docker with BuildKit.
+    Containers,
 }
 
 #[cfg(test)]

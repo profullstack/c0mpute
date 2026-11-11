@@ -19,6 +19,53 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 fn tools() -> Value {
     json!([
         {
+            "name": "container_build",
+            "description": "Build a Dockerfile on a trusted c0mpute builder (container.run, no git: any directory) and get the image back, written to `output` (docker save | gzip) and/or loaded into the local docker with `tags`. Builders come from `peers`, [containers] builders or C0MPUTE_BUILDERS.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "dir": {"type": "string", "description": "Build context directory (or a tar/tar.gz)"},
+                    "dockerfile": {"type": "string", "description": "Path inside the context, default Dockerfile"},
+                    "build_args": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "target": {"type": "string"},
+                    "output": {"type": "string", "description": "Write the image tarball here"},
+                    "load": {"type": "boolean"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "peers": {"type": "array", "items": {"type": "string"}, "description": "Builder peer ids"},
+                    "any_worker": {"type": "boolean"},
+                    "timeout_secs": {"type": "integer"},
+                    "network": {"type": "boolean"}
+                },
+                "required": ["dir"]
+            }
+        },
+        {
+            "name": "container_run",
+            "description": "Run a command in a digest-pinned image (or a build of `build`) on a trusted c0mpute builder, with `input` copied into the workdir, and unpack `outputs` into `dest`. Returns the exit code and log tail.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "image": {"type": "string", "description": "name@sha256:..."},
+                    "build": {"type": "string", "description": "Directory to build first instead of image"},
+                    "dockerfile": {"type": "string"},
+                    "build_args": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "cmd": {"type": "array", "items": {"type": "string"}},
+                    "input": {"type": "string", "description": "Directory copied into the workdir"},
+                    "outputs": {"type": "array", "items": {"type": "string"}},
+                    "dest": {"type": "string"},
+                    "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "workdir": {"type": "string"},
+                    "peers": {"type": "array", "items": {"type": "string"}},
+                    "any_worker": {"type": "boolean"},
+                    "cpus": {"type": "number"},
+                    "memory_mb": {"type": "integer"},
+                    "timeout_secs": {"type": "integer"},
+                    "network": {"type": "boolean"}
+                },
+                "required": ["cmd"]
+            }
+        },
+        {
             "name": "apps_deploy",
             "description": "Deploy (or redeploy) a backend from a directory with a Dockerfile, or a digest-pinned registry image. The network keeps 3 copies, runs one, snapshots `state` to the others and fails over by itself. Returns the app id; it is served at /a/<app_id>/ on every gateway.",
             "inputSchema": {
@@ -72,6 +119,8 @@ async fn call(gateway: &str, name: &str, a: &Value) -> Result<String> {
     let s = |k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
     let n = |k: &str| a.get(k).and_then(Value::as_u64);
     match name {
+        "container_build" => Ok(serde_json::to_string_pretty(&crate::container_cli::mcp_build(a).await?)?),
+        "container_run" => Ok(serde_json::to_string_pretty(&crate::container_cli::mcp_run(a).await?)?),
         "apps_deploy" => {
             let app_name = s("name").unwrap_or_default();
             let wait = Duration::from_secs(n("wait_secs").unwrap_or(600));

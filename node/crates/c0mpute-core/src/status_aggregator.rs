@@ -77,6 +77,8 @@ const KNOWN_WORKLOADS: &[&str] = &[
     "music.txt2music",
     "video.txt2vid",
     "video.img2vid",
+    // DIP 0033: builds and container jobs for trusted buyers.
+    "container.run",
 ];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
