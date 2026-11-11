@@ -71,8 +71,11 @@ pub const MAX_REPLICAS: usize = 5;
 /// [`auto_budget`].
 pub const DEFAULT_MAX_BYTES: u64 = 0;
 /// Share of the free space above the free-disk floor an automatic budget may
-/// use, in percent.
-pub const AUTO_BUDGET_PERCENT: u64 = 25;
+/// use, in percent. Half: a node listed on d1sks offers its disk, and at a
+/// quarter the network could not place three copies of a 600 GiB collection
+/// with 10 TB free across its disks (11-11). The free-disk floor still
+/// guards the rest.
+pub const AUTO_BUDGET_PERCENT: u64 = 50;
 /// Most bytes of FREE sites a node holds for any one owner key, so one
 /// publisher cannot fill every volunteer's disk. Sites a node is a preferred
 /// (paid) host for are not counted: it was picked, and is paid, for them.
@@ -3261,8 +3264,8 @@ mod tests {
     #[test]
     fn auto_budget_follows_the_disk() {
         let g = GIB_BYTES;
-        // 1.8 TiB disk with 57 GiB free: floor 50 GiB, a quarter of 7 GiB.
-        assert_eq!(auto_budget(0, 57 * g, 1843 * g), 7 * g / 100 * 25);
+        // 1.8 TiB disk with 57 GiB free: floor 50 GiB, its share of 7 GiB.
+        assert_eq!(auto_budget(0, 57 * g, 1843 * g), 7 * g / 100 * AUTO_BUDGET_PERCENT);
         // Below the floor: nothing new.
         assert_eq!(auto_budget(3 * g, 40 * g, 1843 * g), 3 * g);
         // A big empty disk takes a lot.

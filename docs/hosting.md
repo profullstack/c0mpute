@@ -51,7 +51,7 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 | Files per site | 10,000,000 |
 | One file | 128 GiB |
 | Small sites other features publish (ad creatives, app images, podcast shows, git repos) | 1 GiB, built in memory |
-| Node budget | `[hosting] max_bytes`; `0` (default) = what it holds plus 25% of the free space above the free-disk floor |
+| Node budget | `[hosting] max_bytes`; `0` (default) = what it holds plus 50% of the free space above the free-disk floor |
 | Free-disk floor | a copy must leave max(10 GiB, 5% of the disk), capped at 50 GiB, free |
 | Per owner, per node | none during the beta; after it, 16 GiB of free (v1) sites. Paid (v2) sites have no per-owner limit: their groups spread over every hosting node with room, and the payer pays each holder for the bytes it holds (preferred hosts their agreed share) |
 
