@@ -923,6 +923,8 @@ pub fn hold_payload(
     sealed: Vec<u8>,
 ) -> PayloadGuard {
     net.register_rpc(PAYLOAD_SERVICE, Arc::new(PayloadHandler));
+    // The winner may not be dialable; let it push its result back.
+    crate::pieces::serve_result_push(net);
     if let Ok(mut p) = payloads().lock() {
         let now = Instant::now();
         p.retain(|_, v| v.until > now);

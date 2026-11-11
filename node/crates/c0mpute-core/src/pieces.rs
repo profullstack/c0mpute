@@ -223,6 +223,9 @@ pub async fn fetch_chunk(
     max_bytes: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
+    if let Some(bytes) = pushed_chunk(&hash).filter(|b| b.len() <= max_bytes) {
+        return Ok(bytes);
+    }
     let request = ChunkRequest {
         chunk_hash: hash,
         shard_index: None,
@@ -689,10 +692,119 @@ pub async fn publish_result_bytes(
     if bytes.is_empty() {
         bail!("cannot publish an empty result");
     }
-    match crate::job_e2e::seal_result(accept, bytes)? {
-        Some(sealed) => publish_stored_bytes(net, store, &sealed).await,
-        None => publish_stored_bytes(net, store, bytes).await,
+    let hash = match crate::job_e2e::seal_result(accept, bytes)? {
+        Some(sealed) => publish_stored_bytes(net, store, &sealed).await?,
+        None => publish_stored_bytes(net, store, bytes).await?,
+    };
+    push_result_to_buyer(net, store, accept, &hash).await;
+    Ok(hash)
+}
+
+/// RPC a worker uses to hand its result's chunks straight to the buyer.
+///
+/// A worker behind NAT with no relay (rented GPUs: Salad, Vast) cannot be
+/// dialed, so a buyer pulling the result timed out every time ("timed out
+/// fetching the c0mpute result", 2026-11-11) although the job had finished.
+/// The worker already dials the buyer to fetch the sealed spec; it now pushes
+/// the result over that same direction before it sends the receipt, and the
+/// buyer's fetch finds the chunks locally. Content-addressed, so a pushed
+/// chunk is only ever used when its hash is the one a receipt names.
+pub const RESULT_PUSH_SERVICE: &str = "c0mpute/result-push/1";
+/// Results bigger than this are left to the pull path.
+const RESULT_PUSH_MAX_TOTAL: usize = 64 * 1024 * 1024;
+/// How long a pushed chunk waits for its buyer to read it.
+const RESULT_PUSH_TTL: Duration = Duration::from_secs(15 * 60);
+/// Memory the pushed-chunk cache may hold.
+const RESULT_PUSH_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+type PushedChunks = std::sync::Mutex<std::collections::HashMap<Hash, (Vec<u8>, std::time::Instant)>>;
+
+fn pushed_chunks() -> &'static PushedChunks {
+    static PUSHED: std::sync::OnceLock<PushedChunks> = std::sync::OnceLock::new();
+    PUSHED.get_or_init(Default::default)
+}
+
+/// A chunk a worker pushed to us, if it is still held.
+pub fn pushed_chunk(hash: &Hash) -> Option<Vec<u8>> {
+    let map = pushed_chunks().lock().ok()?;
+    map.get(hash)
+        .filter(|(_, at)| at.elapsed() < RESULT_PUSH_TTL)
+        .map(|(bytes, _)| bytes.clone())
+}
+
+fn hold_pushed_chunk(bytes: Vec<u8>) -> Hash {
+    let hash = Hash::of(&bytes);
+    if let Ok(mut map) = pushed_chunks().lock() {
+        map.retain(|_, (_, at)| at.elapsed() < RESULT_PUSH_TTL);
+        let mut total: usize = map.values().map(|(b, _)| b.len()).sum();
+        while total + bytes.len() > RESULT_PUSH_CACHE_BYTES {
+            let Some(oldest) = map.iter().min_by_key(|(_, (_, at))| *at).map(|(h, _)| *h) else {
+                break;
+            };
+            if let Some((b, _)) = map.remove(&oldest) {
+                total -= b.len();
+            }
+        }
+        map.insert(hash, (bytes, std::time::Instant::now()));
     }
+    hash
+}
+
+struct ResultPushHandler;
+
+#[async_trait::async_trait]
+impl c0mpute_net::RpcHandler for ResultPushHandler {
+    async fn handle(&self, _peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+        if body.is_empty() || body.len() > RESULT_PIECE_BYTES.max(MAX_MANIFEST_BYTES) + 64 * 1024 {
+            return Err("pushed chunk is empty or too big".into());
+        }
+        Ok(hold_pushed_chunk(body).to_hex().into_bytes())
+    }
+}
+
+/// Accept result chunks pushed by workers (a buyer calls this when it awards).
+pub fn serve_result_push(net: &Libp2pNetwork) {
+    net.register_rpc(RESULT_PUSH_SERVICE, std::sync::Arc::new(ResultPushHandler));
+}
+
+/// Best effort: push the stored result `hash` (one chunk, or a manifest and
+/// its pieces) to the job's buyer. A buyer that cannot take it still pulls.
+async fn push_result_to_buyer(net: &Libp2pNetwork, store: &ChunkStore, accept: &c0mpute_net::topics::JobAccept, hash: &str) {
+    let Ok(buyer) = accept.buyer_peer_id.parse::<PeerId>() else { return };
+    if buyer == net.peer_id() {
+        return;
+    }
+    let Ok(root) = Hash::from_hex(hash) else { return };
+    let Ok(root_bytes) = store.get(&root).await else { return };
+    let mut chunks = vec![root_bytes];
+    if let Some(Ok(manifest)) = ResultManifest::decode(&chunks[0]) {
+        for piece in &manifest.pieces {
+            match Hash::from_hex(piece) {
+                Ok(h) => match store.get(&h).await {
+                    Ok(b) => chunks.push(b),
+                    Err(_) => return,
+                },
+                Err(_) => return,
+            }
+        }
+    }
+    if chunks.iter().map(Vec::len).sum::<usize>() > RESULT_PUSH_MAX_TOTAL {
+        return;
+    }
+    for addr in crate::reachability::dialable_buyer_addrs(&accept.buyer_addrs, &accept.buyer_peer_id) {
+        let mut a = addr;
+        if matches!(a.iter().last(), Some(c0mpute_net::Protocol::P2p(_))) {
+            a.pop();
+        }
+        net.add_peer_address(buyer, a).await;
+    }
+    for chunk in chunks {
+        if let Err(error) = net.rpc(buyer, RESULT_PUSH_SERVICE, chunk).await {
+            tracing::debug!(%buyer, err = %error, job_id = %accept.job_id, "result push failed; the buyer will pull");
+            return;
+        }
+    }
+    tracing::debug!(%buyer, job_id = %accept.job_id, "result pushed to the buyer");
 }
 
 /// Store and announce `bytes` exactly as given (no sealing). Runners use
