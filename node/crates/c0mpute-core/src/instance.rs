@@ -1949,12 +1949,6 @@ pub fn buyer_identity_dir(base: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-#[cfg(not(unix))]
-pub fn buyer_identity_dir(base: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(base)?;
-    Ok(base.to_path_buf())
-}
-
 /// Remove per-process buyer directories whose process is gone.
 #[cfg(unix)]
 fn prune_dead_sessions(sessions: &Path) {

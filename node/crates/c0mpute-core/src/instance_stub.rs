@@ -27,3 +27,9 @@ pub fn claim(_identity_dir: &Path) -> Result<()> {
 }
 
 pub fn spawn_runtime_heartbeat(_identity_dir: PathBuf) {}
+
+/// No per-process buyer identities off unix: the shared one, as before.
+pub fn buyer_identity_dir(base: &Path) -> Result<std::path::PathBuf> {
+    std::fs::create_dir_all(base)?;
+    Ok(base.to_path_buf())
+}
