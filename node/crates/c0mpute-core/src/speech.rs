@@ -349,12 +349,26 @@ async fn pip_install_pocket() -> Result<()> {
 
 pub async fn setup_stt() -> Result<()> {
     if stt_ready() {
+        // Nodes provisioned before v0.3.39 have Whisper base. Upgrade them to
+        // small, best effort: a failed download leaves base serving (the
+        // worker picks small only once it is on disk) and never blocks start.
+        let marker = std::fs::read_to_string(speech_root().join(".stt-ready")).unwrap_or_default();
+        if !marker.contains(" small ") {
+            if let Err(error) = install_whisper_small().await {
+                warn!(err = %error, "could not upgrade STT to Whisper small; still serving base");
+            }
+        }
         return Ok(());
     }
     ensure_venv().await?;
     // faster-whisper 1.2.1 still passes `metadata_errors` to av.open;
     // PyAV 19 removed that keyword, so keep the runtime on the compatible API.
     pip_install(&["faster-whisper==1.2.1", "av<19"]).await?;
+    install_whisper_small().await
+}
+
+/// Download Whisper small into the speech root and record it in `.stt-ready`.
+async fn install_whisper_small() -> Result<()> {
     let root = speech_root();
     tokio::fs::create_dir_all(root.join("models/whisper")).await?;
     let code = "from faster_whisper import WhisperModel; import sys; WhisperModel('small', device='cpu', compute_type='int8', download_root=sys.argv[1])";
