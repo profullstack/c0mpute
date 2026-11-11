@@ -3,7 +3,7 @@
 `Dockerfile` here = the video runner image + the released `c0mpute` binary.
 The entrypoint warms the Hugging Face weights for `C0MPUTE_PREFETCH_MODELS`
 (default `wan2.1-t2v-1.3b`, 29 GB), then runs
-`c0mpute worker start --roles video --no-storage --no-hosting` with
+`c0mpute worker start --roles video --no-storage --no-hosting` (roles from `C0MPUTE_ROLES`, default `video`; `video,music` also renders songs on the GPU) with
 `C0MPUTE_VIDEO_RUNNER=local`, so jobs exec `runner.py` in the container
 instead of `docker run` (a rented container has no docker inside).
 Outbound-only networking is enough: the node joins through the relays.
