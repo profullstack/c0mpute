@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { CodeBlock as Code } from "@/components/CodeBlock";
+import { commandList } from "@/lib/chat/commands";
 
 export const metadata = {
   title: "docs — c0mpute",
@@ -231,6 +232,20 @@ c0mpute infernet model recommend --use-case marketing
 c0mpute infernet model recommend --use-case research
 c0mpute infernet model recommend --use-case coding`}
         </Code>
+      </Section>
+
+      <Section h="chat-commands" title="[ chat commands ]">
+        <P>
+          In <Link href="/chat">c0mpute.com/chat</Link> (and{" "}
+          <code>c0mpute chat</code> / <code>c0mpute tui</code>) a line that
+          starts with <code>/</code> is a command, never a message to the model;
+          an unknown one answers with this list. <code>/video &lt;prompt&gt;</code>{" "}
+          (also <code>/clip</code>, <code>/vid</code>) starts a clip through the
+          API below and shows a card with its stage, place in line and ETA until
+          the MP4 plays inline; it keeps polling across a page reload. In 18+
+          mode it asks for an adult clip, which renders blurred until clicked.
+        </P>
+        <Code>{commandList()}</Code>
       </Section>
 
       <Section h="videos" title="[ generate video (API) ]">

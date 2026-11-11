@@ -9,9 +9,10 @@ import { parseImageCommand } from "./web/images.ts";
 import { parseMusicCommand, type MusicCommand } from "./web/music.ts";
 import { detectPromoRequest, parsePromoCommand, type PromoCommand } from "./web/promo.ts";
 import { parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "./web/push-shared.ts";
-import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "./web/videos.ts";
+import { parseVideoCommand, type VideoCommand } from "./web/videos.ts";
 
-export type VideoCommand = { prompt: string; model: string };
+// The /video grammar lives with the web chat (src/web/videos.ts) so both agree.
+export { parseVideoCommand, type VideoCommand };
 
 export type Command =
   | { kind: "chat"; text: string }
@@ -28,26 +29,6 @@ export type Command =
   | { kind: "help" }
   | { kind: "jobs" }
   | { kind: "error"; message: string };
-
-/**
- * `/video a paper boat on a pond` (also /clip, /vid): text to video on CPU
- * workers via POST /api/v1/videos. `--model wan2.2-ti2v-5b` picks the GPU model.
- */
-export function parseVideoCommand(text: string): VideoCommand | string | null {
-  const m = /^\/(?:video|clip|vid)(?:\s+([\s\S]*))?$/i.exec(String(text ?? "").trim());
-  if (!m) return null;
-  let rest = (m[1] ?? "").trim();
-  let model = DEFAULT_VIDEO_MODEL;
-  const flag = /(?:^|\s)--model[=\s]+(\S+)/.exec(rest);
-  if (flag) {
-    if (!(VIDEO_MODELS as readonly string[]).includes(flag[1]!)) return `model must be one of: ${VIDEO_MODELS.join(", ")}`;
-    model = flag[1]!;
-    rest = rest.replace(flag[0], " ").trim();
-  }
-  if (!rest) return "usage: /video <what happens in the clip>";
-  if (rest.length > 2000) return "prompt must contain 1 to 2000 characters";
-  return { prompt: rest, model };
-}
 
 /**
  * The web chat takes lyrics on the lines after `lyrics:`; a terminal input is

@@ -7,6 +7,8 @@ import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodePr
 import { describeAlbumStage, sanitizeAlbum, trackFileBase, parseAlbumCommand, type AlbumCommand, type AlbumTrack } from "@/lib/chat/album";
 import { describePromoProgress, detectPromoRequest, parsePromoCommand, type PromoCommand, type PromoScene } from "@/lib/chat/promo";
 import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "@/lib/chat/push-shared";
+import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
+import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 
 const PUSH_NODE = "c0_push_node";
 const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -75,6 +77,43 @@ function PushCard({ p }: { p: PushView }) {
   );
 }
 
+function VideoCard({ v, revealed, onReveal }: { v: VideoView; revealed: boolean; onReveal: () => void }) {
+  const running = v.status === "starting" || v.status === "pending";
+  const hidden = v.adult && !revealed;
+  return (
+    <div className="mt-2 border border-[var(--color-rule)] p-3 text-xs space-y-2 max-w-[640px]" aria-live="polite">
+      <p className="flex items-center gap-2">
+        {running ? <Spinner /> : <span className={v.status === "failed" ? "text-[var(--color-warn)]" : "accent"}>{v.status === "failed" ? "✗" : "✓"}</span>}
+        <span className="min-w-0 truncate">
+          {v.adult ? "18+ video" : "video"} <span className="text-[var(--color-dim)]">· {v.model}</span>
+        </span>
+        <span className="ml-auto">
+          {running ? <Elapsed since={v.started} /> : v.seconds ? <span className="text-[var(--color-dim)]">{clock(v.seconds)}</span> : null}
+        </span>
+      </p>
+      {running && <p className="text-[var(--color-dim)]">{v.status === "starting" ? "sending it to the network…" : v.progress ?? "queued for a c0mpute worker"}</p>}
+      {v.status === "done" && v.url && (
+        <figure className="space-y-1">
+          {hidden ? (
+            <button className="relative block w-full overflow-hidden border border-[var(--color-rule)] bg-black" onClick={onReveal}>
+              <video src={v.url} preload="metadata" muted playsInline className="w-full blur-2xl scale-110" aria-hidden />
+              <span className="absolute inset-0 grid place-items-center text-sm bg-black/40 text-white">18+ · click to show</span>
+            </button>
+          ) : (
+            <video controls playsInline preload="metadata" src={v.url} className="w-full border border-[var(--color-rule)] bg-black" />
+          )}
+          {!hidden && (
+            <a href={v.url} download="c0mpute-clip.mp4" className="underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
+              download mp4
+            </a>
+          )}
+        </figure>
+      )}
+      {v.error && <p className="text-[var(--color-warn)] break-words">{v.error}</p>}
+    </div>
+  );
+}
+
 // An image turn keeps its picture only for this session (a blob: URL); what is
 // saved to localStorage is the text placeholder, and the model never sees it.
 // Music turns work the same way (`audio` is a session blob: URL, `audioType` its MIME type).
@@ -98,6 +137,21 @@ type Msg = {
   revealed?: boolean;
   /** A `/push hosting` turn: polled live until the site is up (or gone). */
   push?: PushView;
+  /** A `/video` turn: polled (across reloads and deploys) until the MP4 is ready. */
+  video?: VideoView;
+};
+type VideoView = {
+  /** null until POST /api/v1/videos answers. */
+  id: string | null;
+  prompt: string;
+  model: string;
+  adult: boolean;
+  status: "starting" | "pending" | "done" | "failed";
+  progress: string | null;
+  seconds: number | null;
+  url: string | null;
+  error: string | null;
+  started: number;
 };
 type PushView = {
   id: string;
@@ -307,7 +361,7 @@ export function ChatApp({ error }: { error: string | null }) {
       localStorage.setItem(ADULT_MODE, v ? "1" : "0");
     } catch {}
   };
-  const adultMode = adultPref && !!me?.adult_verified_at;
+  const adultMode = adultModeActive(adultPref, me?.adult_verified_at);
 
   useEffect(() => {
     fetch("/api/v1/me")
@@ -805,6 +859,83 @@ export function ChatApp({ error }: { error: string | null }) {
       });
   }, [convos, pollPush]);
 
+  /**
+   * Poll a clip every 5 s until it is done or failed, updating its card. A
+   * deploy (c0mpute.com or the network) answers 5xx for a minute: keep going.
+   * Survives a reload: the card's job id is saved with the chat.
+   */
+  const pollVideo = useCallback(
+    async (convoId: string, index: number, view: VideoView) => {
+      if (!view.id) return;
+      const key = `video:${convoId}:${index}`;
+      if (polling.current.has(key)) return;
+      polling.current.add(key);
+      const set = (patch: Partial<VideoView>) => patchMsg(convoId, index, (m) => (m.video ? { ...m, video: { ...m.video, ...patch } } : m));
+      const deadline = view.started + QUEUE_DEADLINE_MS;
+      try {
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const res = await fetch(`/api/v1/videos/${view.id}`, { cache: "no-store" }).catch(() => null);
+          const body = res ? await res.json().catch(() => null) : null;
+          const out = videoPollOutcome(res?.status ?? 0, body);
+          if (out.kind === "retry") continue;
+          if (out.kind === "pending") {
+            set({ status: "pending", progress: describeVideoProgress(body ?? {}), seconds: typeof body?.seconds === "number" ? body.seconds : null });
+            continue;
+          }
+          if (out.kind === "failed") {
+            set({ status: "failed", progress: null, error: out.message });
+            return;
+          }
+          set({ status: "done", progress: null, url: typeof body?.video === "string" ? body.video : `/api/v1/videos/${view.id}/video`, seconds: typeof body?.seconds === "number" ? body.seconds : null, error: null });
+          patchMsg(convoId, index, (m) => ({ ...m, content: `[${m.video?.adult ? "18+ video" : "video"}: ${view.prompt}] (on a c0mpute worker)` }));
+          return;
+        }
+        set({ status: "failed", progress: null, error: "gave up waiting: the network queues a clip for up to 2 hours" });
+      } finally {
+        polling.current.delete(key);
+      }
+    },
+    [patchMsg],
+  );
+
+  // After a reload, pick unfinished clips back up (a clip that never got an id cannot be).
+  useEffect(() => {
+    for (const c of convos)
+      c.messages.forEach((m, i) => {
+        if (!m.video || m.video.status === "done" || m.video.status === "failed") return;
+        if (m.video.id) void pollVideo(c.id, i, m.video);
+        else if (!polling.current.has(`video-start:${c.id}:${i}`)) patchMsg(c.id, i, (x) => (x.video ? { ...x, video: { ...x.video, status: "failed", error: "interrupted before the network accepted it; send /video again" } } : x));
+      });
+  }, [convos, pollVideo, patchMsg]);
+
+  async function makeVideo(convo: Convo, text: string, cmd: VideoCommand) {
+    const adult = adultMode;
+    const view: VideoView = { id: null, prompt: cmd.prompt, model: cmd.model, adult, status: "starting", progress: null, seconds: null, url: null, error: null, started: Date.now() };
+    const startKey = `video-start:${convo.id}:${convo.messages.length + 1}`;
+    polling.current.add(startKey);
+    const index = addTurn(convo, text, { role: "assistant", content: `// ${adult ? "18+ video" : "video"}: ${cmd.prompt}`, video: view });
+    const set = (patch: Partial<VideoView>) => patchMsg(convo.id, index, (m) => (m.video ? { ...m, video: { ...m.video, ...patch } } : m));
+    try {
+      const res = await fetch("/api/v1/videos", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(videoRequestBody(cmd, adult)),
+      }).catch(() => null);
+      const j = res ? await res.json().catch(() => ({})) : {};
+      if (!res || res.status !== 202 || typeof j.id !== "string") {
+        // Policy refusals (422/403), the rate limit and balance errors carry the server's message.
+        set({ status: "failed", error: j.error?.message ?? (res ? `HTTP ${res.status}` : "network error: the video was not started") });
+        return;
+      }
+      const started = { ...view, id: j.id as string, status: "pending" as const, progress: "queued for a c0mpute worker" };
+      set(started);
+      void pollVideo(convo.id, index, started);
+    } finally {
+      polling.current.delete(startKey);
+    }
+  }
+
   async function runConnect(convo: Convo, text: string, cmd: ConnectCommand) {
     const index = addTurn(convo, text, { role: "assistant", content: "// looking up your hosting nodes…" });
     const say = (content: string) => patchMsg(convo.id, index, (m) => ({ ...m, content }));
@@ -973,6 +1104,21 @@ export function ChatApp({ error }: { error: string | null }) {
     const imagePrompt = parseImageCommand(text);
     if (imagePrompt) {
       await drawImage(convo, text, imagePrompt);
+      return;
+    }
+    const video = parseVideoCommand(text);
+    if (typeof video === "string") {
+      addTurn(convo, text, { role: "assistant", content: `// ${video}` });
+      return;
+    }
+    if (video) {
+      await makeVideo(convo, text, video);
+      return;
+    }
+    // Any other line starting with "/" is answered here, never sent to the model.
+    const slash = slashCommand(text);
+    if (slash) {
+      addTurn(convo, text, { role: "assistant", content: slashReplyText(slash) });
       return;
     }
     const history: Msg[] = [...convo.messages, { role: "user", content: text }];
@@ -1157,7 +1303,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it).</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /help lists every command.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -1168,6 +1314,13 @@ export function ChatApp({ error }: { error: string | null }) {
                   {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
                 </div>
                 {m.push && <PushCard p={m.push} />}
+                {m.video && (
+                  <VideoCard
+                    v={m.video}
+                    revealed={!!m.revealed}
+                    onReveal={() => active && update(active.id, (c) => ({ ...c, messages: c.messages.map((x, k) => (k === i ? { ...x, revealed: true } : x)) }))}
+                  />
+                )}
                 {m.image && (
                   <figure className="mt-2">
                     {m.adult && !m.revealed ? (
@@ -1329,7 +1482,7 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"
+              placeholder="message, /image <prompt>, /video <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
