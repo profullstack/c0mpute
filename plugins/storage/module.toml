@@ -20,7 +20,7 @@
 [module]
 id          = "storage"
 name        = "Storage — Reed-Solomon shard service"
-version     = "0.3.35"
+version     = "0.3.36"
 kind        = "service"
 category    = "data"
 status      = "available"
