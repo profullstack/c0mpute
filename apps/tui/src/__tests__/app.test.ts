@@ -215,7 +215,7 @@ describe("controller", () => {
       ["user", "hi there"],
       ["assistant", "Hello"],
     ]);
-    expect(JSON.parse(body)).toEqual({ messages: [{ role: "user", content: "hi there" }], stream: true });
+    expect(JSON.parse(body)).toEqual({ messages: [{ role: "user", content: "hi there" }], stream: true, resumable: true });
     expect(ctl.state.chat.convo.title).toBe("hi there");
     expect(ctl.state.chat.streaming).toBe(false);
   });
@@ -295,6 +295,101 @@ describe("controller", () => {
     expect(bodies.length).toBe(2);
     expect(JSON.parse(bodies[1]!).messages.at(-1)).toEqual({ role: "user", content: "draft" });
     expect(ctl.state.chat.convo.messages.at(-1)!.content).toBe("ok");
+  });
+
+  it("a stream cut off mid-answer reattaches by run id and replays the whole answer", async () => {
+    const { api, calls } = fakeApi({
+      "POST /api/v1/chat/completions": () => {
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('data: {"object":"c0mpute.run","id":"run_abc"}\n\ndata: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'));
+            setTimeout(() => c.error(new Error("socket hang up")), 5);
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "x-c0mpute-run": "run_abc" } });
+      },
+      "GET /api/v1/chat/runs/run_abc": () =>
+        sse(['data: {"object":"c0mpute.run","id":"run_abc"}\n\n', 'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n', 'data: {"choices":[{"delta":{"content":"lo again"}}]}\n\ndata: [DONE]\n\n']),
+    });
+    const ctl = controller(api);
+    type(ctl, "hi");
+    handleKey(ctl, keyEvent("enter"));
+    await new Promise((r) => setTimeout(r, 400));
+    expect(calls).toContain("GET /api/v1/chat/runs/run_abc");
+    const last = ctl.state.chat.convo.messages.at(-1)!;
+    expect(last.content).toBe("Hello again");
+    expect(last.run).toBeUndefined();
+    expect(last.error).toBeFalsy();
+  });
+
+  it("Esc on a resumable answer cancels the run on the server", async () => {
+    const { api, calls } = fakeApi({
+      "POST /api/v1/chat/completions": (init) => {
+        const signal = init?.signal;
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"long"}}]}\n\n'));
+            signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream", "x-c0mpute-run": "run_stop" } });
+      },
+      "DELETE /api/v1/chat/runs/run_stop": () => new Response(JSON.stringify({ cancelled: true })),
+    });
+    const ctl = controller(api);
+    type(ctl, "go");
+    handleKey(ctl, keyEvent("enter"));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ctl.state.chat.convo.messages.at(-1)!.run).toBe("run_stop");
+    handleKey(ctl, keyEvent("escape"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toContain("DELETE /api/v1/chat/runs/run_stop");
+    expect(ctl.state.chat.convo.messages.at(-1)!.content).toContain("stopped");
+  });
+
+  it("an answer still streaming at restart is picked up again on start", async () => {
+    const { api } = fakeApi({
+      "GET /api/v1/chat/runs/run_old": () => sse(['data: {"choices":[{"delta":{"content":"finished while you were away"}}]}\n\ndata: [DONE]\n\n']),
+    });
+    const ctl = controller(api, {
+      chat: {
+        ...controller(api).state.chat,
+        convo: { id: "c1", title: "t", model: null, messages: [{ role: "user", content: "q", at: 1 }, { role: "assistant", content: "fini", run: "run_old", at: 1 }] },
+      },
+    });
+    ctl.start();
+    await new Promise((r) => setTimeout(r, 30));
+    ctl.stop();
+    expect(ctl.state.chat.convo.messages.at(-1)!.content).toBe("finished while you were away");
+  });
+
+  it("/history lists the account's conversations and /open switches to one", async () => {
+    const puts: string[] = [];
+    const { api } = fakeApi({
+      "GET /api/v1/chat/conversations?since=1": () =>
+        new Response(JSON.stringify({ data: [{ id: "web123", title: "from the browser", model: "qwen2.5:7b", updated: 50, deleted: false }, { id: "gone1", title: "x", model: "auto", updated: 40, deleted: true }] })),
+      "GET /api/v1/chat/conversations/web123": () =>
+        new Response(JSON.stringify({ id: "web123", title: "from the browser", model: "qwen2.5:7b", updated: 50, messages: [{ role: "user", content: "hello from web" }, { role: "assistant", content: "hi!", image: "data:..." }] })),
+      "PUT /api/v1/chat/conversations/c0local": (init) => {
+        puts.push(String(init?.body));
+        return new Response(JSON.stringify({ ok: true }));
+      },
+    });
+    const base = controller(api).state;
+    const ctl = controller(api, { chat: { ...base.chat, convo: { id: "c0local", title: "mine", model: null, messages: [{ role: "user", content: "local q", at: 5 }], updated: 5 } } });
+    await ctl.run({ kind: "history" }, "/history");
+    const listing = ctl.state.chat.convo.messages.at(-1)!.content;
+    expect(listing).toContain("from the browser");
+    expect(listing).not.toContain("gone1");
+    // The local conversation was saved to the account before listing.
+    expect(JSON.parse(puts[0]!)).toMatchObject({ id: "c0local", model: "auto", messages: [{ role: "user", content: "local q" }] });
+    await ctl.run({ kind: "open", target: "1" }, "/open 1");
+    expect(ctl.state.chat.convo.id).toBe("web123");
+    expect(ctl.state.chat.convo.model).toBe("qwen2.5:7b");
+    expect(ctl.state.chat.convo.messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "hello from web"],
+      ["assistant", "hi!"],
+    ]);
   });
 
   it("tells a signed-out user the exact command, without calling the API", async () => {
