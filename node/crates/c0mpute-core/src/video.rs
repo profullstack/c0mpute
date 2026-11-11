@@ -17,6 +17,13 @@
 //! cannot bill for before paying to start a container, and the runner is the
 //! only side that can see what the model actually produced.
 //!
+//! In-container mode (`[video] runner = "local"` or
+//! `C0MPUTE_VIDEO_RUNNER=local`): when the node itself runs inside the
+//! runner image (a rented GPU container, e.g. Salad, has no docker inside),
+//! step 2 execs `runner.py` directly with the same job directory instead of
+//! starting a container, and readiness checks python + torch + CUDA instead
+//! of docker + image. Everything else is identical.
+//!
 //! Why no cross-worker verification: a generated clip is not reproducible
 //! across workers (different driver, different kernels, same seed), so there
 //! is nothing to compare hashes against. The receipt comes from one worker,
@@ -36,6 +43,7 @@ use tokio::fs;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::config::VideoRunner;
 use crate::runner::{AcceptedJob, WorkerLoad, publish_receipt};
 
 pub const WORKLOAD_TXT2VID: &str = "video.txt2vid";
@@ -568,6 +576,93 @@ pub async fn setup(build_only: bool, scratch: &Path, say: &(dyn Fn(&str) + Sync)
     Ok(SetupSource::Built)
 }
 
+/// Environment variable that picks the GPU runner mode (`docker` | `local`),
+/// over `[video] runner` in the config.
+pub const RUNNER_MODE_ENV: &str = "C0MPUTE_VIDEO_RUNNER";
+/// Local mode: path of `runner.py` (default [`LOCAL_RUNNER_PY`]).
+pub const LOCAL_RUNNER_PY_ENV: &str = "C0MPUTE_VIDEO_RUNNER_PY";
+/// Local mode: the python interpreter (default `python3`).
+pub const LOCAL_PYTHON_ENV: &str = "C0MPUTE_VIDEO_PYTHON";
+/// Where the runner image installs `runner.py` (and `module.toml` beside it).
+pub const LOCAL_RUNNER_PY: &str = "/opt/c0mpute-video/runner.py";
+
+static CONFIGURED_RUNNER: std::sync::OnceLock<VideoRunner> = std::sync::OnceLock::new();
+
+/// Record `[video] runner` from the loaded config. The worker calls this once
+/// at start, before anything probes readiness; later calls are ignored.
+pub fn set_configured_runner(mode: VideoRunner) {
+    let _ = CONFIGURED_RUNNER.set(mode);
+}
+
+/// The env value, else the configured value, else docker.
+pub fn resolve_runner_mode(env: Option<&str>, configured: Option<VideoRunner>) -> VideoRunner {
+    env.and_then(VideoRunner::parse)
+        .or(configured)
+        .unwrap_or_default()
+}
+
+/// How this node runs GPU clips.
+pub fn runner_mode() -> VideoRunner {
+    let env = std::env::var(RUNNER_MODE_ENV).ok();
+    resolve_runner_mode(env.as_deref(), CONFIGURED_RUNNER.get().copied())
+}
+
+/// Local mode: the interpreter and script.
+pub fn local_python() -> String {
+    std::env::var(LOCAL_PYTHON_ENV).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "python3".to_string())
+}
+
+pub fn local_runner_py() -> PathBuf {
+    std::env::var_os(LOCAL_RUNNER_PY_ENV)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(LOCAL_RUNNER_PY))
+}
+
+/// Everything the in-container (local) invocation needs. Same job-dir
+/// contract as [`ContainerRun`], minus the container.
+#[derive(Clone, Debug)]
+pub struct LocalRun {
+    pub python: String,
+    pub script: PathBuf,
+    /// `txt2vid` or `img2vid`.
+    pub command: String,
+    pub job_dir: PathBuf,
+    pub weights_dir: PathBuf,
+}
+
+impl LocalRun {
+    /// `python3 runner.py <command> --job <job_dir>/job.json`.
+    pub fn argv(&self) -> Vec<String> {
+        vec![
+            self.script.display().to_string(),
+            self.command.clone(),
+            "--job".to_string(),
+            self.job_dir.join("job.json").display().to_string(),
+        ]
+    }
+
+    /// Environment the runner gets on top of the node's: the Hugging Face
+    /// cache under the node's weights dir (unless the operator already points
+    /// HF_HOME somewhere, e.g. a pre-warmed volume), and the manifest beside
+    /// the script when one is there and none is named.
+    pub fn env(&self, hf_home_set: bool, module_toml_set: bool) -> Vec<(String, String)> {
+        let mut env = vec![("PYTHONUNBUFFERED".to_string(), "1".to_string())];
+        if !hf_home_set {
+            env.push(("HF_HOME".to_string(), self.weights_dir.join("hf").display().to_string()));
+        }
+        if !module_toml_set {
+            if let Some(dir) = self.script.parent() {
+                let manifest = dir.join("module.toml");
+                if manifest.is_file() {
+                    env.push(("C0MPUTE_VIDEO_MODULE_TOML".to_string(), manifest.display().to_string()));
+                }
+            }
+        }
+        env
+    }
+}
+
 /// The runner command for a workload type.
 pub fn command_for(workload: &str) -> Option<&'static str> {
     match workload {
@@ -587,6 +682,10 @@ pub enum NotReady {
     NoDocker,
     NoImage,
     NoNvidiaGpu,
+    /// Local mode: `runner.py` is not where it should be.
+    NoLocalRunner,
+    /// Local mode: python cannot import torch + diffusers, or torch sees no CUDA.
+    NoTorchCuda,
 }
 
 impl NotReady {
@@ -595,12 +694,17 @@ impl NotReady {
             NotReady::NoDocker => "no container runtime on PATH (install docker)",
             NotReady::NoImage => "runner image not pulled (run `c0mpute video setup`)",
             NotReady::NoNvidiaGpu => "no NVIDIA GPU detected (nvidia-smi found none)",
+            NotReady::NoLocalRunner => "local video runner: runner.py not found (set C0MPUTE_VIDEO_RUNNER_PY)",
+            NotReady::NoTorchCuda => "local video runner: python cannot import torch+diffusers or CUDA is unavailable",
         }
     }
 }
 
 /// Probe the host. Blocking, and only called at boot or from the CLI.
 pub fn readiness(image: &str) -> Option<NotReady> {
+    if runner_mode() == VideoRunner::Local {
+        return local_readiness();
+    }
     if crate::container::which().is_none() {
         return Some(NotReady::NoDocker);
     }
@@ -633,6 +737,33 @@ pub fn readiness_cached(image: &str) -> Option<NotReady> {
         KNOWN_READY.store(true, Ordering::Relaxed);
     }
     verdict
+}
+
+/// Local mode: a GPU, the runner script, and a python that imports the
+/// runner's stack and sees CUDA. The import is the same one the image build
+/// runs, so a broken environment is refused before the first auction.
+pub fn local_readiness() -> Option<NotReady> {
+    if !nvidia_gpu_present() {
+        return Some(NotReady::NoNvidiaGpu);
+    }
+    if !local_runner_py().is_file() {
+        return Some(NotReady::NoLocalRunner);
+    }
+    let ok = std::process::Command::new(local_python())
+        .args([
+            "-c",
+            "import sys, torch, diffusers; sys.exit(0 if torch.cuda.is_available() else 3)",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return Some(NotReady::NoTorchCuda);
+    }
+    None
 }
 
 fn nvidia_gpu_present() -> bool {
@@ -749,6 +880,18 @@ async fn run_video_job(
     let weights_dir = weights_dir(cache_root);
     fs::create_dir_all(&weights_dir).await?;
 
+    if runner_mode() == VideoRunner::Local {
+        let run = LocalRun {
+            python: local_python(),
+            script: local_runner_py(),
+            command: command.to_string(),
+            job_dir: job_dir.clone(),
+            weights_dir,
+        };
+        run_local(&run).await?;
+        return finish_video_job(net, store, job, &inline, &job_dir).await;
+    }
+
     let (uid, gid) = owner_of(&job_dir).await?;
     let run = ContainerRun {
         image: image.to_string(),
@@ -761,7 +904,17 @@ async fn run_video_job(
     };
 
     run_container(&run).await?;
+    finish_video_job(net, store, job, &inline, &job_dir).await
+}
 
+/// Check, policy-gate, store and announce `out.mp4`. Shared by both modes.
+async fn finish_video_job(
+    net: &Arc<Libp2pNetwork>,
+    store: &ChunkStore,
+    job: &AcceptedJob,
+    inline: &VideoJobInline,
+    job_dir: &Path,
+) -> Result<String> {
     let out_path = job_dir.join("out.mp4");
     let len = fs::metadata(&out_path)
         .await
@@ -813,6 +966,35 @@ async fn owner_of(path: &Path) -> Result<(u32, u32)> {
 #[cfg(not(unix))]
 async fn owner_of(_path: &Path) -> Result<(u32, u32)> {
     anyhow::bail!("video containers run on Unix hosts only")
+}
+
+/// Local mode: exec the runner in this environment, under the same timeout.
+/// `kill_on_drop` covers both the timeout and a cancelled job.
+async fn run_local(run: &LocalRun) -> Result<()> {
+    let hf_home_set = std::env::var_os("HF_HOME").is_some_and(|v| !v.is_empty());
+    let manifest_set = std::env::var_os("C0MPUTE_VIDEO_MODULE_TOML").is_some_and(|v| !v.is_empty());
+    info!(script = %run.script.display(), command = %run.command, "video runner: starting local runner");
+    let mut child = tokio::process::Command::new(&run.python)
+        .args(run.argv())
+        .envs(run.env(hf_home_set, manifest_set))
+        .current_dir(&run.job_dir)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("could not start {}", run.python))?;
+    match tokio::time::timeout(JOB_TIMEOUT, child.wait()).await {
+        Ok(status) => {
+            let status = status.context("waiting for the local runner")?;
+            if !status.success() {
+                bail!("runner exited with {status}");
+            }
+            Ok(())
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            bail!("runner exceeded the {} minute job timeout", JOB_TIMEOUT.as_secs() / 60)
+        }
+    }
 }
 
 async fn run_container(run: &ContainerRun) -> Result<()> {
@@ -1119,6 +1301,70 @@ mod tests {
         apply_model_defaults(&mut req);
         let inline: VideoJobInline = serde_json::from_value(req).unwrap();
         assert_eq!((inline.frames, inline.width), (81, 1280));
+    }
+
+    #[test]
+    fn runner_mode_env_beats_config_and_defaults_to_docker() {
+        assert_eq!(resolve_runner_mode(None, None), VideoRunner::Docker);
+        assert_eq!(resolve_runner_mode(None, Some(VideoRunner::Local)), VideoRunner::Local);
+        assert_eq!(resolve_runner_mode(Some("local"), None), VideoRunner::Local);
+        assert_eq!(resolve_runner_mode(Some("LOCAL"), Some(VideoRunner::Docker)), VideoRunner::Local);
+        assert_eq!(resolve_runner_mode(Some("docker"), Some(VideoRunner::Local)), VideoRunner::Docker);
+        // A typo in the env falls through to the config rather than guessing.
+        assert_eq!(resolve_runner_mode(Some("lcoal"), Some(VideoRunner::Local)), VideoRunner::Local);
+        assert_eq!(resolve_runner_mode(Some(""), None), VideoRunner::Docker);
+    }
+
+    #[test]
+    fn video_runner_reads_from_the_config_file() {
+        let cfg: crate::config::VideoConfig = toml::from_str("runner = \"local\"").unwrap();
+        assert_eq!(cfg.runner, VideoRunner::Local);
+        let cfg: crate::config::VideoConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.runner, VideoRunner::Docker);
+        assert!(toml::from_str::<crate::config::VideoConfig>("runner = \"podman-ish\"").is_err());
+    }
+
+    #[test]
+    fn local_run_execs_the_runner_with_the_same_job_dir_contract() {
+        let run = LocalRun {
+            python: "python3".into(),
+            script: PathBuf::from("/opt/c0mpute-video/runner.py"),
+            command: "txt2vid".into(),
+            job_dir: PathBuf::from("/data/jobs/abc"),
+            weights_dir: PathBuf::from("/data/video/weights"),
+        };
+        assert_eq!(
+            run.argv(),
+            vec!["/opt/c0mpute-video/runner.py", "txt2vid", "--job", "/data/jobs/abc/job.json"]
+        );
+        let env = run.env(false, true);
+        assert!(env.contains(&("HF_HOME".to_string(), "/data/video/weights/hf".to_string())));
+        // An operator-set HF_HOME (a pre-warmed cache) is left alone.
+        assert!(!run.env(true, true).iter().any(|(k, _)| k == "HF_HOME"));
+    }
+
+    #[test]
+    fn local_run_points_the_runner_at_the_manifest_beside_it() {
+        let dir = std::env::temp_dir().join(format!("c0-video-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("module.toml"), "[module]\n").unwrap();
+        let run = LocalRun {
+            python: "python3".into(),
+            script: dir.join("runner.py"),
+            command: "txt2vid".into(),
+            job_dir: dir.join("job"),
+            weights_dir: dir.join("w"),
+        };
+        let manifest = dir.join("module.toml").display().to_string();
+        assert!(run.env(true, false).contains(&("C0MPUTE_VIDEO_MODULE_TOML".to_string(), manifest)));
+        assert!(!run.env(true, true).iter().any(|(k, _)| k == "C0MPUTE_VIDEO_MODULE_TOML"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_not_ready_reasons_name_the_fix() {
+        assert!(NotReady::NoLocalRunner.reason().contains("C0MPUTE_VIDEO_RUNNER_PY"));
+        assert!(NotReady::NoTorchCuda.reason().contains("CUDA"));
     }
 
     #[test]

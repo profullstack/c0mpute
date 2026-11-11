@@ -3241,9 +3241,17 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
             Ok(())
         }
         VideoCmd::Check { selftest } => {
+            if let Ok(cfg) = Config::load_or_default(&config::default_config_path()) {
+                video::set_configured_runner(cfg.video.runner);
+            }
+            let local = video::runner_mode() == c0mpute_core::config::VideoRunner::Local;
             match video::readiness(video::RUNNER_IMAGE) {
                 None => {
-                    println!("ready: GPU, container runtime and runner image are all present");
+                    if local {
+                        println!("ready (local runner): GPU, python+torch+CUDA and runner.py are all present");
+                    } else {
+                        println!("ready: GPU, container runtime and runner image are all present");
+                    }
                     match video::nvidia_vram_mib() {
                         Some(mib) => println!(
                             "card: {mib} MiB; models it can run: {}",
@@ -3269,6 +3277,22 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
                     }
                     return Ok(());
                 }
+            }
+            if selftest && local {
+                println!("running the runner selftest locally");
+                let dir = std::env::temp_dir().join(format!("c0mpute-video-selftest-{}", std::process::id()));
+                let status = tokio::process::Command::new(video::local_python())
+                    .arg(video::local_runner_py())
+                    .args(["selftest", "--job"])
+                    .arg(dir.join("job.json"))
+                    .status()
+                    .await
+                    .context("could not run the local runner")?;
+                let _ = std::fs::remove_dir_all(&dir);
+                if !status.success() {
+                    anyhow::bail!("runner selftest failed with {status}");
+                }
+                return Ok(());
             }
             if selftest {
                 println!("running the runner selftest in the container");

@@ -115,6 +115,8 @@ impl Supervisor {
         // Adult (18+) jobs only on an opted-in worker; every generation
         // runner checks this before running a job (`content_policy`).
         crate::content_policy::set_worker_adult(self.config.adult.serve_enabled());
+        // `[video] runner`: docker per job, or in-container (`local`).
+        crate::video::set_configured_runner(self.config.video.runner);
         if self.config.adult.serve_enabled() {
             info!("adult jobs: serving (advertising c0mpute:adult); the child-safety guard stays on");
         }

@@ -522,10 +522,18 @@ impl MusicConfig {
 /// - `cpu = true` (or `C0MPUTE_VIDEO_CPU=1`): install in the background on a
 ///   box that passes the gates, then serve.
 /// - `cpu = false` (or `C0MPUTE_VIDEO_CPU=0`): never serve, even if installed.
+///
+/// `runner` picks how GPU clips run: `"docker"` (the default) starts the
+/// runner image per job; `"local"` execs `runner.py` in this environment,
+/// for a node that itself runs inside the runner image (a rented GPU
+/// container such as Salad has no docker inside). `C0MPUTE_VIDEO_RUNNER`
+/// wins over the file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VideoConfig {
     #[serde(default)]
     pub cpu: Option<bool>,
+    #[serde(default)]
+    pub runner: VideoRunner,
     #[serde(default = "default_video_min_ram_gb")]
     pub min_ram_gb: u64,
     #[serde(default = "default_video_min_free_ram_gb")]
@@ -544,11 +552,35 @@ impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             cpu: None,
+            runner: VideoRunner::default(),
             min_ram_gb: default_video_min_ram_gb(),
             min_free_ram_gb: default_video_min_free_ram_gb(),
             min_free_disk_gb: default_video_min_free_disk_gb(),
             min_cpu_threads: default_video_min_cpu_threads(),
             max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+        }
+    }
+}
+
+/// How GPU video jobs are dispatched (`[video] runner`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoRunner {
+    /// `docker run` the runner image per job (the node is on the host).
+    #[default]
+    Docker,
+    /// Exec `runner.py` directly: the node already runs inside the runner
+    /// image, with python, torch and the GPU but no docker.
+    Local,
+}
+
+impl VideoRunner {
+    /// `docker` / `local` (case-insensitive); anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "docker" | "container" => Some(Self::Docker),
+            "local" | "native" | "in-container" => Some(Self::Local),
+            _ => None,
         }
     }
 }
