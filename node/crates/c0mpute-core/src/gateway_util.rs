@@ -66,6 +66,12 @@ pub async fn fetch_verified(
     let provider: c0mpute_net::PeerId = provider_peer_id
         .parse()
         .map_err(|_| FetchError::Invalid("worker returned an invalid peer id"))?;
+    // The worker may have pushed it already (it cannot always be dialed).
+    if let Some(bytes) = crate::pieces::pushed_chunk(&hash) {
+        if bytes.len() <= max_bytes {
+            return Ok(bytes);
+        }
+    }
     let request = ChunkRequest {
         chunk_hash: hash,
         shard_index: None,
