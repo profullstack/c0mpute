@@ -106,7 +106,20 @@ jobs:
 
       - name: Install musl tools (Linux musl targets)
         if: contains(matrix.target, 'linux-musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # 2026-11-11: hosted runners could not resolve *.ubuntu.com for 40+ min
+        # (crates.io and GitHub resolved fine), failing v0.3.42 and v0.3.43 on
+        # both Linux targets. Fall back to a mirror outside ubuntu.com that
+        # carries both the amd64 archive and arm64 ubuntu-ports.
+        run: |
+          if sudo apt-get update && sudo apt-get install -y musl-tools; then exit 0; fi
+          echo "::warning::ubuntu.com mirrors unreachable; retrying via mirrors.ocf.berkeley.edu"
+          M=http://mirrors.ocf.berkeley.edu
+          sudo sed -i -E \
+            -e "s#https?://([a-z0-9.-]+\.)?archive\.ubuntu\.com/ubuntu#$M/ubuntu#g" \
+            -e "s#https?://security\.ubuntu\.com/ubuntu#$M/ubuntu#g" \
+            -e "s#https?://ports\.ubuntu\.com/ubuntu-ports#$M/ubuntu-ports#g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build c0mpute binary
         run: cargo build --release --bin c0mpute --target ${{ matrix.target }}
