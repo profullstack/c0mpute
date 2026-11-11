@@ -1,6 +1,7 @@
 // Server-side wiring for c0mpute chat: the store on SQLite Cloud, request auth,
 // CoinPay OAuth, the Infernet upstream and a per-user rate limit.
 import { Database } from "@sqlitecloud/drivers";
+import { unwrapData } from "./envelope";
 import { createHash, randomBytes } from "node:crypto";
 // Read at runtime: Next can inline a literal `process.env.NAME` at build time.
 export const env = (name: string): string => (process.env as Record<string, string | undefined>)[name] ?? "";
@@ -251,7 +252,8 @@ export async function balanceFor(subject: string | null | undefined) {
   try {
     const res = await infernet("/api/v1/billing/balance", { signal: AbortSignal.timeout(10_000) }, { subject });
     if (!res.ok) return null;
-    return (await res.json()) as Record<string, unknown>;
+    // Infernet wraps it as { data: {...} }; every caller reads the fields.
+    return unwrapData(await res.json());
   } catch {
     return null;
   }
