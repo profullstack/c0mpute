@@ -1318,6 +1318,13 @@ impl Hosting {
             bail!("manifest does not match its record");
         }
         let layout = self.layout(rec).await?;
+        // A newer version of a site this node holds: switch to it now,
+        // holding every group whose chunks are already here, then fetch the
+        // rest group by group. Waiting for every planned group of the new
+        // version before holding any (as this did) kept a node that had
+        // most of a 600 GiB site counted as holding none of it for hours,
+        // and lost the whole switch to any failed group.
+        self.switch_version_in_place(rec, &manifest, &layout).await;
         let previous = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
         let same_version = previous
             .as_ref()
@@ -1455,6 +1462,52 @@ impl Hosting {
             }
             None => Ok(added.len()),
         }
+    }
+
+    /// Move this node's copy of a striped site to the newer version `rec`
+    /// in one step: the catalog holds `rec` with the groups whose chunks are
+    /// all in the store already (a site that grew shares nearly all of
+    /// them), and only chunks the new version does not use are deleted.
+    /// Nothing to do for a first copy or the version already held.
+    async fn switch_version_in_place(&self, rec: &SiteRecord, manifest: &Manifest, layout: &stripe::Layout) {
+        let Some(old) = self.0.catalog.read().await.sites.get(&rec.site_id).cloned() else {
+            return;
+        };
+        if old.manifest == rec.manifest || old.seq >= rec.seq {
+            return;
+        }
+        let mut present: BTreeSet<u32> = BTreeSet::new();
+        for g in 0..layout.len() as u32 {
+            let mut all = true;
+            for h in layout.group(g) {
+                if !self.0.store.has(h).await {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                present.insert(g);
+            }
+        }
+        {
+            let mut cat = self.0.catalog.write().await;
+            // Another task may have switched meanwhile.
+            if cat.sites.get(&rec.site_id).is_none_or(|r| r.manifest != old.manifest) {
+                return;
+            }
+            cat.sites.insert(rec.site_id.clone(), rec.clone());
+            cat.stripes.insert(rec.site_id.clone(), present.clone());
+        }
+        self.save_catalog().await;
+        self.collect_garbage(&old, Some(manifest)).await;
+        self.announce_holding().await;
+        info!(
+            site = %rec.site_id,
+            name = %rec.name,
+            groups = present.len(),
+            of = layout.len(),
+            "hosting: switched to the new version, holding the groups already here"
+        );
     }
 
     /// Let go of some groups of a striped site: announce first, delete their
