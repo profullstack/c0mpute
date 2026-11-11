@@ -1124,10 +1124,11 @@ impl Hosting {
                 free_disk_floor(disk_total) / GIB_BYTES
             );
         }
-        // Free sites only: a paid (v2) site's payer pays every holder for the
-        // bytes it holds (settle::dues), so its groups spread over any node
-        // with room instead of stopping at 16 GiB per node.
-        if rec.terms().is_none() {
+        // Free sites only, and not during the beta (hosting is free while
+        // c0mpute is in beta): a paid (v2) site's payer pays every holder for
+        // the bytes it holds (settle::dues), so its groups spread over any
+        // node with room instead of stopping at 16 GiB per node.
+        if !site::BETA_FREE_HOSTING && rec.terms().is_none() {
             let owner = self.owner_bytes_excluding(rec).await;
             if owner + this_site_held + extra > MAX_BYTES_PER_OWNER {
                 bail!(

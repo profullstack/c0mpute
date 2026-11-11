@@ -47,13 +47,13 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 | | |
 |---|---|
 | Site, paid (`--disks`, a v2 record) | 4 TiB |
-| Site, free (v1 record) | 64 GiB |
+| Site, free (v1 record) | 4 TiB while hosting is free in the beta (`BETA_FREE_HOSTING`); 64 GiB after |
 | Files per site | 10,000,000 |
 | One file | 128 GiB |
 | Small sites other features publish (ad creatives, app images, podcast shows, git repos) | 1 GiB, built in memory |
 | Node budget | `[hosting] max_bytes`; `0` (default) = what it holds plus 25% of the free space above the free-disk floor |
 | Free-disk floor | a copy must leave max(10 GiB, 5% of the disk), capped at 50 GiB, free |
-| Per owner, per node | 16 GiB of free (v1) sites. Paid (v2) sites have no per-owner limit: their groups spread over every hosting node with room, and the payer pays each holder for the bytes it holds (preferred hosts their agreed share) |
+| Per owner, per node | none during the beta; after it, 16 GiB of free (v1) sites. Paid (v2) sites have no per-owner limit: their groups spread over every hosting node with room, and the payer pays each holder for the bytes it holds (preferred hosts their agreed share) |
 
 ```toml
 # ~/.config/c0mpute/config.toml
