@@ -162,6 +162,9 @@ struct TtsRequest {
     speed: f32,
     #[serde(default)]
     persona: String,
+    /// Chatterbox only: emotional range, 0.25 to 1.5 (default 0.6).
+    #[serde(default)]
+    exaggeration: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +201,8 @@ struct AgentVoice {
     voice: &'static str,
     fallback_engine: &'static str,
     fallback_voice: &'static str,
+    gpu_engine: &'static str,
+    gpu_voice: &'static str,
     pocket_voice: &'static str,
     pocket_voice_gender: &'static str,
     language: &'static str,
@@ -503,6 +508,19 @@ async fn voices() -> Json<VoiceCatalog> {
                     },
                 ],
             },
+            // GPU nodes only: expressive, cloned per agent from clean clips.
+            VoiceEngine {
+                id: "chatterbox",
+                voices: vec![
+                    VoiceItem { id: "riotcoder", label: "RiotCoder · GPU", presentation: "masculine" },
+                    VoiceItem { id: "cha0spunk", label: "Chaospunk · GPU", presentation: "feminine" },
+                    VoiceItem { id: "rootkey", label: "Rootkey · GPU", presentation: "masculine" },
+                    VoiceItem { id: "knox", label: "Knox · GPU", presentation: "masculine" },
+                    VoiceItem { id: "coinpay", label: "CoinPay · GPU", presentation: "masculine" },
+                    VoiceItem { id: "nora", label: "Nora · GPU", presentation: "feminine" },
+                    VoiceItem { id: "quill", label: "Quill · GPU", presentation: "masculine" },
+                ],
+            },
         ],
         agent_profiles: crate::speech_profiles::AGENTS
             .iter()
@@ -513,6 +531,8 @@ async fn voices() -> Json<VoiceCatalog> {
                 voice: p.voice,
                 fallback_engine: p.fallback_engine,
                 fallback_voice: p.fallback_voice,
+                gpu_engine: "chatterbox",
+                gpu_voice: p.gpu_voice,
                 pocket_voice: p.pocket_voice,
                 pocket_voice_gender: p.pocket_voice_gender,
                 language: p.language,
@@ -580,6 +600,7 @@ async fn synthesize(
         "locale": input.locale,
         "speed": input.speed,
         "persona": input.persona,
+        "exaggeration": input.exaggeration,
     });
     let (outcome, bytes) = run_speech_job(
         &state,
@@ -1119,6 +1140,9 @@ struct SayRequest {
     locale: String,
     #[serde(default = "default_speed")]
     speed: f32,
+    /// Chatterbox only: emotional range, 0.25 to 1.5 (default 0.6).
+    #[serde(default)]
+    exaggeration: Option<f32>,
 }
 
 async fn open_session(
@@ -1166,7 +1190,13 @@ async fn say_on_session(
 
     let spoken = state
         .sessions
-        .say(&session, input.text.trim(), &input.locale, input.speed)
+        .say(
+            &session,
+            input.text.trim(),
+            &input.locale,
+            input.speed,
+            input.exaggeration,
+        )
         .await
         .map_err(|error| {
             let message = format!("{error:#}");
@@ -1246,6 +1276,7 @@ fn valid_tts_voice(engine: &str, voice: &str) -> bool {
             "stuart_bell",
         ]
         .contains(&voice),
+        "chatterbox" => crate::speech::CHATTERBOX_VOICES.contains(&voice),
         _ => false,
     }
 }
