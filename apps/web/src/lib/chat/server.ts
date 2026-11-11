@@ -10,6 +10,7 @@ import { createStore, type Sql, type Store, type User } from "./store";
 import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
 import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
+import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
 
 // ── store ────────────────────────────────────────────────────────────────────
 let client: Database | null = null;
@@ -50,6 +51,10 @@ export const pushStore = () => (_pushStore ??= createPushStore(cloudSql, { cloud
 let _oauthStore: OAuthStore | null = null;
 /** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
 export const oauthStore = () => (_oauthStore ??= createOAuthStore(cloudSql));
+
+let _convoStore: ConvoStore | null = null;
+export const convoStore = () =>
+  (_convoStore ??= createConvoStore(cloudSql, { key: convoKey(pluginKey(env("C0MPUTE_CHAT_KEY")), pluginKey(env("C0MPUTE_PLUGIN_KEY"))) }));
 
 let _pluginStore: PluginStoreDb | null = null;
 /** Chat plugins (remote MCP servers) per account, tokens sealed with C0MPUTE_PLUGIN_KEY. */

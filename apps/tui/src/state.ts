@@ -20,6 +20,8 @@ export interface ChatMsg {
   /** A generation turn: its live state is the job's. */
   jobId?: string;
   error?: boolean;
+  /** A resumable turn still streaming (reattached after a restart or a dropped connection). */
+  run?: string;
   at: number;
 }
 
@@ -29,6 +31,8 @@ export interface Convo {
   /** null = the default model (Settings), or any live model. */
   model: string | null;
   messages: ChatMsg[];
+  /** Last change, unix ms: the account sync's clock (last writer wins). */
+  updated?: number;
 }
 
 export interface ChatState {

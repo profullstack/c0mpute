@@ -10,6 +10,7 @@ import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCo
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
+import { adopt, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
 import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
 const PUSH_NODE = "c0_push_node";
@@ -143,6 +144,8 @@ type Msg = {
   video?: VideoView;
   /** Chat plugin tool steps this assistant turn took (calls, results, approvals). */
   tools?: ToolView[];
+  /** A resumable turn still streaming: reattached after a reload or a dropped connection. */
+  run?: string;
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -312,6 +315,9 @@ const newConvo = (model: string): Convo => ({
   updated: Date.now(),
 });
 
+/** An error the server put in the stream (not a dropped connection, so not worth reattaching). */
+class StreamError extends Error {}
+
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
 async function readStream(res: Response, onDelta: (t: string) => void, onEvent?: (e: PluginEvent) => void) {
   const reader = res.body!.getReader();
@@ -334,7 +340,7 @@ async function readStream(res: Response, onDelta: (t: string) => void, onEvent?:
       } catch {
         continue;
       }
-      if (j.error) throw new Error(j.error.message ?? "stream error");
+      if (j.error) throw new StreamError(j.error.message ?? "stream error");
       if (j.object === PLUGIN_EVENT_OBJECT) {
         if (j.event && onEvent) onEvent(j.event as PluginEvent);
         continue;
@@ -402,6 +408,94 @@ export function ChatApp({ error }: { error: string | null }) {
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [active?.messages]);
+
+  // ── account sync: every signed-in device sees the same conversations ──
+  const convosRef = useRef<Convo[]>([]);
+  convosRef.current = convos;
+  const syncing = useRef(false);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  const syncNow = useCallback(async () => {
+    if (syncing.current) return;
+    syncing.current = true;
+    try {
+      const r = await fetch("/api/v1/chat/conversations?since=1");
+      if (r.status === 503 || r.status === 401) return setSyncNote(r.status === 503 ? "sync is off on this server" : null);
+      if (!r.ok) return;
+      const server = ((await r.json()).data ?? []) as ServerSummary[];
+      // Empty "new chat"s and turns still streaming stay local until they have something to keep.
+      const local = convosRef.current.filter((c) => c.messages.length > 0 && !c.messages.some((m) => m.run));
+      const plan = syncPlan(local, server);
+      const pulled: Convo[] = [];
+      for (const id of plan.pull) {
+        const g = await fetch(`/api/v1/chat/conversations/${encodeURIComponent(id)}`);
+        if (g.ok) pulled.push(await g.json());
+      }
+      for (const id of plan.push) {
+        const c = convosRef.current.find((x) => x.id === id);
+        if (!c) continue;
+        const res = await fetch(`/api/v1/chat/conversations/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(slimForSync(c)),
+        });
+        if (res.status === 409) {
+          const j = await res.json().catch(() => ({}));
+          if (j.conversation) pulled.push(j.conversation);
+        }
+      }
+      if (pulled.length || plan.drop.length) {
+        setConvos((all) => {
+          let next = all.filter((c) => !plan.drop.includes(c.id) || c.messages.some((m) => m.run));
+          for (const sc of pulled) {
+            const i = next.findIndex((c) => c.id === sc.id);
+            // Never overwrite a conversation that is streaming right now.
+            if (i >= 0 && next[i].messages.some((m) => m.run)) continue;
+            const merged = adopt(i >= 0 ? next[i] : undefined, sc) as Convo;
+            next = i >= 0 ? next.map((c, k) => (k === i ? merged : c)) : [...next, merged];
+          }
+          next.sort((a, b) => b.updated - a.updated);
+          save(next);
+          return next;
+        });
+        setActiveId((cur) => cur ?? pulled[0]?.id ?? null);
+      }
+      setSyncNote(null);
+    } catch {
+      // Offline: the next pass catches up.
+    } finally {
+      syncing.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (!me) return;
+    void syncNow();
+    const t = setInterval(() => void syncNow(), 60_000);
+    const onFocus = () => void syncNow();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [me, syncNow]);
+  // After an answer lands, save it to the account soon rather than on the next tick.
+  useEffect(() => {
+    if (!me || busy) return;
+    const t = setTimeout(() => void syncNow(), 1500);
+    return () => clearTimeout(t);
+  }, [busy, me, syncNow]);
+
+  // ── resumable turns: reattach to answers still streaming after a reload ──
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (resumed.current || !convos.length) return;
+    resumed.current = true;
+    const pending = convos.flatMap((c) => {
+      const last = c.messages[c.messages.length - 1];
+      return last?.role === "assistant" && last.run ? [{ id: c.id, run: last.run }] : [];
+    });
+    for (const p of pending) void reattach(p.id, p.run);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convos.length]);
 
   async function drawImage(convo: Convo, text: string, prompt: string) {
     const id = convo.id;
@@ -1178,13 +1272,7 @@ export function ChatApp({ error }: { error: string | null }) {
     const ctrl = new AbortController();
     abort.current = ctrl;
     setBusy(true);
-    const setTools = (fn: (t: ToolView[]) => ToolView[]) =>
-      update(id, (c) => {
-        const msgs = c.messages.slice();
-        const last = msgs[msgs.length - 1];
-        msgs[msgs.length - 1] = { ...last, tools: fn(last.tools ?? []) };
-        return { ...c, messages: msgs, updated: Date.now() };
-      });
+    let runId: string | null = null;
     try {
       const res = await fetch("/api/v1/chat/completions", {
         method: "POST",
@@ -1194,14 +1282,129 @@ export function ChatApp({ error }: { error: string | null }) {
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
           plugin_events: true,
+          // The server finishes the turn even if this tab closes or the
+          // connection drops; the run id lets us (or a reload) reattach.
+          resumable: true,
           ...(approvals.length ? { approvals } : {}),
         }),
         signal: ctrl.signal,
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        throw new Error(j.error?.message ?? `HTTP ${res.status}`);
+        throw new StreamError(j.error?.message ?? `HTTP ${res.status}`);
       }
+      runId = res.headers.get("x-c0mpute-run");
+      if (runId) setLastRun(id, runId);
+      await consume(id, res, ctrl.signal);
+      setLastRun(id, undefined);
+    } catch (e) {
+      const stopped = e instanceof DOMException && e.name === "AbortError";
+      if (stopped && runId) {
+        // Stop: closing the connection no longer ends a resumable turn.
+        void fetch(`/api/v1/chat/runs/${runId}`, { method: "DELETE" }).catch(() => {});
+        setLastRun(id, undefined);
+      } else if (!stopped && runId && !(e instanceof StreamError)) {
+        // The connection dropped mid-answer: reattach and replay.
+        abort.current = null;
+        await reattach(id, runId);
+        return;
+      } else if (!stopped) {
+        setLastRun(id, undefined);
+        setFailure(e instanceof Error ? e.message : String(e));
+        // Drop an empty assistant turn so a retry starts clean.
+        update(id, (c) => {
+          const last = c.messages[c.messages.length - 1];
+          return last?.role === "assistant" && !last.content && !last.tools?.length ? { ...c, messages: c.messages.slice(0, -1) } : c;
+        });
+      }
+    } finally {
+      if (abort.current === ctrl) {
+        setBusy(false);
+        abort.current = null;
+      }
+    }
+  }
+
+  /** Mark (or clear) the run id on a chat's last message. */
+  function setLastRun(id: string, run: string | undefined) {
+    update(id, (c) => {
+      const msgs = c.messages.slice();
+      const last = msgs[msgs.length - 1];
+      if (!last || last.role !== "assistant") return c;
+      msgs[msgs.length - 1] = { ...last, run };
+      return { ...c, messages: msgs };
+    });
+  }
+
+  /**
+   * Reattach to a resumable turn: the server replays it from the start, so
+   * the partial answer and its tool rows are rebuilt from the replay.
+   */
+  async function reattach(id: string, run: string) {
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    setBusy(true);
+    try {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, Math.min(8000, 500 * 2 ** attempt)));
+        let res: Response;
+        try {
+          res = await fetch(`/api/v1/chat/runs/${run}`, { signal: ctrl.signal });
+        } catch (e) {
+          if (e instanceof DOMException && e.name === "AbortError") throw e;
+          continue;
+        }
+        if (res.status === 404) {
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            msgs[msgs.length - 1] = { ...last, run: undefined, content: last.content ? `${last.content}\n\n// cut off: the connection dropped and the server no longer has this answer` : "// the connection dropped and the server no longer has this answer; send it again" };
+            return { ...c, messages: msgs };
+          });
+          return;
+        }
+        if (!res.ok) continue;
+        update(id, (c) => {
+          const msgs = c.messages.slice();
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: "", tools: [] };
+          return { ...c, messages: msgs };
+        });
+        try {
+          await consume(id, res, ctrl.signal);
+          setLastRun(id, undefined);
+          return;
+        } catch (e) {
+          if (e instanceof StreamError) throw e;
+          if (e instanceof DOMException && e.name === "AbortError") throw e;
+        }
+      }
+      setFailure("lost the connection to this answer; it may still finish: reload to try again");
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        void fetch(`/api/v1/chat/runs/${run}`, { method: "DELETE" }).catch(() => {});
+        setLastRun(id, undefined);
+      } else {
+        setLastRun(id, undefined);
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (abort.current === ctrl) {
+        setBusy(false);
+        abort.current = null;
+      }
+    }
+  }
+
+  /** Read a turn's SSE into the chat's last message (answer text and tool rows). */
+  async function consume(id: string, res: Response, _signal: AbortSignal) {
+    const setTools = (fn: (t: ToolView[]) => ToolView[]) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        const last = msgs[msgs.length - 1];
+        msgs[msgs.length - 1] = { ...last, tools: fn(last.tools ?? []) };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    {
       await readStream(
         res,
         (t) =>
@@ -1227,18 +1430,6 @@ export function ChatApp({ error }: { error: string | null }) {
           }
         },
       );
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) {
-        setFailure(e instanceof Error ? e.message : String(e));
-        // Drop an empty assistant turn so a retry starts clean.
-        update(id, (c) => {
-          const last = c.messages[c.messages.length - 1];
-          return last?.role === "assistant" && !last.content && !last.tools?.length ? { ...c, messages: c.messages.slice(0, -1) } : c;
-        });
-      }
-    } finally {
-      setBusy(false);
-      abort.current = null;
     }
   }
 
@@ -1371,14 +1562,16 @@ export function ChatApp({ error }: { error: string | null }) {
               <button
                 aria-label="delete chat"
                 className="opacity-0 group-hover:opacity-100 px-1 text-[var(--color-dim)] hover:text-[var(--color-warn)]"
-                onClick={() =>
+                onClick={() => {
                   setConvos((all) => {
                     const next = all.filter((x) => x.id !== c.id);
                     save(next);
                     if (activeId === c.id) setActiveId(next[0]?.id ?? null);
                     return next;
-                  })
-                }
+                  });
+                  // Gone on the account too, so other devices drop it at their next sync.
+                  if (me) void fetch(`/api/v1/chat/conversations/${encodeURIComponent(c.id)}`, { method: "DELETE" }).catch(() => {});
+                }}
               >
                 ×
               </button>
@@ -1386,6 +1579,7 @@ export function ChatApp({ error }: { error: string | null }) {
           ))}
         </nav>
         <div className="border-t border-[var(--color-rule)] pt-3 space-y-2 text-xs text-[var(--color-dim)]">
+          <p title="conversations sync to your c0mpute account: the web chat, the TUI and the CLI share them">{me ? (syncNote ?? "synced to your account") : "saved in this browser · sign in to sync"}</p>
           <button onClick={() => setTab("plugins")} className={`block ${tab === "plugins" ? "accent" : "hover:text-[var(--color-fg)]"}`}>
             plugins
           </button>

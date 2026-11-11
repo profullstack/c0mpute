@@ -14,6 +14,10 @@ import type { Creds } from "./config.ts";
 
 export type ApiErrorKind = "offline" | "auth" | "http" | "aborted";
 
+/** A conversation as the account stores it (see the web's convo-store). */
+export type SyncConvo = { id: string; title: string; model: string; updated: number; messages: ({ role: string; content: string } & Record<string, unknown>)[] };
+export type SyncSummary = { id: string; title: string; model: string; updated: number; deleted: boolean };
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -106,16 +110,22 @@ export class Api {
    * POST /api/v1/chat/completions with stream: true, feeding each delta to
    * `onDelta`. Returns the whole answer.
    */
+  /**
+   * One answer, streamed. The turn is resumable: the server finishes it even
+   * if the connection drops, and a cut-off stream reattaches by run id and
+   * replays (onReset clears what was shown so the replay can redraw it).
+   */
   async streamChat(
     messages: { role: string; content: string }[],
     model: string | null,
     onDelta: (text: string) => void,
     signal?: AbortSignal,
+    opts: { onRun?: (id: string) => void; onReset?: () => void } = {},
   ): Promise<string> {
     const res = await this.raw("/api/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...(model ? { model } : {}), messages, stream: true }),
+      body: JSON.stringify({ ...(model ? { model } : {}), messages, stream: true, resumable: true }),
       timeoutMs: 15 * 60_000,
       signal,
     });
@@ -124,6 +134,83 @@ export class Api {
       if (res.status === 401) throw new ApiError(`${errorMessage(body, 401)} · run \`c0mpute chat login\``, "auth", 401);
       throw new ApiError(errorMessage(body, res.status), "http", res.status);
     }
+    const run = res.headers.get("x-c0mpute-run");
+    if (run) opts.onRun?.(run);
+    try {
+      return await this.readAnswer(res, onDelta, signal);
+    } catch (e) {
+      if (run && e instanceof ApiError && e.kind === "offline") return this.resumeRun(run, onDelta, signal, opts.onReset);
+      throw e;
+    }
+  }
+
+  /** Reattach to a resumable turn (a few tries with backoff); the replay starts at the beginning. */
+  async resumeRun(run: string, onDelta: (text: string) => void, signal?: AbortSignal, onReset?: () => void, tries = 6): Promise<string> {
+    let last: unknown = null;
+    for (let attempt = 0; attempt < tries; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, Math.min(8000, 250 * 2 ** attempt)));
+      if (signal?.aborted) throw new ApiError("stopped", "aborted");
+      let res: Response;
+      try {
+        res = await this.raw(`/api/v1/chat/runs/${encodeURIComponent(run)}`, { timeoutMs: 15 * 60_000, signal });
+      } catch (e) {
+        last = e;
+        if (e instanceof ApiError && (e.kind === "aborted" || e.kind === "auth")) throw e;
+        continue;
+      }
+      if (res.status === 404) throw new ApiError("the connection dropped and the server no longer has this answer; send it again", "http", 404);
+      if (!res.ok) {
+        last = new ApiError(errorMessage(await res.json().catch(() => null), res.status), "http", res.status);
+        continue;
+      }
+      onReset?.();
+      try {
+        return await this.readAnswer(res, onDelta, signal);
+      } catch (e) {
+        last = e;
+        if (!(e instanceof ApiError && e.kind === "offline")) throw e;
+      }
+    }
+    throw last instanceof ApiError ? last : new ApiError("lost the connection to this answer", "offline");
+  }
+
+  /** Stop a resumable turn (closing its connection does not). Best effort. */
+  async cancelRun(run: string): Promise<void> {
+    await this.raw(`/api/v1/chat/runs/${encodeURIComponent(run)}`, { method: "DELETE", timeoutMs: 10_000 }).catch(() => {});
+  }
+
+  // ─── conversations synced to the account ───────────────────────────
+
+  async listConversations(since = 1): Promise<SyncSummary[]> {
+    const res = await this.raw(`/api/v1/chat/conversations?since=${since}`, { timeoutMs: 20_000 });
+    if (!res.ok) throw new ApiError(errorMessage(await res.json().catch(() => null), res.status), "http", res.status);
+    return ((await res.json()) as { data?: SyncSummary[] }).data ?? [];
+  }
+
+  async getConversation(id: string): Promise<SyncConvo | null> {
+    const res = await this.raw(`/api/v1/chat/conversations/${encodeURIComponent(id)}`, { timeoutMs: 20_000 });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new ApiError(errorMessage(await res.json().catch(() => null), res.status), "http", res.status);
+    return (await res.json()) as SyncConvo;
+  }
+
+  /** Save; on 409 returns the newer server copy instead. */
+  async putConversation(c: SyncConvo): Promise<{ ok: true } | { ok: false; newer: SyncConvo | null }> {
+    const res = await this.raw(`/api/v1/chat/conversations/${encodeURIComponent(c.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(c),
+      timeoutMs: 20_000,
+    });
+    if (res.status === 409) {
+      const body = (await res.json().catch(() => ({}))) as { conversation?: SyncConvo };
+      return { ok: false, newer: body.conversation ?? null };
+    }
+    if (!res.ok) throw new ApiError(errorMessage(await res.json().catch(() => null), res.status), "http", res.status);
+    return { ok: true };
+  }
+
+  private async readAnswer(res: Response, onDelta: (text: string) => void, signal?: AbortSignal): Promise<string> {
     if (!res.body) throw new ApiError("empty answer stream", "http", res.status);
     let answer = "";
     const parser = sseParser((data) => {

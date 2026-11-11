@@ -28,6 +28,8 @@ export type Command =
   | { kind: "new" }
   | { kind: "help" }
   | { kind: "jobs" }
+  | { kind: "history" }
+  | { kind: "open"; target: string }
   | { kind: "error"; message: string };
 
 /**
@@ -49,6 +51,8 @@ export const HELP_COMMANDS: [string, string][] = [
   ["/model [id]", "pick the model (no id: open the picker)"],
   ["/models", "list the live models"],
   ["/new", "start a new conversation"],
+  ["/history", "your conversations (synced to your account: web, TUI and CLI share them)"],
+  ["/open <n|id>", "switch to one from /history"],
   ["/jobs", "go to the Jobs tab"],
   ["/help", "this list"],
 ];
@@ -89,6 +93,12 @@ export function parseLine(input: string): Command | null {
         return { kind: "help" };
       case "jobs":
         return { kind: "jobs" };
+      case "history":
+      case "chats":
+        return { kind: "history" };
+      case "open":
+      case "resume":
+        return arg?.trim() ? { kind: "open", target: arg.trim() } : { kind: "error", message: "usage: /open <number from /history, or a conversation id>" };
       case "image":
       case "img":
       case "draw":
