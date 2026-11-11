@@ -130,7 +130,8 @@ export function unseal(key: Buffer, sealed: string, aad: string): string | null 
   const [v, iv, tag, ct] = sealed.split(".");
   if (v !== "v1" || !iv || !tag || ct === undefined) return null;
   try {
-    const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
+    // Pin the 16-byte tag seal() writes: without it a truncated tag would verify.
+    const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"), { authTagLength: 16 });
     d.setAAD(Buffer.from(aad));
     d.setAuthTag(Buffer.from(tag, "base64url"));
     return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
