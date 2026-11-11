@@ -7,6 +7,7 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import pkg from "../../package.json";
 import { expandServer, type McpServer } from "./mcp-config";
 
 export interface McpTool {
@@ -25,7 +26,7 @@ export interface McpConn {
   stderr: string[];
 }
 
-const VERSION = "0.3.28";
+const VERSION: string = pkg.version;
 
 /** Tool name the model sees: `<server>__<tool>`, limited to [A-Za-z0-9_-]. */
 export function qualifiedName(server: string, tool: string): string {
