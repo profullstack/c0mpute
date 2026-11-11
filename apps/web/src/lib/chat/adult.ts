@@ -4,8 +4,9 @@
 //
 // - The child-safety guard is always on, adult mode or not.
 // - Adult mode needs an 18+ attestation on the account (adult_verified_at),
-//   a browser session to set it, and a paid compute balance: anonymous and
-//   free-tier callers never get it.
+//   a browser session to set it, and a paid compute balance (or an Infernet
+//   admin account, which is unmetered): anonymous and free-tier callers never
+//   get it.
 // - Adult results never become og images, public galleries, shares or
 //   /push sites, and the chat shows them blurred until clicked.
 
@@ -18,6 +19,8 @@ export type AdultCaller = { id: string; adult_verified_at?: string | null } | nu
 export type Gate = { ok: true } | { ok: false; status: number; code: RefusalCode | "adult_needs_balance"; message: string };
 
 const paid = (balance: Record<string, unknown> | null | undefined) => {
+  // Infernet admins (INFERNET_ADMIN_USER_IDS) are unmetered: no payment needed.
+  if (balance?.admin === true) return true;
   const v = Number(balance?.total_spendable_usd ?? balance?.spendable_usd ?? 0);
   return Number.isFinite(v) && v > 0;
 };
