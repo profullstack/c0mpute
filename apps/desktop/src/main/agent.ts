@@ -37,6 +37,8 @@ export interface AgentDeps {
   systemExtra(): string;
   confirm(req: { call: ToolCall; tool: AgentTool }): Promise<Decision>;
   emit(ev: AgentEvent): void;
+  /** Called with the conversation after every run and on reset (the app saves it to disk). */
+  persist?(messages: ChatMessage[]): void;
 }
 
 export const BASE_SYSTEM =
@@ -68,6 +70,13 @@ export class AgentSession {
     this.stop();
     this.messages = [];
     this.setQueue([]);
+    this.save();
+  }
+
+  private save() {
+    try {
+      this.deps.persist?.(this.messages);
+    } catch {}
   }
 
   get queued(): readonly string[] {
@@ -153,6 +162,7 @@ export class AgentSession {
       emit({ type: "done" });
     } finally {
       this.running = false;
+      this.save();
     }
   }
 
