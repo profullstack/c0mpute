@@ -27,6 +27,11 @@ describe("sealing", () => {
     expect(unseal(key, s, "u2|tc|token")).toBeNull();
     expect(unseal(randomBytes(32), s, "u1|tc|token")).toBeNull();
   });
+  test("a truncated auth tag is refused", () => {
+    const [v, iv, tag, ct] = seal(key, "secret-token", "u1|tc|token").split(".");
+    const short = Buffer.from(tag, "base64url").subarray(0, 4).toString("base64url");
+    expect(unseal(key, [v, iv, short, ct].join("."), "u1|tc|token")).toBeNull();
+  });
   test("key formats", () => {
     expect(pluginKey(key.toString("hex"))?.equals(key)).toBe(true);
     expect(pluginKey(key.toString("base64"))?.equals(key)).toBe(true);

@@ -130,10 +130,13 @@ export function unseal(key: Buffer, sealed: string, aad: string): string | null 
   const [v, iv, tag, ct] = sealed.split(".");
   if (v !== "v1" || !iv || !tag || ct === undefined) return null;
   try {
-    // Pin the 16-byte tag seal() writes: without it a truncated tag would verify.
+    // Pin the tag to the full 16 bytes: GCM otherwise accepts a truncated tag,
+    // which makes forging a ciphertext far cheaper.
+    const t = Buffer.from(tag, "base64url");
+    if (t.length !== 16) return null;
     const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"), { authTagLength: 16 });
     d.setAAD(Buffer.from(aad));
-    d.setAuthTag(Buffer.from(tag, "base64url"));
+    d.setAuthTag(t);
     return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
   } catch {
     return null;

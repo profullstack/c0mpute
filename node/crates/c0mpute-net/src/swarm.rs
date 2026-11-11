@@ -27,7 +27,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{ChunkSource, Network, identity as id_mod};
 
@@ -786,7 +786,17 @@ struct SwarmTask {
     /// Broadcast channel for gossipsub messages delivered to subscribed
     /// topics. Senders are upstream consumers that called `messages()`.
     gossip_tx: broadcast::Sender<GossipMessage>,
+    /// Consecutive gossipsub heartbeats on which each peer dropped messages
+    /// (its send queue was full), and when the last one was reported.
+    slow_peers: HashMap<PeerId, (u32, std::time::Instant)>,
 }
+
+/// Heartbeats in a row a peer may fail to drain its gossipsub send queue
+/// before we close its connections. A stuck connection never drains: every
+/// message to it is dropped with a "Send Queue full" WARN until it closes,
+/// so it was flooding logs while losing offers and bids. Closing it makes
+/// the peer redial with an empty queue (mDNS/kad rediscover it).
+const SLOW_PEER_HEARTBEATS: u32 = 5;
 
 impl SwarmTask {
     /// Remember addresses seen for `peer` (newest last, at most 16, and at
@@ -898,6 +908,7 @@ impl SwarmTask {
             rpc_handlers,
             cmd_weak,
             gossip_tx,
+            slow_peers: HashMap::new(),
         })
     }
 
@@ -1264,6 +1275,29 @@ impl SwarmTask {
                 // never blocks).
                 let _ = self.gossip_tx.send(msg);
             }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Gossipsub(gossipsub::Event::SlowPeer {
+                peer_id,
+                failed_messages,
+            })) => {
+                let now = std::time::Instant::now();
+                let entry = self.slow_peers.entry(peer_id).or_insert((0, now));
+                // Heartbeat is 1 s; a gap longer than ~3 s means it recovered.
+                entry.0 = if now.duration_since(entry.1) <= Duration::from_secs(3) {
+                    entry.0 + 1
+                } else {
+                    1
+                };
+                entry.1 = now;
+                if entry.0 >= SLOW_PEER_HEARTBEATS {
+                    self.slow_peers.remove(&peer_id);
+                    warn!(
+                        %peer_id,
+                        ?failed_messages,
+                        "gossipsub send queue stuck for {SLOW_PEER_HEARTBEATS} heartbeats; closing connection"
+                    );
+                    let _ = self.swarm.lock().await.disconnect_peer_id(peer_id);
+                }
+            }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
                 let mut sw = self.swarm.lock().await;
                 for (peer_id, addr) in peers {
@@ -1292,6 +1326,7 @@ impl SwarmTask {
                 num_established: 0,
                 ..
             } => {
+                self.slow_peers.remove(&peer_id);
                 self.swarm
                     .lock()
                     .await
