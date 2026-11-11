@@ -78,8 +78,11 @@ export async function POST(req: Request) {
     } catch {
       continue;
     }
-    const p = (await poll.json().catch(() => ({}))) as Record<string, unknown>;
+    const p = (await poll.json().catch(() => null)) as Record<string, unknown> | null;
     if (poll.status === 202) continue;
+    // A deploy of the network's web tier answers 502/503 (or an HTML
+    // maintenance page) for a minute: keep holding, the job is not lost there.
+    if (!p || poll.status >= 500) continue;
     if (poll.status !== 200) {
       return err(poll.status >= 400 ? poll.status : 502, typeof p.error === "string" ? p.error : "video failed");
     }
