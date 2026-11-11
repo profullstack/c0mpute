@@ -288,14 +288,37 @@ export class Controller {
   async submit(): Promise<void> {
     const text = this.state.chat.input.value.trim();
     if (!text) return;
+    const history = [...this.state.chat.history.filter((h) => h !== text), text].slice(-100);
     if (this.state.chat.streaming) {
-      this.toast("still answering; Esc stops it", "info");
+      // Busy: hold the line and send it when this answer finishes.
+      const queued = [...this.state.chat.queued, text];
+      this.set({ chat: { ...this.state.chat, input: { value: "", cursor: 0 }, history, historyAt: null, queued } });
+      this.toast(`queued (${queued.length}); sends when this answer finishes · Esc stops it now`, "info");
       return;
     }
-    const history = [...this.state.chat.history.filter((h) => h !== text), text].slice(-100);
     this.set({ chat: { ...this.state.chat, input: { value: "", cursor: 0 }, history, historyAt: null } });
     const cmd = parseLine(text);
     if (cmd) await this.run(cmd, text);
+  }
+
+  /** Send the next queued line, if the answer before it has finished. */
+  private async drainQueue(): Promise<void> {
+    const [next, ...rest] = this.state.chat.queued;
+    if (next === undefined || this.state.chat.streaming) return;
+    this.set({ chat: { ...this.state.chat, queued: rest } });
+    const cmd = parseLine(next);
+    if (cmd) await this.run(cmd, next);
+    // A command that does not stream (/help, /image…) leaves the rest waiting.
+    if (!this.state.chat.streaming && this.state.chat.queued.length) await this.drainQueue();
+  }
+
+  /** ↑ on an empty input with lines queued: take the last one back to edit. */
+  unqueueLast(): boolean {
+    const queued = this.state.chat.queued;
+    const last = queued.at(-1);
+    if (last === undefined) return false;
+    this.set({ chat: { ...this.state.chat, queued: queued.slice(0, -1), input: { value: last, cursor: last.length }, historyAt: null } });
+    return true;
   }
 
   async run(cmd: Command, text: string): Promise<void> {
@@ -373,6 +396,7 @@ export class Controller {
       this.set({ chat: { ...this.state.chat, streaming: false } });
       this.schedulePersist();
     }
+    await this.drainQueue();
   }
 
   stopStreaming(): void {
@@ -410,7 +434,7 @@ export class Controller {
 
   newChat(): void {
     this.abort?.abort();
-    this.set({ chat: { ...this.state.chat, convo: newConvo(this.state.chat.convo.model, this.now()), scroll: 0, streaming: false } });
+    this.set({ chat: { ...this.state.chat, convo: newConvo(this.state.chat.convo.model, this.now()), scroll: 0, streaming: false, queued: [] } });
     this.schedulePersist();
   }
 

@@ -220,6 +220,83 @@ describe("controller", () => {
     expect(ctl.state.chat.streaming).toBe(false);
   });
 
+  it("queues a line typed during an answer and sends it when the answer finishes", async () => {
+    const bodies: string[] = [];
+    let finish: () => void = () => {};
+    const { api } = fakeApi({
+      "POST /api/v1/chat/completions": (init) => {
+        bodies.push(String(init?.body));
+        if (bodies.length > 1) return sse(['data: {"choices":[{"delta":{"content":"second"}}]}\n\ndata: [DONE]\n']);
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"first"}}]}\n'));
+            finish = () => {
+              c.enqueue(new TextEncoder().encode("data: [DONE]\n"));
+              c.close();
+            };
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const ctl = controller(api);
+    type(ctl, "one");
+    handleKey(ctl, keyEvent("enter"));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ctl.state.chat.streaming).toBe(true);
+    type(ctl, "two");
+    handleKey(ctl, keyEvent("enter"));
+    expect(ctl.state.chat.queued).toEqual(["two"]);
+    expect(ctl.state.chat.input.value).toBe("");
+    expect(draw({ ...ctl.state, tab: "chat" })).toContain("queued › two");
+    expect(bodies.length).toBe(1);
+    finish();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ctl.state.chat.queued).toEqual([]);
+    expect(ctl.state.chat.convo.messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "one"],
+      ["assistant", "first"],
+      ["user", "two"],
+      ["assistant", "second"],
+    ]);
+    expect(JSON.parse(bodies[1]!).messages.at(-1)).toEqual({ role: "user", content: "two" });
+  });
+
+  it("Esc stops the answer and the queued line goes at once; up takes a queued line back", async () => {
+    const bodies: string[] = [];
+    const { api } = fakeApi({
+      "POST /api/v1/chat/completions": (init) => {
+        bodies.push(String(init?.body));
+        if (bodies.length > 1) return sse(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n']);
+        const signal = init?.signal;
+        const body = new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"long"}}]}\n'));
+            signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const ctl = controller(api);
+    type(ctl, "one");
+    handleKey(ctl, keyEvent("enter"));
+    await new Promise((r) => setTimeout(r, 10));
+    type(ctl, "draft");
+    handleKey(ctl, keyEvent("enter"));
+    type(ctl, "two");
+    handleKey(ctl, keyEvent("enter"));
+    handleKey(ctl, keyEvent("up"));
+    expect(ctl.state.chat.input.value).toBe("two");
+    expect(ctl.state.chat.queued).toEqual(["draft"]);
+    for (let i = 0; i < 3; i++) handleKey(ctl, keyEvent("backspace"));
+    handleKey(ctl, keyEvent("escape"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bodies.length).toBe(2);
+    expect(JSON.parse(bodies[1]!).messages.at(-1)).toEqual({ role: "user", content: "draft" });
+    expect(ctl.state.chat.convo.messages.at(-1)!.content).toBe("ok");
+  });
+
   it("tells a signed-out user the exact command, without calling the API", async () => {
     const { api, calls } = fakeApi({}, null);
     const ctl = controller(api);
