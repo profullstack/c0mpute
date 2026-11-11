@@ -798,9 +798,28 @@ async fn push_result_to_buyer(net: &Libp2pNetwork, store: &ChunkStore, accept: &
         }
         net.add_peer_address(buyer, a).await;
     }
+    // Dial first, like the sealed-spec fetch: from behind NAT the dial alone
+    // can take longer than one RPC's 20 s budget (2026-11-11: every push timed
+    // out and the connection came up half a second later).
+    if let Err(error) = net.reach(buyer, Duration::from_secs(30)).await {
+        tracing::debug!(%buyer, err = %error, "result push: buyer not reachable yet; trying anyway");
+    }
     for chunk in chunks {
-        if let Err(error) = net.rpc(buyer, RESULT_PUSH_SERVICE, chunk).await {
-            tracing::debug!(%buyer, err = %error, job_id = %accept.job_id, "result push failed; the buyer will pull");
+        let mut pushed = false;
+        for attempt in 0..3u32 {
+            match net.rpc(buyer, RESULT_PUSH_SERVICE, chunk.clone()).await {
+                Ok(_) => {
+                    pushed = true;
+                    break;
+                }
+                Err(error) => {
+                    tracing::debug!(%buyer, attempt, err = %error, job_id = %accept.job_id, "result push attempt failed");
+                    let _ = net.reach(buyer, Duration::from_secs(15)).await;
+                }
+            }
+        }
+        if !pushed {
+            tracing::warn!(%buyer, job_id = %accept.job_id, "result push failed; the buyer will pull");
             return;
         }
     }
