@@ -102,7 +102,7 @@ hardware     = "GPU path: NVIDIA GPU + docker with the NVIDIA container runtime 
 # `width`/`height` are this model's defaults for a job that leaves them out.
 # `cpu` means a CPU-only node can serve it too (see the header).
 [module.models]
-"wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", diffusers_repo = "Wan-AI/Wan2.2-TI2V-5B-Diffusers", default = true, params = "5B", precision = "fp16", vram_gib = 24, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
+"wan2.2-ti2v-5b" = { repo = "Wan-AI/Wan2.2-TI2V-5B", diffusers_repo = "Wan-AI/Wan2.2-TI2V-5B-Diffusers", default = true, params = "5B", precision = "fp16", vram_gib = 24, full_vram_gib = 28, resolution = "720p@24fps", workloads = ["video.txt2vid", "video.img2vid"], license = "apache-2.0" }
 "wan2.2-t2v-a14b" = { repo = "Wan-AI/Wan2.2-T2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-T2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.txt2vid"], license = "apache-2.0" }
 "wan2.2-i2v-a14b" = { repo = "Wan-AI/Wan2.2-I2V-A14B", diffusers_repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers", params = "14B MoE", precision = "fp8", vram_gib = 48, resolution = "720p@24fps", workloads = ["video.img2vid"], license = "apache-2.0" }
 "wan2.1-t2v-1.3b" = { repo = "Wan-AI/Wan2.1-T2V-1.3B", diffusers_repo = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers", params = "1.3B", precision = "bf16", vram_gib = 8, full_vram_gib = 20, resolution = "480p@16fps", frames = 33, fps = 16, steps = 20, width = 480, height = 272, workloads = ["video.txt2vid"], license = "apache-2.0", cpu = "16 GiB RAM, 16 threads, ~20-30 min per 33-frame 480x272 clip (batch)" }
