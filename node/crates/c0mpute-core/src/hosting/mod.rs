@@ -249,6 +249,8 @@ struct Inner {
     own_receipts: RwLock<Vec<Receipt>>,
     receipts_path: Option<PathBuf>,
     disk_override: Option<(u64, u64)>,
+    /// This node's failure domain, worked out once (see [`failure_domain`]).
+    machine: std::sync::OnceLock<Option<String>>,
 }
 
 /// Which sites a node challenges.
@@ -409,6 +411,7 @@ impl Hosting {
             own_receipts: RwLock::new(own_receipts),
             receipts_path: opts.receipts_path,
             disk_override: opts.disk_override,
+            machine: std::sync::OnceLock::new(),
         });
         let h = Hosting(inner);
         // Records seen before a restart (each re-verified).
@@ -637,11 +640,7 @@ impl Hosting {
         );
         // A pretend disk (tests running many nodes in one process) is no
         // failure domain: those nodes are told apart by address.
-        let machine = if self.0.disk_override.is_some() {
-            None
-        } else {
-            failure_domain(self.0.store.root(), self.disk().1)
-        };
+        let machine = self.machine().await;
         {
             let mut map = self.0.map.write().await;
             map.set_full(&self.0.me, full);
@@ -680,6 +679,28 @@ impl Hosting {
             })
             .await;
         }
+    }
+
+    /// This node's failure domain, for hosting nodes only (a publisher or a
+    /// gateway holds no copies). Worked out once, off the async threads: the
+    /// disk lookup lists every mount. A pretend disk (tests running many
+    /// nodes in one process) is no failure domain: those nodes are told
+    /// apart by address.
+    async fn machine(&self) -> Option<String> {
+        if !self.0.hosts || self.0.disk_override.is_some() {
+            return None;
+        }
+        if let Some(m) = self.0.machine.get() {
+            return m.clone();
+        }
+        let root = self.0.store.root().to_path_buf();
+        let m = tokio::task::spawn_blocking(move || {
+            let total = crate::opendisk::disk_for(&root).1;
+            failure_domain(&root, total)
+        })
+        .await
+        .unwrap_or(None);
+        self.0.machine.get_or_init(|| m).clone()
     }
 
     /// Bytes this node holds for the network (striped sites: the groups held).
