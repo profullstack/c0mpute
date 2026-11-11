@@ -217,3 +217,87 @@ jobs:
               [ "$code" = "200" ] || { echo "asset $f not downloadable after publish" >&2; exit 1; }
             done
           done
+
+  # The desktop app (apps/desktop), built once the CLI release is public and
+  # attached to the same release. It bundles the CLI tarball of its own
+  # platform from this release (checked against its .sha256), so the app and
+  # the `c0mpute` inside it are the same version. Runs after `publish` on
+  # purpose: a desktop build failure never holds back a CLI release; re-run
+  # the failed job. Unsigned on macOS/Windows until certificates exist (see
+  # apps/desktop/electron-builder.yml).
+  desktop:
+    name: desktop ${{ matrix.platform }}
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            builder: --linux AppImage deb --x64
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+            builder: --linux AppImage deb --arm64
+          - platform: darwin-aarch64
+            os: macos-latest
+            builder: --mac dmg zip --arm64
+          - platform: darwin-x86_64
+            os: macos-latest
+            builder: --mac dmg zip --x64
+          - platform: windows-x86_64
+            os: windows-latest
+            builder: --win nsis --x64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Bundle the CLI from this release
+        working-directory: apps/desktop
+        shell: bash
+        run: node scripts/fetch-cli.mjs --tag "$TAG" --platform ${{ matrix.platform }}
+
+      - name: Test
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        shell: bash
+        run: bun test
+
+      - name: Build and package
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          # No signing identity yet: do not let electron-builder go looking.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -eu
+          node scripts/ensure-electron.mjs
+          node scripts/build.mjs
+          npx electron-builder --config electron-builder.yml ${{ matrix.builder }} --publish never -c.extraMetadata.version="${TAG#v}"
+
+      - name: Upload to the release
+        working-directory: apps/desktop/release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          shopt -s nullglob
+          # A version-less AppImage too, for `install.sh --desktop` via
+          # c0mpute.com/releases/latest/c0mpute-desktop-<platform>.AppImage.
+          for a in c0mpute-desktop-*.AppImage; do cp "$a" "c0mpute-desktop-${{ matrix.platform }}.AppImage"; break; done
+          files=(c0mpute-desktop-*.AppImage c0mpute-desktop-*.deb c0mpute-desktop-*.dmg c0mpute-desktop-*.zip c0mpute-desktop-*.exe)
+          [ ${#files[@]} -gt 0 ] || { echo "no desktop artifacts built" >&2; ls -la; exit 1; }
+          for f in "${files[@]}"; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+            gh release upload "$TAG" "$f" "$f.sha256" --clobber
+          done

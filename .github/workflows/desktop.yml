@@ -1,0 +1,38 @@
+name: desktop
+
+# Unit tests, typecheck and a bundle build of apps/desktop on every change to
+# it. Packaging (AppImage, deb, dmg, exe) happens in release.yml on tags.
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/desktop.yml"
+      - "bun.lock"
+  push:
+    branches: [master]
+    paths:
+      - "apps/desktop/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - name: Unit tests (incl. a real stdio MCP round trip)
+        working-directory: apps/desktop
+        run: bun test
+      - name: Typecheck
+        working-directory: apps/desktop
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: Bundle
+        working-directory: apps/desktop
+        run: node scripts/build.mjs

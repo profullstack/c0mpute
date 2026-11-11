@@ -1,0 +1,10 @@
+{
+  "_note": "typeheard (local stdio, npm @profullstack/typeheard-mcp): transcribe audio/video files via typeheard. Needs TYPEHEARD_API_KEY (th_...) from your account at https://typeheard.pwa.pit.world.",
+  "mcpServers": {
+    "typeheard": {
+      "command": "npx",
+      "args": ["-y", "@profullstack/typeheard-mcp"],
+      "env": { "TYPEHEARD_API_KEY": "${TYPEHEARD_API_KEY}" }
+    }
+  }
+}

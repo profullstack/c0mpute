@@ -1,0 +1,10 @@
+{
+  "_note": "CrawlProof: audit how AI crawlers see a site, and run ads that reach them. Requires CRAWLPROOF_API_KEY from https://crawlproof.com/settings.",
+  "mcpServers": {
+    "crawlproof": {
+      "type": "http",
+      "url": "https://crawlproof.com/api/mcp",
+      "headers": { "Authorization": "Bearer ${CRAWLPROOF_API_KEY}" }
+    }
+  }
+}
