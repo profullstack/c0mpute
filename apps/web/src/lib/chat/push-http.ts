@@ -1,5 +1,5 @@
 // Shared bits for the /api/v1/hosting/* routes.
-import { chooseNode, PushError, type HostingNode, type PushStore } from "./push";
+import { PushError, type HostingNode, type Push, type PushStore } from "./push";
 import { json } from "./server";
 
 export function pushErr(e: unknown) {
@@ -11,11 +11,11 @@ export function pushErr(e: unknown) {
 export const bad = (message: string, code = 400) => json({ error: { message, code } }, code);
 
 /**
- * Which node a push goes to: the one named, else the only one, else the one
- * seen most recently. Paid pushes (`--disks`) need a node that pays its hosts
- * through CoinPay.
+ * Which node a push goes to: the one named, else the node that signed the
+ * site, else the account's own (most recently seen), else the c0mpute cloud
+ * node. Paid pushes (`--disks`) need a node that pays its hosts through CoinPay.
  */
-export async function pickNode(ps: PushStore, userId: string, name: unknown): Promise<HostingNode | Response> {
-  const r = chooseNode(await ps.nodes(userId), name);
+export async function pickNode(ps: PushStore, userId: string, name: unknown, existing?: Push | null): Promise<HostingNode | Response> {
+  const r = await ps.pickNode(userId, name, existing);
   return "error" in r ? bad(r.error, r.code) : r;
 }

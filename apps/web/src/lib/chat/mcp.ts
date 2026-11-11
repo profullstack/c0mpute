@@ -35,11 +35,13 @@ export const TOOLS = [
         temperature: { type: "number" },
       },
     },
+    annotations: { title: "Ask a network model", readOnlyHint: true, openWorldHint: true },
   },
   {
     name: "list_models",
     description: "Models live on the c0mpute network right now.",
     inputSchema: { type: "object", properties: {} },
+    annotations: { title: "List models", readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "promo_video",
@@ -55,16 +57,19 @@ export const TOOLS = [
       },
       required: ["url"],
     },
+    annotations: { title: "Make a promo video", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
     name: "promo_status",
     description: "Progress of a promo_video job (brand, script, frames, motion, voice, music, render), and the MP4 and SRT links when it is done (fetch them with the same Bearer key).",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    annotations: { title: "Promo video status", readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "whoami",
     description: "The signed-in c0mpute account (CoinPay DID).",
     inputSchema: { type: "object", properties: {} },
+    annotations: { title: "Who am I", readOnlyHint: true, openWorldHint: false },
   },
 ] as const;
 
@@ -84,9 +89,9 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return ok(id, {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "c0mpute-chat", version: "1.0.0" },
+        serverInfo: { name: "c0mpute", title: "c0mpute", version: "1.1.0" },
         instructions:
-          "Chat with models on the c0mpute network. Call list_models, then chat. promo_video makes a promo video of a website; poll promo_status. hosting_push publishes files as a site through one of your linked nodes (hosting_nodes); poll hosting_push_status.",
+          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first). promo_video makes a promo video of a website; poll promo_status.",
       });
     case "ping":
       return ok(id, {});

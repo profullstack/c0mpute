@@ -16,7 +16,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const { id, n } = await params;
   let file;
   try {
-    const p = await pushStore().pushById(user.id, id);
+    const p = await pushStore().pushForCaller(user.id, id);
     if (!p) return bad("no such push on this account", 404);
     file = p.files[Number(n)];
   } catch (e) {

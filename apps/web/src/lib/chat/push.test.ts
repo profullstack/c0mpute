@@ -234,3 +234,57 @@ describe("push store", () => {
     expect(again.payments).toBe("off");
   });
 });
+
+describe("cloud node", () => {
+  async function setup() {
+    const sql = memSql();
+    const house = await createPushStore(sql).registerNode("house", { name: "cloud-vienna", payments: "off" });
+    return { sql, s: createPushStore(sql, { cloudNodeId: house.id }), house };
+  }
+
+  test("someone with no node of their own publishes free through it", async () => {
+    const { s, house } = await setup();
+    const node = await s.pickNode("u1", undefined, null);
+    expect("error" in node).toBe(false);
+    expect((node as { id: string }).id).toBe(house.id);
+    const p = await s.upsertPush("u1", { target: "hosting", name: "blog", node: node as never, files: FILES, disks: "auto" });
+    expect(p.disks).toBe("free");
+    // The house node claims every account's work, and reports on it.
+    const jobs = await s.claimJobs("house", house.id);
+    expect(jobs.map((j) => j.id)).toEqual([p.id]);
+    const live = await s.report("house", house.id, p.id, { rev: 1, ok: true, site_id: "abcdef0123456789abcd", url: "https://gateway.c0mpute.com/s/abcdef0123456789abcd/", copies: 3 });
+    expect(live !== "deleted" && live.status).toBe("live");
+    expect((await s.push("u1", "hosting", "blog"))?.status).toBe("live");
+    // The house can read the file it publishes; another account cannot.
+    expect((await s.pushForCaller("house", p.id))?.id).toBe(p.id);
+    expect(await s.pushForCaller("u2", p.id)).toBeNull();
+  });
+
+  test("names are first come, first served; media and too many sites refused", async () => {
+    const { s, house } = await setup();
+    const cloud = (await s.cloudNode())!;
+    await s.upsertPush("u1", { target: "hosting", name: "blog", node: cloud, files: FILES });
+    await expect(s.upsertPush("u2", { target: "hosting", name: "blog", node: cloud, files: FILES })).rejects.toThrow(/taken/);
+    await expect(
+      s.upsertPush("u2", { target: "hosting", name: "art", node: cloud, files: [{ path: "a.png", type: "image/png", src: "/api/v1/images/x" }] as never }),
+    ).rejects.toThrow(/inline text/);
+    for (const n of ["a", "b", "c", "d"]) await s.upsertPush("u1", { target: "hosting", name: n, node: cloud, files: FILES });
+    await expect(s.upsertPush("u1", { target: "hosting", name: "e", node: cloud, files: FILES })).rejects.toThrow(/at most 5/);
+    // Updating an existing cloud site is not a new site.
+    await s.upsertPush("u1", { target: "hosting", name: "blog", node: cloud, files: FILES });
+    expect(house.id).toBe(cloud.id);
+  });
+
+  test("your own node wins when you have one; 'cloud' picks the cloud node", async () => {
+    const { s, house } = await setup();
+    const mine = await s.registerNode("u1", { name: "laptop", payments: "coinpay" });
+    expect(((await s.pickNode("u1", undefined, null)) as { id: string }).id).toBe(mine.id);
+    expect(((await s.pickNode("u1", "cloud", null)) as { id: string }).id).toBe(house.id);
+  });
+
+  test("without a configured cloud node nothing changes", async () => {
+    const s = createPushStore(memSql());
+    const r = await s.pickNode("u1", undefined, null);
+    expect("error" in r && r.error).toMatch(/no hosting node/);
+  });
+});

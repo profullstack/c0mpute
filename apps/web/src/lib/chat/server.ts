@@ -7,6 +7,7 @@ export const env = (name: string): string => (process.env as Record<string, stri
 
 import { createStore, type Sql, type Store, type User } from "./store";
 import { createPushStore, type PushStore } from "./push";
+import { createOAuthStore, type OAuthStore } from "./oauth";
 
 // ── store ────────────────────────────────────────────────────────────────────
 let client: Database | null = null;
@@ -42,7 +43,11 @@ export const store = () => (_store ??= createStore(cloudSql));
 
 let _pushStore: PushStore | null = null;
 /** `/push hosting` + `/connect hosting`: linked nodes and pushes, per account. */
-export const pushStore = () => (_pushStore ??= createPushStore(cloudSql));
+export const pushStore = () => (_pushStore ??= createPushStore(cloudSql, { cloudNodeId: env("C0MPUTE_CLOUD_NODE_ID") }));
+
+let _oauthStore: OAuthStore | null = null;
+/** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
+export const oauthStore = () => (_oauthStore ??= createOAuthStore(cloudSql));
 
 // ── request auth ─────────────────────────────────────────────────────────────
 export const SESSION_COOKIE = "c0_session";
@@ -91,6 +96,22 @@ export function json(body: unknown, status = 200, headers: Record<string, string
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store", ...headers },
   });
+}
+
+/**
+ * 401 for the MCP server: names the protected-resource metadata, which is how
+ * an MCP client (ChatGPT, claude.ai, Claude Code) finds where to sign in.
+ */
+export function mcpUnauthorized() {
+  return json(
+    { jsonrpc: "2.0", id: null, error: { code: -32001, message: "Sign in to c0mpute (OAuth), or send Authorization: Bearer c0k_..." } },
+    401,
+    {
+      "www-authenticate": `Bearer realm="c0mpute", resource_metadata="${siteUrl()}/.well-known/oauth-protected-resource"`,
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": "www-authenticate",
+    },
+  );
 }
 
 export function unauthorized() {

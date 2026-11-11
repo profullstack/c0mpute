@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     const ps = pushStore();
     const existing = await ps.push(user.id, "hosting", name);
     // An existing site stays on the node that signed it unless one is named.
-    const node = await pickNode(ps, user.id, body.node ?? (existing?.site_id ? existing.node_id : undefined));
+    const node = await pickNode(ps, user.id, body.node, existing);
     if (node instanceof Response) return node;
     const push = await ps.upsertPush(user.id, { target: "hosting", name, node, files, disks: "auto" });
     return json({ push: publicPush(push, node), poll: `/api/v1/hosting/pushes/${push.id}` }, 202);
