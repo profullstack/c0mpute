@@ -3163,12 +3163,13 @@ async fn run_tts(cmd: TtsCmd, config_path: &std::path::Path) -> Result<()> {
             println!("\nOpenProfile role map:");
             for profile in c0mpute_core::speech_profiles::AGENTS {
                 println!(
-                    "@{}: {} / {}:{} (Pocket: {})",
+                    "@{}: {} / {}:{} (fallback {}:{})",
                     profile.slug,
                     profile.persona,
                     profile.engine,
                     profile.voice,
-                    profile.pocket_voice
+                    profile.fallback_engine,
+                    profile.fallback_voice
                 );
             }
             Ok(())

@@ -49,7 +49,7 @@ pub const IDLE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// How many warm models one node will hold at once. Each is a Python process
 /// with an ONNX session in it, so this is a memory bound, not a CPU one.
-pub const MAX_SESSIONS: usize = 4;
+pub const MAX_SESSIONS: usize = 16;
 
 /// How long to wait for the worker to report its model loaded.
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -105,13 +105,18 @@ struct WarmWorker {
 
 impl WarmWorker {
     /// Start a worker and wait for it to say its model is loaded.
-    async fn start(python: &std::path::Path, root: &std::path::Path) -> Result<Self> {
+    async fn start(
+        python: &std::path::Path,
+        root: &std::path::Path,
+        engine: &str,
+    ) -> Result<Self> {
         let mut command = Command::new(python);
         command
             .arg("-c")
             .arg(super::speech::WORKER_SOURCE)
             .arg("serve")
             .arg(root)
+            .arg(engine)
             .env("HF_HOME", root.join("cache/huggingface"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -125,7 +130,7 @@ impl WarmWorker {
         }
         crate::resources::apply_job_limits(&mut command);
         let mut child = command.spawn().context(
-            "start the warm speech worker; run `c0mpute tts setup --engine kokoro` first",
+            "start the warm speech worker; run `c0mpute tts setup --engine all` first",
         )?;
         let stdin = child.stdin.take().context("warm worker has no stdin")?;
         let stdout = child.stdout.take().context("warm worker has no stdout")?;
@@ -140,7 +145,7 @@ impl WarmWorker {
             .with_context(|| format!("warm worker said {first:.200} instead of ready"))?;
         if !ready.ready {
             bail!(
-                "the warm speech worker could not load Kokoro: {}",
+                "the warm speech worker could not load {engine}: {}",
                 ready.error.unwrap_or_else(|| "no reason given".into())
             );
         }
@@ -216,7 +221,10 @@ impl Drop for WarmWorker {
 struct Session {
     engine: &'static str,
     voice: String,
-    worker: Mutex<WarmWorker>,
+    /// Shared by every session on the same engine: one loaded model serves
+    /// all voices (Pocket caches each voice's state), so a five-voice show
+    /// costs one model in RAM, not five.
+    worker: Arc<Mutex<WarmWorker>>,
     last_used: Mutex<Instant>,
     opened_at: Instant,
     load_ms: u64,
@@ -251,10 +259,16 @@ impl SessionStore {
     /// point is that the model is already loaded when the first word is
     /// wanted — discovering a missing voice later would defeat it.
     pub async fn open(&self, voice: &str) -> Result<OpenedSession> {
-        if !crate::speech::tts_voice_available("kokoro", voice) {
+        // Voice names are unique across engines, so the voice picks the
+        // engine: a Pocket voice (the agents' default) gets a warm Pocket.
+        let engine = crate::speech::engine_for_voice(voice);
+        if engine == "piper" {
+            bail!("warm sessions serve Pocket and Kokoro voices, not Piper ({voice})");
+        }
+        if !crate::speech::tts_voice_available(engine, voice) {
             bail!(
-                "this node does not serve the kokoro voice {voice}; \
-                 run `c0mpute tts setup --engine kokoro`"
+                "this node does not serve the {engine} voice {voice}; \
+                 run `c0mpute tts setup --engine {engine}`"
             );
         }
         self.reap().await;
@@ -268,20 +282,36 @@ impl SessionStore {
             }
         }
 
-        let python =
-            crate::speech::kokoro_python_installed().unwrap_or_else(crate::speech::kokoro_python);
+        let python = if engine == "pocket" {
+            crate::speech::python_path()
+        } else {
+            crate::speech::kokoro_python_installed().unwrap_or_else(crate::speech::kokoro_python)
+        };
         let root = crate::speech::speech_root();
-        let worker = WarmWorker::start(&python, &root).await?;
-        let load_ms = worker.load_ms;
+        let shared = {
+            let sessions = self.inner.read().await;
+            sessions
+                .values()
+                .find(|s| s.engine == engine)
+                .map(|s| (s.worker.clone(), s.load_ms))
+        };
+        let (worker, load_ms) = match shared {
+            Some(found) => found,
+            None => {
+                let worker = WarmWorker::start(&python, &root, engine).await?;
+                let load_ms = worker.load_ms;
+                (Arc::new(Mutex::new(worker)), load_ms)
+            }
+        };
 
         let session = uuid::Uuid::new_v4().to_string();
         let dir = root.join("sessions").join(&session);
         tokio::fs::create_dir_all(&dir).await?;
         let now = Instant::now();
         let entry = Arc::new(Session {
-            engine: "kokoro",
+            engine,
             voice: voice.to_string(),
-            worker: Mutex::new(worker),
+            worker,
             last_used: Mutex::new(now),
             opened_at: now,
             load_ms,
@@ -292,7 +322,7 @@ impl SessionStore {
         info!(%session, voice, load_ms, "opened a warm speech session");
         Ok(OpenedSession {
             session,
-            engine: "kokoro",
+            engine,
             voice: voice.to_string(),
             load_ms,
         })

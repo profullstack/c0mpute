@@ -157,6 +157,17 @@ pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Which engine serves `voice`. Voice ids are unique across engines.
+pub fn engine_for_voice(voice: &str) -> &'static str {
+    if POCKET_VOICES.contains(&voice) {
+        "pocket"
+    } else if PIPER_VOICES.contains(&voice) {
+        "piper"
+    } else {
+        "kokoro"
+    }
+}
+
 pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
     let root = speech_root();
     // Kokoro may run from its own venv, so it is the one engine whose
