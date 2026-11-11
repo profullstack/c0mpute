@@ -635,7 +635,13 @@ impl Hosting {
             room,
             addrs.clone(),
         );
-        let machine = failure_domain(self.0.store.root(), self.disk().1);
+        // A pretend disk (tests running many nodes in one process) is no
+        // failure domain: those nodes are told apart by address.
+        let machine = if self.0.disk_override.is_some() {
+            None
+        } else {
+            failure_domain(self.0.store.root(), self.disk().1)
+        };
         {
             let mut map = self.0.map.write().await;
             map.set_full(&self.0.me, full);
