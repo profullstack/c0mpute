@@ -34,7 +34,7 @@ export async function POST(req: Request) {
   if (!sameOrigin(req)) return err(403, "cross-site request refused");
   const rl = rateLimit(`video:${user.id}`, 6);
   if (!rl.ok) return err(429, "rate limit: too many videos this hour", { "retry-after": String(rl.retryAfter) });
-  const parsed = parseVideoRequest(await req.json().catch(() => null));
+  const parsed = parseVideoRequest(await req.json().catch(() => null), { adultModel: env("C0MPUTE_ADULT_VIDEO_MODEL") || undefined });
   if (typeof parsed === "string") return err(400, parsed);
   const gate = gateGeneration(
     user,

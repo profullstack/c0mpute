@@ -99,9 +99,62 @@ class Model:
     full_vram_gib: int = 0
     # Job defaults for this model (see JOB_DEFAULTS).
     defaults: tuple[tuple[str, int], ...] = ()
+    # LoRAs for adult (18+) jobs only (see AdultLora / pick_adult_lora).
+    adult_loras: tuple["AdultLora", ...] = ()
 
     def default(self, field: str) -> int:
         return dict(self.defaults).get(field, JOB_DEFAULTS[field])
+
+
+@dataclass(frozen=True)
+class AdultLora:
+    repo: str
+    file: str
+    scale: float = 1.0
+    # Word the LoRA was trained on; prepended to the prompt when it is used.
+    trigger: str = ""
+    # Prompt words that pick this LoRA (lowercase, whole words or phrases).
+    match: tuple[str, ...] = ()
+    # Used when no LoRA's `match` hits the prompt.
+    default: bool = False
+
+
+def parse_adult_loras(mid: str, rows) -> tuple[AdultLora, ...]:
+    """`adult_loras = [{ repo, file, scale, trigger, match = [...], default }]`."""
+    out = []
+    for row in rows or ():
+        repo, file = str(row.get("repo", "")).strip(), str(row.get("file", "")).strip()
+        scale = float(row.get("scale", 1.0))
+        if not repo or not file.endswith(".safetensors") or not 0.0 < scale <= 2.0:
+            raise JobError(f"model {mid} has a bad adult_loras entry {row!r}")
+        out.append(AdultLora(
+            repo=repo, file=file, scale=scale,
+            trigger=str(row.get("trigger", "")).strip(),
+            match=tuple(str(m).strip().lower() for m in row.get("match", ()) if str(m).strip()),
+            default=bool(row.get("default", False)),
+        ))
+    if sum(1 for l in out if l.default) > 1:
+        raise JobError(f"model {mid} marks more than one adult LoRA as default")
+    return tuple(out)
+
+
+def pick_adult_lora(loras: tuple[AdultLora, ...], prompt: str) -> AdultLora | None:
+    """The LoRA whose `match` words appear most in the prompt, else the default.
+
+    One LoRA per clip: these are single-act LoRAs and stacking them at full
+    strength fights over the same layers.
+    """
+    import re
+
+    text = prompt.lower()
+    best, best_hits = None, 0
+    for lora in loras:
+        hits = sum(1 for m in lora.match if re.search(rf"(?<![a-z]){re.escape(m)}(?![a-z])", text))
+        if hits > best_hits:
+            best, best_hits = lora, hits
+    if best is not None:
+        return best
+    return next((l for l in loras if l.default), None)
 
 
 def load_models(path: Path) -> dict[str, Model]:
@@ -137,6 +190,7 @@ def load_models(path: Path) -> dict[str, Model]:
             distilled=bool(row.get("distilled", False)),
             full_vram_gib=int(row.get("full_vram_gib", 0)),
             defaults=tuple((k, int(row[k])) for k in JOB_DEFAULTS if k in row),
+            adult_loras=parse_adult_loras(mid, row.get("adult_loras", ())),
         )
         if models[mid].backend not in BACKENDS:
             # Fail loudly: a typo here would otherwise advertise a model the
@@ -232,6 +286,9 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
         "width": width,
         "height": height,
         "seed": seed,
+        # 18+ job (the node verified the buyer opted in): load the model's
+        # adult LoRAs. The child-safety guard ran before this job existed.
+        "adult": raw.get("adult") is True,
         # Distilled checkpoints are trained for CFG off; 5.0 on them burns
         # two forward passes per step for a worse clip.
         "guidance_scale": float(
@@ -359,6 +416,7 @@ def generate_frames(job: dict, frame_dir: Path) -> None:
     vae = AutoencoderKLWan.from_pretrained(repo, subfolder="vae", torch_dtype=torch.float32)
     pipe_cls = WanPipeline if job["workload"] == "video.txt2vid" else WanImageToVideoPipeline
     pipe = pipe_cls.from_pretrained(repo, vae=vae, torch_dtype=dtype)
+    job["loras"] = apply_adult_loras(pipe, model, job)
 
     prompt_kwargs: dict = dict(
         prompt=job["prompt"],
@@ -409,6 +467,25 @@ def generate_frames(job: dict, frame_dir: Path) -> None:
 
     frames = pipe(**kwargs).frames[0]
     write_frames(frames, frame_dir)
+
+
+def apply_adult_loras(pipe, model: Model, job: dict) -> list[str]:
+    """Load the model's adult LoRAs onto the pipeline for an adult job.
+
+    Before any offload hooks exist, so the adapters move with the transformer.
+    Returns what was loaded ("repo/file@scale") for the sidecar.
+    """
+    if not job.get("adult") or not model.adult_loras:
+        return []
+    lora = pick_adult_lora(model.adult_loras, job["prompt"])
+    if lora is None:
+        return []
+    pipe.load_lora_weights(lora.repo, weight_name=lora.file, adapter_name="adult")
+    pipe.set_adapters(["adult"], adapter_weights=[lora.scale])
+    if lora.trigger and lora.trigger.lower() not in job["prompt"].lower():
+        # Before the prompt is encoded (generate_frames builds it after this).
+        job["prompt"] = f"{lora.trigger}, {job['prompt']}"
+    return [f"{lora.repo}/{lora.file}@{lora.scale}"]
 
 
 def write_frames(frames, frame_dir: Path) -> int:
@@ -592,6 +669,8 @@ def write_sidecar(job_dir: Path, job: dict, probed: dict) -> None:
         "prompt": job["prompt"],
         "negative_prompt": job["negative_prompt"],
         "seed": job["seed"],
+        "adult": job.get("adult", False),
+        "loras": job.get("loras", []),
         "steps": job["steps"],
         "guidance_scale": job["guidance_scale"],
         "offload": bool(job.get("offload", False)),
