@@ -87,39 +87,26 @@ pub struct Config {
     /// plugin). Off by default.
     #[serde(default)]
     pub threatcrush: crate::threatcrush::ThreatcrushConfig,
-    /// Adult (18+) image and video jobs. Workers serve them by default
-    /// (opt out with `[adult] serve = false` or `C0MPUTE_ADULT=0`); gateways
-    /// accept them only when opted in. The child-safety guard in
-    /// `content_policy` is always on regardless.
+    /// Adult (18+) jobs: every worker serves them (there is no per-node
+    /// switch; jobs are end-to-end encrypted); gateways accept them only with
+    /// `[adult] buyer`. The child-safety guard in `content_policy` always runs.
     #[serde(default)]
     pub adult: AdultConfig,
 }
 
-/// Adult mode. A worker serves adult jobs unless the operator opts out with
-/// `serve = false` (or `C0MPUTE_ADULT=0`), and advertises `c0mpute:adult`
-/// while it does; a gateway accepts adult requests only with `buyer = true`
-/// (or `C0MPUTE_ADULT_BUYER=1`) and awards them only to workers advertising
-/// that tag. Adult jobs are text-only and always pass the child-safety guard.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Adult mode on the buyer side. Every worker serves adult jobs and
+/// advertises `c0mpute:adult` (no per-node switch; an old `serve` key is
+/// ignored). A gateway accepts adult requests only with `buyer = true` (or
+/// `C0MPUTE_ADULT_BUYER=1`) and awards them only to workers advertising that
+/// tag, i.e. workers new enough to run the child-safety guard. Adult jobs are
+/// text-only and always pass that guard.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AdultConfig {
-    #[serde(default = "default_true")]
-    pub serve: bool,
     #[serde(default)]
     pub buyer: bool,
 }
 
-impl Default for AdultConfig {
-    fn default() -> Self {
-        Self { serve: true, buyer: false }
-    }
-}
-
 impl AdultConfig {
-    /// This worker takes adult jobs: the config and `C0MPUTE_ADULT` agree.
-    pub fn serve_enabled(&self) -> bool {
-        env_switch("C0MPUTE_ADULT", self.serve)
-    }
-
     /// This gateway accepts adult requests: the config and
     /// `C0MPUTE_ADULT_BUYER` agree.
     pub fn buyer_enabled(&self) -> bool {
@@ -983,15 +970,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workers_serve_adult_by_default_and_gateways_opt_in() {
-        let cfg = Config::default();
-        assert!(cfg.adult.serve && !cfg.adult.buyer);
-        let cfg: Config = toml::from_str("[adult]\nbuyer = true\n").unwrap();
-        assert!(cfg.adult.serve && cfg.adult.buyer, "a missing serve key stays on");
-        let out: Config = toml::from_str("[adult]\nserve = false\n").unwrap();
-        assert!(!out.adult.serve, "operators can opt out");
-        let partial: Config = toml::from_str("[storage]\nenabled = true\n").unwrap();
-        assert!(partial.adult.serve && !partial.adult.buyer);
+    fn gateways_opt_into_adult_and_an_old_serve_key_is_ignored() {
+        assert!(!Config::default().adult.buyer);
+        let cfg: Config = toml::from_str("[adult]\nserve = false\nbuyer = true\n").unwrap();
+        assert!(cfg.adult.buyer, "an old serve key still parses");
     }
 
     #[test]

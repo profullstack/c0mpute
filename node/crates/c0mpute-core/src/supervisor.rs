@@ -112,14 +112,12 @@ impl Supervisor {
             store = %self.config.storage.root.display(),
             "supervisor up"
         );
-        // Adult (18+) jobs unless the operator opted out; every generation
-        // runner checks this before running a job (`content_policy`).
-        crate::content_policy::set_worker_adult(self.config.adult.serve_enabled());
+        // Every worker serves adult (18+) jobs; every generation runner still
+        // runs the child-safety guard before a job (`content_policy`).
+        crate::content_policy::set_worker_adult(true);
         // `[video] runner`: docker per job, or in-container (`local`).
         crate::video::set_configured_runner(self.config.video.runner);
-        if self.config.adult.serve_enabled() {
-            info!("adult jobs: serving (advertising c0mpute:adult, the default; opt out with [adult] serve = false or C0MPUTE_ADULT=0); the child-safety guard stays on");
-        }
+        info!("adult jobs: served by every node (advertising c0mpute:adult); the child-safety guard stays on");
 
         // Capability registry: subscribe to c0mpute/cap/v1 and keep a
         // map of seen peers + their advertised capabilities.
