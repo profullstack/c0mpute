@@ -1780,6 +1780,30 @@ impl Hosting {
         ))
     }
 
+    /// Who holds a striped site, and how much of it: (peer, groups held,
+    /// room in bytes it last announced), most groups first.
+    pub async fn holder_breakdown(&self, rec: &SiteRecord) -> Vec<(String, usize, Option<u64>)> {
+        if !stripe::is_striped(rec.size) {
+            return Vec::new();
+        }
+        let map = self.0.map.read().await;
+        let mut n: HashMap<String, usize> = HashMap::new();
+        for hs in map.group_holders(&rec.site_id, stripe::group_count(rec.size), true) {
+            for p in hs {
+                *n.entry(p).or_default() += 1;
+            }
+        }
+        let mut v: Vec<(String, usize, Option<u64>)> = n
+            .into_iter()
+            .map(|(p, c)| {
+                let r = map.room_of(&p);
+                (p, c, r)
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    }
+
     /// Every known site: record plus live copy count.
     pub async fn sites(&self) -> Vec<(SiteRecord, usize)> {
         let map = self.0.map.read().await;
@@ -2871,6 +2895,13 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
             v["groups"] = serde_json::json!(x.groups);
             v["short_groups"] = serde_json::json!(x.short);
             v["missing_groups"] = serde_json::json!(x.missing);
+            let holders: Vec<serde_json::Value> = h
+                .holder_breakdown(&r)
+                .await
+                .into_iter()
+                .map(|(p, g, room)| serde_json::json!({ "peer": p, "groups": g, "room": room }))
+                .collect();
+            v["holders"] = serde_json::json!(holders);
         }
         sites.push(v);
     }
