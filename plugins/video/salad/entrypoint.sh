@@ -2,6 +2,12 @@
 # Boot a rented-GPU c0mpute video worker: warm the weights, then join.
 set -u
 LOGS=/logs
+# Auto-update: the image's binary lives in a root-owned dir, so run a copy
+# from $HOME/bin, which the worker can swap in place when a release lands
+# (it re-execs the new binary). C0MPUTE_NO_AUTO_UPDATE=1 pins the image's.
+mkdir -p "$HOME/bin"
+cp -n /usr/local/bin/c0mpute "$HOME/bin/c0mpute"
+export PATH="$HOME/bin:$PATH"
 mkdir -p "$LOGS" /weights/hf
 # Read-only status page (Salad's gateway puts its own auth in front).
 python3 -m http.server "${STATUS_PORT:-8080}" --bind :: -d "$LOGS" >/dev/null 2>&1 &
