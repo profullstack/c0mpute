@@ -21,7 +21,7 @@
 [module]
 id          = "secure-chat"
 name        = "Secure Chat — E2E encrypted p2p messaging"
-version     = "0.3.23"
+version     = "0.3.33"
 kind        = "service"
 category    = "applications"
 status      = "available"
