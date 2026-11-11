@@ -292,6 +292,9 @@ jobs:
         run: |
           set -eu
           shopt -s nullglob
+          # A version-less AppImage too, for `install.sh --desktop` via
+          # c0mpute.com/releases/latest/c0mpute-desktop-<platform>.AppImage.
+          for a in c0mpute-desktop-*.AppImage; do cp "$a" "c0mpute-desktop-${{ matrix.platform }}.AppImage"; break; done
           files=(c0mpute-desktop-*.AppImage c0mpute-desktop-*.deb c0mpute-desktop-*.dmg c0mpute-desktop-*.zip c0mpute-desktop-*.exe)
           [ ${#files[@]} -gt 0 ] || { echo "no desktop artifacts built" >&2; ls -la; exit 1; }
           for f in "${files[@]}"; do

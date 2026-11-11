@@ -17,6 +17,8 @@
 #   --no-infernet   Skip Infernet CLI
 #   --no-transcode  Skip transcode plugin's system deps (ffmpeg)
 #   --no-tui        Skip the c0mpute-tui terminal UI
+#   --desktop       Also install the desktop app (Linux AppImage; chat, agent,
+#                   node manager, hosting) as ~/.local/bin/c0mpute-desktop
 #   --worker        Add Docker / FFmpeg readiness checks
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
@@ -60,6 +62,7 @@ INSTALL_COINPAY=1
 INSTALL_INFERNET=1
 INSTALL_TRANSCODE=1
 INSTALL_TUI=1
+INSTALL_DESKTOP="${C0MPUTE_DESKTOP:-0}"
 WORKER_MODE=0
 DEVELOPER_MODE=0
 FORCE=0
@@ -87,6 +90,7 @@ while [ $# -gt 0 ]; do
     --no-infernet)  INSTALL_INFERNET=0 ;;
     --no-transcode) INSTALL_TRANSCODE=0 ;;
     --no-tui)       INSTALL_TUI=0 ;;
+    --desktop)      INSTALL_DESKTOP=1 ;;
     --no-start)     NO_START=1 ;;
     --worker)       WORKER_MODE=1 ;;
     --developer)    DEVELOPER_MODE=1 ;;
@@ -101,7 +105,7 @@ while [ $# -gt 0 ]; do
     --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
     --system-service)       SYSTEM_SERVICE=1 ;;
     --help|-h)
-      sed -n '2,39p' "$0"
+      sed -n '2,41p' "$0"
       exit 0
       ;;
     *)
@@ -447,6 +451,56 @@ install_transcode_deps() {
     warn "transcode deps install failed (continuing without ffmpeg)"
     return 1
   fi
+}
+
+# ────────────────────────────────────────────────────────────────────────
+# desktop app (opt-in: --desktop)
+# ────────────────────────────────────────────────────────────────────────
+# The release carries a version-less AppImage per arch
+# (c0mpute-desktop-linux-<arch>.AppImage, see .github/workflows/release.yml),
+# checked here against its .sha256. The app updates itself from GitHub
+# releases afterwards. macOS and Windows builds are on the releases page.
+install_desktop() {
+  plat=$(detect_platform)
+  case "$plat" in
+    linux-*) ;;
+    *)
+      warn "desktop app: get the macOS build from https://github.com/profullstack/c0mpute/releases/latest"
+      return 0
+      ;;
+  esac
+  asset="c0mpute-desktop-${plat}.AppImage"
+  bin_dir="$HOME/.local/bin"
+  dest="$bin_dir/c0mpute-desktop"
+  mkdir -p "$bin_dir" "$HOME/.local/share/applications"
+  say "installing the desktop app ($asset)"
+  if ! curl -fsSL -o "$dest.tmp" "${RELEASE_BASE}/${C0MPUTE_VERSION}/${asset}" \
+    || ! curl -fsSL -o "$dest.tmp.sha256" "${RELEASE_BASE}/${C0MPUTE_VERSION}/${asset}.sha256"; then
+    rm -f "$dest.tmp" "$dest.tmp.sha256"
+    warn "desktop app: $asset is not on the ${C0MPUTE_VERSION} release (yet); skipped"
+    return 0
+  fi
+  want=$(cut -d' ' -f1 < "$dest.tmp.sha256")
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$dest.tmp" | cut -d' ' -f1)
+  else got=$(shasum -a 256 "$dest.tmp" | cut -d' ' -f1); fi
+  rm -f "$dest.tmp.sha256"
+  if [ "$want" != "$got" ]; then
+    rm -f "$dest.tmp"
+    warn "desktop app: checksum mismatch for $asset; not installed"
+    return 0
+  fi
+  chmod 755 "$dest.tmp" && mv "$dest.tmp" "$dest"
+  cat > "$HOME/.local/share/applications/c0mpute-desktop.desktop" <<DESKTOP
+[Desktop Entry]
+Name=c0mpute
+Comment=c0mpute chat, agent, node manager and hosting
+Exec=$dest %U
+Terminal=false
+Type=Application
+Categories=Network;
+StartupWMClass=c0mpute-desktop
+DESKTOP
+  say "desktop app: $dest (menu entry: c0mpute)"
 }
 
 # ────────────────────────────────────────────────────────────────────────
@@ -987,6 +1041,9 @@ main() {
 
   # c0mpute-tui: Bun + hqtui terminal UI launched by `c0mpute tui`.
   if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
+
+  # Desktop app (apps/desktop): opt-in, a node is usually headless.
+  if [ "$INSTALL_DESKTOP" -eq 1 ]; then install_desktop || true; fi
 
   if [ "$WORKER_MODE" -eq 1 ]; then worker_checks; fi
 
