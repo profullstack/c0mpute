@@ -352,6 +352,10 @@ export function ChatApp({ error }: { error: string | null }) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Lines sent while busy (an answer, its plugin tool calls, or a generation):
+  // they go out in order once the work in front of them finishes. Stop ends
+  // the current work, so the next queued line goes at once.
+  const [queued, setQueued] = useState<string[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [tab, setTab] = useState<"chat" | "connect" | "plugins">("chat");
   const abort = useRef<AbortController | null>(null);
@@ -403,7 +407,6 @@ export function ChatApp({ error }: { error: string | null }) {
     const id = convo.id;
     const adult = adultMode;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -491,7 +494,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function composeMusic(convo: Convo, text: string, music: MusicCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -609,7 +611,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function makeAlbum(convo: Convo, text: string, cmd: AlbumCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -712,7 +713,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function makePromo(convo: Convo, text: string, req: PromoCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -790,7 +790,6 @@ export function ChatApp({ error }: { error: string | null }) {
   function addTurn(convo: Convo, text: string, reply: Msg): number {
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
     const index = convo.messages.length + 1;
-    setInput("");
     setFailure(null);
     setConvos((all) => {
       const base = all.some((c) => c.id === convo.id) ? all : [convo, ...all];
@@ -1069,9 +1068,27 @@ export function ChatApp({ error }: { error: string | null }) {
     void pollPush(convo.id, index, view);
   }
 
-  async function send() {
-    const text = input.trim();
-    if (!text || busy) return;
+  // A destructive tool call waiting on Approve/Deny holds the queue: sending
+  // past it would silently drop the approval.
+  const lastMsg = active?.messages[active.messages.length - 1];
+  const awaitingApproval = !!lastMsg?.tools?.some((t) => t.status === "approval");
+  useEffect(() => {
+    if (busy || awaitingApproval || !queued.length) return;
+    const [next, ...rest] = queued;
+    setQueued(rest);
+    void send(next);
+    // send() reads the latest render's state; this runs after that render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, awaitingApproval, queued]);
+
+  async function send(line?: string) {
+    const text = (line ?? input).trim();
+    if (!text) return;
+    if (line === undefined) setInput("");
+    if (busy || awaitingApproval) {
+      setQueued((q) => [...q, text]);
+      return;
+    }
     let convo = active;
     if (!convo) {
       convo = newConvo("auto");
@@ -1136,7 +1153,6 @@ export function ChatApp({ error }: { error: string | null }) {
     }
     const history: Msg[] = [...convo.messages, { role: "user", content: text }];
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     // Insert the user turn plus an empty assistant turn that streams in.
@@ -1585,6 +1601,30 @@ export function ChatApp({ error }: { error: string | null }) {
               </div>
             ))}
             {failure && <p className="text-[var(--color-warn)] text-xs">error: {failure}</p>}
+            {queued.length > 0 && (
+              <ol className="space-y-1" aria-label="queued messages">
+                {queued.map((q, i) => (
+                  <li key={`${i}-${q}`} className="flex items-start gap-2 text-sm text-[var(--color-dim)]">
+                    <span className="shrink-0">queued ›</span>
+                    <span className="flex-1 whitespace-pre-wrap break-words">{q}</span>
+                    <button
+                      type="button"
+                      className="text-xs underline hover:text-[var(--color-fg)]"
+                      onClick={() => {
+                        setQueued((all) => all.filter((_, k) => k !== i));
+                        if (!input.trim()) setInput(q);
+                      }}
+                    >
+                      edit
+                    </button>
+                    <button type="button" className="text-xs underline hover:text-[var(--color-warn)]" onClick={() => setQueued((all) => all.filter((_, k) => k !== i))}>
+                      remove
+                    </button>
+                  </li>
+                ))}
+                <li className="text-xs text-[var(--color-dim)]">{awaitingApproval && !busy ? "sends after you approve or deny the tool call above" : "sends when the current answer finishes · stop to send it now"}</li>
+              </ol>
+            )}
             <div ref={bottom} />
           </div>
           <form
@@ -1604,13 +1644,18 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, /video <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"
+              placeholder={busy ? "type now: Enter queues it for when this answer finishes (stop sends it at once)" : "message, /image <prompt>, /video <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"}
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
-              <button type="button" onClick={() => abort.current?.abort()} className="border border-[var(--color-warn)] px-4 text-[var(--color-warn)]">
-                stop
-              </button>
+              <div className="flex flex-col gap-1">
+                <button type="button" onClick={() => abort.current?.abort()} className="border border-[var(--color-warn)] px-4 flex-1 text-[var(--color-warn)]">
+                  stop
+                </button>
+                <button type="submit" disabled={!input.trim()} className="border border-[var(--color-rule)] px-4 text-xs disabled:opacity-40" title="send after the current answer finishes">
+                  queue
+                </button>
+              </div>
             ) : (
               <button type="submit" className="border border-[var(--color-accent)] px-4 accent hover:bg-[var(--color-accent-dim)]">
                 send

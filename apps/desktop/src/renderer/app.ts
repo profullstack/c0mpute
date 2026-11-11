@@ -135,6 +135,33 @@ function chatView() {
 const transcript: HTMLElement = h("div", { class: "transcript" });
 let agentStatus: HTMLElement = h("span", { class: "dim" });
 const toolNodes = new Map<string, HTMLElement>();
+/** Messages sent while the agent works; they go out as each run ends. */
+const queuedBox: HTMLElement = h("div", { class: "queued" });
+let agentInput: HTMLTextAreaElement | null = null;
+
+function renderQueued(items: string[]) {
+  queuedBox.replaceChildren(
+    ...items.map((text, i) =>
+      h(
+        "div",
+        { class: "msg user dim" },
+        h("span", { class: "tag" }, "queued"),
+        " ",
+        text,
+        " ",
+        btn("edit", async () => {
+          const t = await call("agent:unqueue", i);
+          if (typeof t === "string" && agentInput && !agentInput.value.trim()) {
+            agentInput.value = t;
+            agentInput.focus();
+          }
+        }, "b small"),
+        btn("remove", () => call("agent:unqueue", i), "b small"),
+      ),
+    ),
+    ...(items.length ? [h("div", { class: "dim" }, "sends when the current run finishes · Stop sends the next one now")] : []),
+  );
+}
 
 function renderEvent(ev: Any) {
   switch (ev.type) {
@@ -167,6 +194,9 @@ function renderEvent(ev: Any) {
       break;
     case "done":
       agentStatus.textContent = "";
+      break;
+    case "queued":
+      renderQueued(ev.items ?? []);
       break;
   }
   if (tab === "agent") main.scrollTop = main.scrollHeight;
@@ -202,7 +232,9 @@ async function agentView() {
   const tools: Any[] = (await call("agent:tools")) ?? [];
   const sel = h("select", { onchange: () => call("settings:set", { agentModel: (sel as HTMLSelectElement).value }) }, h("option", { value: "" }, "auto (any live model)"), models.map((m) => h("option", { value: m }, m))) as HTMLSelectElement;
   sel.value = info?.settings.agentModel ?? "";
-  const input = h("textarea", { placeholder: "Ask the agent. It can use your MCP servers and skills (Ctrl+Enter to send)." }) as HTMLTextAreaElement;
+  const input = h("textarea", { placeholder: "Ask the agent. It can use your MCP servers and skills (Ctrl+Enter to send; while it works, Ctrl+Enter queues the message)." }) as HTMLTextAreaElement;
+  agentInput = input;
+  renderQueued((await call("agent:queued")) ?? []);
   const sendIt = async () => {
     const t = input.value.trim();
     if (!t) return;
@@ -227,6 +259,7 @@ async function agentView() {
     ),
     h("p", { class: "dim" }, `Runs on c0mpute (${models.length} models live) with ${tools.length} tools: `, [...bySource].map(([s, n]) => h("span", { class: "tag" }, `${s} ${n}`)), " Tools ask before running unless you allowed their server."),
     transcript,
+    queuedBox,
     h("div", { class: "composer" }, input, h("div", {}, btn("Send", sendIt, "b primary"), h("div", {}, agentStatus))),
   );
   if (!info?.settings) return;
