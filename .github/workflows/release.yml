@@ -114,6 +114,9 @@ jobs:
           if sudo apt-get update && sudo apt-get install -y musl-tools; then exit 0; fi
           echo "::warning::ubuntu.com mirrors unreachable; retrying via mirrors.ocf.berkeley.edu"
           M=http://mirrors.ocf.berkeley.edu
+          # amd64 runners list their mirrors in apt-mirrors.txt (sources say
+          # mirror+file:/etc/apt/apt-mirrors.txt), so rewrite that list too.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then echo "$M/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt; fi
           sudo sed -i -E \
             -e "s#https?://([a-z0-9.-]+\.)?archive\.ubuntu\.com/ubuntu#$M/ubuntu#g" \
             -e "s#https?://security\.ubuntu\.com/ubuntu#$M/ubuntu#g" \
