@@ -99,23 +99,62 @@ class Model:
     full_vram_gib: int = 0
     # Job defaults for this model (see JOB_DEFAULTS).
     defaults: tuple[tuple[str, int], ...] = ()
-    # LoRAs applied to adult (18+) jobs only: (hf repo, file, strength).
-    adult_loras: tuple[tuple[str, str, float], ...] = ()
+    # LoRAs for adult (18+) jobs only (see AdultLora / pick_adult_lora).
+    adult_loras: tuple["AdultLora", ...] = ()
 
     def default(self, field: str) -> int:
         return dict(self.defaults).get(field, JOB_DEFAULTS[field])
 
 
-def parse_adult_loras(mid: str, rows) -> tuple[tuple[str, str, float], ...]:
-    """`adult_loras = [{ repo = "...", file = "x.safetensors", scale = 0.8 }]`."""
+@dataclass(frozen=True)
+class AdultLora:
+    repo: str
+    file: str
+    scale: float = 1.0
+    # Word the LoRA was trained on; prepended to the prompt when it is used.
+    trigger: str = ""
+    # Prompt words that pick this LoRA (lowercase, whole words or phrases).
+    match: tuple[str, ...] = ()
+    # Used when no LoRA's `match` hits the prompt.
+    default: bool = False
+
+
+def parse_adult_loras(mid: str, rows) -> tuple[AdultLora, ...]:
+    """`adult_loras = [{ repo, file, scale, trigger, match = [...], default }]`."""
     out = []
     for row in rows or ():
         repo, file = str(row.get("repo", "")).strip(), str(row.get("file", "")).strip()
         scale = float(row.get("scale", 1.0))
         if not repo or not file.endswith(".safetensors") or not 0.0 < scale <= 2.0:
             raise JobError(f"model {mid} has a bad adult_loras entry {row!r}")
-        out.append((repo, file, scale))
+        out.append(AdultLora(
+            repo=repo, file=file, scale=scale,
+            trigger=str(row.get("trigger", "")).strip(),
+            match=tuple(str(m).strip().lower() for m in row.get("match", ()) if str(m).strip()),
+            default=bool(row.get("default", False)),
+        ))
+    if sum(1 for l in out if l.default) > 1:
+        raise JobError(f"model {mid} marks more than one adult LoRA as default")
     return tuple(out)
+
+
+def pick_adult_lora(loras: tuple[AdultLora, ...], prompt: str) -> AdultLora | None:
+    """The LoRA whose `match` words appear most in the prompt, else the default.
+
+    One LoRA per clip: these are single-act LoRAs and stacking them at full
+    strength fights over the same layers.
+    """
+    import re
+
+    text = prompt.lower()
+    best, best_hits = None, 0
+    for lora in loras:
+        hits = sum(1 for m in lora.match if re.search(rf"(?<![a-z]){re.escape(m)}(?![a-z])", text))
+        if hits > best_hits:
+            best, best_hits = lora, hits
+    if best is not None:
+        return best
+    return next((l for l in loras if l.default), None)
 
 
 def load_models(path: Path) -> dict[str, Model]:
@@ -438,15 +477,15 @@ def apply_adult_loras(pipe, model: Model, job: dict) -> list[str]:
     """
     if not job.get("adult") or not model.adult_loras:
         return []
-    names, weights, loaded = [], [], []
-    for i, (repo, file, scale) in enumerate(model.adult_loras):
-        name = f"adult{i}"
-        pipe.load_lora_weights(repo, weight_name=file, adapter_name=name)
-        names.append(name)
-        weights.append(scale)
-        loaded.append(f"{repo}/{file}@{scale}")
-    pipe.set_adapters(names, adapter_weights=weights)
-    return loaded
+    lora = pick_adult_lora(model.adult_loras, job["prompt"])
+    if lora is None:
+        return []
+    pipe.load_lora_weights(lora.repo, weight_name=lora.file, adapter_name="adult")
+    pipe.set_adapters(["adult"], adapter_weights=[lora.scale])
+    if lora.trigger and lora.trigger.lower() not in job["prompt"].lower():
+        # Before the prompt is encoded (generate_frames builds it after this).
+        job["prompt"] = f"{lora.trigger}, {job['prompt']}"
+    return [f"{lora.repo}/{lora.file}@{lora.scale}"]
 
 
 def write_frames(frames, frame_dir: Path) -> int:

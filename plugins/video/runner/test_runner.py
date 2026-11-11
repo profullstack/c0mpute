@@ -251,14 +251,22 @@ def main() -> int:
     check("adult flag parsed", runner.parse_job(base_job(adult=True), models, job_dir)["adult"] is True)
     check("adult defaults to false", runner.parse_job(base_job(), models, job_dir)["adult"] is False)
     check("adult must be literally true", runner.parse_job(base_job(adult="yes"), models, job_dir)["adult"] is False)
-    rows = runner.parse_adult_loras("m", [{"repo": "o/r", "file": "x.safetensors", "scale": 0.8}])
-    check("adult_loras parse", rows == (("o/r", "x.safetensors", 0.8),))
-    for label, bad in [("no repo", {"file": "x.safetensors"}), ("not safetensors", {"repo": "o/r", "file": "x.ckpt"}), ("scale 0", {"repo": "o/r", "file": "x.safetensors", "scale": 0})]:
+    rows = runner.parse_adult_loras("m", [{"repo": "o/r", "file": "x.safetensors", "scale": 0.8, "trigger": "t", "match": ["Alpha"], "default": True}])
+    check("adult_loras parse", rows == (runner.AdultLora("o/r", "x.safetensors", 0.8, "t", ("alpha",), True),), str(rows))
+    for label, bad in [("no repo", [{"file": "x.safetensors"}]), ("not safetensors", [{"repo": "o/r", "file": "x.ckpt"}]),
+                       ("scale 0", [{"repo": "o/r", "file": "x.safetensors", "scale": 0}]),
+                       ("two defaults", [{"repo": "a/b", "file": "a.safetensors", "default": True}, {"repo": "c/d", "file": "c.safetensors", "default": True}])]:
         try:
-            runner.parse_adult_loras("m", [bad])
+            runner.parse_adult_loras("m", bad)
             check(f"adult_loras refuses {label}", False, "(accepted)")
         except runner.JobError:
             check(f"adult_loras refuses {label}", True)
+
+    A = runner.AdultLora("o/a", "a.safetensors", 0.9, "atrig", ("alpha", "alpha beta"), True)
+    B = runner.AdultLora("o/b", "b.safetensors", 0.7, "btrig", ("gamma",), False)
+    check("picks the matching LoRA", runner.pick_adult_lora((A, B), "a Gamma scene") is B)
+    check("falls back to the default", runner.pick_adult_lora((A, B), "nothing matches") is A)
+    check("whole words only", runner.pick_adult_lora((B,), "gammas everywhere") is None)
 
     class FakePipe:
         def __init__(self):
@@ -268,14 +276,14 @@ def main() -> int:
         def set_adapters(self, names, adapter_weights):
             self.calls.append(("set", tuple(names), tuple(adapter_weights)))
 
-    m = runner.Model(id="m", repo="", diffusers_repo="d", workloads=("video.txt2vid",), precision="bf16", vram_gib=24,
-                     adult_loras=(("o/r", "x.safetensors", 0.8),))
-    pipe = FakePipe()
-    loaded = runner.apply_adult_loras(pipe, m, {"adult": True})
-    check("adult job loads the LoRA", pipe.calls == [("load", "o/r", "x.safetensors", "adult0"), ("set", ("adult0",), (0.8,))], str(pipe.calls))
-    check("adult job reports what loaded", loaded == ["o/r/x.safetensors@0.8"])
-    pipe = FakePipe()
-    check("SFW job loads nothing", runner.apply_adult_loras(pipe, m, {"adult": False}) == [] and pipe.calls == [])
+    m = runner.Model(id="m", repo="", diffusers_repo="d", workloads=("video.txt2vid",), precision="bf16", vram_gib=24, adult_loras=(A, B))
+    pipe, job = FakePipe(), {"adult": True, "prompt": "a gamma scene"}
+    loaded = runner.apply_adult_loras(pipe, m, job)
+    check("adult job loads one LoRA", pipe.calls == [("load", "o/b", "b.safetensors", "adult"), ("set", ("adult",), (0.7,))], str(pipe.calls))
+    check("trigger is prepended", job["prompt"] == "btrig, a gamma scene", job["prompt"])
+    check("adult job reports what loaded", loaded == ["o/b/b.safetensors@0.7"])
+    pipe, job = FakePipe(), {"adult": False, "prompt": "a gamma scene"}
+    check("SFW job loads nothing", runner.apply_adult_loras(pipe, m, job) == [] and pipe.calls == [] and job["prompt"] == "a gamma scene")
 
     print("the selftest runs end to end")
     sel = tmp / "selftest"
