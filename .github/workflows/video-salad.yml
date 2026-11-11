@@ -7,12 +7,19 @@
 # holds no secrets. The job summary prints the image reference.
 name: video salad image
 
+# Scheduled: ttl.sh keeps an image 24 h, so a rented group that runs longer
+# would fail its next pull. Every 8 h this rebuilds the LATEST release and
+# re-pushes it to one stable reference, ttl.sh/c0mpute-video-salad-<secret
+# SALAD_TTL_NAME>:24h, which a long-running group points at. The name is a
+# secret so nobody else can push to it.
 on:
+  schedule:
+    - cron: "17 */8 * * *"
   workflow_dispatch:
     inputs:
       version:
-        description: "c0mpute release tag to bake in, e.g. v0.3.37"
-        required: true
+        description: "c0mpute release tag to bake in, e.g. v0.3.37 (empty = latest release)"
+        required: false
       runner:
         description: "Runner image to build on"
         required: false
@@ -39,10 +46,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          set -eu
+          v="${INPUT:-}"
+          if [ -z "$v" ]; then v=$(gh release view -R "${GITHUB_REPOSITORY}" --json tagName -q .tagName); fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Build
         env:
-          VERSION: ${{ inputs.version }}
-          RUNNER: ${{ inputs.runner }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          RUNNER: ${{ inputs.runner || 'ghcr.io/profullstack/c0mpute-video-runner:stable' }}
         run: |
           set -eu
           docker build \
@@ -64,9 +82,16 @@ jobs:
 
       - name: Push to ttl.sh
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          STABLE_NAME: ${{ secrets.SALAD_TTL_NAME }}
         run: |
           set -eu
+          if [ -n "${STABLE_NAME:-}" ]; then
+            stable="ttl.sh/c0mpute-video-salad-${STABLE_NAME}:24h"
+            docker tag c0mpute-video-salad:local "$stable"
+            docker push "$stable" >/dev/null
+            echo "stable reference refreshed (${VERSION})" >> "$GITHUB_STEP_SUMMARY"
+          fi
           ref="ttl.sh/c0mpute-video-salad-${VERSION}-$(openssl rand -hex 6):24h"
           docker tag c0mpute-video-salad:local "$ref"
           docker push "$ref"
