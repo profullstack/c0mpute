@@ -282,6 +282,16 @@ def serve(root: Path, engine: str = "kokoro") -> None:
     A failed utterance answers {"ok": false, "error": ...} and the loop stays
     up: one bad line should not cost the caller its warm model.
     """
+    # The protocol owns the real stdout. Libraries print there too (Chatterbox's
+    # watermarker says "loaded PerthNet ..." while loading, 2026-11-11), which
+    # the caller would read as the ready line; send everything else to stderr.
+    protocol = sys.stdout
+    sys.stdout = sys.stderr
+
+    def emit(message: dict) -> None:
+        protocol.write(json.dumps(message) + "\n")
+        protocol.flush()
+
     import soundfile as sf
 
     started = time.monotonic()
@@ -293,10 +303,10 @@ def serve(root: Path, engine: str = "kokoro") -> None:
         else:
             kokoro = load_kokoro(root)
     except Exception as error:  # noqa: BLE001 - tell the caller why, then stop
-        print(json.dumps({"ready": False, "engine": engine, "error": f"{error}"[:300]}), flush=True)
+        emit({"ready": False, "engine": engine, "error": f"{error}"[:300]})
         return
     load_ms = int((time.monotonic() - started) * 1000)
-    print(json.dumps({"ready": True, "engine": engine, "load_ms": load_ms}), flush=True)
+    emit({"ready": True, "engine": engine, "load_ms": load_ms})
 
     for raw in sys.stdin:
         line = raw.strip()
@@ -305,7 +315,7 @@ def serve(root: Path, engine: str = "kokoro") -> None:
         try:
             request = json.loads(line)
         except ValueError:
-            print(json.dumps({"ok": False, "error": "not json"}), flush=True)
+            emit({"ok": False, "error": "not json"})
             continue
         if request.get("op") == "close":
             break
@@ -322,22 +332,16 @@ def serve(root: Path, engine: str = "kokoro") -> None:
                 **extra,
             )
             sf.write(str(output), audio, sample_rate, subtype="PCM_16")
-            print(
-                json.dumps(
+            emit(
                     {
                         "id": request_id,
                         "ok": True,
                         "seconds": round(len(audio) / float(sample_rate), 3),
                         "ms": int((time.monotonic() - began) * 1000),
                     }
-                ),
-                flush=True,
-            )
+                )
         except Exception as error:  # noqa: BLE001 - report, keep serving
-            print(
-                json.dumps({"id": request_id, "ok": False, "error": f"{error}"[:300]}),
-                flush=True,
-            )
+            emit({"id": request_id, "ok": False, "error": f"{error}"[:300]})
 
     try:
         if engine == "kokoro":
