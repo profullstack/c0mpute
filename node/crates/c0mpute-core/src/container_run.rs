@@ -2208,6 +2208,37 @@ pub async fn submit(
             "no trusted builders: pass --peer <peer id> (or set [containers] builders / C0MPUTE_BUILDERS), or --any-worker to accept any builder"
         );
     }
+    // Connect to the named builders up front: they fetch the inputs from us
+    // and we fetch the results from them, over this connection when one of
+    // us cannot be dialed, and gossip reaches them even where no seed relays
+    // the topic yet. A builder may be named by peer id or by a full
+    // multiaddr (`/ip4/1.2.3.4/tcp/4001/p2p/<id>`).
+    let (builders, addrs) = split_builders(&req.builders)?;
+    let mut req = req;
+    req.builders = builders;
+    let mut dialed = false;
+    for addr in addrs {
+        match net.dial(addr.clone()).await {
+            Ok(()) => dialed = true,
+            Err(e) => progress(&format!("could not dial {addr}: {e}")),
+        }
+    }
+    for b in &req.builders {
+        if let Ok(peer) = b.parse::<PeerId>()
+            && !net.is_connected(peer).await
+        {
+            match net.connect(peer).await {
+                Ok(()) => dialed = true,
+                Err(e) => progress(&format!(
+                    "could not dial builder {b} yet ({e}); trying through the network"
+                )),
+            }
+        }
+    }
+    if dialed {
+        // Let the connections come up and swap topic subscriptions.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
     let mut stored = Vec::new();
     progress("sealing and storing the inputs");
     let spec = spec_for(&net, &store, &req, &mut stored).await?;
@@ -2364,6 +2395,35 @@ pub async fn submit(
     })
 }
 
+/// Builders as given (peer ids or `/.../p2p/<id>` multiaddrs) -> the peer
+/// ids to accept bids from, plus the addresses to dial.
+pub fn split_builders(list: &[String]) -> Result<(Vec<String>, Vec<c0mpute_net::Multiaddr>)> {
+    let mut ids = Vec::new();
+    let mut addrs = Vec::new();
+    for b in list {
+        let b = b.trim();
+        if b.starts_with('/') {
+            let addr: c0mpute_net::Multiaddr = b
+                .parse()
+                .with_context(|| format!("{b:?} is not a multiaddr"))?;
+            let id = addr
+                .iter()
+                .find_map(|p| match p {
+                    c0mpute_net::Protocol::P2p(id) => Some(id.to_base58()),
+                    _ => None,
+                })
+                .with_context(|| format!("{b} names no /p2p/<peer id>"))?;
+            ids.push(id);
+            addrs.push(addr);
+        } else {
+            b.parse::<PeerId>()
+                .with_context(|| format!("{b:?} is not a peer id"))?;
+            ids.push(b.to_string());
+        }
+    }
+    Ok((ids, addrs))
+}
+
 /// Hold an exclusive lock on `<dir>/lock` while this process uses the
 /// identity in `dir`: two buyers with one identity on the network see each
 /// other's subscriptions as their own and lose auctions.
@@ -2511,6 +2571,17 @@ mod tests {
             || x.contains("privileged")));
         let img = a.iter().position(|x| x == "img").unwrap();
         assert_eq!(&a[img + 1..], &["x".to_string()]);
+    }
+
+    #[test]
+    fn builders_by_id_or_multiaddr() {
+        let id = "12D3KooWLs9iJBPDWwKkeCBNdvS5bj2egBE4jDPnmTkE6rkb7SBE";
+        let (ids, addrs) =
+            split_builders(&[id.to_string(), format!("/ip4/1.2.3.4/tcp/4001/p2p/{id}")]).unwrap();
+        assert_eq!(ids, vec![id.to_string(), id.to_string()]);
+        assert_eq!(addrs.len(), 1);
+        assert!(split_builders(&["/ip4/1.2.3.4/tcp/4001".into()]).is_err());
+        assert!(split_builders(&["nope".into()]).is_err());
     }
 
     #[test]

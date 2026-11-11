@@ -22,11 +22,17 @@ c0mpute worker restart
 c0mpute status                                 # containers: serving ...
 ```
 
+Give the builder a dialable p2p port (`C0MPUTE_P2P_LISTEN=/ip4/0.0.0.0/tcp/46347`
+in the worker's environment, and open it in the firewall) and name it by
+multiaddr on the buyer side, `/ip4/<ip>/tcp/46347/p2p/<peer id>`: a new
+workload's topic is not relayed by every seed yet, and the buyer connects to
+the named builders directly before it publishes the offer.
+
 On the machine that wants the build:
 
 ```sh
 c0mpute containers id                          # the peer id to give the builder
-c0mpute containers add-builder <builder peer id>
+c0mpute containers add-builder /ip4/<ip>/tcp/46347/p2p/<builder peer id>
 c0mpute build . --load -t myapp:latest         # image built remotely, loaded here
 c0mpute build . -f docker/Dockerfile --build-arg NEXT_PUBLIC_URL=https://x.com -o image.tar.gz
 c0mpute run --image node:22@sha256:<digest> --in . --out dist -- sh -c 'npm ci && npm run build'

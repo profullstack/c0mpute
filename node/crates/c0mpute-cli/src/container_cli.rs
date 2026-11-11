@@ -15,9 +15,10 @@ use clap::{Args, Subcommand};
 /// Who runs the job and with what limits (shared by build and run).
 #[derive(Args, Debug, Clone)]
 pub struct Target {
-    /// Builder peer id to send the job to (repeat for several). Defaults to
-    /// `[containers] builders` and `C0MPUTE_BUILDERS`.
-    #[arg(long = "peer", value_name = "PEER_ID")]
+    /// Builder to send the job to: a peer id, or a multiaddr ending in
+    /// /p2p/<peer id> (repeat for several). Defaults to `[containers]
+    /// builders` and `C0MPUTE_BUILDERS`.
+    #[arg(long = "peer", value_name = "PEER_ID|MULTIADDR")]
     pub peers: Vec<String>,
     /// Accept any builder on the network. A builder controls the bytes it
     /// returns: use only for throwaway work.
@@ -433,6 +434,11 @@ pub fn run_containers(cmd: ContainersCmd, config_path: &Path) -> Result<()> {
         }
         Ok(p.to_string())
     };
+    // Builders may also be full multiaddrs ending in /p2p/<peer id>.
+    let valid_builder = |p: &str| -> Result<String> {
+        container_run::split_builders(&[p.to_string()])?;
+        Ok(p.trim().to_string())
+    };
     let changed = match cmd {
         ContainersCmd::Show => {
             let c = &cfg.containers;
@@ -511,7 +517,7 @@ pub fn run_containers(cmd: ContainersCmd, config_path: &Path) -> Result<()> {
         ContainersCmd::Open => !std::mem::replace(&mut cfg.containers.open, true),
         ContainersCmd::Close => std::mem::replace(&mut cfg.containers.open, false),
         ContainersCmd::AddBuilder { peer_id } => {
-            let p = valid(&peer_id)?;
+            let p = valid_builder(&peer_id)?;
             if cfg.containers.builders.contains(&p) {
                 false
             } else {
