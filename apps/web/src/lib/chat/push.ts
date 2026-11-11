@@ -272,11 +272,12 @@ export function createPushStore(sql: Sql, opts: { cloudNodeId?: string } = {}) {
       const cloud = await store.cloudNode();
       const named = typeof name === "string" && name ? name.toLowerCase() : "";
       if (cloud && (named === CLOUD_NODE || named === cloud.id)) return cloud;
+      // The account that runs the cloud node does not get it as "its own" node.
+      const nodes = (await store.nodes(userId)).filter((n) => !store.isCloud(n.id));
       if (!named && existing?.site_id) {
         if (cloud && existing.node_id === cloud.id) return cloud;
-        return chooseNode(await store.nodes(userId), existing.node_id);
+        return chooseNode(nodes, existing.node_id);
       }
-      const nodes = await store.nodes(userId);
       if (!named && cloud && nodes.length === 0) return cloud;
       return chooseNode(nodes, named || undefined);
     },

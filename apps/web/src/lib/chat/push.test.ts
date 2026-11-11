@@ -282,6 +282,13 @@ describe("cloud node", () => {
     expect(((await s.pickNode("u1", "cloud", null)) as { id: string }).id).toBe(house.id);
   });
 
+  test("the account running the cloud node gets it as the cloud node, not its own", async () => {
+    const { s, house } = await setup();
+    const n = await s.pickNode("house", undefined, null);
+    expect("error" in n).toBe(false);
+    expect((n as { id: string }).id).toBe(house.id);
+  });
+
   test("without a configured cloud node nothing changes", async () => {
     const s = createPushStore(memSql());
     const r = await s.pickNode("u1", undefined, null);
