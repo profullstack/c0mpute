@@ -114,7 +114,11 @@ describe("house system prompt", () => {
     const user = { role: "user" as const, content: "who is this?" };
     expect(withHousePrompt([user])).toEqual([{ role: "system", content: C0_SYSTEM_PROMPT }, user]);
     const own = [{ role: "system" as const, content: "be terse" }, user];
-    expect(withHousePrompt(own)).toBe(own);
+    expect(withHousePrompt(own)).toEqual(own);
+    const stub = { role: "assistant" as const, content: 'Running on the Infernet P2P network. You said: "hi" This is a stub response from the provider daemon — no real model.' };
+    const err = { role: "assistant" as const, content: "ollama HTTP 404: {\"error\":\"model 'qwen2.5:0.5b' not found\"}" };
+    const real = { role: "assistant" as const, content: "Hello! How can I help?" };
+    expect(withHousePrompt([user, stub, user, err, user, real, user]).slice(1)).toEqual([user, user, user, real, user]);
     let sent: Record<string, unknown> = {};
     const up: Upstream = async (_p, init) => {
       sent = JSON.parse(String(init?.body));
