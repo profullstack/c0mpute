@@ -263,25 +263,27 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     let month = c0mpute_core::hosting::settle::MONTH_SECS;
     let (from, to) = (now + 1 - month, now + 1);
     let (dues, outcomes) = publisher.settle_round(&rail, &ledger, from, to, 5_000_000).await;
-    assert_eq!(dues.len(), 2, "dues for the two preferred hosts only: {dues:?}");
+    // Every holder that passed is owed: the two preferred hosts their agreed
+    // share, the free copy the bytes it holds (the whole 5 MiB site here).
+    assert_eq!(dues.len(), holders.len(), "a due per holder: {dues:?}");
     let expected = c0mpute_core::hosting::settle::owed(1_000_000, rec.size, month, 1, 1);
     assert!(expected > 4_000, "5 MiB at $1/GiB-month for a month is ~$0.0049: {expected}");
     for d in &dues {
         assert_eq!((d.passed, d.challenged), (1, 1), "gateway receipts do not count: {d:?}");
         assert_eq!(d.amount, expected);
     }
-    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes.len(), holders.len());
     assert!(outcomes.iter().all(|(_, o)| matches!(o, Outcome::Paid(_))), "{outcomes:?}");
     let idx = |peer: &str| hosts.iter().position(|h| h.peer_id() == peer).unwrap();
     for x in &preferred {
         assert_eq!(rail.received(&wallet(idx(x))), expected, "preferred {x} paid");
     }
     let free = holders.iter().find(|h| !preferred.contains(h)).unwrap();
-    assert_eq!(rail.received(&wallet(idx(free))), 0, "the free copy is not paid");
-    assert_eq!(rail.payments().len(), 2);
+    assert_eq!(rail.received(&wallet(idx(free))), expected, "the free copy is paid for what it holds");
+    assert_eq!(rail.payments().len(), holders.len());
 
     // Same window again: nothing pays twice.
     let (_, again) = publisher.settle_round(&rail, &ledger, from, to, 5_000_000).await;
     assert!(again.iter().all(|(_, o)| *o == Outcome::AlreadyPaid), "{again:?}");
-    assert_eq!(rail.payments().len(), 2);
+    assert_eq!(rail.payments().len(), holders.len());
 }

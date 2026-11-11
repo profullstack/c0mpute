@@ -22,9 +22,17 @@ pub const FILE_CHUNK_BYTES: usize = 1024 * 1024;
 /// 4 TiB. Striping caps a site at [`super::stripe::MAX_GROUPS`] groups, so
 /// past 512 GiB the groups grow (512 MiB each at 4 TiB) instead.
 pub const MAX_SITE_BYTES: u64 = 4 * 1024 * GIB;
-/// Largest free site (a v1 record, no preferred hosts). Volunteers hold free
-/// copies, so a free site may use at most a quarter of what a paid one may.
-pub const MAX_FREE_SITE_BYTES: u64 = 64 * GIB;
+/// Hosting is free while c0mpute is in beta: a free site (a v1 record, no
+/// preferred hosts) may be as big as a paid one, and no node limits how much
+/// of one owner's sites it holds, so a big collection spreads its groups over
+/// every hosting node with room. Turn off to restore the free-site limits.
+pub const BETA_FREE_HOSTING: bool = true;
+/// Largest free site after the beta. Volunteers hold free copies, so a free
+/// site may then use at most a sixty-fourth of what a paid one may.
+pub const MAX_FREE_SITE_BYTES_AFTER_BETA: u64 = 64 * GIB;
+/// Largest free site (a v1 record, no preferred hosts): see
+/// [`BETA_FREE_HOSTING`].
+pub const MAX_FREE_SITE_BYTES: u64 = if BETA_FREE_HOSTING { MAX_SITE_BYTES } else { MAX_FREE_SITE_BYTES_AFTER_BETA };
 /// Largest site that is built in memory ([`build_from_dir`]), and the cap for
 /// the small sites other features publish (ad creatives, app images, podcast
 /// shows, git repos). It was the only site cap before striping.
@@ -1523,8 +1531,12 @@ mod tests {
                 .verify()
         );
         assert!(SiteRecord::sign_with_terms(&kp, "x", &h, 1, MAX_SITE_BYTES + 1, vec![], Some(terms)).is_err());
-        let e = check_site_size(70 * GIB, false).unwrap_err().to_string();
-        assert!(e.contains("--disks auto"), "{e}");
+        if BETA_FREE_HOSTING {
+            assert!(check_site_size(70 * GIB, false).is_ok(), "free sites are as big as paid ones in the beta");
+        } else {
+            let e = check_site_size(70 * GIB, false).unwrap_err().to_string();
+            assert!(e.contains("--disks auto"), "{e}");
+        }
         assert!(check_site_size(70 * GIB, true).is_ok());
         assert!(check_site_size(300 * GIB, true).is_ok(), "300 GiB is under the 4 TiB cap");
         assert!(check_site_size(MAX_SITE_BYTES + GIB, true).unwrap_err().to_string().contains("Split"));
