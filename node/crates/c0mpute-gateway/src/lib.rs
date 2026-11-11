@@ -6,6 +6,7 @@
 //! request is content-addressed, so any gateway can serve any chunk.
 
 pub mod auth;
+pub mod host_guard;
 pub mod storage_api;
 
 use std::net::SocketAddr;

@@ -872,7 +872,10 @@ async fn serve(config_path: &std::path::Path, bind: &str, allow_anon: bool) -> R
     eprintln!("  GET  /storage/v1/objects/{{hash}}   (supports Range)");
     eprintln!("  GET  /storage/v1/status");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Anonymous writes on loopback are exactly what a DNS-rebinding page
+    // would abuse: answer only local Host names there.
+    let local = listener.local_addr().unwrap_or(addr);
+    axum::serve(listener, c0mpute_gateway::host_guard::guard_loopback(app, local)).await?;
     Ok(())
 }
 
