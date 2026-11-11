@@ -528,6 +528,28 @@ pub fn with_instance(mut hardware: serde_json::Value, instance: &str) -> serde_j
     hardware
 }
 
+/// Instances in `last_ad` (instance id -> its latest ad's `published_at_ms`)
+/// that advertised since `cutoff` and were not replaced. An instance whose
+/// last ad predates a newer instance's start (the start time is in the id)
+/// is the same worker restarted, e.g. by auto-update, not a twin: counting it
+/// marked every restarted node "duplicate identity (2 processes)" for the
+/// five minutes its old ad stayed fresh. Real twins keep advertising after
+/// each other's start, so they still count within one advert interval.
+pub fn live_instances(last_ad: &HashMap<String, u64>, cutoff: u64) -> usize {
+    let newest_other_start = |me: &str| {
+        last_ad
+            .keys()
+            .filter(|k| k.as_str() != me)
+            .filter_map(|k| c0mpute_net::instance_started_ms(k))
+            .max()
+    };
+    last_ad
+        .iter()
+        .filter(|(_, t)| **t >= cutoff)
+        .filter(|(id, t)| newest_other_start(id).is_none_or(|s| **t >= s))
+        .count()
+}
+
 /// In-memory registry of recently-seen peer capabilities.
 #[derive(Clone, Default)]
 pub struct Registry {
@@ -592,9 +614,14 @@ impl Registry {
                     let mut seen = instances.write().await;
                     let mine = seen.entry(source).or_default();
                     if !mine.contains_key(id) && mine.len() < 16 {
+                        // A process that last advertised before this one
+                        // started was restarted (auto-update, `worker
+                        // restart`), not twinned.
+                        let started = c0mpute_net::instance_started_ms(id).unwrap_or(0);
                         let fresh = mine
                             .values()
                             .filter(|t| now_ms.saturating_sub(**t) <= MAX_AD_AGE.as_millis() as u64)
+                            .filter(|t| **t >= started)
                             .count();
                         if fresh > 0 {
                             warn!(peer = %source, instance = id, "registry: a second process advertises this peer id (duplicate identity)");
@@ -634,8 +661,8 @@ impl Registry {
         });
     }
 
-    /// How many processes (instance ids) advertised each peer id within the
-    /// ad lifetime. More than one: the identity runs twice.
+    /// How many processes (instance ids) are advertising each peer id at
+    /// once. More than one: the identity runs twice. See [`live_instances`].
     pub async fn instance_counts(&self) -> Vec<(PeerId, usize)> {
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -646,7 +673,7 @@ impl Registry {
             .read()
             .await
             .iter()
-            .map(|(p, m)| (*p, m.values().filter(|t| **t >= cutoff).count()))
+            .map(|(p, m)| (*p, live_instances(m, cutoff)))
             .collect()
     }
 
@@ -677,6 +704,33 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restarted_worker_is_not_a_duplicate() {
+        // The old process last advertised at 1_000_060; the new one started at 1_000_090.
+        let m = HashMap::from([
+            ("0000001000000-aaaaaaaa".to_string(), 1_000_060u64),
+            ("0000001000090-bbbbbbbb".to_string(), 1_000_150u64),
+        ]);
+        assert_eq!(live_instances(&m, 0), 1);
+    }
+
+    #[test]
+    fn twins_advertising_at_once_still_count() {
+        let m = HashMap::from([
+            ("0000001000000-aaaaaaaa".to_string(), 1_000_200u64),
+            ("0000001000090-bbbbbbbb".to_string(), 1_000_150u64),
+        ]);
+        assert_eq!(live_instances(&m, 0), 2);
+        // Stale ads drop out either way.
+        assert_eq!(live_instances(&m, 1_000_160), 1);
+    }
+
+    #[test]
+    fn unparseable_instance_ids_supersede_nothing() {
+        let m = HashMap::from([("x".to_string(), 5u64), ("y".to_string(), 6u64)]);
+        assert_eq!(live_instances(&m, 0), 2);
+    }
     use c0mpute_net::{Libp2pNetwork, Multiaddr, NetworkConfig, Protocol};
 
     #[test]
