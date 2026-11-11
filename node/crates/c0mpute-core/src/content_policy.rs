@@ -8,7 +8,8 @@
 //!    sexual or nudity terms with a minor indicator is refused. In adult mode
 //!    any minor indicator at all is refused, because the output may be
 //!    sexual even when the words are not.
-//! 2. **Adult mode is opt-in on both sides** (job field `adult`, default
+//! 2. **Adult mode is opt-in per request** (workers serve it unless their
+//!    operator opts out; gateways opt in) (job field `adult`, default
 //!    false). Without it, explicit prompts are refused, the worker adds NSFW
 //!    terms to the negative prompt and checks the output with an NSFW image
 //!    classifier ([`crate::nsfw`]). With it, the request must be text only
@@ -36,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use serde::Deserialize;
 use unicode_normalization::UnicodeNormalization;
 
-/// Capability tag of a worker that opted into adult jobs (`[adult] serve`).
+/// Capability tag of a worker that serves adult jobs (`[adult] serve`, on by default).
 pub const ADULT_TAG: &str = "c0mpute:adult";
 
 const TERMS_JSON: &str = include_str!("content_policy/terms.json");
@@ -545,7 +546,7 @@ pub fn set_worker_adult(on: bool) {
     WORKER_ADULT.store(on, Ordering::Relaxed);
 }
 
-/// This worker opted into adult jobs.
+/// This worker serves adult jobs (`[adult] serve`, on unless opted out).
 pub fn worker_adult() -> bool {
     WORKER_ADULT.load(Ordering::Relaxed)
 }

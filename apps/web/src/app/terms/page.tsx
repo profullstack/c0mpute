@@ -49,8 +49,8 @@ export default function TermsPage() {
           for verified adults: you must attest that you are 18 or older (and
           that adult content is legal where you are) in the chat settings, and
           have a paid compute balance. Anonymous and free-tier use never
-          includes adult mode. Only node operators who opt in ever run adult
-          jobs. Adult results are shown blurred until you open them and are
+          includes adult mode. Nodes serve adult jobs unless their operator
+          opts out. Adult results are shown blurred until you open them and are
           never used for previews, public galleries, shares or published sites.
           Adult mode is text only: no uploaded images, photos or face references.
         </p>

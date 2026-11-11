@@ -87,22 +87,31 @@ pub struct Config {
     /// plugin). Off by default.
     #[serde(default)]
     pub threatcrush: crate::threatcrush::ThreatcrushConfig,
-    /// Adult (18+) image and video jobs. Off on both sides by default; the
-    /// child-safety guard in `content_policy` is always on regardless.
+    /// Adult (18+) image and video jobs. Workers serve them by default
+    /// (opt out with `[adult] serve = false` or `C0MPUTE_ADULT=0`); gateways
+    /// accept them only when opted in. The child-safety guard in
+    /// `content_policy` is always on regardless.
     #[serde(default)]
     pub adult: AdultConfig,
 }
 
-/// Adult mode. A worker serves adult jobs only with `serve = true` (or
-/// `C0MPUTE_ADULT=1`) and then advertises `c0mpute:adult`; a gateway accepts
-/// adult requests only with `buyer = true` (or `C0MPUTE_ADULT_BUYER=1`) and
-/// awards them only to workers advertising that tag.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Adult mode. A worker serves adult jobs unless the operator opts out with
+/// `serve = false` (or `C0MPUTE_ADULT=0`), and advertises `c0mpute:adult`
+/// while it does; a gateway accepts adult requests only with `buyer = true`
+/// (or `C0MPUTE_ADULT_BUYER=1`) and awards them only to workers advertising
+/// that tag. Adult jobs are text-only and always pass the child-safety guard.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdultConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub serve: bool,
     #[serde(default)]
     pub buyer: bool,
+}
+
+impl Default for AdultConfig {
+    fn default() -> Self {
+        Self { serve: true, buyer: false }
+    }
 }
 
 impl AdultConfig {
@@ -974,13 +983,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adult_mode_is_off_on_both_sides_by_default() {
+    fn workers_serve_adult_by_default_and_gateways_opt_in() {
         let cfg = Config::default();
-        assert!(!cfg.adult.serve && !cfg.adult.buyer);
-        let cfg: Config = toml::from_str("[adult]\nserve = true\nbuyer = true\n").unwrap();
-        assert!(cfg.adult.serve && cfg.adult.buyer);
+        assert!(cfg.adult.serve && !cfg.adult.buyer);
+        let cfg: Config = toml::from_str("[adult]\nbuyer = true\n").unwrap();
+        assert!(cfg.adult.serve && cfg.adult.buyer, "a missing serve key stays on");
+        let out: Config = toml::from_str("[adult]\nserve = false\n").unwrap();
+        assert!(!out.adult.serve, "operators can opt out");
         let partial: Config = toml::from_str("[storage]\nenabled = true\n").unwrap();
-        assert!(!partial.adult.serve);
+        assert!(partial.adult.serve && !partial.adult.buyer);
     }
 
     #[test]
