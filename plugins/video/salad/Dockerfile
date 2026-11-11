@@ -31,6 +31,12 @@ RUN set -eu; \
 
 COPY --chmod=0755 salad/entrypoint.sh salad/prefetch.py /opt/c0mpute-salad/
 
+# Back to the runner's non-root user; it owns its home, the logs and the
+# weights cache.
+RUN mkdir -p /home/runner /logs /weights/hf \
+    && chown -R 10001:10001 /home/runner /logs /weights
+USER 10001:10001
+
 # Local runner mode; weights cache on the container disk (warmed at start by
 # prefetch.py, shared with the runner through HF_HOME). No self-update: the
 # image pins the binary it was built with.
@@ -40,9 +46,9 @@ ENV C0MPUTE_VIDEO_RUNNER=local \
     HF_HOME=/weights/hf \
     C0MPUTE_PREFETCH_MODELS=wan2.1-t2v-1.3b \
     C0MPUTE_NAME=profullstack \
-    HOME=/root
+    HOME=/home/runner
 
 # Status page (boot + worker log) for the container gateway.
 EXPOSE 8080
-WORKDIR /root
+WORKDIR /home/runner
 ENTRYPOINT ["/opt/c0mpute-salad/entrypoint.sh"]
