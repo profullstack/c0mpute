@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { errorMessage, sseParser } from "../api.ts";
@@ -198,8 +198,13 @@ describe("config", () => {
     const home = mkdtempSync(join(tmpdir(), "c0tui-"));
     expect(loadCreds({}, home)).toEqual({ url: "https://c0mpute.com", key: null, source: null });
     const path = saveCreds("https://c0mpute.com", "c0k_abc", home);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ url: null, key: "c0k_abc" });
+    const fd = openSync(path, "r");
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(readFileSync(fd, "utf8"))).toEqual({ url: null, key: "c0k_abc" });
+    } finally {
+      closeSync(fd);
+    }
     expect(loadCreds({}, home)).toEqual({ url: "https://c0mpute.com", key: "c0k_abc", source: "file" });
     expect(loadCreds({ C0MPUTE_API_KEY: "c0k_env", C0MPUTE_URL: "http://localhost:3000/" }, home)).toEqual({ url: "http://localhost:3000", key: "c0k_env", source: "env" });
   });
