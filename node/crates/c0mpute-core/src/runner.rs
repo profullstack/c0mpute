@@ -155,6 +155,8 @@ pub struct TtsJobInline {
     pub speed: f32,
     #[serde(default)]
     pub persona: String,
+    #[serde(default)]
+    pub exaggeration: Option<f32>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
@@ -285,14 +287,22 @@ async fn run_tts_job(
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     fs::create_dir_all(&job_dir).await?;
     let output_path = job_dir.join("speech.wav");
-    let request = serde_json::json!({
-        "text": inline.text,
-        "engine": inline.engine,
-        "voice": inline.voice,
-        "locale": inline.locale,
-        "speed": inline.speed,
-    });
-    crate::speech::synthesize(&request, &output_path).await?;
+    if inline.engine == "pocket" || inline.engine == "chatterbox" {
+        // Model load dominates a one-shot job (Chatterbox ~10-30 s), so these
+        // engines speak through a warm worker this node keeps between jobs.
+        let spoken = warm_say(&inline).await?;
+        fs::copy(&spoken, &output_path).await?;
+        let _ = fs::remove_file(&spoken).await;
+    } else {
+        let request = serde_json::json!({
+            "text": inline.text,
+            "engine": inline.engine,
+            "voice": inline.voice,
+            "locale": inline.locale,
+            "speed": inline.speed,
+        });
+        crate::speech::synthesize(&request, &output_path).await?;
+    }
     let bytes = fs::read(&output_path).await?;
     if bytes.len() < 44
         || bytes.len() > 20 * 1024 * 1024
@@ -302,6 +312,43 @@ async fn run_tts_job(
         bail!("TTS output is not a valid WAV under the 20 MiB result limit");
     }
     crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
+}
+
+/// One warm session per voice, held for the life of the worker (idle ones
+/// are reaped by the store). Sessions on one engine share a single model.
+async fn warm_say(inline: &TtsJobInline) -> Result<std::path::PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static STORE: OnceLock<crate::speech_session::SessionStore> = OnceLock::new();
+    static IDS: OnceLock<tokio::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+    let store = STORE.get_or_init(crate::speech_session::SessionStore::new);
+    let ids = IDS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+    for attempt in 0..2 {
+        let id = {
+            let mut ids = ids.lock().await;
+            match ids.get(&inline.voice) {
+                Some(id) => id.clone(),
+                None => {
+                    let opened = store.open(&inline.voice).await?;
+                    ids.insert(inline.voice.clone(), opened.session.clone());
+                    opened.session
+                }
+            }
+        };
+        match store
+            .say(&id, &inline.text, &inline.locale, inline.speed, inline.exaggeration)
+            .await
+        {
+            Ok(spoken) => return Ok(spoken.wav),
+            // The store drops a broken session; forget it and open a new one once.
+            Err(error) if attempt == 0 => {
+                warn!(voice = %inline.voice, err = %error, "warm TTS session failed; reopening");
+                ids.lock().await.remove(&inline.voice);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the loop returns on its second attempt")
 }
 
 /// Largest audio input a worker accepts.

@@ -171,10 +171,11 @@ impl WarmWorker {
         voice: &str,
         locale: &str,
         speed: f32,
+        exaggeration: Option<f32>,
         out: &std::path::Path,
     ) -> Result<Spoken> {
         self.next_id += 1;
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "id": self.next_id.to_string(),
             "text": text,
             "voice": voice,
@@ -182,6 +183,9 @@ impl WarmWorker {
             "speed": speed,
             "out": out,
         });
+        if let Some(exaggeration) = exaggeration {
+            request["exaggeration"] = serde_json::json!(exaggeration);
+        }
         let mut line = serde_json::to_vec(&request)?;
         line.push(b'\n');
         self.stdin.write_all(&line).await.context(
@@ -284,6 +288,8 @@ impl SessionStore {
 
         let python = if engine == "pocket" {
             crate::speech::python_path()
+        } else if engine == "chatterbox" {
+            crate::speech::chatterbox_python()
         } else {
             crate::speech::kokoro_python_installed().unwrap_or_else(crate::speech::kokoro_python)
         };
@@ -340,6 +346,7 @@ impl SessionStore {
         text: &str,
         locale: &str,
         speed: f32,
+        exaggeration: Option<f32>,
     ) -> Result<Spoken> {
         let session = {
             let sessions = self.inner.read().await;
@@ -360,7 +367,9 @@ impl SessionStore {
         // and a phone call speaks in sequence anyway.
         let spoken = {
             let mut worker = session.worker.lock().await;
-            worker.say(text, &session.voice, locale, speed, &out).await
+            worker
+                .say(text, &session.voice, locale, speed, exaggeration, &out)
+                .await
         };
         match spoken {
             Ok(spoken) => {
@@ -631,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn saying_into_a_session_that_does_not_exist_is_an_error_not_a_panic() {
         let store = SessionStore::new();
-        let error = store.say("nope", "hello", "en-us", 1.0).await.unwrap_err();
+        let error = store.say("nope", "hello", "en-us", 1.0, None).await.unwrap_err();
         assert!(
             error.to_string().contains("no warm speech session"),
             "{error}"

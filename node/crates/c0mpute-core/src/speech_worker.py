@@ -138,6 +138,15 @@ def tts(root: Path, output: Path, request: dict) -> None:
         pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
         wavfile.write(str(output), model.sample_rate, pcm)
         return
+    if engine == "chatterbox":
+        import soundfile as sf
+
+        audio, sample_rate = ChatterboxSpeaker(root).create(
+            text, voice=voice, lang=str(request.get("locale", "en-US")).lower(),
+            exaggeration=float(request.get("exaggeration", 0.6)),
+        )
+        sf.write(str(output), audio, sample_rate, subtype="PCM_16")
+        return
     raise ValueError("unsupported TTS engine")
 
 
@@ -213,6 +222,42 @@ class PocketSpeaker:
         return np.clip(audio, -1.0, 1.0).astype(np.float32), self.model.sample_rate
 
 
+class ChatterboxSpeaker:
+    """Chatterbox (Resemble AI, MIT) on the GPU: the expressive voices.
+
+    Each voice is cloned from a clean reference clip; `exaggeration` turns the
+    emotional range up or down (0.5 neutral, 0.6 our default, ~1.0 animated).
+    """
+
+    def __init__(self, root: Path) -> None:
+        from chatterbox.tts import ChatterboxTTS
+
+        self.model = ChatterboxTTS.from_pretrained(device="cuda")
+        self.voices = root / "models" / "chatterbox" / "voices"
+
+    def create(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us",
+               exaggeration: float = 0.6):
+        import numpy as np
+
+        if lang.split("-", 1)[0] != "en":
+            raise ValueError("Chatterbox serves English voice jobs only")
+        reference = self.voices / f"{voice}.wav"
+        if not reference.is_file():
+            raise ValueError(f"no Chatterbox reference clip for {voice}")
+        exaggeration = min(1.5, max(0.25, float(exaggeration)))
+        # Livelier delivery wants a lower cfg weight, or the pacing rushes.
+        cfg_weight = 0.5 if exaggeration <= 0.5 else 0.35
+        wav = self.model.generate(text, audio_prompt_path=str(reference),
+                                  exaggeration=exaggeration, cfg_weight=cfg_weight)
+        audio = wav.squeeze().detach().cpu().numpy().astype(np.float32)
+        if not np.isfinite(audio).all():
+            raise RuntimeError("Chatterbox produced non-finite audio")
+        peak = float(np.abs(audio).max() or 1.0)
+        if peak > 0.97:  # never hand back a clipped line
+            audio = audio * (0.97 / peak)
+        return audio, self.model.sr
+
+
 def serve(root: Path, engine: str = "kokoro") -> None:
     """Answer utterances from a model held in memory, one JSON line each.
 
@@ -230,7 +275,12 @@ def serve(root: Path, engine: str = "kokoro") -> None:
 
     started = time.monotonic()
     try:
-        kokoro = PocketSpeaker() if engine == "pocket" else load_kokoro(root)
+        if engine == "pocket":
+            kokoro = PocketSpeaker()
+        elif engine == "chatterbox":
+            kokoro = ChatterboxSpeaker(root)
+        else:
+            kokoro = load_kokoro(root)
     except Exception as error:  # noqa: BLE001 - tell the caller why, then stop
         print(json.dumps({"ready": False, "engine": engine, "error": f"{error}"[:300]}), flush=True)
         return
@@ -252,11 +302,13 @@ def serve(root: Path, engine: str = "kokoro") -> None:
         began = time.monotonic()
         try:
             output = Path(request["out"])
+            extra = {"exaggeration": float(request.get("exaggeration", 0.6))} if engine == "chatterbox" else {}
             audio, sample_rate = kokoro.create(
                 request["text"],
                 voice=request.get("voice", "bill_boerst" if engine == "pocket" else "am_michael"),
                 speed=float(request.get("speed", 1.0)),
                 lang=str(request.get("locale", "en-US")).lower(),
+                **extra,
             )
             sf.write(str(output), audio, sample_rate, subtype="PCM_16")
             print(
@@ -277,7 +329,7 @@ def serve(root: Path, engine: str = "kokoro") -> None:
             )
 
     try:
-        if engine != "pocket":
+        if engine == "kokoro":
             kokoro.voices.close()
     except Exception:  # noqa: BLE001 - we are on the way out anyway
         pass

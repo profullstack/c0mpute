@@ -73,6 +73,57 @@ const POCKET_VOICES: &[&str] = &[
     "stuart_bell",
 ];
 const POCKET_LANGUAGE: &str = "english_2m_2026-10";
+/// Expressive GPU voices: Chatterbox (Resemble AI, MIT) cloned from a clean
+/// reference clip per agent. Best quality on GPU nodes; CPU nodes keep Pocket
+/// and Kokoro (Anthony 2026-11-11: "add best qualitiy on gpus and lower
+/// quality for cpus"). Ids are agent slugs, so they never collide with the
+/// Kokoro/Piper/Pocket voice names `engine_for_voice` relies on.
+pub(crate) const CHATTERBOX_VOICES: &[&str] =
+    &["riotcoder", "cha0spunk", "rootkey", "knox", "coinpay", "nora", "quill"];
+const CHATTERBOX_PACKAGES: &[&str] = &["chatterbox-tts==0.1.7", "setuptools<81"];
+/// The reference clips, rendered once with full-precision Kokoro (Apache-2.0)
+/// so the cloned voices carry no audiobook mic hiss and no licence question.
+const CHATTERBOX_REFERENCES: &[(&str, &[u8])] = &[
+    ("riotcoder", include_bytes!("../../../../plugins/tts/chatterbox-voices/riotcoder.wav")),
+    ("cha0spunk", include_bytes!("../../../../plugins/tts/chatterbox-voices/cha0spunk.wav")),
+    ("rootkey", include_bytes!("../../../../plugins/tts/chatterbox-voices/rootkey.wav")),
+    ("knox", include_bytes!("../../../../plugins/tts/chatterbox-voices/knox.wav")),
+    ("coinpay", include_bytes!("../../../../plugins/tts/chatterbox-voices/coinpay.wav")),
+    ("nora", include_bytes!("../../../../plugins/tts/chatterbox-voices/nora.wav")),
+    ("quill", include_bytes!("../../../../plugins/tts/chatterbox-voices/quill.wav")),
+];
+
+/// True when this box has an NVIDIA GPU the CUDA build of torch can use.
+/// Checked once: a node does not grow a GPU while it runs.
+pub fn has_cuda_gpu() -> bool {
+    static GPU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GPU.get_or_init(|| {
+        if std::env::var("C0MPUTE_TTS_GPU").is_ok_and(|v| v == "0" || v == "off") {
+            return false;
+        }
+        std::process::Command::new("nvidia-smi")
+            .arg("-L")
+            .output()
+            .is_ok_and(|out| out.status.success() && !out.stdout.is_empty())
+    })
+}
+
+fn chatterbox_venv_dir() -> PathBuf {
+    speech_root().join("chatterbox-venv")
+}
+
+/// The interpreter Chatterbox runs under (its own venv: CUDA torch is large
+/// and must not disturb the CPU engines' shared one).
+pub fn chatterbox_python() -> PathBuf {
+    venv_python(&chatterbox_venv_dir())
+}
+
+fn chatterbox_ready() -> bool {
+    has_cuda_gpu()
+        && speech_root().join(".chatterbox-ready").is_file()
+        && chatterbox_python().is_file()
+}
+
 
 pub fn speech_root() -> PathBuf {
     crate::config::data_dir()
@@ -159,7 +210,9 @@ pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
 
 /// Which engine serves `voice`. Voice ids are unique across engines.
 pub fn engine_for_voice(voice: &str) -> &'static str {
-    if POCKET_VOICES.contains(&voice) {
+    if CHATTERBOX_VOICES.contains(&voice) {
+        "chatterbox"
+    } else if POCKET_VOICES.contains(&voice) {
         "pocket"
     } else if PIPER_VOICES.contains(&voice) {
         "piper"
@@ -170,6 +223,15 @@ pub fn engine_for_voice(voice: &str) -> &'static str {
 
 pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
     let root = speech_root();
+    // Chatterbox lives in its own CUDA venv and only on GPU nodes.
+    if engine == "chatterbox" {
+        return CHATTERBOX_VOICES.contains(&voice)
+            && chatterbox_ready()
+            && root
+                .join("models/chatterbox/voices")
+                .join(format!("{voice}.wav"))
+                .is_file();
+    }
     // Kokoro may run from its own venv, so it is the one engine whose
     // readiness does not imply the shared one exists.
     if engine == "kokoro" {
@@ -229,6 +291,12 @@ pub fn available_tts_engines() -> Vec<&'static str> {
     {
         engines.push("pocket");
     }
+    if CHATTERBOX_VOICES
+        .iter()
+        .any(|voice| tts_voice_available("chatterbox", voice))
+    {
+        engines.push("chatterbox");
+    }
     engines
 }
 
@@ -260,12 +328,26 @@ fn pocket_ready() -> bool {
 }
 
 pub async fn setup_tts(engine: &str) -> Result<()> {
-    if engine != "piper" && engine != "kokoro" && engine != "pocket" && engine != "all" {
-        bail!("engine must be piper, kokoro, pocket, or all");
+    if !["piper", "kokoro", "pocket", "chatterbox", "all"].contains(&engine) {
+        bail!("engine must be piper, kokoro, pocket, chatterbox, or all");
     }
+    if engine == "chatterbox" && !has_cuda_gpu() {
+        bail!("Chatterbox needs an NVIDIA GPU (nvidia-smi found none); CPU nodes serve Pocket and Kokoro");
+    }
+    // "all" adds the GPU voices only where there is a GPU to run them.
+    let install_chatterbox =
+        (engine == "chatterbox" || (engine == "all" && has_cuda_gpu())) && !chatterbox_ready();
     let install_piper = (engine == "piper" || engine == "all") && !piper_ready();
     let install_kokoro = (engine == "kokoro" || engine == "all") && !kokoro_ready();
     let install_pocket = (engine == "pocket" || engine == "all") && !pocket_ready();
+    if install_chatterbox {
+        if let Err(error) = install_chatterbox_engine().await {
+            if engine == "chatterbox" {
+                return Err(error);
+            }
+            warn!(err = %error, "Chatterbox unavailable on this GPU node; serving the CPU voices");
+        }
+    }
     if !install_piper && !install_kokoro && !install_pocket {
         return Ok(());
     }
@@ -541,6 +623,45 @@ async fn bootstrap_pip() -> Result<()> {
 /// gets Kokoro its own venv instead — built from an older interpreter when the
 /// box has one, else by `uv`, which fetches a managed CPython itself. Piper,
 /// Pocket and Whisper keep the shared venv either way.
+/// Install Chatterbox into its own venv, write the agents' reference clips and
+/// prefetch the weights, so the first job is not the one that downloads 2 GB.
+async fn install_chatterbox_engine() -> Result<()> {
+    let root = speech_root();
+    let dir = chatterbox_venv_dir();
+    if !chatterbox_python().is_file() {
+        tokio::fs::create_dir_all(&root).await?;
+        if let Some(uv) = find_uv() {
+            let mut command = Command::new(uv);
+            command.args(["venv", "--seed", "--python", "3.11"]).arg(&dir);
+            run_checked(command, "create the Chatterbox Python environment with uv").await?;
+        } else {
+            let interpreter = KOKORO_PYTHONS
+                .iter()
+                .find(|p| python_version(Path::new(p)).is_some_and(|v| v >= (3, 10) && v < (3, 13)))
+                .context("Chatterbox needs Python 3.10 to 3.12, or uv")?;
+            let mut command = Command::new(interpreter);
+            command.args(["-m", "venv"]).arg(&dir);
+            run_checked(command, "create the Chatterbox Python environment").await?;
+        }
+    }
+    pip_install_with(&chatterbox_python(), CHATTERBOX_PACKAGES).await?;
+    let voices = root.join("models/chatterbox/voices");
+    tokio::fs::create_dir_all(&voices).await?;
+    for (name, bytes) in CHATTERBOX_REFERENCES {
+        tokio::fs::write(voices.join(format!("{name}.wav")), bytes).await?;
+    }
+    let cache = root.join("cache/huggingface");
+    tokio::fs::create_dir_all(&cache).await?;
+    let mut command = Command::new(chatterbox_python());
+    command
+        .arg("-c")
+        .arg("from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cuda')")
+        .env("HF_HOME", &cache);
+    run_checked(command, "download and load the Chatterbox weights on the GPU").await?;
+    tokio::fs::write(root.join(".chatterbox-ready"), b"chatterbox-tts 0.1.7 cuda\n").await?;
+    Ok(())
+}
+
 async fn ensure_kokoro_venv() -> Result<PathBuf> {
     let existing = kokoro_python();
     if existing.is_file() && python_version(&existing).is_some_and(python_fits_kokoro) {
@@ -832,10 +953,11 @@ pub async fn transcribe(request: &serde_json::Value, audio: &Path, output: &Path
 async fn run_worker(action: &str, args: &[&str], request: &serde_json::Value) -> Result<()> {
     // Kokoro may live in its own venv (see `ensure_kokoro_venv`), so pick the
     // interpreter by engine rather than assuming the shared one.
-    let python = if action == "tts"
-        && request.get("engine").and_then(|engine| engine.as_str()) == Some("kokoro")
-    {
+    let engine = request.get("engine").and_then(|engine| engine.as_str());
+    let python = if action == "tts" && engine == Some("kokoro") {
         kokoro_python_installed().unwrap_or_else(kokoro_python)
+    } else if action == "tts" && engine == Some("chatterbox") {
+        chatterbox_python()
     } else {
         python_path()
     };
