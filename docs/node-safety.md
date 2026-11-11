@@ -65,13 +65,10 @@ classifier (AdamCodd/vit-base-nsfw-detector, Apache-2.0, int8 ONNX pinned by
 SHA-256, installed under `~/.local/share/c0mpute/nsfw`); an explicit output is
 discarded and the job fails with a policy reason.
 
-**Adult jobs are opt-in and off by default.** Your node runs them only if you
-set this (or `C0MPUTE_ADULT=1`), and then advertises `c0mpute:adult`:
-
-```toml
-[adult]
-serve = true
-```
+**Every node serves adult jobs; there is no per-node switch.** Since v0.3.38
+every worker takes adult (18+) image and video jobs and advertises
+`c0mpute:adult`. Jobs are end-to-end encrypted between buyer and worker. The
+child-safety guard runs on every job and cannot be turned off.
 
 A gateway accepts adult requests only with `[adult] buyer = true` (or
 `C0MPUTE_ADULT_BUYER=1`) and awards them only to nodes whose own capability ad

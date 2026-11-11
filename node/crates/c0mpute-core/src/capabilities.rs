@@ -73,12 +73,10 @@ pub fn role_tags(config: &Config) -> Vec<String> {
     if crate::crowdgpt::donating() {
         tags.push(crate::crowdgpt::DONATE_TAG.to_string());
     }
-    // Not a workload: the operator opted into adult (18+) image and video
-    // jobs. Buyers require it on adult offers and award them only to nodes
-    // that advertise it.
-    if config.adult.serve_enabled() {
-        tags.push(crate::content_policy::ADULT_TAG.to_string());
-    }
+    // Not a workload: every node serves adult (18+) image and video jobs.
+    // Buyers require the tag on adult offers, so only workers new enough to
+    // run the child-safety guard get them.
+    tags.push(crate::content_policy::ADULT_TAG.to_string());
     for role in &config.roles {
         match role {
             Role::Tts => {
@@ -901,15 +899,11 @@ mod tests {
     }
 
     #[test]
-    fn the_adult_tag_is_advertised_only_when_the_operator_opts_in() {
-        // Skip when the environment overrides the config either way.
-        if std::env::var("C0MPUTE_ADULT").is_ok() {
-            return;
-        }
+    fn every_node_advertises_the_adult_tag() {
         let adult = crate::content_policy::ADULT_TAG.to_string();
-        assert!(!super::role_tags(&Config::default()).contains(&adult), "off by default");
-        let on: Config = toml::from_str("[adult]\nserve = true\n").unwrap();
-        assert!(super::role_tags(&on).contains(&adult));
+        assert!(super::role_tags(&Config::default()).contains(&adult));
+        let old: Config = toml::from_str("[adult]\nserve = false\n").unwrap();
+        assert!(super::role_tags(&old).contains(&adult), "no per-node switch");
     }
 
     #[test]
