@@ -247,11 +247,22 @@ class ChatterboxSpeaker:
         exaggeration = min(1.5, max(0.25, float(exaggeration)))
         # Livelier delivery wants a lower cfg weight, or the pacing rushes.
         cfg_weight = 0.5 if exaggeration <= 0.5 else 0.35
-        wav = self.model.generate(text, audio_prompt_path=str(reference),
-                                  exaggeration=exaggeration, cfg_weight=cfg_weight)
-        audio = wav.squeeze().detach().cpu().numpy().astype(np.float32)
-        if not np.isfinite(audio).all():
-            raise RuntimeError("Chatterbox produced non-finite audio")
+        # Sampling occasionally yields NaN audio (seen 2 of 4 tries on CPU,
+        # 2026-11-11; the watermark step then raises "not finite"). A fresh
+        # sample almost always comes out clean, so retry before failing.
+        last = None
+        for _attempt in range(3):
+            try:
+                wav = self.model.generate(text, audio_prompt_path=str(reference),
+                                          exaggeration=exaggeration, cfg_weight=cfg_weight)
+                audio = wav.squeeze().detach().cpu().numpy().astype(np.float32)
+                if np.isfinite(audio).all() and np.abs(audio).max() > 1e-4:
+                    break
+                last = RuntimeError("Chatterbox produced non-finite or silent audio")
+            except Exception as error:  # noqa: BLE001 - retry, then report
+                last = error
+        else:
+            raise RuntimeError(f"Chatterbox failed 3 times: {last}")
         peak = float(np.abs(audio).max() or 1.0)
         if peak > 0.97:  # never hand back a clipped line
             audio = audio * (0.97 / peak)
