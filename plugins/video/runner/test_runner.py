@@ -244,6 +244,39 @@ def main() -> int:
         except runner.JobError:
             check(f"wav refuses {name}", True)
 
+    print("adult LoRAs load on adult jobs only")
+    models = runner.load_models(MANIFEST)
+    job_dir = tmp / "adult"
+    job_dir.mkdir(exist_ok=True)
+    check("adult flag parsed", runner.parse_job(base_job(adult=True), models, job_dir)["adult"] is True)
+    check("adult defaults to false", runner.parse_job(base_job(), models, job_dir)["adult"] is False)
+    check("adult must be literally true", runner.parse_job(base_job(adult="yes"), models, job_dir)["adult"] is False)
+    rows = runner.parse_adult_loras("m", [{"repo": "o/r", "file": "x.safetensors", "scale": 0.8}])
+    check("adult_loras parse", rows == (("o/r", "x.safetensors", 0.8),))
+    for label, bad in [("no repo", {"file": "x.safetensors"}), ("not safetensors", {"repo": "o/r", "file": "x.ckpt"}), ("scale 0", {"repo": "o/r", "file": "x.safetensors", "scale": 0})]:
+        try:
+            runner.parse_adult_loras("m", [bad])
+            check(f"adult_loras refuses {label}", False, "(accepted)")
+        except runner.JobError:
+            check(f"adult_loras refuses {label}", True)
+
+    class FakePipe:
+        def __init__(self):
+            self.calls = []
+        def load_lora_weights(self, repo, weight_name, adapter_name):
+            self.calls.append(("load", repo, weight_name, adapter_name))
+        def set_adapters(self, names, adapter_weights):
+            self.calls.append(("set", tuple(names), tuple(adapter_weights)))
+
+    m = runner.Model(id="m", repo="", diffusers_repo="d", workloads=("video.txt2vid",), precision="bf16", vram_gib=24,
+                     adult_loras=(("o/r", "x.safetensors", 0.8),))
+    pipe = FakePipe()
+    loaded = runner.apply_adult_loras(pipe, m, {"adult": True})
+    check("adult job loads the LoRA", pipe.calls == [("load", "o/r", "x.safetensors", "adult0"), ("set", ("adult0",), (0.8,))], str(pipe.calls))
+    check("adult job reports what loaded", loaded == ["o/r/x.safetensors@0.8"])
+    pipe = FakePipe()
+    check("SFW job loads nothing", runner.apply_adult_loras(pipe, m, {"adult": False}) == [] and pipe.calls == [])
+
     print("the selftest runs end to end")
     sel = tmp / "selftest"
     rc = runner.selftest(sel)

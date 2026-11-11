@@ -99,9 +99,23 @@ class Model:
     full_vram_gib: int = 0
     # Job defaults for this model (see JOB_DEFAULTS).
     defaults: tuple[tuple[str, int], ...] = ()
+    # LoRAs applied to adult (18+) jobs only: (hf repo, file, strength).
+    adult_loras: tuple[tuple[str, str, float], ...] = ()
 
     def default(self, field: str) -> int:
         return dict(self.defaults).get(field, JOB_DEFAULTS[field])
+
+
+def parse_adult_loras(mid: str, rows) -> tuple[tuple[str, str, float], ...]:
+    """`adult_loras = [{ repo = "...", file = "x.safetensors", scale = 0.8 }]`."""
+    out = []
+    for row in rows or ():
+        repo, file = str(row.get("repo", "")).strip(), str(row.get("file", "")).strip()
+        scale = float(row.get("scale", 1.0))
+        if not repo or not file.endswith(".safetensors") or not 0.0 < scale <= 2.0:
+            raise JobError(f"model {mid} has a bad adult_loras entry {row!r}")
+        out.append((repo, file, scale))
+    return tuple(out)
 
 
 def load_models(path: Path) -> dict[str, Model]:
@@ -137,6 +151,7 @@ def load_models(path: Path) -> dict[str, Model]:
             distilled=bool(row.get("distilled", False)),
             full_vram_gib=int(row.get("full_vram_gib", 0)),
             defaults=tuple((k, int(row[k])) for k in JOB_DEFAULTS if k in row),
+            adult_loras=parse_adult_loras(mid, row.get("adult_loras", ())),
         )
         if models[mid].backend not in BACKENDS:
             # Fail loudly: a typo here would otherwise advertise a model the
@@ -232,6 +247,9 @@ def parse_job(raw: dict, models: dict[str, Model], job_dir: Path) -> dict:
         "width": width,
         "height": height,
         "seed": seed,
+        # 18+ job (the node verified the buyer opted in): load the model's
+        # adult LoRAs. The child-safety guard ran before this job existed.
+        "adult": raw.get("adult") is True,
         # Distilled checkpoints are trained for CFG off; 5.0 on them burns
         # two forward passes per step for a worse clip.
         "guidance_scale": float(
@@ -359,6 +377,7 @@ def generate_frames(job: dict, frame_dir: Path) -> None:
     vae = AutoencoderKLWan.from_pretrained(repo, subfolder="vae", torch_dtype=torch.float32)
     pipe_cls = WanPipeline if job["workload"] == "video.txt2vid" else WanImageToVideoPipeline
     pipe = pipe_cls.from_pretrained(repo, vae=vae, torch_dtype=dtype)
+    job["loras"] = apply_adult_loras(pipe, model, job)
 
     prompt_kwargs: dict = dict(
         prompt=job["prompt"],
@@ -409,6 +428,25 @@ def generate_frames(job: dict, frame_dir: Path) -> None:
 
     frames = pipe(**kwargs).frames[0]
     write_frames(frames, frame_dir)
+
+
+def apply_adult_loras(pipe, model: Model, job: dict) -> list[str]:
+    """Load the model's adult LoRAs onto the pipeline for an adult job.
+
+    Before any offload hooks exist, so the adapters move with the transformer.
+    Returns what was loaded ("repo/file@scale") for the sidecar.
+    """
+    if not job.get("adult") or not model.adult_loras:
+        return []
+    names, weights, loaded = [], [], []
+    for i, (repo, file, scale) in enumerate(model.adult_loras):
+        name = f"adult{i}"
+        pipe.load_lora_weights(repo, weight_name=file, adapter_name=name)
+        names.append(name)
+        weights.append(scale)
+        loaded.append(f"{repo}/{file}@{scale}")
+    pipe.set_adapters(names, adapter_weights=weights)
+    return loaded
 
 
 def write_frames(frames, frame_dir: Path) -> int:
@@ -592,6 +630,8 @@ def write_sidecar(job_dir: Path, job: dict, probed: dict) -> None:
         "prompt": job["prompt"],
         "negative_prompt": job["negative_prompt"],
         "seed": job["seed"],
+        "adult": job.get("adult", False),
+        "loras": job.get("loras", []),
         "steps": job["steps"],
         "guidance_scale": job["guidance_scale"],
         "offload": bool(job.get("offload", False)),
