@@ -222,10 +222,14 @@ pub const MAX_PROMPT_CHARS: usize = 2000;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
-/// How long a single clip may take before the container is killed. Generous:
-/// a 14B model at 720p on a busy card is minutes, and the alternative to
-/// waiting is failing a job that was nearly done.
-pub const JOB_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// How long one clip may render once a worker has taken it: 2 hours. It is
+/// the worker's kill timeout (sd-cli or the container), the gateway's receipt
+/// timeout and, plus a margin, the auction deadline. Measured from the award,
+/// not from when the request was queued, so a clip that waited for a worker
+/// still gets its full 2 h. A CPU Wan 2.1 1.3B clip on a loaded box (vienna,
+/// load 2-3 per CPU, 2026-11-10) was cut at the old 45 min while still
+/// rendering; the alternative to waiting is failing a job that was nearly done.
+pub const JOB_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// One video job, as it arrives in `JobAccept.spec_inline`.
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -269,6 +273,10 @@ pub struct VideoJobInline {
     pub seed: Option<u64>,
     #[serde(default)]
     pub guidance_scale: Option<f32>,
+    /// Adult (18+) job: text only, verified buyers and opted-in workers
+    /// (`content_policy`). Left off the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adult: bool,
 }
 
 fn default_frames() -> u32 {
@@ -291,6 +299,32 @@ fn default_image_format() -> String {
 }
 
 impl VideoJobInline {
+    /// What the content policy reads of this job.
+    pub fn policy(&self) -> crate::content_policy::PolicyRequest<'_> {
+        crate::content_policy::PolicyRequest {
+            prompt: &self.prompt,
+            negative: &self.negative_prompt,
+            extra: &[],
+            adult: self.adult,
+            has_image_input: self.image_hash.is_some(),
+        }
+    }
+
+    /// The negative prompt the model gets: the buyer's, plus NSFW terms on an
+    /// SFW job or minor terms on an adult one.
+    pub fn effective_negative(&self, fallback: &str) -> String {
+        let user = match self.negative_prompt.trim() {
+            "" => fallback,
+            n => n,
+        };
+        let extra = if self.adult {
+            crate::content_policy::adult_negative_terms()
+        } else {
+            crate::content_policy::nsfw_negative_terms()
+        };
+        crate::content_policy::with_negative(user, extra)
+    }
+
     /// The conditioning image as a checked input, when there is one.
     pub fn image_input(&self) -> Option<std::result::Result<crate::pieces::InputRef, String>> {
         self.image_hash.as_deref().map(|hash| {
@@ -384,7 +418,7 @@ impl VideoJobInline {
             "workload": workload,
             "model": self.model,
             "prompt": self.prompt.trim(),
-            "negative_prompt": self.negative_prompt.trim(),
+            "negative_prompt": self.effective_negative(""),
             "frames": self.frames,
             "fps": self.fps,
             "steps": self.steps,
@@ -627,6 +661,7 @@ pub fn spawn_video_runner(
     image: String,
     load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
+    crate::nsfw::warm_up();
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -671,6 +706,10 @@ async fn run_video_job(
         serde_json::from_value(spec.clone()).context("decode video job")?;
     if let Err(reason) = inline.validate(workload) {
         bail!("{reason}");
+    }
+    if let Err(refusal) = crate::content_policy::worker_check(&inline.policy()) {
+        crate::content_policy::record(refusal, "worker", Some(&job.accept.job_id));
+        bail!(refusal.job_error());
     }
     let command = command_for(workload).context("unsupported video workload")?;
 
@@ -741,6 +780,13 @@ async fn run_video_job(
         if !is_mp4(&head[..n]) {
             bail!("video result is not an MP4");
         }
+    }
+    if !inline.adult && crate::nsfw::fixed_test_score().is_some() {
+        crate::nsfw::sfw_gate(std::slice::from_ref(&out_path), &job.accept.job_id).await?;
+    } else if !inline.adult {
+        let frames = crate::nsfw::extract_frames(&out_path, &job_dir.join("policy-frames"), crate::nsfw::VIDEO_SAMPLES).await
+            .map_err(|e| anyhow::anyhow!("policy: classifier_unavailable: SFW clip could not be checked: {e:#}"))?;
+        crate::nsfw::sfw_gate(&frames, &job.accept.job_id).await?;
     }
     crate::pieces::publish_result_file(net, store, &job.accept, &out_path, MAX_RESULT_BYTES as u64).await
 }
@@ -824,7 +870,35 @@ mod tests {
             height: 704,
             seed: Some(7),
             guidance_scale: None,
+            adult: false,
         }
+    }
+
+    #[test]
+    fn adult_flag_is_off_by_default_and_off_the_wire_when_false() {
+        let inline: VideoJobInline =
+            serde_json::from_value(serde_json::json!({ "model": "m", "prompt": "p" })).unwrap();
+        assert!(!inline.adult);
+        assert!(serde_json::to_value(&inline).unwrap().get("adult").is_none());
+        let mut adult = inline.clone();
+        adult.adult = true;
+        assert_eq!(serde_json::to_value(&adult).unwrap()["adult"], true);
+    }
+
+    #[test]
+    fn adult_video_is_text_only_and_sfw_gets_nsfw_negatives() {
+        use crate::content_policy::{Refusal, check};
+        let mut j = job();
+        j.adult = true;
+        assert_eq!(check(&j.policy()), Ok(()));
+        j.image_hash = Some("ab".repeat(32));
+        assert_eq!(check(&j.policy()), Err(Refusal::AdultImageInput));
+        let sfw = job();
+        let v = sfw.to_job_json("id", WORKLOAD_TXT2VID, None);
+        assert_eq!(v["negative_prompt"], crate::content_policy::nsfw_negative_terms());
+        let mut neg = job();
+        neg.negative_prompt = "blurry".into();
+        assert!(neg.effective_negative("").starts_with("blurry, "));
     }
 
     #[test]

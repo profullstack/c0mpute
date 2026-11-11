@@ -99,6 +99,9 @@ fn fake_docker() -> &'static PathBuf {
 }
 
 async fn node(dir: &Path, bootstrap: Vec<libp2p::Multiaddr>) -> (Arc<Libp2pNetwork>, ChunkStore) {
+    // The fake runner's clips are placeholders: score them SFW instead of
+    // installing the real NSFW classifier.
+    c0mpute_core::nsfw::use_fixed_score_for_tests(0.0);
     let store = ChunkStore::open(dir.join("store")).await.unwrap();
     let net = Libp2pNetwork::spawn(
         NetworkConfig::for_dir(dir.join("id"))

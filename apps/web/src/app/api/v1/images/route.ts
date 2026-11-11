@@ -1,5 +1,6 @@
+import { gateGeneration } from "@/lib/chat/adult";
 import { parseImageRequest } from "@/lib/chat/images";
-import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { balanceFor, currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -8,7 +9,7 @@ const err = (status: number, message: string, headers: Record<string, string> = 
 
 /**
  * Start an image on the c0mpute network (Z-Image-Turbo on CPU workers).
- *   POST { prompt, size?: "landscape"|"square"|"portrait" }  ->  202 { id, poll }
+ *   POST { prompt, size?: "landscape"|"square"|"portrait", adult?: true }  ->  202 { id, poll }
  * Poll GET /api/v1/images/<id> until it returns image/png (~2 minutes).
  * Billed to the person's compute balance when they have one (flat per image);
  * otherwise it spends one of Infernet's free daily queries.
@@ -21,6 +22,12 @@ export async function POST(req: Request) {
   if (!rl.ok) return err(429, "rate limit: too many images this hour", { "retry-after": String(rl.retryAfter) });
   const parsed = parseImageRequest(await req.json().catch(() => null));
   if (typeof parsed === "string") return err(400, parsed);
+  // Content policy first: the child-safety guard (always on), explicit
+  // prompts only in adult mode, and adult mode only for a verified 18+
+  // account with a paid balance. The network's gateway and the worker check
+  // again; a refusal here never leaves c0mpute.com.
+  const gate = gateGeneration(user, { prompt: parsed.prompt, adult: parsed.adult === true }, parsed.adult ? await balanceFor(user.coinpay_sub) : null);
+  if (!gate.ok) return json({ error: { message: gate.message, type: "content_policy", code: gate.code } }, gate.status);
 
   let upstream: Response;
   try {

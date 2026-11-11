@@ -54,6 +54,33 @@ open an issue; this page is meant to be checkable against the code.
 - **Uncensored house models are off unless you opt in** (`--uncensored-models`
   at install, or `infernet house-models uncensored on`).
 
+## Content policy (images and video)
+
+Every image and video job passes a child-safety guard on the gateway that
+auctions it and again on your worker before it runs: sexual or nudity terms
+combined with any minor indicator are refused, always, with no setting to turn
+it off. Without adult mode your worker also refuses explicit prompts, adds NSFW
+terms to the negative prompt, and checks every output with a small CPU NSFW
+classifier (AdamCodd/vit-base-nsfw-detector, Apache-2.0, int8 ONNX pinned by
+SHA-256, installed under `~/.local/share/c0mpute/nsfw`); an explicit output is
+discarded and the job fails with a policy reason.
+
+**Adult jobs are opt-in and off by default.** Your node runs them only if you
+set this (or `C0MPUTE_ADULT=1`), and then advertises `c0mpute:adult`:
+
+```toml
+[adult]
+serve = true
+```
+
+A gateway accepts adult requests only with `[adult] buyer = true` (or
+`C0MPUTE_ADULT_BUYER=1`) and awards them only to nodes whose own capability ad
+carries that tag. Adult jobs are text only (no image inputs) and requests that
+point at a real, identifiable person are refused; that check is a word-list
+heuristic, documented in `node/crates/c0mpute-core/src/content_policy.rs`.
+Refusals are counted by reason (`GET /v1/policy` on a gateway) and logged with a
+hashed requester id, never the prompt.
+
 ## Network
 
 Outbound connections only; no port forwarding needed. Some workloads make

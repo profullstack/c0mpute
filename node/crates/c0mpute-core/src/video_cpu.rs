@@ -285,10 +285,11 @@ pub fn sd_args(job: &VideoJobInline, models: &Path, frames_pattern: &Path, threa
     // sd-cli reads the next argv as the prompt, but keep a leading dash from
     // ever looking like a flag.
     let prompt = if prompt.starts_with('-') { format!(" {prompt}") } else { prompt.to_string() };
-    let negative = match job.negative_prompt.trim() {
-        "" => DEFAULT_NEGATIVE.to_string(),
+    // The buyer's negative (or Wan's default), plus NSFW terms on an SFW
+    // job or minor terms on an adult one (`content_policy`).
+    let negative = match job.effective_negative(DEFAULT_NEGATIVE) {
         n if n.starts_with('-') => format!(" {n}"),
-        n => n.to_string(),
+        n => n,
     };
     let path = |name: &str| models.join(name).display().to_string();
     vec![
@@ -415,6 +416,13 @@ pub async fn generate(job: &VideoJobInline, job_dir: &Path) -> Result<PathBuf> {
     if written < job.frames {
         bail!("sd-cli wrote {written} frames, asked for {}", job.frames);
     }
+    // SFW jobs: classify evenly spaced frames before encoding; an explicit
+    // clip is discarded, not delivered.
+    if !job.adult {
+        let frames = crate::nsfw::sample_frames(&frame_dir, crate::nsfw::VIDEO_SAMPLES).await?;
+        let id = job_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        crate::nsfw::sfw_gate(&frames, &id).await?;
+    }
 
     let out = job_dir.join("out.mp4");
     let encoded = Command::new(ffmpeg)
@@ -438,6 +446,7 @@ pub fn spawn_cpu_video_runner(
     load: WorkerLoad,
 ) -> mpsc::Sender<AcceptedJob> {
     diffusion::kill_orphaned_renders();
+    crate::nsfw::warm_up();
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -471,6 +480,10 @@ async fn run_job(net: &Libp2pNetwork, store: &ChunkStore, cache_root: &Path, job
     let spec = job.accept.spec_inline.as_ref().context("accept missing spec_inline")?;
     let inline: VideoJobInline = serde_json::from_value(spec.clone()).context("decode video job")?;
     fits(&inline, WORKLOAD_TXT2VID).map_err(anyhow::Error::msg)?;
+    if let Err(refusal) = crate::content_policy::worker_check(&inline.policy()) {
+        crate::content_policy::record(refusal, "worker", Some(&job.accept.job_id));
+        bail!(refusal.job_error());
+    }
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     tokio::fs::create_dir_all(&job_dir).await?;
     let out = generate(&inline, &job_dir).await?;
@@ -552,7 +565,14 @@ mod tests {
         assert_eq!(pair("--seed"), Some("42"));
         assert_eq!(pair("-t"), Some("16"));
         assert_eq!(pair("-o"), Some("/j/frames/frame_%05d.png"));
-        assert_eq!(pair("-n"), Some(DEFAULT_NEGATIVE), "empty negative prompt gets Wan's default");
+        let negative = pair("-n").unwrap();
+        assert!(negative.starts_with(DEFAULT_NEGATIVE), "empty negative prompt gets Wan's default");
+        assert!(negative.ends_with(crate::content_policy::nsfw_negative_terms()), "SFW jobs add NSFW negatives");
+        let mut adult = small();
+        adult.adult = true;
+        let args = sd_args(&adult, Path::new("/m"), Path::new("/o.png"), 1, 1);
+        let n = args.iter().position(|a| a == "-n").unwrap();
+        assert!(args[n + 1].ends_with(crate::content_policy::adult_negative_terms()), "adult jobs add minor negatives");
         assert_eq!(pair("-p"), Some("a fox in the snow"));
 
         let mut dash = small();

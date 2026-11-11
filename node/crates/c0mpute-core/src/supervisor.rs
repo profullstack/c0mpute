@@ -112,6 +112,12 @@ impl Supervisor {
             store = %self.config.storage.root.display(),
             "supervisor up"
         );
+        // Adult (18+) jobs only on an opted-in worker; every generation
+        // runner checks this before running a job (`content_policy`).
+        crate::content_policy::set_worker_adult(self.config.adult.serve_enabled());
+        if self.config.adult.serve_enabled() {
+            info!("adult jobs: serving (advertising c0mpute:adult); the child-safety guard stays on");
+        }
 
         // Capability registry: subscribe to c0mpute/cap/v1 and keep a
         // map of seen peers + their advertised capabilities.

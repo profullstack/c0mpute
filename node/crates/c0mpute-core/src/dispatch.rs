@@ -605,6 +605,15 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The offer's required tags this worker does not advertise. Empty: eligible.
+pub(crate) fn missing_capabilities<'a>(offer: &'a JobOffer, advertised_tags: &[String]) -> Vec<&'a String> {
+    offer
+        .required_capabilities
+        .iter()
+        .filter(|c| !crate::job_e2e::implicit_tag(c) && !advertised_tags.iter().any(|a| a == *c))
+        .collect()
+}
+
 async fn handle_offer(
     net: &Arc<Libp2pNetwork>,
     topic: &str,
@@ -634,12 +643,9 @@ async fn handle_offer(
         debug!(job_id = %offer.job_id, "dispatch: malformed external_ref, not bidding");
         return None;
     }
-    // Capability check.
-    let missing: Vec<&String> = offer
-        .required_capabilities
-        .iter()
-        .filter(|c| !crate::job_e2e::implicit_tag(c) && !advertised_tags.iter().any(|a| a == *c))
-        .collect();
+    // Capability check (an adult offer requires `c0mpute:adult`, which only
+    // an opted-in worker advertises).
+    let missing = missing_capabilities(offer, advertised_tags);
     if !missing.is_empty() {
         debug!(
             job_id = %offer.job_id,
@@ -956,6 +962,21 @@ mod tests {
             bid_window_ms: window,
             e2e: None,
         }
+    }
+
+    #[test]
+    fn an_adult_offer_is_never_bid_on_by_a_worker_that_did_not_opt_in() {
+        let adult = crate::content_policy::ADULT_TAG.to_string();
+        let mut offer = offer_at(NOW, None);
+        offer.required_capabilities = vec![crate::diffusion::ROLE_TAG.to_string(), adult.clone()];
+        let ordinary = vec![crate::diffusion::ROLE_TAG.to_string(), crate::diffusion::MODEL_TAG.to_string()];
+        assert_eq!(missing_capabilities(&offer, &ordinary), vec![&adult]);
+        let mut opted_in = ordinary.clone();
+        opted_in.push(adult.clone());
+        assert!(missing_capabilities(&offer, &opted_in).is_empty());
+        // An SFW offer is open to both.
+        offer.required_capabilities = vec![crate::diffusion::ROLE_TAG.to_string()];
+        assert!(missing_capabilities(&offer, &ordinary).is_empty());
     }
 
     #[test]

@@ -93,6 +93,9 @@ type Msg = {
   album?: { id: string; band: string | null; album: string | null; genre: string | null; concept: string | null; cover: string | null; zip: string | null; tracks: AlbumTrack[] };
   /** The image job a picture came from, so /push can publish it later. */
   imageJob?: string;
+  /** An adult (18+) result: shown blurred until clicked, never pushed or shared. */
+  adult?: boolean;
+  revealed?: boolean;
   /** A `/push hosting` turn: polled live until the site is up (or gone). */
   push?: PushView;
 };
@@ -113,7 +116,7 @@ type PushView = {
 const PUSH_FINAL = new Set(["live", "failed", "deleted"]);
 type Convo = { id: string; title: string; model: string; messages: Msg[]; updated: number };
 type Balance = { spendable_usd: string; earned_spendable_usd: string; prepaid_available_usd: string };
-type Me = { id: string; did: string; name: string | null; balance?: Balance | null };
+type Me = { id: string; did: string; name: string | null; balance?: Balance | null; adult_verified_at?: string | null };
 type Key = { id: string; label: string; prefix: string; created_at: string; last_used_at: string | null };
 
 const STORE = "c0_chats_v1";
@@ -121,6 +124,78 @@ const STORE = "c0_chats_v1";
 // 2 h for a free worker, then renders it.
 const QUEUE_DEADLINE_MS = 3 * 60 * 60_000;
 const clock = (s: number) => (s < 120 ? `${s}s` : `${Math.floor(s / 60)} min`);
+
+const ADULT_MODE = "c0_adult_mode";
+
+/**
+ * 18+ mode. Turning it on takes an attestation (a checkbox and a confirm),
+ * stored on the account with its time; after that this browser can switch
+ * it on and off. Adult images are drawn only for accounts with a paid
+ * balance, render blurred until clicked, and are never pushed or shared.
+ * The child-safety rules apply either way.
+ */
+function AdultSettings({ me, setMe, on, setOn }: { me: Me; setMe: (m: Me) => void; on: boolean; setOn: (v: boolean) => void }) {
+  const [open, setOpen] = useState(false);
+  const [over18, setOver18] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const verified = !!me.adult_verified_at;
+  async function attest() {
+    setErr(null);
+    if (!over18) return setErr("tick the box first");
+    if (!window.confirm("Confirm you are 18 or older. Content involving minors or real, identifiable people is never allowed and leads to account termination and reporting.")) return;
+    const r = await fetch("/api/v1/me/adult", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ over_18: true, confirm: true }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return setErr(j.error?.message ?? `HTTP ${r.status}`);
+    setMe({ ...me, adult_verified_at: j.adult_verified_at });
+    setOn(true);
+    setOpen(false);
+  }
+  async function revoke() {
+    await fetch("/api/v1/me/adult", { method: "DELETE" }).catch(() => {});
+    setMe({ ...me, adult_verified_at: null });
+    setOn(false);
+  }
+  if (verified) {
+    return (
+      <div className="space-y-1">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={on} onChange={(e) => setOn(e.target.checked)} />
+          <span>18+ mode {on ? "on" : "off"}</span>
+        </label>
+        <button onClick={revoke} className="hover:text-[var(--color-fg)]">
+          remove 18+ verification
+        </button>
+      </div>
+    );
+  }
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="hover:text-[var(--color-fg)]">
+        18+ mode: off
+      </button>
+    );
+  }
+  return (
+    <div className="space-y-2 border border-[var(--color-rule)] p-2">
+      <label className="flex items-start gap-2">
+        <input type="checkbox" checked={over18} onChange={(e) => setOver18(e.target.checked)} className="mt-1" />
+        <span>
+          I am 18 or older and adult content is legal where I am. I will not request content involving minors (real, drawn or
+          &quot;young-looking&quot;) or real, identifiable people. See the <a href="/terms">terms</a>.
+        </span>
+      </label>
+      {err && <p className="text-[var(--color-warn)]">{err}</p>}
+      <div className="flex gap-3">
+        <button onClick={attest} className="accent hover:text-[var(--color-fg)]">
+          confirm
+        </button>
+        <button onClick={() => setOpen(false)} className="hover:text-[var(--color-fg)]">
+          cancel
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * What this person can spend on inference: money they topped up on Infernet
@@ -166,7 +241,7 @@ function save(c: Convo[]) {
   try {
     const slim = c.slice(0, 100).map((cv) => ({
       ...cv,
-      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, ...m }) => m),
+      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, revealed: _revealed, ...m }) => m),
     }));
     localStorage.setItem(STORE, JSON.stringify(slim));
   } catch {}
@@ -219,6 +294,20 @@ export function ChatApp({ error }: { error: string | null }) {
   const [tab, setTab] = useState<"chat" | "connect">("chat");
   const abort = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
+  // 18+ mode for this browser (only meaningful once the account attested).
+  const [adultPref, setAdultPref] = useState(false);
+  useEffect(() => {
+    try {
+      setAdultPref(localStorage.getItem(ADULT_MODE) === "1");
+    } catch {}
+  }, []);
+  const setAdultMode = (v: boolean) => {
+    setAdultPref(v);
+    try {
+      localStorage.setItem(ADULT_MODE, v ? "1" : "0");
+    } catch {}
+  };
+  const adultMode = adultPref && !!me?.adult_verified_at;
 
   useEffect(() => {
     fetch("/api/v1/me")
@@ -250,6 +339,7 @@ export function ChatApp({ error }: { error: string | null }) {
 
   async function drawImage(convo: Convo, text: string, prompt: string) {
     const id = convo.id;
+    const adult = adultMode;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
     setInput("");
     setFailure(null);
@@ -287,7 +377,7 @@ export function ChatApp({ error }: { error: string | null }) {
       const res = await fetch("/api/v1/images", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(adult ? { prompt, adult: true } : { prompt }),
         signal: ctrl.signal,
       });
       const start = await res.json().catch(() => ({}));
@@ -319,7 +409,12 @@ export function ChatApp({ error }: { error: string | null }) {
       }
       const url = URL.createObjectURL(await done.blob());
       const imageJob = String(start.poll).split("/").pop() || undefined;
-      setLast({ content: `[image: ${prompt}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute CPU worker)`, image: url, imageJob });
+      setLast({
+        content: `[${adult ? "18+ image" : "image"}: ${prompt}] (${Math.round((Date.now() - started) / 1000)}s on a c0mpute CPU worker)`,
+        image: url,
+        imageJob,
+        ...(adult ? { adult: true } : {}),
+      });
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         setFailure(e instanceof Error ? e.message : String(e));
@@ -1028,6 +1123,7 @@ export function ChatApp({ error }: { error: string | null }) {
             {me.did}
           </p>
           <BalanceLine balance={me.balance ?? null} />
+          <AdultSettings me={me} setMe={setMe} on={adultPref} setOn={setAdultMode} />
           <button onClick={signOut} className="hover:text-[var(--color-fg)]">
             sign out
           </button>
@@ -1074,11 +1170,26 @@ export function ChatApp({ error }: { error: string | null }) {
                 {m.push && <PushCard p={m.push} />}
                 {m.image && (
                   <figure className="mt-2">
-                    {/* eslint-disable-next-line @next/next/no-img-element -- a session blob: URL */}
-                    <img src={m.image} alt={m.content} className="max-w-full w-[640px] border border-[var(--color-rule)]" />
-                    <a href={m.image} download="c0mpute-image.png" className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
-                      download
-                    </a>
+                    {m.adult && !m.revealed ? (
+                      <button
+                        className="relative block overflow-hidden border border-[var(--color-rule)]"
+                        onClick={() =>
+                          active && update(active.id, (c) => ({ ...c, messages: c.messages.map((x, k) => (k === i ? { ...x, revealed: true } : x)) }))
+                        }
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element -- a session blob: URL */}
+                        <img src={m.image} alt="18+ image, hidden" className="max-w-full w-[640px] blur-2xl scale-110" aria-hidden />
+                        <span className="absolute inset-0 grid place-items-center text-sm bg-black/40 text-white">18+ · click to show</span>
+                      </button>
+                    ) : (
+                      // eslint-disable-next-line @next/next/no-img-element -- a session blob: URL
+                      <img src={m.image} alt={m.content} className="max-w-full w-[640px] border border-[var(--color-rule)]" />
+                    )}
+                    {(!m.adult || m.revealed) && (
+                      <a href={m.image} download="c0mpute-image.png" className="text-xs underline text-[var(--color-dim)] hover:text-[var(--color-fg)]">
+                        download
+                      </a>
+                    )}
                   </figure>
                 )}
                 {m.promo && (
