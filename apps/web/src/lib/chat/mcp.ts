@@ -1,10 +1,12 @@
 // MCP (JSON-RPC 2.0, Streamable HTTP with plain JSON responses) for c0mpute chat.
 // Tools: chat, list_models, whoami, promo_video, promo_status. Auth is the same
 // c0k_ API key as the REST API.
-import { chatText, listModels, parseChatRequest, type ChatMessage, type Upstream } from "./completions";
+import { chatText, listModels, parseChatRequest, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
 import { describePromoProgress, parsePromoRequest, sanitizePromoProgress, PROMO_STYLES } from "./promo";
 import { HOSTING_TOOL_NAMES, HOSTING_TOOLS, hostingTool } from "./push-mcp";
 import type { PushStore } from "./push";
+import { describeSteps, PLUGIN_TOOL_NAMES, PLUGIN_TOOLS, pluginTool, type PluginMcpDeps } from "./plugin-mcp";
+import type { PluginEvent } from "./plugin-shared";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -33,6 +35,7 @@ export const TOOLS = [
         model: { type: "string", description: "Model id from list_models; omit for any live model." },
         max_tokens: { type: "number" },
         temperature: { type: "number" },
+        plugins: { type: "boolean", description: "Use this account's chat plugins (default true when any is on; see chat_plugins_list)." },
       },
     },
     annotations: { title: "Ask a network model", readOnlyHint: true, openWorldHint: true },
@@ -74,7 +77,16 @@ export const TOOLS = [
 ] as const;
 
 type Rpc = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-export type McpCtx = { user: { id: string; did: string; name: string | null }; upstream: Upstream; push?: PushStore };
+export type McpCtx = {
+  user: { id: string; did: string; name: string | null };
+  upstream: Upstream;
+  push?: PushStore;
+  /** Chat plugins: the store plus the add/run functions (plugins.ts), when wired. */
+  plugins?: PluginMcpDeps & {
+    hasEnabled: (userId: string) => Promise<boolean>;
+    run: (o: { userId: string; upstream: Upstream; req: ChatRequest; emit: (e: PluginEvent) => void }) => Promise<{ text: string }>;
+  };
+};
 
 const ok = (id: Rpc["id"], result: unknown) => ({ jsonrpc: "2.0", id: id ?? null, result });
 const fail = (id: Rpc["id"], code: number, message: string) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
@@ -91,12 +103,12 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "c0mpute", title: "c0mpute", version: "1.1.0" },
         instructions:
-          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first). promo_video makes a promo video of a website; poll promo_status.",
+          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first); with chat plugins on (chat_plugins_list / chat_plugins_add: any remote MCP server, sign-in by link) those models can use the plugins' tools. promo_video makes a promo video of a website; poll promo_status.",
       });
     case "ping":
       return ok(id, {});
     case "tools/list":
-      return ok(id, { tools: ctx.push ? [...TOOLS, ...HOSTING_TOOLS] : TOOLS });
+      return ok(id, { tools: [...TOOLS, ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -104,6 +116,11 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         if (HOSTING_TOOL_NAMES.has(name)) {
           if (!ctx.push) return fail(id, -32602, `unknown tool: ${name}`);
           const r = await hostingTool(name, args, ctx.user.id, ctx.push);
+          return ok(id, text(r.text, r.isError));
+        }
+        if (PLUGIN_TOOL_NAMES.has(name)) {
+          if (!ctx.plugins) return fail(id, -32602, `unknown tool: ${name}`);
+          const r = await pluginTool(name, args, ctx.user.id, ctx.plugins);
           return ok(id, text(r.text, r.isError));
         }
         if (name === "whoami") return ok(id, text(JSON.stringify({ did: ctx.user.did, name: ctx.user.name })));
@@ -146,6 +163,11 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
           if (typeof args.system === "string" && args.system) messages = [{ role: "system", content: args.system }, ...messages];
           const req = parseChatRequest({ ...args, messages, stream: false });
           if (typeof req === "string") return ok(id, text(req, true));
+          if (ctx.plugins && args.plugins !== false && (await ctx.plugins.hasEnabled(ctx.user.id))) {
+            const events: PluginEvent[] = [];
+            const r = await ctx.plugins.run({ userId: ctx.user.id, upstream: ctx.upstream, req, emit: (e) => events.push(e) });
+            return ok(id, text(r.text + describeSteps(events)));
+          }
           const r = await chatText(ctx.upstream, req);
           return ok(id, text(r.text));
         }

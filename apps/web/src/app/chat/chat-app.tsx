@@ -9,6 +9,8 @@ import { describePromoProgress, detectPromoRequest, parsePromoCommand, type Prom
 import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "@/lib/chat/push-shared";
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
+import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
+import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
 const PUSH_NODE = "c0_push_node";
 const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -139,6 +141,8 @@ type Msg = {
   push?: PushView;
   /** A `/video` turn: polled (across reloads and deploys) until the MP4 is ready. */
   video?: VideoView;
+  /** Chat plugin tool steps this assistant turn took (calls, results, approvals). */
+  tools?: ToolView[];
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -309,7 +313,7 @@ const newConvo = (model: string): Convo => ({
 });
 
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
-async function readStream(res: Response, onDelta: (t: string) => void) {
+async function readStream(res: Response, onDelta: (t: string) => void, onEvent?: (e: PluginEvent) => void) {
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -331,6 +335,10 @@ async function readStream(res: Response, onDelta: (t: string) => void) {
         continue;
       }
       if (j.error) throw new Error(j.error.message ?? "stream error");
+      if (j.object === PLUGIN_EVENT_OBJECT) {
+        if (j.event && onEvent) onEvent(j.event as PluginEvent);
+        continue;
+      }
       const t = j.choices?.[0]?.delta?.content;
       if (t) onDelta(t);
     }
@@ -345,7 +353,7 @@ export function ChatApp({ error }: { error: string | null }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [tab, setTab] = useState<"chat" | "connect">("chat");
+  const [tab, setTab] = useState<"chat" | "connect" | "plugins">("chat");
   const abort = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   // 18+ mode for this browser (only meaningful once the account attested).
@@ -1076,6 +1084,11 @@ export function ChatApp({ error }: { error: string | null }) {
       setActiveId(c.id);
     }
     const id = convo.id;
+    const pluginCmd = parsePluginCommand(text);
+    if (pluginCmd) {
+      await runPlugin(convo, text, pluginCmd);
+      return;
+    }
     const pushCmd = parsePushCommand(text);
     if (pushCmd) {
       await runPush(convo, text, pushCmd);
@@ -1136,16 +1149,36 @@ export function ChatApp({ error }: { error: string | null }) {
       save(next);
       return next;
     });
+    await streamTurn(id, convo.model, history);
+  }
+
+  /**
+   * Stream one assistant turn into the last message of a chat. With chat
+   * plugins on, the server runs the tool loop and the stream carries its tool
+   * steps (plugin events) before the answer. `approvals` re-runs a turn with
+   * destructive calls the person approved.
+   */
+  async function streamTurn(id: string, model: string, history: Msg[], approvals: string[] = []) {
     const ctrl = new AbortController();
     abort.current = ctrl;
+    setBusy(true);
+    const setTools = (fn: (t: ToolView[]) => ToolView[]) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        const last = msgs[msgs.length - 1];
+        msgs[msgs.length - 1] = { ...last, tools: fn(last.tools ?? []) };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
     try {
       const res = await fetch("/api/v1/chat/completions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: convo.model,
+          model,
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
+          plugin_events: true,
+          ...(approvals.length ? { approvals } : {}),
         }),
         signal: ctrl.signal,
       });
@@ -1153,13 +1186,30 @@ export function ChatApp({ error }: { error: string | null }) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error?.message ?? `HTTP ${res.status}`);
       }
-      await readStream(res, (t) =>
-        update(id, (c) => {
-          const msgs = c.messages.slice();
-          const last = msgs[msgs.length - 1];
-          msgs[msgs.length - 1] = { ...last, content: last.content + t };
-          return { ...c, messages: msgs, updated: Date.now() };
-        }),
+      await readStream(
+        res,
+        (t) =>
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            msgs[msgs.length - 1] = { ...last, content: last.content + t };
+            return { ...c, messages: msgs, updated: Date.now() };
+          }),
+        (e) => {
+          if (e.type === "plugin_error") {
+            setTools((ts) => [...ts, { id: `err-${ts.length}`, plugin: e.plugin, tool: "", arguments: {}, status: "error", text: e.message }]);
+          } else if (e.type === "tool_call") {
+            setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "running" }]);
+          } else if (e.type === "tool_result") {
+            setTools((ts) => {
+              const known = ts.some((t) => t.id === e.id);
+              const row: ToolView = { id: e.id, plugin: e.plugin, tool: e.tool, arguments: {}, status: e.ok ? "ok" : "error", text: e.text.slice(0, 4000) };
+              return known ? ts.map((t) => (t.id === e.id ? { ...t, status: row.status, text: row.text } : t)) : [...ts, row];
+            });
+          } else if (e.type === "approval_needed") {
+            setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "approval", approval: e.approval }]);
+          }
+        },
       );
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
@@ -1167,12 +1217,71 @@ export function ChatApp({ error }: { error: string | null }) {
         // Drop an empty assistant turn so a retry starts clean.
         update(id, (c) => {
           const last = c.messages[c.messages.length - 1];
-          return last?.role === "assistant" && !last.content ? { ...c, messages: c.messages.slice(0, -1) } : c;
+          return last?.role === "assistant" && !last.content && !last.tools?.length ? { ...c, messages: c.messages.slice(0, -1) } : c;
         });
       }
     } finally {
       setBusy(false);
       abort.current = null;
+    }
+  }
+
+  /** Approve or deny a destructive tool call the model asked for (only on the chat's last turn). */
+  async function decideTool(convoId: string, index: number, toolId: string, approve: boolean) {
+    const c = convos.find((x) => x.id === convoId);
+    if (!c || busy || index !== c.messages.length - 1) return;
+    const msg = c.messages[index];
+    const t = msg.tools?.find((x) => x.id === toolId);
+    if (!t?.approval) return;
+    patchMsg(convoId, index, (m) => ({ ...m, tools: (m.tools ?? []).map((x) => (x.id === toolId ? { ...x, status: approve ? "approved" : "denied" } : x)) }));
+    if (!approve) {
+      patchMsg(convoId, index, (m) => ({ ...m, content: m.content || `// ${t.plugin} · ${t.tool} not run (denied)` }));
+      return;
+    }
+    // Re-run the turn with the approval: the server runs that exact call first.
+    const history = c.messages.slice(0, index);
+    await streamTurn(convoId, c.model, history, [t.approval]);
+  }
+
+  /** `/plugin add|ls|rm|on|off|connect`: answered locally, never sent to the model. */
+  async function runPlugin(convo: Convo, text: string, cmd: PluginCommand) {
+    if (cmd.kind === "help") {
+      addTurn(convo, text, { role: "assistant", content: `${cmd.error ? `// ${cmd.error}\n\n` : ""}${PLUGIN_HELP}` });
+      return;
+    }
+    const index = addTurn(convo, text, { role: "assistant", content: "// …" });
+    const say = (content: string) => patchMsg(convo.id, index, (m) => ({ ...m, content }));
+    try {
+      if (cmd.kind === "ls") {
+        const j = await pluginsApi.list();
+        const mine = j.plugins.map((p) => `${p.slug.padEnd(16)} ${p.status.padEnd(14)} ${p.tools.length} tools  ${p.url}`);
+        const cat = j.catalog.filter((x) => !x.added).map((x) => `${x.slug.padEnd(16)} ${x.description}`);
+        say(
+          [mine.length ? `your plugins:\n${mine.join("\n")}` : "no plugins yet", cat.length ? `\ncatalog (/plugin add <name>):\n${cat.join("\n")}` : "", "\n/plugin add <https://… MCP URL> adds any remote MCP server."]
+            .filter(Boolean)
+            .join("\n"),
+        );
+      } else if (cmd.kind === "add") {
+        const r = await pluginsApi.add(cmd.target);
+        if (r.connect_url) {
+          say(`// ${r.plugin.slug} added; signing in (a window opened; if not, open ${r.connect_url})…`);
+          const ok = await signInPopup(r.connect_url, r.plugin.slug);
+          say(ok ? `// ${r.plugin.slug} connected. Its tools are on in this chat.` : `// ${r.plugin.slug} added, not signed in yet: /plugin connect ${r.plugin.slug}`);
+        } else {
+          say(`// ${r.plugin.slug} added: ${r.plugin.tools.length} tools (${r.plugin.tools.map((t) => t.name).join(", ") || "none listed"}). Ask away.`);
+        }
+      } else if (cmd.kind === "rm") {
+        await pluginsApi.remove(cmd.slug);
+        say(`// ${cmd.slug} removed`);
+      } else if (cmd.kind === "on" || cmd.kind === "off") {
+        const r = await pluginsApi.toggle(cmd.slug, cmd.kind === "on");
+        say(`// ${r.plugin.slug} ${r.plugin.enabled ? "on" : "off"}`);
+      } else if (cmd.kind === "connect") {
+        const ok = await signInPopup(`/api/v1/chat/plugins/${encodeURIComponent(cmd.slug)}/connect`, cmd.slug);
+        say(ok ? `// ${cmd.slug} connected` : `// ${cmd.slug}: sign-in not finished`);
+      }
+    } catch (e) {
+      say(`// ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -1261,6 +1370,9 @@ export function ChatApp({ error }: { error: string | null }) {
           ))}
         </nav>
         <div className="border-t border-[var(--color-rule)] pt-3 space-y-2 text-xs text-[var(--color-dim)]">
+          <button onClick={() => setTab("plugins")} className={`block ${tab === "plugins" ? "accent" : "hover:text-[var(--color-fg)]"}`}>
+            plugins
+          </button>
           <button onClick={() => setTab("connect")} className={tab === "connect" ? "accent" : "hover:text-[var(--color-fg)]"}>
             CLI / API / MCP keys
           </button>
@@ -1278,6 +1390,8 @@ export function ChatApp({ error }: { error: string | null }) {
 
       {tab === "connect" ? (
         <Connect />
+      ) : tab === "plugins" ? (
+        <PluginsPanel />
       ) : (
         <section className="flex flex-col min-w-0 border border-[var(--color-rule)] bg-[var(--color-panel)]">
           <div className="flex items-center gap-2 border-b border-[var(--color-rule)] px-3 py-2 text-xs">
@@ -1303,7 +1417,7 @@ export function ChatApp({ error }: { error: string | null }) {
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /help lists every command.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /plugin add &lt;url&gt; gives the model tools from any remote MCP server. /help lists every command.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -1313,6 +1427,14 @@ export function ChatApp({ error }: { error: string | null }) {
                 <div className="whitespace-pre-wrap break-words">
                   {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
                 </div>
+                {m.tools?.map((t) => (
+                  <ToolCard
+                    key={t.id}
+                    t={t}
+                    onApprove={() => active && void decideTool(active.id, i, t.id, true)}
+                    onDeny={() => active && void decideTool(active.id, i, t.id, false)}
+                  />
+                ))}
                 {m.push && <PushCard p={m.push} />}
                 {m.video && (
                   <VideoCard

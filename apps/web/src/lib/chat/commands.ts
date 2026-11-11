@@ -11,6 +11,7 @@ export const CHAT_COMMANDS: [string, string][] = [
   ["/promo <url> [pixar|anime|claymation|flat] [vertical]", "a promo video with narration and music"],
   ["/push hosting <name> | ls | rm <name>", "publish this chat's files as a site on the c0mpute network"],
   ["/connect hosting [node]", "link or pick the node that publishes your sites"],
+  ["/plugin add <url|name> | ls | on|off|rm <name>", "give the model tools from any remote MCP server (chat plugins)"],
   ["/help", "this list"],
 ];
 
