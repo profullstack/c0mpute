@@ -57,6 +57,26 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        {/* @profullstack/webmcp: site_info and open_page, beside the c0mpute_*
+            tools WebMcpProvider registers. /api/mcp takes bearer keys only, so
+            it is not bridged. */}
+        <script
+          type="module"
+          data-webmcp=""
+          src="https://cdn.jsdelivr.net/npm/@profullstack/webmcp@0/src/embed.js"
+          data-pages={JSON.stringify({
+            chat: "/chat",
+            market: "/market",
+            nodes: "/nodes",
+            apps: "/apps",
+            plugins: "/plugins",
+            pricing: "/pricing",
+            docs: "/docs",
+            status: "/status",
+          })}
+        />
+      </head>
       <body className="min-h-screen flex flex-col">
         <PwaRegistration />
         <WebMcpProvider />
