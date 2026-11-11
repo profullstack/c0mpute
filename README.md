@@ -125,7 +125,7 @@ c0mpute webhook send https://example.com/hook -d '{"event":"paid"}' --secret whs
 
 # monitor
 c0mpute job status <job-id>
-c0mpute tui                              # interactive dashboard (hqtui)
+c0mpute tui                              # terminal app: chat, jobs, node, network, settings
 c0mpute doctor                           # full-stack health check
 c0mpute bench                            # measure this node; the worker advertises the score
 
@@ -423,7 +423,7 @@ Delete `identity.key` in the copy before starting it.
 | CLI binaries (`c0mpute`) | Rust | Static binary; no runtime to install on workers |
 | P2P / chunks / FFmpeg | Rust | rust-libp2p, content-addressed storage, no GC pauses |
 | Web (`apps/web`) | Bun + Next.js 16 | Apex landing at c0mpute.com |
-| TUI (`apps/tui`) | Bun + @profullstack/hqtui | `c0mpute tui` interactive dashboard |
+| TUI (`apps/tui`) | Bun + @profullstack/hqtui | `c0mpute tui`: chat (+ /image /video /music /album /promo /push), jobs, node roles and gates, network, settings |
 | Future GPU kernels | Mojo | When a workload needs custom GPU compute (DIP-0009) |
 
 ## Repo layout

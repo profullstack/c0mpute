@@ -213,6 +213,48 @@ pub fn can_serve(config: &crate::config::MusicConfig) -> bool {
         && !crate::diffusion::busy()
 }
 
+/// Why [`can_serve`] says no right now, or `None` when it would say yes
+/// (apart from a song or image already running in the worker process).
+pub fn gate_reason(config: &crate::config::MusicConfig) -> Option<String> {
+    if !platform_supported() {
+        return Some("no music build for this platform (Linux x86_64 only)".into());
+    }
+    gate_reason_with(
+        config,
+        installed(),
+        installed() && on_gpu(),
+        crate::diffusion::HostNow::probe(),
+    )
+}
+
+/// [`gate_reason`] for a given install state, device and host.
+pub fn gate_reason_with(
+    config: &crate::config::MusicConfig,
+    installed: bool,
+    gpu: bool,
+    host: crate::diffusion::HostNow,
+) -> Option<String> {
+    if !config.auto_install_enabled() {
+        return Some("turned off (C0MPUTE_MUSIC_AUTO=0 or [music] auto_install = false)".into());
+    }
+    if !gpu && !fast_enough_with(config, host.job_threads) {
+        return Some(format!(
+            "CPU budget too small: {} threads per job, needs {}",
+            host.job_threads, config.min_cpu_threads
+        ));
+    }
+    if !installed {
+        return Some(crate::diffusion::not_installed_reason(config.min_ram_gb, host, "~8 GB"));
+    }
+    crate::diffusion::resource_gate(
+        config.min_ram_gb,
+        config.min_free_ram_gb,
+        config.max_load_per_cpu,
+        host,
+        !gpu,
+    )
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -718,6 +760,23 @@ async fn run_job(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_reason_skips_the_load_check_on_a_gpu() {
+        let cfg = crate::config::MusicConfig::default();
+        let busy = crate::diffusion::HostNow {
+            mem: crate::diffusion::MemorySnapshot { total: 64 << 30, available: 32 << 30 },
+            load_1m: 40.0,
+            cpus: 8,
+            job_threads: 2,
+        };
+        assert_eq!(super::gate_reason_with(&cfg, true, true, busy), None);
+        assert!(super::gate_reason_with(&cfg, true, false, busy).unwrap().starts_with("CPU budget too small"));
+        let idle = crate::diffusion::HostNow { load_1m: 0.1, job_threads: 8, ..busy };
+        assert_eq!(super::gate_reason_with(&cfg, true, false, idle), None);
+        let full = crate::diffusion::HostNow { mem: crate::diffusion::MemorySnapshot { total: 64 << 30, available: 4 << 30 }, ..idle };
+        assert!(super::gate_reason_with(&cfg, true, false, full).unwrap().contains("GiB RAM free, needs 10 GiB free"));
+    }
+
     use super::*;
     use crate::config::MusicConfig;
     use crate::diffusion::MemorySnapshot;
