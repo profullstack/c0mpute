@@ -191,7 +191,7 @@ export function chooseNode(nodes: HostingNode[], name: unknown): HostingNode | {
   if (!nodes.length) {
     return {
       error:
-        "no hosting node linked to this account yet. Run on the machine that should publish: c0mpute chat login && c0mpute chat connect hosting --name <node>",
+        "no hosting node linked to this account yet (and no c0mpute cloud node is configured). Run on the machine that should publish: c0mpute chat login && c0mpute chat connect hosting --name <node>",
       code: 409,
     };
   }
@@ -211,6 +211,16 @@ export function chooseNode(nodes: HostingNode[], name: unknown): HostingNode | {
   return node;
 }
 
+/**
+ * The c0mpute cloud node: one house node (C0MPUTE_CLOUD_NODE_ID) that publishes
+ * for people who have not linked a node of their own, e.g. someone using the
+ * ChatGPT or Claude connector. It publishes on the network's free copies
+ * (`--disks free`), so it never spends a wallet, and it signs every site with
+ * one key, so site names are first come, first served across accounts.
+ */
+export const CLOUD_NODE = "cloud";
+export const CLOUD_MAX_PUSHES = 5;
+
 export class PushError extends Error {
   constructor(
     message: string,
@@ -220,7 +230,8 @@ export class PushError extends Error {
   }
 }
 
-export function createPushStore(sql: Sql) {
+export function createPushStore(sql: Sql, opts: { cloudNodeId?: string } = {}) {
+  const cloudId = opts.cloudNodeId || "";
   let ready: Promise<void> | null = null;
   const init = () =>
     (ready ??= (async () => {
@@ -235,8 +246,56 @@ export function createPushStore(sql: Sql) {
     return (await sql.all(q, p))[0] ?? null;
   }
 
+  const byId = async (pid: string): Promise<Push | null> => {
+    const r = await one(`SELECT * FROM chat_pushes WHERE id = ?`, [pid]);
+    return r ? toPush(r) : null;
+  };
+
   const store = {
     init,
+
+    // ── the cloud node ───────────────────────────────────────────────────────
+    async cloudNode(): Promise<HostingNode | null> {
+      if (!cloudId) return null;
+      const r = await one(`SELECT * FROM chat_nodes WHERE id = ?`, [cloudId]);
+      return (r as unknown as HostingNode) ?? null;
+    },
+
+    isCloud: (nodeId: string | null | undefined) => !!cloudId && nodeId === cloudId,
+
+    /**
+     * Which node a push goes to. An existing site stays on the node that
+     * signed it; `cloud` (or no node of your own) means the cloud node;
+     * otherwise chooseNode over this account's nodes.
+     */
+    async pickNode(userId: string, name: unknown, existing?: Push | null): Promise<HostingNode | { error: string; code: number }> {
+      const cloud = await store.cloudNode();
+      const named = typeof name === "string" && name ? name.toLowerCase() : "";
+      if (cloud && (named === CLOUD_NODE || named === cloud.id)) return cloud;
+      // The account that runs the cloud node does not get it as "its own" node.
+      const nodes = (await store.nodes(userId)).filter((n) => !store.isCloud(n.id));
+      if (!named && existing?.site_id) {
+        if (cloud && existing.node_id === cloud.id) return cloud;
+        return chooseNode(nodes, existing.node_id);
+      }
+      if (!named && cloud && nodes.length === 0) return cloud;
+      return chooseNode(nodes, named || undefined);
+    },
+
+    /** The node a push belongs to, the cloud node included. */
+    async nodeForPush(userId: string, p: Push): Promise<HostingNode | null> {
+      if (store.isCloud(p.node_id)) return store.cloudNode();
+      return store.node(userId, p.node_id);
+    },
+
+    /** A push the caller may read: their own, or one on a cloud node they run. */
+    async pushForCaller(userId: string, pid: string): Promise<Push | null> {
+      const own = await store.pushById(userId, pid);
+      if (own) return own;
+      if (!cloudId || !(await store.node(userId, cloudId))) return null;
+      const p = await byId(pid);
+      return p && p.node_id === cloudId ? p : null;
+    },
 
     // ── nodes ────────────────────────────────────────────────────────────────
     /** A node signs in with the account's key and (re)registers by name. */
@@ -330,13 +389,32 @@ export function createPushStore(sql: Sql) {
       if (!p.files.length) throw new PushError("nothing to push: this chat has no files yet");
       const bytes = 0; // the node reports the real size once it has fetched the files
       const files = JSON.stringify(p.files);
-      const disks = p.disks ?? "auto";
+      const cloud = store.isCloud(p.node.id);
+      // The cloud node pays no one: free network copies only.
+      const disks = cloud ? "free" : (p.disks ?? "auto");
       const existing = await store.push(userId, p.target, p.name);
+      if (cloud) {
+        // Media refs are fetched with the publishing node's key, which cannot read your chat results.
+        if (p.files.some((f) => f.text === undefined))
+          throw new PushError("the c0mpute cloud node publishes inline text files only; link your own node for media", 400);
+        const taken = await one(`SELECT 1 AS x FROM chat_pushes WHERE node_id = ? AND target = ? AND name = ? AND user_id <> ?`, [
+          p.node.id,
+          p.target,
+          p.name,
+          userId,
+        ]);
+        if (taken) throw new PushError(`${p.name} is taken on the c0mpute cloud node; pick another name`, 409);
+        if (!existing || existing.node_id !== p.node.id) {
+          const mine = await one(`SELECT COUNT(*) AS n FROM chat_pushes WHERE node_id = ? AND user_id = ?`, [p.node.id, userId]);
+          if (Number(mine?.n ?? 0) >= CLOUD_MAX_PUSHES)
+            throw new PushError(`at most ${CLOUD_MAX_PUSHES} sites per account on the c0mpute cloud node; remove one or link your own node`, 409);
+        }
+      }
       if (existing) {
         if (existing.status === "publishing" || existing.status === "deleting")
           throw new PushError(`${p.name} is ${existing.status}; wait for it to finish`, 409);
         if (existing.site_id && existing.node_id !== p.node.id) {
-          const owner = await store.node(userId, existing.node_id);
+          const owner = await store.nodeForPush(userId, existing);
           throw new PushError(
             `${p.name} is signed by node ${owner?.name ?? existing.node_id}; only that node can update it (or /push hosting rm ${p.name} first)`,
             409,
@@ -392,11 +470,13 @@ export function createPushStore(sql: Sql) {
       const t = now();
       await sql.run(`UPDATE chat_nodes SET last_seen_at = ? WHERE id = ?`, [t, n.id]);
       const stale = new Date(Date.now() - CLAIM_TIMEOUT_MS).toISOString();
+      // The cloud node works for every account; any other node only for its owner.
+      const shared = store.isCloud(n.id);
       const rows = await sql.all(
-        `SELECT * FROM chat_pushes WHERE user_id = ? AND node_id = ?
+        `SELECT * FROM chat_pushes WHERE ${shared ? "" : "user_id = ? AND "}node_id = ?
            AND (status = 'queued' OR (status IN ('publishing','deleting') AND (claimed_at IS NULL OR claimed_at < ?)))
          ORDER BY updated_at LIMIT 5`,
-        [userId, n.id, stale],
+        shared ? [n.id, stale] : [userId, n.id, stale],
       );
       const out: Push[] = [];
       for (const r of rows) {
@@ -416,7 +496,7 @@ export function createPushStore(sql: Sql) {
       pid: string,
       r: { rev?: unknown; progress?: unknown; bytes?: unknown; note?: unknown; ok?: unknown; site_id?: unknown; version?: unknown; url?: unknown; copies?: unknown; error?: unknown; deleted?: unknown },
     ): Promise<Push | "deleted"> {
-      const p = await store.pushById(userId, pid);
+      const p = await store.pushForCaller(userId, pid);
       if (!p || p.node_id !== nodeId) throw new PushError("no such push on this node", 404);
       if (Number(r.rev) !== p.rev) throw new PushError(`stale report: push is at rev ${p.rev}`, 409);
       const t = now();
@@ -430,7 +510,7 @@ export function createPushStore(sql: Sql) {
           p.id,
         ]);
         await sql.run(`UPDATE chat_nodes SET last_seen_at = ? WHERE id = ?`, [t, nodeId]);
-        return (await store.pushById(userId, p.id))!;
+        return (await byId(p.id))!;
       }
       if (p.status === "deleting") {
         if (r.ok === true || r.deleted === true) {
@@ -443,7 +523,7 @@ export function createPushStore(sql: Sql) {
           t,
           p.id,
         ]);
-        return (await store.pushById(userId, p.id))!;
+        return (await byId(p.id))!;
       }
       if (p.status !== "publishing") throw new PushError(`push is ${p.status}, not publishing`, 409);
       if (r.ok === true) {
@@ -471,7 +551,7 @@ export function createPushStore(sql: Sql) {
           p.id,
         ]);
       }
-      return (await store.pushById(userId, p.id))!;
+      return (await byId(p.id))!;
     },
   };
   return store;

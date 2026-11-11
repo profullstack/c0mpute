@@ -122,7 +122,7 @@ describe("mcp", () => {
     const init = (await handleRpc({ jsonrpc: "2.0", id: 1, method: "initialize" }, { user, upstream })) as {
       result: { serverInfo: { name: string } };
     };
-    expect(init.result.serverInfo.name).toBe("c0mpute-chat");
+    expect(init.result.serverInfo.name).toBe("c0mpute");
     const list = (await handleRpc({ id: 2, method: "tools/list" }, { user, upstream })) as {
       result: { tools: { name: string }[] };
     };
