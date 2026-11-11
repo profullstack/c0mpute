@@ -5382,14 +5382,29 @@ fn run_menu() -> Result<()> {
 /// release's tag, so the CLI and the TUI move together.
 fn run_tui(args: &[String]) -> Result<()> {
     let stale = installed_tui_version().is_some_and(|v| tui_is_stale(&v));
-    if which_on_path("c0mpute-tui").is_none() {
+    if tui_launcher().is_none() {
         install_tui()?;
     } else if stale {
         if let Err(e) = install_tui() {
             eprintln!("c0mpute tui: could not update the terminal UI ({e:#}); starting the installed one");
         }
     }
-    delegate("c0mpute-tui", args)
+    // The launcher lives in ~/.c0mpute/bin, which is not on PATH when the
+    // CLI itself was installed elsewhere (e.g. /usr/local/bin).
+    let launcher = tui_launcher().ok_or_else(|| anyhow::anyhow!("c0mpute-tui was not installed; run `c0mpute tui` again"))?;
+    let status = Command::new(launcher).args(args).status()?;
+    if !status.success() {
+        anyhow::bail!("c0mpute-tui exited {status}");
+    }
+    Ok(())
+}
+
+/// `c0mpute-tui` on PATH, else the launcher `install_tui` writes.
+fn tui_launcher() -> Option<PathBuf> {
+    which_on_path("c0mpute-tui").or_else(|| {
+        let p = PathBuf::from(std::env::var_os("HOME")?).join(".c0mpute/bin/c0mpute-tui");
+        p.is_file().then_some(p)
+    })
 }
 
 /// The version in ~/.c0mpute/tui/package.json, when the TUI was installed there.
