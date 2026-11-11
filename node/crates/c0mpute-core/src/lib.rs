@@ -91,9 +91,16 @@ pub use supervisor::Supervisor;
 use anyhow::Result;
 use tracing::info;
 
+/// Default log filter. `libp2p_gossipsub` is held at `error`: its WARNs fire
+/// once per message ("Send Queue full" for a stuck peer, which the swarm now
+/// disconnects; "GRAFT: ignoring request from direct peer" when an mDNS
+/// neighbour is explicit on our side only, answered with a PRUNE), and they
+/// buried every other line of the worker log and TUI. `RUST_LOG` still wins.
+pub const DEFAULT_FILTER: &str = "info,c0mpute=debug,libp2p_gossipsub=error";
+
 /// Convenience: install a default `tracing-subscriber` for the binary.
 pub fn init_tracing() -> Result<()> {
-    init_tracing_with("info,c0mpute=debug")
+    init_tracing_with(DEFAULT_FILTER)
 }
 
 /// [`init_tracing`] with another default filter (`RUST_LOG` still wins):
