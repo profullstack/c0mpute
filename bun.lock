@@ -41,7 +41,7 @@
         "c0mpute-tui": "./src/index.ts",
       },
       "dependencies": {
-        "@profullstack/hqtui": "^0.11.1",
+        "@profullstack/hqtui": "^0.12.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -296,7 +296,7 @@
 
     "@profullstack/footer": ["@profullstack/footer@0.4.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-EJZnMUQmWDi9Gzx6BAjogloeaPFFSSCHtHJuC9dsXiOz8M87hfn6Z+Zx9AMYWk8s6xemPrPlkXKGB3PZugkcEA=="],
 
-    "@profullstack/hqtui": ["@profullstack/hqtui@0.11.1", "", { "bin": { "hqtui": "bin/hqtui.mjs" } }, "sha512-c/UzTmiRDjdLZQEO/gdVinUKtx6Q0WBPdixIm90MBTvC3DqFPqpersRs0BIDPS7XVokCSr1DtELI91kj5J1kCg=="],
+    "@profullstack/hqtui": ["@profullstack/hqtui@0.12.0", "", { "bin": { "hqtui": "bin/hqtui.mjs" } }, "sha512-THxKKus56d44HeBpb9Kx7LENG9fAgqrl84tgyfv5ZHztJ2sSSRvjGeyD9G2dXNG8fY7s7CLyoz+00wQ63mQfHQ=="],
 
     "@profullstack/keys": ["@profullstack/keys@0.1.0", "", {}, "sha512-Vys47LvS5ivhdZu4SYOxh9Le3DEmWhjP0+CtrU45RhXAbY0ZFG/2Dk9V1bIIUGDp8UWMJqctvUD21JrNjfh04w=="],
 

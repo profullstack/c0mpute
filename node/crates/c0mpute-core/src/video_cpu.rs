@@ -151,6 +151,50 @@ pub fn can_serve(config: &VideoConfig) -> bool {
         && !crate::music::busy()
 }
 
+/// Why [`can_serve`] says no right now, or `None` when it would say yes
+/// (apart from a job already running in the worker process).
+pub fn gate_reason(config: &VideoConfig) -> Option<String> {
+    gate_reason_with(
+        config,
+        installed(),
+        ffmpeg_present(),
+        diffusion::HostNow::probe(),
+    )
+}
+
+/// [`gate_reason`] for a given install state, ffmpeg and host.
+pub fn gate_reason_with(
+    config: &VideoConfig,
+    installed: bool,
+    ffmpeg: bool,
+    host: diffusion::HostNow,
+) -> Option<String> {
+    match config.cpu_setting() {
+        Some(false) => return Some("CPU video turned off (C0MPUTE_VIDEO_CPU=0 or [video] cpu = false)".into()),
+        None if !installed => return Some("CPU video not installed (`c0mpute video setup --cpu` opts in)".into()),
+        _ => {}
+    }
+    if !fast_enough_with(config, host.job_threads) {
+        return Some(format!(
+            "CPU budget too small: {} threads per job, needs {}",
+            host.job_threads, config.min_cpu_threads
+        ));
+    }
+    if !installed {
+        return Some(diffusion::not_installed_reason(config.min_ram_gb, host, "~5.4 GB"));
+    }
+    if !ffmpeg {
+        return Some("ffmpeg not found on PATH".into());
+    }
+    diffusion::resource_gate(
+        config.min_ram_gb,
+        config.min_free_ram_gb,
+        config.max_load_per_cpu,
+        host,
+        true,
+    )
+}
+
 /// Tags a CPU video node advertises while it can take a clip.
 pub fn tags() -> Vec<String> {
     vec![
@@ -505,6 +549,25 @@ async fn run_job(net: &Libp2pNetwork, store: &ChunkStore, cache_root: &Path, job
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_reason_explains_opt_in_and_ffmpeg() {
+        let cfg = VideoConfig::default();
+        let host = diffusion::HostNow {
+            mem: diffusion::MemorySnapshot { total: 64 << 30, available: 32 << 30 },
+            load_1m: 0.2,
+            cpus: 16,
+            job_threads: 8,
+        };
+        if std::env::var("C0MPUTE_VIDEO_CPU").is_ok() {
+            return;
+        }
+        assert!(super::gate_reason_with(&cfg, false, true, host).unwrap().contains("video setup --cpu"));
+        assert_eq!(super::gate_reason_with(&cfg, true, true, host), None);
+        assert_eq!(super::gate_reason_with(&cfg, true, false, host).as_deref(), Some("ffmpeg not found on PATH"));
+        let off = VideoConfig { cpu: Some(false), ..VideoConfig::default() };
+        assert!(super::gate_reason_with(&off, true, true, host).unwrap().starts_with("CPU video turned off"));
+    }
+
     use super::*;
 
     fn small() -> VideoJobInline {

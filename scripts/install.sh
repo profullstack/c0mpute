@@ -566,7 +566,7 @@ install_tui() {
 
   # Materialise a self-contained node_modules (the monorepo hoists deps, so a
   # copied node_modules would be dangling symlinks).
-  if ! ( cd "$dest" && "$bun_bin" install --no-save >/dev/null 2>&1 ); then
+  if ! ( cd "$dest" && "$bun_bin" install --production --no-save >/dev/null 2>&1 ); then
     warn "c0mpute-tui dependency install failed; skipping"
     [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
     return 1

@@ -1,0 +1,50 @@
+name: tui
+
+# `c0mpute tui` (apps/tui): typecheck and test the Bun app on its own, the
+# way the installer sets it up (apps/tui copied out, `bun install` there),
+# plus the test that keeps its copy of the web chat's parsers identical to
+# apps/web/src/lib/chat.
+
+on:
+  pull_request:
+    paths:
+      - "apps/tui/**"
+      - "apps/web/src/lib/chat/**"
+      - ".github/workflows/tui.yml"
+  push:
+    branches: [master]
+    paths:
+      - "apps/tui/**"
+      - "apps/web/src/lib/chat/**"
+      - ".github/workflows/tui.yml"
+
+concurrency:
+  group: tui-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - name: Install the TUI's dependencies only
+        run: |
+          deps="$RUNNER_TEMP/tui-deps"
+          mkdir -p "$deps"
+          cp apps/tui/package.json "$deps/"
+          (cd "$deps" && bun install --no-save)
+          ln -s "$deps/node_modules" apps/tui/node_modules
+      - name: Typecheck
+        working-directory: apps/tui
+        run: node_modules/.bin/tsc -p tsconfig.json --noEmit
+      - name: Test
+        working-directory: apps/tui
+        run: bun test
+      - name: Screenshots (demo state)
+        working-directory: apps/tui
+        run: bun scripts/screenshot.ts --demo 80 24

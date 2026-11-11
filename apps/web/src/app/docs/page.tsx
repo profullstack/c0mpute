@@ -370,7 +370,7 @@ grep -v '^#' urls.txt | xargs -P 8 -I{} curl -s http://127.0.0.1:8788/v1/jobs \\
 {`c0mpute job status <job-id>          # one-shot status
 c0mpute job logs <job-id> --follow   # tail logs
 c0mpute job cancel <job-id>          # cancel queued/running
-c0mpute tui                          # interactive worker / job dashboard`}
+c0mpute tui                          # terminal app: chat, jobs, node, network`}
         </Code>
       </Section>
 

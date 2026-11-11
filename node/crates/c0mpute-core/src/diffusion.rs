@@ -182,6 +182,118 @@ pub fn idle_enough_with(load_1m: f64, cpus: usize, max_per_cpu: f64) -> bool {
     cpus > 0 && load_1m.is_finite() && load_1m < cpus as f64 * max_per_cpu
 }
 
+/// What the host looks like right now, for the "why not" lines that
+/// `c0mpute status` prints next to each CPU generation role.
+#[derive(Clone, Copy, Debug)]
+pub struct HostNow {
+    pub mem: MemorySnapshot,
+    pub load_1m: f64,
+    pub cpus: usize,
+    /// Threads one job gets (`resources::cpu_threads_per_job`).
+    pub job_threads: usize,
+}
+
+impl HostNow {
+    pub fn probe() -> Self {
+        Self {
+            mem: memory(),
+            load_1m: load_avg_1m(),
+            cpus: logical_cpus(),
+            job_threads: crate::resources::cpu_threads_per_job(),
+        }
+    }
+}
+
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / GIB as f64
+}
+
+/// The resource half of a CPU generation gate (images, songs, clips): the
+/// first check that fails, worded for an operator, or `None`. Same order as
+/// the `can_serve` functions. A job already running in the worker process is
+/// not visible from here; the caller says so if it matters.
+pub fn resource_gate(
+    min_ram_gb: u64,
+    min_free_ram_gb: u64,
+    max_load_per_cpu: f64,
+    host: HostNow,
+    check_load: bool,
+) -> Option<String> {
+    if host.mem.total < min_ram_gb.saturating_mul(GIB) {
+        return Some(format!(
+            "{:.0} GiB RAM, needs {min_ram_gb} GiB",
+            gib(host.mem.total)
+        ));
+    }
+    if host.mem.available < min_free_ram_gb.saturating_mul(GIB) {
+        return Some(format!(
+            "load gate: {:.1} GiB RAM free, needs {min_free_ram_gb} GiB free",
+            gib(host.mem.available)
+        ));
+    }
+    if check_load && !idle_enough_with(host.load_1m, host.cpus, max_load_per_cpu) {
+        return Some(format!(
+            "load gate: load {:.1} on {} CPUs, takes work below {:.1}",
+            host.load_1m,
+            host.cpus,
+            host.cpus as f64 * max_load_per_cpu
+        ));
+    }
+    None
+}
+
+/// Why a role that installs in the background is not installed yet.
+pub fn not_installed_reason(min_ram_gb: u64, host: HostNow, size: &str) -> String {
+    if host.mem.total < min_ram_gb.saturating_mul(GIB) {
+        format!(
+            "not installed: {:.0} GiB RAM, needs {min_ram_gb} GiB",
+            gib(host.mem.total)
+        )
+    } else {
+        format!(
+            "not installed yet: the worker installs it ({size}) in the background when the disk has room; see the worker log"
+        )
+    }
+}
+
+/// Why [`can_serve`] says no right now, or `None` when it would say yes
+/// (apart from a job already running in the worker process).
+pub fn gate_reason(config: &crate::config::DiffusionConfig) -> Option<String> {
+    if !platform_supported() {
+        return Some("no CPU image build for this platform (Linux x86_64 only)".into());
+    }
+    gate_reason_with(config, installed(), HostNow::probe())
+}
+
+/// [`gate_reason`] for a given install state and host.
+pub fn gate_reason_with(
+    config: &crate::config::DiffusionConfig,
+    installed: bool,
+    host: HostNow,
+) -> Option<String> {
+    if !config.auto_install_enabled() {
+        return Some(
+            "turned off (C0MPUTE_DIFFUSION_AUTO=0 or [diffusion] auto_install = false)".into(),
+        );
+    }
+    if !fast_enough_with(config, host.job_threads) {
+        return Some(format!(
+            "CPU budget too small: {} threads per job, needs {}",
+            host.job_threads, config.min_cpu_threads
+        ));
+    }
+    if !installed {
+        return Some(not_installed_reason(config.min_ram_gb, host, "~6.7 GB"));
+    }
+    resource_gate(
+        config.min_ram_gb,
+        config.min_free_ram_gb,
+        config.max_load_per_cpu,
+        host,
+        true,
+    )
+}
+
 pub(crate) fn load_avg_1m() -> f64 {
     sysinfo::System::load_average().one
 }
@@ -779,6 +891,34 @@ async fn run_job(
 
 #[cfg(test)]
 mod tests {
+    fn host(total_gb: u64, free_gb: u64, load: f64, cpus: usize, threads: usize) -> super::HostNow {
+        super::HostNow {
+            mem: super::MemorySnapshot {
+                total: total_gb * super::GIB,
+                available: free_gb * super::GIB,
+            },
+            load_1m: load,
+            cpus,
+            job_threads: threads,
+        }
+    }
+
+    #[test]
+    fn gate_reason_names_the_first_failing_check() {
+        let cfg = crate::config::DiffusionConfig::default();
+        let big = host(64, 32, 0.5, 16, 8);
+        assert_eq!(super::gate_reason_with(&cfg, true, big), None);
+        assert!(super::gate_reason_with(&cfg, false, big).unwrap().starts_with("not installed yet"));
+        let small = host(2, 1, 0.5, 16, 8);
+        assert!(super::gate_reason_with(&cfg, false, small).unwrap().contains("GiB RAM, needs"));
+        let busy = host(64, 32, 15.0, 16, 8);
+        assert!(super::gate_reason_with(&cfg, true, busy).unwrap().starts_with("load gate: load 15.0 on 16 CPUs"));
+        let tight = host(64, 0, 0.5, 16, 8);
+        assert!(super::gate_reason_with(&cfg, true, tight).unwrap().starts_with("load gate: 0.0 GiB RAM free"));
+        let slow = host(64, 32, 0.5, 16, 1);
+        assert!(super::gate_reason_with(&cfg, true, slow).unwrap().starts_with("CPU budget too small"));
+    }
+
 
     /// A server that cuts the first response off halfway, then honours Range.
     async fn flaky_range_server(body: Vec<u8>) -> String {

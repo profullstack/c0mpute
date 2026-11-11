@@ -36,6 +36,7 @@ mod promo;
 mod storage;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod mount;
+mod node_status;
 mod temporal;
 mod text;
 mod train;
@@ -187,8 +188,9 @@ enum Cmd {
     /// This node at a glance: the worker, auto-update, bench, idle donation
     /// (same as `c0mpute worker status`).
     Status {
-        /// One JSON object instead of the text report (for the desktop app
-        /// and scripts): version, worker pid, peer id, nickname, config.
+        /// One JSON object instead of the text report (for the desktop app,
+        /// `c0mpute tui` and scripts): version, worker pid, peer id, nickname,
+        /// config, and every role, serving right now or gated and why.
         #[arg(long)]
         json: bool,
     },
@@ -461,10 +463,13 @@ enum Cmd {
         cmd: ChatCmd,
     },
 
-    /// Launch the interactive TUI (worker / job / module dashboard).
+    /// The terminal app: chat (with /image, /video, /music, /album,
+    /// /promo, /push), your jobs, this node's roles and why any are gated,
+    /// the network, and settings.
     ///
-    /// Subprocess-launches `c0mpute-tui` (a terminal dashboard on
-    /// @profullstack/hqtui, run through Bun). See apps/tui in the repo.
+    /// Subprocess-launches `c0mpute-tui` (on @profullstack/hqtui, run through
+    /// Bun), installed and kept at this release's version on demand. See
+    /// apps/tui in the repo.
     /// Long-term we move to Perry once their CLI surface ships.
     // -h/--help go to the plugin's own parser, which prints the real help.
     #[command(disable_help_flag = true)]
@@ -585,7 +590,8 @@ enum WorkerCmd {
     },
     /// Show worker status.
     Status {
-        /// One JSON object instead of the text report.
+        /// One JSON object instead of the text report (roles serving or
+        /// gated and why included).
         #[arg(long)]
         json: bool,
     },
@@ -2279,7 +2285,28 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             Ok(())
         }
         WorkerCmd::Status { json: true } => {
-            println!("{}", serde_json::to_string_pretty(&worker_status_json(config_path)?)?);
+            let mut status = worker_status_json(config_path)?;
+            // Roles serving or gated (and why), tags, host load: what the
+            // running worker would do, from its own command line.
+            let mut cfg = Config::load_or_default(config_path)?;
+            let worker = node_status::find_worker(read_worker_pid());
+            let flags = worker.as_ref().and_then(|(_, argv)| node_status::worker_flags(argv));
+            let source = match (&worker, flags.as_ref().and_then(|f| f.roles.as_ref())) {
+                (Some(_), Some(_)) => "worker --roles",
+                (Some(_), None) => "worker defaults",
+                (None, _) => "defaults (worker not running)",
+            };
+            let f = flags.unwrap_or_default();
+            if f.private {
+                cfg.private.enabled = true;
+            }
+            effective_worker_roles(&mut cfg, f.roles.as_deref(), f.gpu, f.no_storage, f.no_hosting);
+            let roles = cfg.roles.clone();
+            let gates = node_status::report(&cfg, &roles, worker, source).await;
+            if let (Some(base), serde_json::Value::Object(extra)) = (status.as_object_mut(), gates) {
+                base.extend(extra);
+            }
+            println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())
         }
         WorkerCmd::Status { json: false } => {
@@ -2348,51 +2375,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             }
             ensure_current_version_benchmark();
             let default_speech_roles = roles.is_none();
-            if let Some(rs) = roles {
-                cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
-            } else {
-                for role in [
-                    Role::Storage,
-                    Role::Tts,
-                    Role::Stt,
-                    Role::WorkflowStep,
-                    Role::Diffusion,
-                    Role::Music,
-                    Role::Video,
-                    Role::Crawl,
-                    Role::Hosting,
-                    Role::Ocr,
-                    Role::Embed,
-                    Role::Captcha,
-                    Role::LiveStream,
-                    Role::Render,
-                    Role::Inference,
-                    Role::Mailbox,
-                ] {
-                    if !cfg.roles.contains(&role) {
-                        cfg.roles.push(role);
-                    }
-                }
-                // Transcoding needs nothing but ffmpeg: a node that has it
-                // serves it, CPU encoders included, without `--gpu`.
-                if c0mpute_core::supervisor::which_ffmpeg().is_some()
-                    && !cfg.roles.contains(&Role::Transcode)
-                {
-                    cfg.roles.push(Role::Transcode);
-                }
-            }
-            if gpu && !cfg.roles.contains(&Role::Transcode) {
-                cfg.roles.push(Role::Transcode);
-            }
-            if no_storage {
-                cfg.storage.enabled = false;
-            }
-            if no_hosting {
-                cfg.hosting.enabled = false;
-            }
-            // Every node is a disk provider unless it opted out: storage and
-            // hosting join even an explicit --roles list.
-            cfg.apply_disk_provider_defaults();
+            effective_worker_roles(&mut cfg, roles.as_deref(), gpu, no_storage, no_hosting);
             if cfg.lists_on_d1sks() {
                 eprintln!(
                     "disk provider: storing shards and holding sites for the network, listed on {} \
@@ -3273,10 +3256,9 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
                     println!("GPU video not ready: {}", not_ready.reason());
                     let cfg = Config::load_or_default(&config::default_config_path()).unwrap_or_default();
                     if c0mpute_core::video_cpu::installed() {
-                        let serving = if c0mpute_core::video_cpu::can_serve(&cfg.video) {
-                            "yes"
-                        } else {
-                            "no (disabled, busy, low RAM, small CPU budget or no ffmpeg)"
+                        let serving = match c0mpute_core::video_cpu::gate_reason(&cfg.video) {
+                            None => "yes".to_string(),
+                            Some(why) => format!("no ({why})"),
                         };
                         println!(
                             "CPU video: installed ({}); can take a clip right now: {serving}",
@@ -5225,6 +5207,56 @@ fn run_uninstall(all: bool, purge: bool, yes: bool) -> Result<()> {
 // helpers
 // ────────────────────────────────────────────────────────────────────────
 
+/// The roles `worker start` runs with: `--roles` when given, otherwise the
+/// config's roles plus the defaults; then transcode for `--gpu`, and storage
+/// and hosting unless opted out. Shared with `c0mpute status --json`, so the
+/// TUI reports the role set the worker actually has.
+fn effective_worker_roles(cfg: &mut Config, roles: Option<&[String]>, gpu: bool, no_storage: bool, no_hosting: bool) {
+    if let Some(rs) = roles {
+        cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
+    } else {
+        for role in [
+            Role::Storage,
+            Role::Tts,
+            Role::Stt,
+            Role::WorkflowStep,
+            Role::Diffusion,
+            Role::Music,
+            Role::Video,
+            Role::Crawl,
+            Role::Hosting,
+            Role::Ocr,
+            Role::Embed,
+            Role::Captcha,
+            Role::LiveStream,
+            Role::Render,
+            Role::Inference,
+            Role::Mailbox,
+        ] {
+            if !cfg.roles.contains(&role) {
+                cfg.roles.push(role);
+            }
+        }
+        // Transcoding needs nothing but ffmpeg: a node that has it
+        // serves it, CPU encoders included, without `--gpu`.
+        if c0mpute_core::supervisor::which_ffmpeg().is_some() && !cfg.roles.contains(&Role::Transcode) {
+            cfg.roles.push(Role::Transcode);
+        }
+    }
+    if gpu && !cfg.roles.contains(&Role::Transcode) {
+        cfg.roles.push(Role::Transcode);
+    }
+    if no_storage {
+        cfg.storage.enabled = false;
+    }
+    if no_hosting {
+        cfg.hosting.enabled = false;
+    }
+    // Every node is a disk provider unless it opted out: storage and
+    // hosting join even an explicit --roles list.
+    cfg.apply_disk_provider_defaults();
+}
+
 fn parse_role(s: &str) -> Option<Role> {
     match s.trim().to_ascii_lowercase().as_str() {
         "storage" => Some(Role::Storage),
@@ -5343,14 +5375,37 @@ fn run_menu() -> Result<()> {
 }
 
 /// `c0mpute tui` — launch the terminal UI, installing it on demand the first
-/// time. The TUI is a Bun app (react-blessed), not part of the Rust binary, so
-/// `c0mpute tui` fetches the source, runs `bun install`, and writes a launcher —
-/// the user never has to know about the underlying `c0mpute-tui` binary.
+/// time. The TUI is a Bun app (apps/tui, on @profullstack/hqtui), not part of
+/// the Rust binary, so `c0mpute tui` fetches the source, runs `bun install`,
+/// and writes a launcher — the user never has to know about the underlying
+/// `c0mpute-tui` binary. After an update it reinstalls the TUI from this
+/// release's tag, so the CLI and the TUI move together.
 fn run_tui(args: &[String]) -> Result<()> {
+    let stale = installed_tui_version().is_some_and(|v| tui_is_stale(&v));
     if which_on_path("c0mpute-tui").is_none() {
         install_tui()?;
+    } else if stale {
+        if let Err(e) = install_tui() {
+            eprintln!("c0mpute tui: could not update the terminal UI ({e:#}); starting the installed one");
+        }
     }
     delegate("c0mpute-tui", args)
+}
+
+/// The version in ~/.c0mpute/tui/package.json, when the TUI was installed there.
+fn installed_tui_version() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let text = std::fs::read_to_string(PathBuf::from(home).join(".c0mpute/tui/package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version")?.as_str().map(str::to_string)
+}
+
+/// Reinstall unless it matches this binary, or the operator pinned a ref
+/// (`C0MPUTE_TUI_REF`) or opted out (`C0MPUTE_TUI_NO_UPDATE=1`).
+fn tui_is_stale(installed: &str) -> bool {
+    std::env::var_os("C0MPUTE_TUI_REF").is_none()
+        && std::env::var_os("C0MPUTE_TUI_NO_UPDATE").is_none()
+        && installed != env!("CARGO_PKG_VERSION")
 }
 
 /// Locate a usable `bun`, installing it via mise if needed. bun may be on PATH,
@@ -5387,7 +5442,7 @@ fn ensure_bun() -> Option<PathBuf> {
 }
 
 fn install_tui() -> Result<()> {
-    println!("c0mpute tui: installing the terminal UI (one-time)…");
+    println!("c0mpute tui: installing the terminal UI for v{}…", env!("CARGO_PKG_VERSION"));
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .map_err(|_| anyhow::anyhow!("HOME not set"))?;
@@ -5401,21 +5456,28 @@ fn install_tui() -> Result<()> {
     let tui_dir = home.join(".c0mpute/tui");
     let wrapper = home.join(".c0mpute/bin/c0mpute-tui");
     let tmp = std::env::temp_dir().join("c0mpute-tui-install");
-    let git_ref = std::env::var("C0MPUTE_TUI_REF").unwrap_or_else(|_| "master".into());
+    // This release's tag, so the TUI matches the CLI; master if the tag is
+    // not there (a dev build). C0MPUTE_TUI_REF picks a branch instead.
+    let archive = match std::env::var("C0MPUTE_TUI_REF") {
+        Ok(branch) if !branch.is_empty() => format!("https://github.com/profullstack/c0mpute/archive/refs/heads/{branch}.tar.gz"),
+        _ => format!("https://github.com/profullstack/c0mpute/archive/refs/tags/v{}.tar.gz", env!("CARGO_PKG_VERSION")),
+    };
+    let fallback = "https://github.com/profullstack/c0mpute/archive/refs/heads/master.tar.gz";
 
     // Fetch the repo, copy apps/tui into ~/.c0mpute/tui, and materialise deps.
     let script = format!(
         "set -e\n\
          rm -rf '{tmp}' && mkdir -p '{tmp}'\n\
-         curl -fsSL 'https://github.com/profullstack/c0mpute/archive/refs/heads/{git_ref}.tar.gz' | tar -xz -C '{tmp}'\n\
+         curl -fsSL '{archive}' | tar -xz -C '{tmp}' || {{ rm -rf '{tmp}' && mkdir -p '{tmp}' && curl -fsSL '{fallback}' | tar -xz -C '{tmp}'; }}\n\
          src=$(find '{tmp}' -type d -path '*/apps/tui' | head -1)\n\
          [ -d \"$src/src\" ] || {{ echo 'TUI source not found' >&2; exit 1; }}\n\
          rm -rf '{tui}' && mkdir -p '{tui}'\n\
          cp -R \"$src/src\" \"$src/package.json\" \"$src/tsconfig.json\" '{tui}/'\n\
-         cd '{tui}' && '{bun}' install --no-save >/dev/null 2>&1\n\
+         cd '{tui}' && '{bun}' install --production --no-save >/dev/null 2>&1\n\
          rm -rf '{tmp}'\n",
         tmp = tmp.display(),
-        git_ref = git_ref,
+        archive = archive,
+        fallback = fallback,
         tui = tui_dir.display(),
         bun = bun.display(),
     );
