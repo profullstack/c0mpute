@@ -249,7 +249,7 @@ impl Hosting {
         }
 
         // Every chunk: sent, already here, or fetched from the current holders.
-        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
         let mut chunks = Vec::new();
         for h in &wanted {
             if let Some(c) = sent_by_hash.remove(h) {
@@ -260,12 +260,29 @@ impl Hosting {
             if self.0.store.has(&hash).await {
                 continue;
             }
-            let bytes = self.fetch_chunk(&hash, &holders).await.map_err(|e| {
-                Refused(
-                    StatusCode::BAD_GATEWAY,
-                    format!("chunk {h} is neither in the push nor reachable: {e}"),
-                )
-            })?;
+            // Holder announcements can lag a version that just landed (or
+            // lapse under load); refresh them and retry briefly before refusing.
+            let mut tries = 0;
+            let bytes = loop {
+                let from = if tries == 0 {
+                    holders.clone()
+                } else {
+                    self.0.map.read().await.fetch_sources(&rec.site_id)
+                };
+                match self.fetch_chunk(&hash, &from).await {
+                    Ok(b) => break b,
+                    Err(e) if tries >= 4 => {
+                        return Err(Refused(
+                            StatusCode::BAD_GATEWAY,
+                            format!("chunk {h} is neither in the push nor reachable: {e}"),
+                        ));
+                    }
+                    Err(_) => {
+                        tries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * tries)).await;
+                    }
+                }
+            };
             chunks.push(bytes);
         }
         let built = BuiltSite { manifest, chunks };

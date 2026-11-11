@@ -57,14 +57,14 @@ impl Hosting {
     /// The raw bytes of the manifest chunk a record names.
     async fn manifest_bytes(&self, rec: &site::SiteRecord) -> anyhow::Result<Vec<u8>> {
         let hash = Hash::from_hex(&rec.manifest).map_err(|_| anyhow::anyhow!("manifest hash"))?;
-        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
         self.fetch_chunk(&hash, &holders).await
     }
 
     /// The raw bytes of one manifest part, checked against its reference.
     async fn part_bytes(&self, rec: &site::SiteRecord, r: &site::PartRef) -> anyhow::Result<Vec<u8>> {
         let hash = Hash::from_hex(&r.hash).map_err(|_| anyhow::anyhow!("part hash"))?;
-        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
         let bytes = self.fetch_chunk(&hash, &holders).await?;
         ManifestPart::from_bytes(&bytes, r)?;
         Ok(bytes)
@@ -172,7 +172,7 @@ pub(super) async fn chunk(
     if !belongs {
         return (StatusCode::NOT_FOUND, "not a chunk of this site").into_response();
     }
-    let holders = h.0.map.read().await.sources(&rec.site_id);
+    let holders = h.0.map.read().await.fetch_sources(&rec.site_id);
     match h.fetch_chunk(&hash, &holders).await {
         Ok(bytes) => {
             let mut resp = (StatusCode::OK, bytes).into_response();

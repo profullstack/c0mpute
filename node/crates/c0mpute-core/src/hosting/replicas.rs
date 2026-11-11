@@ -331,6 +331,24 @@ impl ReplicaMap {
         self.with_current(site_id, false)
     }
 
+    /// Where to fetch a site's chunks from by hash: [`Self::sources`] first,
+    /// then every peer announcing any other version of the site. Right after
+    /// a new version lands nobody has announced it yet, but the holders of
+    /// the previous version still have every chunk the two share; fetched
+    /// bytes are checked against their hash, so a stale holder is safe.
+    pub fn fetch_sources(&self, site_id: &str) -> Vec<String> {
+        let mut v = self.sources(site_id);
+        let mut rest: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(p, h)| h.sites.contains_key(site_id) && !v.contains(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        rest.sort();
+        v.extend(rest);
+        v
+    }
+
     fn with_current(&self, site_id: &str, hosting_only: bool) -> Vec<String> {
         let Some(rec) = self.records.get(site_id) else {
             return Vec::new();
@@ -668,6 +686,29 @@ mod tests {
     }
 
     #[test]
+    fn fetch_sources_fall_back_to_holders_of_an_older_version() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        let now = Instant::now();
+        let mut cur = HashMap::new();
+        cur.insert(site.clone(), (r.manifest.clone(), 1));
+        m.apply_holding("fresh", cur, now);
+        let mut old = HashMap::new();
+        old.insert(site.clone(), ("an-older-manifest".to_string(), 1));
+        m.apply_holding("stale", old, now);
+        m.apply_holding("other", HashMap::new(), now);
+        assert_eq!(m.sources(&site), vec!["fresh".to_string()]);
+        assert_eq!(
+            m.fetch_sources(&site),
+            vec!["fresh".to_string(), "stale".to_string()],
+            "current holders first, then holders of another version; never a peer without the site"
+        );
+    }
+
+    #[test]
     fn a_seeding_publisher_is_a_source_not_a_copy() {
         let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
         let r = rec(&kp, 1);
@@ -683,6 +724,7 @@ mod tests {
         }
         assert!(m.holders(&site).is_empty());
         assert_eq!(m.sources(&site), vec!["publisher".to_string()]);
+        assert_eq!(m.fetch_sources(&site), vec!["publisher".to_string()]);
         let takers = (0..5)
             .filter(|i| decide(&m, &site, &format!("h{i}"), true, 3, 5, true) == Action::Replicate)
             .count();

@@ -1150,7 +1150,7 @@ impl Hosting {
         if manifest.total_bytes() != rec.size || manifest.name() != rec.name {
             bail!("manifest does not match its record");
         }
-        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
         // Part by part for a parted manifest (its chunk list never sits in
         // memory whole), many chunks in flight; the root goes in last,
         // marking the copy complete.
@@ -1206,7 +1206,7 @@ impl Hosting {
         }
         let mh = Hash::from_hex(&rec.manifest).context("manifest hash")?;
         if !self.0.store.has(&mh).await {
-            let holders = self.0.map.read().await.sources(&rec.site_id);
+            let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
             let bytes = self.fetch_chunk(&mh, &holders).await?;
             self.0.store.put(&bytes).await?;
         }
@@ -2138,7 +2138,7 @@ impl Hosting {
     async fn chunk_sources(&self, rec: &SiteRecord) -> ChunkSources {
         let map = self.0.map.read().await;
         if !stripe::is_striped(rec.size) {
-            return ChunkSources::Whole(map.sources(&rec.site_id));
+            return ChunkSources::Whole(map.fetch_sources(&rec.site_id));
         }
         let n = stripe::group_count(rec.size);
         ChunkSources::Striped {
@@ -2153,7 +2153,7 @@ impl Hosting {
             return Ok(p.clone());
         }
         let hash = Hash::from_hex(&r.hash).context("part hash")?;
-        let holders = self.0.map.read().await.sources(site_id);
+        let holders = self.0.map.read().await.fetch_sources(site_id);
         let bytes = self.fetch_chunk(&hash, &holders).await?;
         let p = Arc::new(ManifestPart::from_bytes(&bytes, r)?);
         let mut cache = self.0.parts.write().await;
@@ -2245,7 +2245,7 @@ impl Hosting {
             return Ok(m.clone());
         }
         let hash = Hash::from_hex(&rec.manifest).context("manifest hash")?;
-        let holders = self.0.map.read().await.sources(&rec.site_id);
+        let holders = self.0.map.read().await.fetch_sources(&rec.site_id);
         let bytes = self.fetch_chunk(&hash, &holders).await?;
         let m = Arc::new(Manifest::from_bytes(&bytes)?);
         let mut cache = self.0.manifests.write().await;
