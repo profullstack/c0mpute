@@ -199,8 +199,25 @@ async fn run(args: &[String]) -> Result<Vec<f32>> {
     Ok(out.scores)
 }
 
+static TEST_SCORE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+/// Integration tests only: score every output `score` instead of running
+/// the model (their fake runners write placeholder clips no decoder reads).
+/// Code-only, never read from config or the environment.
+#[doc(hidden)]
+pub fn use_fixed_score_for_tests(score: f32) {
+    let _ = TEST_SCORE.set(score);
+}
+
+pub(crate) fn fixed_test_score() -> Option<f32> {
+    TEST_SCORE.get().copied()
+}
+
 /// `nsfw` probability per image file.
 pub async fn classify(paths: &[PathBuf]) -> Result<Vec<f32>> {
+    if let Some(score) = fixed_test_score() {
+        return Ok(vec![score; paths.len()]);
+    }
     ensure().await?;
     let args: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     let scores = run(&args).await?;

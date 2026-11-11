@@ -781,7 +781,9 @@ async fn run_video_job(
             bail!("video result is not an MP4");
         }
     }
-    if !inline.adult {
+    if !inline.adult && crate::nsfw::fixed_test_score().is_some() {
+        crate::nsfw::sfw_gate(std::slice::from_ref(&out_path), &job.accept.job_id).await?;
+    } else if !inline.adult {
         let frames = crate::nsfw::extract_frames(&out_path, &job_dir.join("policy-frames"), crate::nsfw::VIDEO_SAMPLES).await
             .map_err(|e| anyhow::anyhow!("policy: classifier_unavailable: SFW clip could not be checked: {e:#}"))?;
         crate::nsfw::sfw_gate(&frames, &job.accept.job_id).await?;
