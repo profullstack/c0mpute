@@ -15,7 +15,7 @@ describe("chat music", () => {
     expect(parseMusicRequest({ prompt: " jazz " })).toEqual({ prompt: "jazz", lyrics: "" });
     expect(parseMusicRequest({ prompt: "x", duration: 60, lyrics: "hi" })).toEqual({ prompt: "x", lyrics: "hi", duration: 60 });
     expect(typeof parseMusicRequest({ prompt: "x", duration: 5 })).toBe("string");
-    expect(typeof parseMusicRequest({ prompt: "x", duration: 200 })).toBe("string");
+    expect(typeof parseMusicRequest({ prompt: "x", duration: 601 })).toBe("string");
     expect(typeof parseMusicRequest({ prompt: "" })).toBe("string");
     expect(parseMusicRequest({ prompt: "x".repeat(100_000), lyrics: "y".repeat(100_000) })).toMatchObject({ lyrics: "y".repeat(100_000) });
     expect(typeof parseMusicRequest({ prompt: "x".repeat(100_001) })).toBe("string");

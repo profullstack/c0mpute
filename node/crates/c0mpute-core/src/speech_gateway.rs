@@ -685,14 +685,23 @@ async fn transcribe(
     Ok(response)
 }
 
+/// A song's worker-side limit, from the length in its spec (the longest when
+/// the spec does not say).
+fn music_timeout(spec: &serde_json::Value) -> Duration {
+    spec.get("duration")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|d| u32::try_from(d).ok())
+        .map_or(crate::music::JOB_TIMEOUT, crate::music::job_timeout)
+}
+
 /// How long a worker gets to deliver a `workload` job's receipt.
-fn receipt_timeout_for(workload: &str) -> Duration {
+fn receipt_timeout_for(workload: &str, spec: &serde_json::Value) -> Duration {
     if is_video(workload) {
         crate::video::JOB_TIMEOUT
     } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
         IMAGE_RECEIPT_TIMEOUT
     } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
-        crate::music::JOB_TIMEOUT
+        music_timeout(spec)
     } else {
         Duration::from_secs(15 * 60)
     }
@@ -710,6 +719,7 @@ async fn run_speech_auction(
     // Learn the winner as soon as it is chosen, so a winner that then goes
     // silent can be benched and the job re-auctioned.
     let (winner_tx, mut winner_rx) = tokio::sync::mpsc::unbounded_channel();
+    let receipt_timeout = receipt_timeout_for(workload, &spec);
     let auction = JobAuction::new(workload, spec)
         .with_accept_notify(winner_tx)
         .with_required_capabilities(required)
@@ -722,11 +732,11 @@ async fn run_speech_auction(
         } else if workload == crate::diffusion::WORKLOAD_TXT2IMG {
             IMAGE_RECEIPT_TIMEOUT + Duration::from_secs(60)
         } else if workload == crate::music::WORKLOAD_TXT2MUSIC {
-            crate::music::JOB_TIMEOUT + Duration::from_secs(60)
+            receipt_timeout + Duration::from_secs(60)
         } else {
             Duration::from_secs(20 * 60)
         })
-        .with_receipt_timeout(receipt_timeout_for(workload));
+        .with_receipt_timeout(receipt_timeout);
     // Adult offers: only peers whose own capability ad says c0mpute:adult.
     let auction = if adult_offer {
         let peers = state.adult_peers.clone();
@@ -840,7 +850,7 @@ async fn run_checked_job(
             p.worker = Some(job.winner_peer.clone());
             p.job_id = Some(job.job_id.clone());
         });
-        match crate::buyer::resume_auction(state.net.clone(), &job, receipt_timeout_for(workload)).await {
+        match crate::buyer::resume_auction(state.net.clone(), &job, receipt_timeout_for(workload, &spec)).await {
             Ok(outcome) => {
                 tracing::info!(workload, job_id = %job.job_id, worker = %job.winner_peer, "resumed the in-flight job after a restart");
                 resumed = Some(outcome);

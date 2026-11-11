@@ -43,8 +43,8 @@ pub const MODEL_ID: &str = "ace-step-1.5";
 pub const MODEL_TAG: &str = "c0mpute:music:model:ace-step-1.5";
 
 /// Largest song a worker returns or a buyer accepts. A 2-minute 128 kb/s MP3
-/// is ~2 MB; the FLAC fallback for a 3-minute song is up to ~30 MB.
-pub const MAX_RESULT_BYTES: usize = 48 * 1024 * 1024;
+/// is ~2 MB; the FLAC fallback for a 10-minute song is up to ~110 MB.
+pub const MAX_RESULT_BYTES: usize = 160 * 1024 * 1024;
 /// What a buyer may send. Longer than the model reads on purpose: callers
 /// paste whole briefs and songs, and `clip_for_model` trims them.
 pub const MAX_PROMPT_CHARS: usize = 100_000;
@@ -55,12 +55,23 @@ pub const MAX_LYRICS_CHARS: usize = 100_000;
 pub const MODEL_PROMPT_CHARS: usize = 1_000;
 pub const MODEL_LYRICS_CHARS: usize = 4_000;
 pub const MIN_SECONDS: u32 = 10;
-pub const MAX_SECONDS: u32 = 180;
+/// ACE-Step 1.5's own ceiling: it renders 10 s to 10 minutes.
+pub const MAX_SECONDS: u32 = 600;
 pub const DEFAULT_SECONDS: u32 = 30;
-/// Worker-side limit for one song, model load included. A 30 s song takes
-/// ~130 s on 16 CPU threads and time grows with length, so a 3-minute song
-/// on a busy box needs well over 10 minutes.
-pub const JOB_TIMEOUT: Duration = Duration::from_secs(25 * 60);
+/// The longest any song may take, model load included: a 10-minute song on
+/// a busy CPU box. Also what an update drains for (`c0mpute_update::MAX_DRAIN`
+/// covers 2 h already, for video).
+pub const JOB_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Worker-side limit for one song of `seconds`, model load included. A 30 s
+/// song takes ~130 s on 16 CPU threads and a 150 s one ~11.5 min end to end
+/// (dev2, 2026-11-09); a busy 8-thread box runs at about half that, and the
+/// DiT's attention grows faster than the song. So: 20 min of slack plus 12 s
+/// per second of audio, never more than `JOB_TIMEOUT`.
+pub fn job_timeout(seconds: u32) -> Duration {
+    let wanted = 20 * 60 + 12 * u64::from(seconds.clamp(MIN_SECONDS, MAX_SECONDS));
+    Duration::from_secs(wanted).min(JOB_TIMEOUT)
+}
 const INSTALL_RETRY_BACKOFF_SECS: u64 = 6 * 60 * 60;
 
 const WORKER: &str = include_str!("music_worker.py");
@@ -515,6 +526,7 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
     }
     let out_dir = job_dir.join("out");
     tokio::fs::create_dir_all(&out_dir).await?;
+    let timeout = job_timeout(spec.duration);
     let mut command = Command::new(python());
     let threads = crate::resources::apply_job_limits(&mut command);
     let request = serde_json::json!({
@@ -542,7 +554,7 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
         // timeout is the real limit; leave a margin for model load and decode.
         .env(
             "ACESTEP_GENERATION_TIMEOUT",
-            JOB_TIMEOUT.saturating_sub(Duration::from_secs(3 * 60)).as_secs().to_string(),
+            timeout.saturating_sub(Duration::from_secs(3 * 60)).as_secs().to_string(),
         )
         .env("TMPDIR", job_dir)
         .stdin(std::process::Stdio::null())
@@ -550,7 +562,7 @@ pub async fn generate(spec: &Txt2MusicSpec, job_dir: &Path) -> Result<PathBuf> {
         .stderr(std::process::Stdio::piped());
     // Kills the worker's whole process group on a timeout or a cancel.
     let result =
-        crate::job_process::run_with_timeout(&mut command, JOB_TIMEOUT, "ACE-Step").await?;
+        crate::job_process::run_with_timeout(&mut command, timeout, "ACE-Step").await?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
@@ -698,7 +710,7 @@ async fn run_job(
     let path = generate(&spec, &job_dir).await?;
     let bytes = tokio::fs::read(&path).await?;
     if audio_content_type(&bytes).is_none() || bytes.len() > MAX_RESULT_BYTES {
-        bail!("ACE-Step output is not MP3/FLAC audio under the 48 MiB result limit");
+        bail!("ACE-Step output is not MP3/FLAC audio under the 160 MiB result limit");
     }
     // Over 1 MiB goes back as pieces: one chunk fetch caps out near 5 MiB.
     crate::pieces::publish_result_bytes(net, store, &job.accept, &bytes).await
@@ -720,6 +732,17 @@ mod tests {
         assert_eq!((spec.duration, spec.steps, spec.lyrics.as_str()), (30, 8, ""));
         assert_eq!(spec.model, MODEL_ID);
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn long_songs_are_allowed_and_get_more_time() {
+        let mut s = spec();
+        s.duration = 600;
+        assert!(s.validate().is_ok());
+        assert_eq!(job_timeout(30), Duration::from_secs(20 * 60 + 360));
+        assert!(job_timeout(180) > Duration::from_secs(25 * 60));
+        assert_eq!(job_timeout(600), JOB_TIMEOUT);
+        assert!(job_timeout(10_000) <= JOB_TIMEOUT);
     }
 
     #[test]

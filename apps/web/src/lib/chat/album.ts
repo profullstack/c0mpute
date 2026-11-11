@@ -33,7 +33,7 @@ export function parseAlbumRequest(body: unknown): { prompt: string; tracks?: num
   }
   if (b.duration !== undefined && b.duration !== null) {
     const d = Number(b.duration);
-    if (!Number.isInteger(d) || d < 10 || d > 180) return "duration must be a whole number of seconds from 10 to 180";
+    if (!Number.isInteger(d) || d < 10 || d > 600) return "duration must be a whole number of seconds from 10 to 600";
     out.duration = d;
   }
   return out;
