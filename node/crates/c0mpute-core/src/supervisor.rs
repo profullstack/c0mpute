@@ -45,10 +45,12 @@ impl Supervisor {
     /// the buyer's auctions fail with `NoPeersSubscribedToTopic` while the
     /// network has plenty of workers on the topic.
     pub async fn boot_buyer(config: Config) -> Result<Self> {
-        let identity_dir = config::data_dir()
+        let base = config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("buyer");
-        std::fs::create_dir_all(&identity_dir)?;
+        // Nor may two buyers share one: a second one (a terminal publish
+        // beside the publisher unit) gets its own network identity.
+        let identity_dir = crate::instance::buyer_identity_dir(&base)?;
         Self::boot_with_identity(config, identity_dir).await
     }
 

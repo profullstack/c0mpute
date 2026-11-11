@@ -157,6 +157,12 @@ pub enum HostingMsg {
         /// a group. Absent from older nodes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         room: Option<u64>,
+        /// An opaque id of the machine and disk it stores on (see
+        /// [`failure_domain`]): two nodes with the same id are one copy, even
+        /// when neither has a public address to compare. Absent from older
+        /// nodes (they are told apart by address only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
     },
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
@@ -500,6 +506,7 @@ impl Hosting {
                         full,
                         room_gib,
                         room,
+                        machine,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -546,6 +553,7 @@ impl Hosting {
                             );
                             map.set_full(&source, full);
                             map.set_room(&source, room_gib);
+                            map.set_machine(&source, machine.filter(|m| m.len() <= 64));
                         }
                     }
                     HostingMsg::Receipt { receipt } => {
@@ -627,10 +635,18 @@ impl Hosting {
             room,
             addrs.clone(),
         );
+        // A pretend disk (tests running many nodes in one process) is no
+        // failure domain: those nodes are told apart by address.
+        let machine = if self.0.disk_override.is_some() {
+            None
+        } else {
+            failure_domain(self.0.store.root(), self.disk().1)
+        };
         {
             let mut map = self.0.map.write().await;
             map.set_full(&self.0.me, full);
             map.set_room(&self.0.me, room_gib);
+            map.set_machine(&self.0.me, machine.clone());
         }
         // Split by count and by size: group bitmaps make striped entries big.
         let mut chunks: Vec<Vec<Held>> = vec![Vec::new()];
@@ -660,6 +676,7 @@ impl Hosting {
                 full,
                 room_gib,
                 room,
+                machine: machine.clone(),
             })
             .await;
         }
@@ -956,7 +973,7 @@ impl Hosting {
         };
         let plan = {
             let map = self.0.map.read().await;
-            let holders = map.group_holders(&rec.site_id, layout.len(), true);
+            let holders = map.distinct_group_holders(&rec.site_id, layout.len());
             let now = Instant::now();
             let mut short = self.0.short_since.lock().expect("short_since");
             for (g, hs) in holders.iter().enumerate() {
@@ -973,7 +990,12 @@ impl Hosting {
                     .map(|t| (now.duration_since(*t).as_secs() / WIDEN_AFTER.as_secs()) as usize)
                     .unwrap_or(0)
             };
-            let trims: Vec<bool> = holders
+            // The grace clock runs on every holder, a second node on one box
+            // included: once a group is over the target on that count for
+            // the grace, the planner lets the box's duplicate go (or, past
+            // the target on distinct machines, the usual surplus).
+            let raw = map.group_holders(&rec.site_id, layout.len(), true);
+            let trims: Vec<bool> = raw
                 .iter()
                 .enumerate()
                 .map(|(g, hs)| self.trim_due(&rec.site_id, g as u32, hs.len(), now))
@@ -1775,9 +1797,33 @@ impl Hosting {
         }
         let map = self.0.map.read().await;
         Some(stripe::health(
-            &map.group_holders(&rec.site_id, stripe::group_count(rec.size), true),
+            &map.distinct_group_holders(&rec.site_id, stripe::group_count(rec.size)),
             TARGET_REPLICAS,
         ))
+    }
+
+    /// Who holds a striped site, and how much of it: (peer, groups held,
+    /// room in bytes it last announced), most groups first.
+    pub async fn holder_breakdown(&self, rec: &SiteRecord) -> Vec<(String, usize, Option<u64>)> {
+        if !stripe::is_striped(rec.size) {
+            return Vec::new();
+        }
+        let map = self.0.map.read().await;
+        let mut n: HashMap<String, usize> = HashMap::new();
+        for hs in map.group_holders(&rec.site_id, stripe::group_count(rec.size), true) {
+            for p in hs {
+                *n.entry(p).or_default() += 1;
+            }
+        }
+        let mut v: Vec<(String, usize, Option<u64>)> = n
+            .into_iter()
+            .map(|(p, c)| {
+                let r = map.room_of(&p);
+                (p, c, r)
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
     }
 
     /// Every known site: record plus live copy count.
@@ -2871,6 +2917,13 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
             v["groups"] = serde_json::json!(x.groups);
             v["short_groups"] = serde_json::json!(x.short);
             v["missing_groups"] = serde_json::json!(x.missing);
+            let holders: Vec<serde_json::Value> = h
+                .holder_breakdown(&r)
+                .await
+                .into_iter()
+                .map(|(p, g, room)| serde_json::json!({ "peer": p, "groups": g, "room": room }))
+                .collect();
+            v["holders"] = serde_json::json!(holders);
         }
         sites.push(v);
     }
@@ -3170,6 +3223,7 @@ mod tests {
             full: false,
             room_gib: Some(u64::MAX),
             room: Some(u64::MAX),
+            machine: None,
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -3223,6 +3277,7 @@ mod tests {
             full: false,
             room_gib: Some(3000),
             room: None,
+            machine: None,
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
@@ -3260,6 +3315,7 @@ mod tests {
             full: true,
             room_gib: Some(u64::MAX),
             room: Some(u64::MAX),
+            machine: None,
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -3322,6 +3378,46 @@ pub const REANNOUNCE_CAP: Duration = Duration::from_secs(60);
 
 /// How often a publisher checks the replica map while it waits.
 const COPY_POLL: Duration = Duration::from_secs(2);
+
+/// An opaque id for the failure domain a node's copies live in: this OS
+/// install (`/etc/machine-id`) and the filesystem the chunk store is on (its
+/// fsid and size). Two nodes on one box and disk get the same id, and so
+/// count as one copy; a hash, so it says nothing about the machine. `None`
+/// when there is no machine id (many containers), and then nodes are told
+/// apart by address.
+pub fn failure_domain(store_root: &std::path::Path, disk_total: u64) -> Option<String> {
+    let id = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let fsid = fs_id(store_root).unwrap_or(0);
+    let h = Hash::of(format!("c0mpute-failure-domain\n{id}\n{fsid}\n{disk_total}").as_bytes());
+    Some(h.to_hex()[..32].to_string())
+}
+
+#[cfg(unix)]
+fn fs_id(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    // The store directory may not exist yet: walk up to one that does.
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent()?;
+    }
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c is a valid NUL-terminated path, st a valid out-pointer.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Some(st.f_fsid as u64)
+}
+
+#[cfg(not(unix))]
+fn fs_id(_path: &std::path::Path) -> Option<u64> {
+    None
+}
 
 /// The IP of `addr` when it names one machine only: not loopback, private,
 /// link-local or unspecified (those repeat across machines, e.g. every
@@ -4064,7 +4160,7 @@ async fn wait_striped(
             .map
             .read()
             .await
-            .group_holders(&record.site_id, layout.len(), true);
+            .distinct_group_holders(&record.site_id, layout.len());
         let placed: u64 = holders
             .iter()
             .enumerate()
@@ -4100,12 +4196,71 @@ async fn wait_striped(
         }
         p.show(&line, false);
         if last_progress.elapsed() >= wait {
+            if h.missing > 0 {
+                // This publisher is the only source of those groups: leaving
+                // now would lose them. Keep seeding (and say why) until some
+                // host holds every group.
+                if last_progress.elapsed().as_secs() % 600 < 2 {
+                    p.done(&line);
+                    eprintln!(
+                        "  {} group(s) are held by no host yet: staying up as their only source.",
+                        h.missing
+                    );
+                }
+                continue;
+            }
             p.done(&line);
+            let still = want.saturating_sub(placed);
+            let (room, nodes) = {
+                let map = hosting.0.map.read().await;
+                other_room(&map, &hosting.0.me)
+            };
             eprintln!(
-                "  no progress for {} s: stopping. The copies made so far stay; run the same command to resume.",
+                "  no progress for {} s: stopping. Every group is held by at least one host, so the \
+                 network keeps filling the missing copies on its own as room appears; nothing here \
+                 needs to stay running.",
                 wait.as_secs()
             );
+            if room < still {
+                eprintln!(
+                    "  short of disk: {:.0} GiB of copies still to place, hosting nodes on other \
+                     machines announce {:.0} GiB free ({nodes} node(s)). Add a hosting node with \
+                     room (`c0mpute worker start` on another machine) and the copies follow.",
+                    gib(still),
+                    gib(room)
+                );
+            } else {
+                eprintln!(
+                    "  {:.0} GiB of copies still to place and {:.0} GiB free on {nodes} hosting node(s) \
+                     elsewhere: some of them are not fetching (unreachable or relayed only). Run the \
+                     same command to resume and watch.",
+                    gib(still),
+                    gib(room)
+                );
+            }
             return h.min_copies;
         }
     }
+}
+
+/// Room (bytes) on hosting nodes that place striped sites, one node per
+/// machine and none on `me`'s machine, and how many such nodes there are.
+fn other_room(map: &replicas::ReplicaMap, me: &str) -> (u64, usize) {
+    let machines = map.machines();
+    let peers: Vec<String> = map
+        .striping_peers()
+        .into_iter()
+        .filter(|p| !replicas::same_machine(&machines, p, me))
+        .collect();
+    // Per machine, its biggest announced room (two nodes on one disk show
+    // the same free space; adding both would count it twice).
+    let mut seen: Vec<(String, u64)> = Vec::new();
+    for p in peers {
+        let r = map.room_of(&p).unwrap_or(0);
+        match seen.iter_mut().find(|(q, _)| replicas::same_machine(&machines, q, &p)) {
+            Some(e) => e.1 = e.1.max(r),
+            None => seen.push((p, r)),
+        }
+    }
+    (seen.iter().map(|(_, r)| *r).sum(), seen.len())
 }
