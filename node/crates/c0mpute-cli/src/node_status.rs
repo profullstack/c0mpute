@@ -136,6 +136,7 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
         Role::Diffusion => from_gate(role, diffusion::gate_reason(&cfg.diffusion), "z-image-turbo on CPU"),
         Role::Music => from_gate(role, music::gate_reason(&cfg.music), "ace-step-1.5"),
         Role::Video => {
+            video::set_configured_runner(cfg.video.runner);
             let gpu = tokio::task::spawn_blocking(|| video::readiness(video::RUNNER_IMAGE)).await.ok().flatten();
             match gpu {
                 None => serving(role, Some("GPU (Wan 2.2)".into())),

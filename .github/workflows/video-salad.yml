@@ -1,0 +1,77 @@
+# Build the rented-GPU video worker image (plugins/video/salad) for a release.
+#
+# Manual only: it needs a published release tag (the binary comes from the
+# release) and a runner image (pulled from ghcr with this repo's token).
+# Pushes to ttl.sh, an anonymous public registry whose images expire (24 h
+# here), so a rented host can pull without registry credentials; the image
+# holds no secrets. The job summary prints the image reference.
+name: video salad image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "c0mpute release tag to bake in, e.g. v0.3.37"
+        required: true
+      runner:
+        description: "Runner image to build on"
+        required: false
+        default: "ghcr.io/profullstack/c0mpute-video-runner:stable"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          df -h /
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        env:
+          VERSION: ${{ inputs.version }}
+          RUNNER: ${{ inputs.runner }}
+        run: |
+          set -eu
+          docker build \
+            --build-arg "C0MPUTE_VERSION=${VERSION}" \
+            --build-arg "RUNNER_IMAGE=${RUNNER}" \
+            -t c0mpute-video-salad:local \
+            -f plugins/video/salad/Dockerfile plugins/video
+
+      - name: Smoke test (no GPU)
+        run: |
+          set -eu
+          docker run --rm --entrypoint c0mpute c0mpute-video-salad:local --version
+          # Local mode must refuse cleanly on a box with no GPU.
+          docker run --rm --entrypoint c0mpute c0mpute-video-salad:local video check | tee check.txt
+          grep -q "NVIDIA" check.txt
+          docker run --rm --entrypoint python3 c0mpute-video-salad:local /opt/c0mpute-video/runner.py selftest --job /tmp/st/job.json
+          docker run --rm --entrypoint python3 c0mpute-video-salad:local -c "import ast,sys; ast.parse(open('/opt/c0mpute-salad/prefetch.py').read()); import huggingface_hub; print('hub', huggingface_hub.__version__)"
+          docker run --rm --entrypoint bash c0mpute-video-salad:local -n /opt/c0mpute-salad/entrypoint.sh
+
+      - name: Push to ttl.sh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          ref="ttl.sh/c0mpute-video-salad-${VERSION}-$(openssl rand -hex 6):24h"
+          docker tag c0mpute-video-salad:local "$ref"
+          docker push "$ref"
+          docker image inspect "$ref" --format '{{.Size}}' | awk '{printf "size %.1f GB\n", $1/1e9}'
+          echo "### salad image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "    $ref" >> "$GITHUB_STEP_SUMMARY"
+          echo "IMAGE=$ref"
