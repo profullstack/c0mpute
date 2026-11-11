@@ -4,6 +4,8 @@ import { ConvoError, convoKey, createConvoStore, parseConversation } from "./con
 import { _resetRuns, cancelRun, getRun, listRuns, runStream, startRun } from "./runs";
 import type { Sql } from "./store";
 import { adopt, slimForSync, syncPlan } from "./sync-merge";
+import { handleRpc } from "./mcp";
+import type { Upstream } from "./completions";
 
 function memSql(): { sql: Sql; db: Database } {
   const db = new Database(":memory:");
@@ -191,5 +193,42 @@ describe("sync merge (client)", () => {
     expect(back.messages[1].image).toBe("data:image/png;base64,AAA");
     expect(back.messages[2]).toEqual({ role: "user", content: "more" });
     expect(back.updated).toBe(2);
+  });
+});
+
+describe("MCP conversations", () => {
+  test("chat continues a synced conversation and saves the turn; the tools list and read it", async () => {
+    const convos = createConvoStore(memSql().sql, { key: KEY });
+    await convos.put("u", parseConversation("web123", { title: "from the browser", model: "auto", updated: 10, messages: [{ role: "user", content: "my name is Ada" }, { role: "assistant", content: "hi Ada" }, { role: "note", content: "local remark" }] }));
+    let sent: { role: string; content: string }[] = [];
+    const upstream: Upstream = async (_p, init) => {
+      sent = JSON.parse(String(init?.body)).messages;
+      return Response.json({ model: "m", choices: [{ message: { content: "Your name is Ada." } }] });
+    };
+    const user = { id: "u", did: "did:key:z", name: null };
+    const r = (await handleRpc({ id: 1, method: "tools/call", params: { name: "chat", arguments: { prompt: "what is my name?", conversation: "web123" } } }, { user, upstream, convos })) as { result: { content: { text: string }[] } };
+    expect(r.result.content[0].text).toBe("Your name is Ada.");
+    // History first (notes never go to the model), then the new prompt.
+    expect(sent.filter((m) => m.role !== "system")).toEqual([
+      { role: "user", content: "my name is Ada" },
+      { role: "assistant", content: "hi Ada" },
+      { role: "user", content: "what is my name?" },
+    ]);
+    const saved = await convos.get("u", "web123");
+    expect(saved?.messages.slice(-2)).toEqual([
+      { role: "user", content: "what is my name?" },
+      { role: "assistant", content: "Your name is Ada." },
+    ]);
+    expect(saved!.updated).toBeGreaterThan(10);
+
+    const list = (await handleRpc({ id: 2, method: "tools/call", params: { name: "chat_conversations", arguments: {} } }, { user, upstream, convos })) as { result: { content: { text: string }[] } };
+    expect(list.result.content[0].text).toContain("web123");
+    const read = (await handleRpc({ id: 3, method: "tools/call", params: { name: "chat_conversation", arguments: { id: "web123" } } }, { user, upstream, convos })) as { result: { content: { text: string }[] } };
+    expect(read.result.content[0].text).toContain("assistant: Your name is Ada.");
+    const tools = (await handleRpc({ id: 4, method: "tools/list" }, { user, upstream, convos })) as { result: { tools: { name: string }[] } };
+    expect(tools.result.tools.map((t) => t.name)).toContain("chat_conversations");
+    // A new id starts a conversation.
+    await handleRpc({ id: 5, method: "tools/call", params: { name: "chat", arguments: { prompt: "start fresh", conversation: "mcp-new-1" } } }, { user, upstream, convos });
+    expect((await convos.get("u", "mcp-new-1"))?.title).toBe("start fresh");
   });
 });

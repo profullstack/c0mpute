@@ -4,6 +4,7 @@
 import { chatText, listModels, parseChatRequest, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
 import { describePromoProgress, parsePromoRequest, sanitizePromoProgress, PROMO_STYLES } from "./promo";
 import { HOSTING_TOOL_NAMES, HOSTING_TOOLS, hostingTool } from "./push-mcp";
+import { CONVO_ID, type ConvoStore } from "./convo-store";
 import type { PushStore } from "./push";
 import { describeSteps, PLUGIN_TOOL_NAMES, PLUGIN_TOOLS, pluginTool, type PluginMcpDeps } from "./plugin-mcp";
 import type { PluginEvent } from "./plugin-shared";
@@ -36,6 +37,11 @@ export const TOOLS = [
         max_tokens: { type: "number" },
         temperature: { type: "number" },
         plugins: { type: "boolean", description: "Use this account's chat plugins (default true when any is on; see chat_plugins_list)." },
+        conversation: {
+          type: "string",
+          description:
+            "Optional: continue a conversation synced to this account (the same history the c0mpute.com chat, TUI and CLI see; ids from chat_conversations). Its messages come first and this turn is saved to it. A new id starts one.",
+        },
       },
     },
     annotations: { title: "Ask a network model", readOnlyHint: true, openWorldHint: true },
@@ -88,7 +94,25 @@ export type McpCtx = {
   };
   /** The HTTP request's signal: the client hanging up stops the call. */
   signal?: AbortSignal;
+  /** The account's synced conversations (convo-store.ts), when wired. */
+  convos?: ConvoStore;
 };
+
+export const CONVO_TOOLS = [
+  {
+    name: "chat_conversations",
+    description: "This account's chat conversations (synced across the c0mpute.com chat, the TUI and the CLI), newest first: id, title, model, last change. Pass an id to chat's `conversation` to continue one.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", description: "At most this many (default 20, max 100)." } } },
+    annotations: { title: "List conversations", readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "chat_conversation",
+    description: "One synced conversation's transcript (to recover context after a disconnect, or to read what was said on another device).",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    annotations: { title: "Read a conversation", readOnlyHint: true, openWorldHint: false },
+  },
+];
+const CONVO_TOOL_NAMES = new Set(CONVO_TOOLS.map((t) => t.name));
 
 /**
  * tools/call requests still running, by user and JSON-RPC id, so a client's
@@ -128,7 +152,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return null;
     }
     case "tools/list":
-      return ok(id, { tools: [...TOOLS, ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : [])] });
+      return ok(id, { tools: [...TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -137,6 +161,20 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       if (key) inflight.set(key, stop);
       const signal = ctx.signal ? AbortSignal.any([ctx.signal, stop.signal]) : stop.signal;
       try {
+        if (CONVO_TOOL_NAMES.has(name)) {
+          if (!ctx.convos) return fail(id, -32602, `unknown tool: ${name}`);
+          if (name === "chat_conversations") {
+            const limit = Math.min(100, Math.max(1, Number(args.limit) || 20));
+            const list = (await ctx.convos.list(ctx.user.id)).slice(0, limit);
+            if (!list.length) return ok(id, text("no conversations on this account yet"));
+            return ok(id, text(list.map((c) => `${c.id}  ${new Date(c.updated).toISOString().slice(0, 16)}Z  ${c.model}  ${c.title}`).join("\n")));
+          }
+          const cid = typeof args.id === "string" ? args.id : "";
+          const c = CONVO_ID.test(cid) ? await ctx.convos.get(ctx.user.id, cid) : null;
+          if (!c) return ok(id, text(`no conversation ${cid} on this account`, true));
+          const lines = c.messages.map((m) => `${m.role === "user" ? "user" : m.role === "assistant" ? "assistant" : m.role}: ${m.content}`);
+          return ok(id, text(`# ${c.title} (${c.id}, model ${c.model})\n\n${lines.join("\n\n")}`));
+        }
         if (HOSTING_TOOL_NAMES.has(name)) {
           if (!ctx.push) return fail(id, -32602, `unknown tool: ${name}`);
           const r = await hostingTool(name, args, ctx.user.id, ctx.push);
@@ -184,16 +222,47 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
           if (Array.isArray(args.messages) && args.messages.length) messages = args.messages as ChatMessage[];
           else if (typeof args.prompt === "string" && args.prompt) messages = [{ role: "user", content: args.prompt }];
           else return ok(id, text("chat needs `prompt` or `messages`", true));
+          // A synced conversation: its history goes first, and the turn is saved to it.
+          const convoId = typeof args.conversation === "string" && args.conversation ? args.conversation : null;
+          if (convoId && !ctx.convos) return ok(id, text("conversations are not available on this server", true));
+          if (convoId && !CONVO_ID.test(convoId)) return ok(id, text("conversation ids are 4-64 of A-Z a-z 0-9 _ -", true));
+          const stored = convoId && ctx.convos ? await ctx.convos.get(ctx.user.id, convoId) : null;
+          const fresh = messages.slice();
+          if (stored) {
+            const prior = stored.messages
+              .filter((m) => (m.role === "user" || m.role === "assistant" || m.role === "system") && !m.error && m.content)
+              .map((m) => ({ role: m.role as ChatMessage["role"], content: m.content }));
+            messages = [...prior, ...messages];
+          }
           if (typeof args.system === "string" && args.system) messages = [{ role: "system", content: args.system }, ...messages];
           const req = parseChatRequest({ ...args, messages, stream: false });
           if (typeof req === "string") return ok(id, text(req, true));
+          let answer: string;
+          let shown: string;
           if (ctx.plugins && args.plugins !== false && (await ctx.plugins.hasEnabled(ctx.user.id))) {
             const events: PluginEvent[] = [];
             const r = await ctx.plugins.run({ userId: ctx.user.id, upstream: ctx.upstream, req, emit: (e) => events.push(e), signal });
-            return ok(id, text(r.text + describeSteps(events)));
+            answer = r.text;
+            shown = r.text + describeSteps(events);
+          } else {
+            const r = await chatText(ctx.upstream, req, signal);
+            answer = r.text;
+            shown = r.text;
           }
-          const r = await chatText(ctx.upstream, req, signal);
-          return ok(id, text(r.text));
+          if (convoId && ctx.convos) {
+            const now = Date.now();
+            const firstUser = fresh.find((m) => m.role === "user")?.content ?? "";
+            await ctx.convos
+              .put(ctx.user.id, {
+                id: convoId,
+                title: stored?.title ?? (firstUser.slice(0, 60) || "new chat"),
+                model: typeof args.model === "string" && args.model ? args.model : (stored?.model ?? "auto"),
+                messages: [...(stored?.messages ?? []), ...fresh.filter((m) => m.role !== "system"), { role: "assistant", content: answer }],
+                updated: Math.max(now, (stored?.updated ?? 0) + 1),
+              })
+              .catch(() => {});
+          }
+          return ok(id, text(shown));
         }
         return fail(id, -32602, `unknown tool: ${name}`);
       } catch (e) {
