@@ -640,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn saying_into_a_session_that_does_not_exist_is_an_error_not_a_panic() {
         let store = SessionStore::new();
-        let error = store.say("nope", "hello", "en-us", 1.0).await.unwrap_err();
+        let error = store.say("nope", "hello", "en-us", 1.0, None).await.unwrap_err();
         assert!(
             error.to_string().contains("no warm speech session"),
             "{error}"
