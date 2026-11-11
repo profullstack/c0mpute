@@ -57,10 +57,25 @@ export const C0_SYSTEM_PROMPT =
   "is serving you. If asked about cost, say chats are billed to the user's c0mpute.com balance when they have one, " +
   "otherwise they use the free daily allowance, and the details are on c0mpute.com. Be concise and helpful.";
 
-/** Prepend the c0 system prompt unless the caller sent its own. */
+/**
+ * Assistant turns that were never answers: the provider daemon's stub engine
+ * and raw engine errors. Clients (the TUI, the PWA) keep them in history and
+ * resend them, and a small model then copies the pattern word for word: after
+ * a dozen stub turns qwen2.5:0.5b answered "we on?" with the stub text itself
+ * (2026-11-11), long after the stub node was gone.
+ */
+const POISON_RE =
+  /This is a stub response from the provider daemon|^ollama HTTP \d{3}:|^the c0mpute network is restarting or busy|^no (live node|Infernet node)/;
+
+export function isPoisonedTurn(m: ChatMessage): boolean {
+  return m.role === "assistant" && POISON_RE.test(m.content.trim());
+}
+
+/** Drop poisoned assistant turns, then prepend the c0 system prompt unless the caller sent its own. */
 export function withHousePrompt(messages: ChatMessage[]): ChatMessage[] {
-  if (messages.some((m) => m.role === "system")) return messages;
-  return [{ role: "system", content: C0_SYSTEM_PROMPT }, ...messages];
+  const clean = messages.filter((m) => !isPoisonedTurn(m));
+  if (clean.some((m) => m.role === "system")) return clean;
+  return [{ role: "system", content: C0_SYSTEM_PROMPT }, ...clean];
 }
 
 /** Forward to Infernet; the Response (JSON or SSE) is handed back as-is. */
