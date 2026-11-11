@@ -15,7 +15,7 @@
 # Turn on:
 #   [x402]
 #   enabled = true
-#   pay_to  = "0x..."          # your EVM wallet
+#   # pay_to is read from your CoinPay account (the key's business USDC wallet)
 #   # CoinPay key (x402 scope) in $C0MPUTE_X402_COINPAY_KEY, never in config
 
 [module]
