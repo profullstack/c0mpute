@@ -2,7 +2,7 @@
   "name": "@c0mpute/desktop",
   "productName": "c0mpute",
   "desktopName": "c0mpute-desktop.desktop",
-  "version": "0.3.36",
+  "version": "0.3.37",
   "private": true,
   "type": "module",
   "description": "c0mpute desktop: chat, agent with your MCP servers and skills, node manager, hosting and tasks, with the c0mpute CLI bundled.",
