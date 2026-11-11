@@ -132,8 +132,13 @@ def main() -> int:
     check("a 24 GiB card loads it whole", not runner.use_offload(models[small], 24.0))
     check(
         "models without full_vram_gib never offload",
-        not runner.use_offload(models["wan2.2-ti2v-5b"], 8.0),
+        not runner.use_offload(models["wan2.2-t2v-a14b"], 8.0),
     )
+    # The 5B pipeline is ~24.2 GB in fp16/bf16 + fp32 VAE: a 24 GiB card
+    # (RTX 3090/4090) cannot hold it whole, and under WSL (Salad) the driver
+    # spills to system memory instead of OOMing, so the clip crawls at 0 steps.
+    check("a 24 GiB card offloads wan2.2 5B", runner.use_offload(models["wan2.2-ti2v-5b"], 23.6))
+    check("a 32 GiB card loads wan2.2 5B whole", not runner.use_offload(models["wan2.2-ti2v-5b"], 31.4))
 
     print("a model only serves the workloads it declares")
     # t2v-a14b is text-to-video only, so an img2vid job naming it is refused
