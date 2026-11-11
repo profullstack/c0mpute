@@ -244,7 +244,7 @@ describe("node probes", () => {
 
   it("finds the worker by PID file, systemd unit or process, and its jobs", () => {
     const procs: ProcInfo[] = [
-      { pid: 100, ppid: 1, argv: ["/root/.c0mpute/bin/c0mpute", "worker", "start"], ageS: 7200, uid: 0 },
+      { pid: 100, ppid: 1, argv: ["/root/.c0mpute/bin/c0mpute (deleted)", "worker", "start"], ageS: 7200, uid: 0 },
       { pid: 101, ppid: 100, argv: ["/data/diffusion/bin/sd-cli", "-p", "x"], ageS: 30, uid: 0 },
       { pid: 102, ppid: 101, argv: ["ffmpeg", "-y"], ageS: 5, uid: 0 },
       { pid: 103, ppid: 100, argv: ["/usr/bin/infernet", "daemon"], ageS: 7000, uid: 0 },

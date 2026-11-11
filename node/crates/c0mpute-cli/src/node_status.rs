@@ -72,7 +72,9 @@ pub fn find_worker(pid_file_pid: Option<i32>) -> Option<(i32, Vec<String>)> {
         .filter_map(|pid| {
             let argv = argv_of(pid)?;
             let exe = argv.first()?;
-            (exe.ends_with("c0mpute") && worker_flags(&argv).is_some()).then_some((pid, argv))
+            // An in-place update re-execs from /proc/self/exe, whose name
+            // then ends in " (deleted)".
+            (exe.trim_end_matches(" (deleted)").ends_with("c0mpute") && worker_flags(&argv).is_some()).then_some((pid, argv))
         })
         .collect();
     found.sort_by_key(|(pid, _)| *pid);

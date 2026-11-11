@@ -147,7 +147,8 @@ export function readProcs(root = "/proc"): ProcInfo[] {
 }
 
 export function isWorker(p: ProcInfo): boolean {
-  return (p.argv[0] ?? "").endsWith("c0mpute") && workerFlags(p.argv) !== null;
+  // An in-place update re-execs from /proc/self/exe: "…/c0mpute (deleted)".
+  return (p.argv[0] ?? "").replace(/ \(deleted\)$/, "").endsWith("c0mpute") && workerFlags(p.argv) !== null;
 }
 
 /** Everything under `pid`, depth first. */
