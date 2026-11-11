@@ -956,7 +956,7 @@ impl Hosting {
         };
         let plan = {
             let map = self.0.map.read().await;
-            let holders = map.group_holders(&rec.site_id, layout.len(), true);
+            let holders = map.distinct_group_holders(&rec.site_id, layout.len());
             let now = Instant::now();
             let mut short = self.0.short_since.lock().expect("short_since");
             for (g, hs) in holders.iter().enumerate() {
@@ -973,7 +973,12 @@ impl Hosting {
                     .map(|t| (now.duration_since(*t).as_secs() / WIDEN_AFTER.as_secs()) as usize)
                     .unwrap_or(0)
             };
-            let trims: Vec<bool> = holders
+            // The grace clock runs on every holder, a second node on one box
+            // included: once a group is over the target on that count for
+            // the grace, the planner lets the box's duplicate go (or, past
+            // the target on distinct machines, the usual surplus).
+            let raw = map.group_holders(&rec.site_id, layout.len(), true);
+            let trims: Vec<bool> = raw
                 .iter()
                 .enumerate()
                 .map(|(g, hs)| self.trim_due(&rec.site_id, g as u32, hs.len(), now))
@@ -1775,7 +1780,7 @@ impl Hosting {
         }
         let map = self.0.map.read().await;
         Some(stripe::health(
-            &map.group_holders(&rec.site_id, stripe::group_count(rec.size), true),
+            &map.distinct_group_holders(&rec.site_id, stripe::group_count(rec.size)),
             TARGET_REPLICAS,
         ))
     }
@@ -4095,7 +4100,7 @@ async fn wait_striped(
             .map
             .read()
             .await
-            .group_holders(&record.site_id, layout.len(), true);
+            .distinct_group_holders(&record.site_id, layout.len());
         let placed: u64 = holders
             .iter()
             .enumerate()
@@ -4131,12 +4136,71 @@ async fn wait_striped(
         }
         p.show(&line, false);
         if last_progress.elapsed() >= wait {
+            if h.missing > 0 {
+                // This publisher is the only source of those groups: leaving
+                // now would lose them. Keep seeding (and say why) until some
+                // host holds every group.
+                if last_progress.elapsed().as_secs() % 600 < 2 {
+                    p.done(&line);
+                    eprintln!(
+                        "  {} group(s) are held by no host yet: staying up as their only source.",
+                        h.missing
+                    );
+                }
+                continue;
+            }
             p.done(&line);
+            let still = want.saturating_sub(placed);
+            let (room, nodes) = {
+                let map = hosting.0.map.read().await;
+                other_room(&map, &hosting.0.me)
+            };
             eprintln!(
-                "  no progress for {} s: stopping. The copies made so far stay; run the same command to resume.",
+                "  no progress for {} s: stopping. Every group is held by at least one host, so the \
+                 network keeps filling the missing copies on its own as room appears; nothing here \
+                 needs to stay running.",
                 wait.as_secs()
             );
+            if room < still {
+                eprintln!(
+                    "  short of disk: {:.0} GiB of copies still to place, hosting nodes on other \
+                     machines announce {:.0} GiB free ({nodes} node(s)). Add a hosting node with \
+                     room (`c0mpute worker start` on another machine) and the copies follow.",
+                    gib(still),
+                    gib(room)
+                );
+            } else {
+                eprintln!(
+                    "  {:.0} GiB of copies still to place and {:.0} GiB free on {nodes} hosting node(s) \
+                     elsewhere: some of them are not fetching (unreachable or relayed only). Run the \
+                     same command to resume and watch.",
+                    gib(still),
+                    gib(room)
+                );
+            }
             return h.min_copies;
         }
     }
+}
+
+/// Room (bytes) on hosting nodes that place striped sites, one node per
+/// machine and none on `me`'s machine, and how many such nodes there are.
+fn other_room(map: &replicas::ReplicaMap, me: &str) -> (u64, usize) {
+    let machines = map.machines();
+    let peers: Vec<String> = map
+        .striping_peers()
+        .into_iter()
+        .filter(|p| !replicas::same_machine(&machines, p, me))
+        .collect();
+    // Per machine, its biggest announced room (two nodes on one disk show
+    // the same free space; adding both would count it twice).
+    let mut seen: Vec<(String, u64)> = Vec::new();
+    for p in peers {
+        let r = map.room_of(&p).unwrap_or(0);
+        match seen.iter_mut().find(|(q, _)| replicas::same_machine(&machines, q, &p)) {
+            Some(e) => e.1 = e.1.max(r),
+            None => seen.push((p, r)),
+        }
+    }
+    (seen.iter().map(|(_, r)| *r).sum(), seen.len())
 }

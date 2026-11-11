@@ -3484,7 +3484,11 @@ async fn run_podcasting(cmd: PodcastingCmd) -> Result<()> {
                     record.site_id
                 );
             }
-            if copies < c0mpute_core::hosting::TARGET_REPLICAS {
+            // A striped site already said where its copies stand (and why
+            // any are short) when the wait ended.
+            if copies < c0mpute_core::hosting::TARGET_REPLICAS
+                && !c0mpute_core::hosting::stripe::is_striped(record.size)
+            {
                 eprintln!(
                     "note: fewer than {} hosting nodes took a copy before the wait ran out; \
                      re-run publish (same --name) if no copies appear",
@@ -4464,7 +4468,11 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                     record.site_id
                 );
             }
-            if copies < c0mpute_core::hosting::TARGET_REPLICAS {
+            // A striped site already said where its copies stand (and why
+            // any are short) when the wait ended.
+            if copies < c0mpute_core::hosting::TARGET_REPLICAS
+                && !c0mpute_core::hosting::stripe::is_striped(record.size)
+            {
                 eprintln!(
                     "note: fewer than {} hosting nodes took a copy before the wait ran out; \
                      the network keeps replicating as hosting nodes see the record, but \
@@ -4621,6 +4629,21 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                         .map(|d| d.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
                         .unwrap_or_default()
                 );
+                // Who holds a striped site, and how much (copies are counted
+                // one per machine; this lists every node).
+                for hd in s["holders"].as_array().into_iter().flatten() {
+                    let room = hd["room"]
+                        .as_u64()
+                        .map(|r| format!("{:.1} GiB free", r as f64 / (1u64 << 30) as f64))
+                        .unwrap_or_else(|| "room ?".into());
+                    println!(
+                        "    held by {}  {}/{} groups  {}",
+                        hd["peer"].as_str().unwrap_or("?"),
+                        hd["groups"],
+                        s["groups"],
+                        room
+                    );
+                }
             }
             Ok(())
         }

@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use base64::Engine;
 use c0mpute_proto::Hash;
 
-use super::replicas::{ReplicaMap, chosen, releases, score};
+use super::replicas::{ReplicaMap, chosen, one_per_machine, releases, same_machine, score};
 use super::site::{FILE_CHUNK_BYTES, FileEntry, STRIPE_ABOVE, SiteManifest};
 
 /// Chunks per group: 64 MiB of a site.
@@ -243,15 +243,26 @@ pub fn plan(
     let holders = map.group_holders(site_id, layout.len(), true);
     let preferred = map.effective_preferred(site_id);
     let striping = map.striping_peers();
+    let machines = map.machines();
     let mut out = Plan::default();
     let mut wanted: Vec<(usize, [u8; 32], u32)> = Vec::new();
-    for (gi, hs) in holders.iter().enumerate() {
+    for (gi, all) in holders.iter().enumerate() {
         let g = gi as u32;
         let key = group_key(site_id, g);
-        let i_hold = hs.iter().any(|p| p == me);
+        let i_hold = all.iter().any(|p| p == me);
         let takers = preferred_takers(site_id, g, &preferred, target);
+        // Copies count per machine: a second node on a box that already
+        // holds the group adds nothing (the box going away takes both).
+        let (hs, extra) = one_per_machine(&machines, &key, all, &takers);
         if i_hold {
-            if !takers.iter().any(|p| p == me) {
+            if extra.iter().any(|p| p == me) && !takers.iter().any(|p| p == me) {
+                // A duplicate on a machine already counted: let it go once
+                // the group has been over the target for the grace period
+                // (so a real copy elsewhere is in place first).
+                if trim(g) {
+                    out.drop.push(g);
+                }
+            } else if !takers.iter().any(|p| p == me) {
                 let free: Vec<String> = hs.iter().filter(|p| !takers.contains(p)).cloned().collect();
                 if releases(&key, hs.len(), &free, me, target, max, trim(g)) {
                     out.drop.push(g);
@@ -270,17 +281,29 @@ pub fn plan(
         if hs.len() >= target {
             continue;
         }
+        if hs.iter().any(|h| same_machine(&machines, h, me)) {
+            // This box already holds the group.
+            continue;
+        }
         let need = layout.bytes(g);
         let mut candidates: Vec<String> = striping
             .iter()
-            .filter(|p| !hs.contains(p) && !takers.contains(p))
+            .filter(|p| !all.contains(p) && !takers.contains(p))
+            .filter(|p| !hs.iter().any(|h| same_machine(&machines, h, p)))
             .filter(|p| map.room_of(p).is_some_and(|r| r >= need))
             .cloned()
             .collect();
+        // One candidate per machine too, or two nodes on one box would
+        // both be chosen for the same group.
+        candidates = one_per_machine(&machines, &key, &candidates, &[]).0;
         if !candidates.iter().any(|p| p == me) {
             // Not announced yet (or too full): only count ourselves when we
             // have not said we are full.
             if map.room_of(me).is_some_and(|r| r < need) {
+                continue;
+            }
+            // Or another node on this box stands for it.
+            if candidates.iter().any(|c| same_machine(&machines, c, me)) {
                 continue;
             }
             candidates.push(me.to_string());
@@ -412,6 +435,104 @@ mod tests {
         let a = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0, &|_| true);
         let b = plan(&map, &rec.site_id, &layout, "peer3", true, 3, 5, &|_| 0, &|_| true);
         assert_eq!(a, b);
+    }
+
+    /// `map_with`, but each peer announces the given direct address.
+    fn map_on(peers: &[(String, &str)], rec: &SiteRecord) -> ReplicaMap {
+        let mut map = ReplicaMap::default();
+        assert!(map.apply_record(rec.clone()));
+        let now = Instant::now();
+        for (p, addr) in peers {
+            map.apply_holding_full(
+                p,
+                HashMap::new(),
+                HashMap::new(),
+                now,
+                true,
+                None,
+                None,
+                Some(u64::MAX),
+                vec![addr.to_string()],
+            );
+        }
+        map
+    }
+
+    fn hold_all(map: &mut ReplicaMap, rec: &SiteRecord, p: &str, groups: impl IntoIterator<Item = u32>) {
+        let mut sites = HashMap::new();
+        sites.insert(rec.site_id.clone(), (rec.manifest.clone(), rec.seq));
+        let mut g = HashMap::new();
+        g.insert(rec.site_id.clone(), groups.into_iter().collect::<BTreeSet<u32>>());
+        let addrs = map.peers.get(p).map(|h| h.addrs.clone()).unwrap_or_default();
+        map.apply_holding_full(p, sites, g, Instant::now(), true, None, None, Some(u64::MAX), addrs);
+    }
+
+    #[test]
+    fn two_nodes_on_one_machine_are_one_copy() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let m = manifest(64 * 8);
+        let rec = big_record(&kp, &m);
+        let layout = Layout::of(&m);
+        // a1 + a2 share a box (the publisher's box and its worker, or two
+        // workers on one disk); b and c are their own machines; r is relayed
+        // through a's box (its circuit address names a's IP) but is not on it.
+        let peers: Vec<(String, &str)> = vec![
+            ("a1".into(), "/ip4/203.0.113.1/tcp/1"),
+            ("a2".into(), "/ip4/203.0.113.1/tcp/2"),
+            ("b".into(), "/ip4/203.0.113.2/tcp/1"),
+            ("c".into(), "/ip4/203.0.113.3/tcp/1"),
+            ("r".into(), "/ip4/203.0.113.1/tcp/1/p2p/12D3KooWRelay/p2p-circuit"),
+        ];
+        let mut map = map_on(&peers, &rec);
+        let all: Vec<u32> = (0..layout.len() as u32).collect();
+        hold_all(&mut map, &rec, "a1", all.clone());
+        hold_all(&mut map, &rec, "a2", all.clone());
+        hold_all(&mut map, &rec, "b", all.clone());
+        // Raw count 3, but only 2 machines.
+        let h = health(&map.distinct_group_holders(&rec.site_id, layout.len()), 3);
+        assert_eq!((h.min_copies, h.short), (2, layout.len()));
+        // Every group goes to exactly one of c and r (one more machine each).
+        for g in 0..layout.len() as u32 {
+            let takers: Vec<&str> = ["c", "r"]
+                .into_iter()
+                .filter(|p| plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| false).fetch.contains(&g))
+                .collect();
+            assert_eq!(takers.len(), 1, "group {g}: {takers:?}");
+        }
+        // Neither node on the box re-fetches or drops before the grace.
+        for p in ["a1", "a2"] {
+            let pl = plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| false);
+            assert!(pl.fetch.is_empty() && pl.drop.is_empty(), "{p}: {pl:?}");
+        }
+        // Once c holds everything: 3 machines; after the grace the duplicate
+        // on a's box lets go (exactly one of a1/a2, per group), nobody else.
+        hold_all(&mut map, &rec, "c", all.clone());
+        let h = health(&map.distinct_group_holders(&rec.site_id, layout.len()), 3);
+        assert_eq!((h.min_copies, h.short), (3, 0));
+        let drops = |p: &str| plan(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| true).drop;
+        for g in 0..layout.len() as u32 {
+            let n = ["a1", "a2"].into_iter().filter(|p| drops(p).contains(&g)).count();
+            assert_eq!(n, 1, "group {g}");
+        }
+        assert!(drops("b").is_empty() && drops("c").is_empty());
+    }
+
+    #[test]
+    fn a_node_on_a_box_that_holds_the_group_is_never_chosen() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let m = manifest(64 * 4);
+        let rec = big_record(&kp, &m);
+        let layout = Layout::of(&m);
+        let peers: Vec<(String, &str)> = vec![
+            ("a1".into(), "/ip4/203.0.113.1/tcp/1"),
+            ("a2".into(), "/ip4/203.0.113.1/tcp/2"),
+        ];
+        let mut map = map_on(&peers, &rec);
+        hold_all(&mut map, &rec, "a1", 0..layout.len() as u32);
+        // Short of copies forever, widened as far as it goes: a2 still waits
+        // for another machine instead of adding a copy that counts for nothing.
+        let pl = plan(&map, &rec.site_id, &layout, "a2", true, 3, 5, &|_| 10, &|_| false);
+        assert!(pl.fetch.is_empty(), "{pl:?}");
     }
 
     #[test]

@@ -1907,3 +1907,90 @@ mod tests {
         assert!(findings(&r).is_empty());
     }
 }
+
+/// Lock files of buyer identities this process holds (kept open for life:
+/// closing one releases its lock).
+#[cfg(unix)]
+static BUYER_LOCKS: std::sync::Mutex<Vec<std::fs::File>> = std::sync::Mutex::new(Vec::new());
+
+const BUYER_LOCK_FILE: &str = "in-use.lock";
+
+/// The libp2p identity directory for a buyer process (`hosting publish`,
+/// `chat`, `disks --live`, ...): `base` when no other live process is using
+/// it, else a fresh per-process directory beside it.
+///
+/// Two processes on one peer id break each other: remote peers keep one
+/// connection per peer id, so the second process's gossip fails with
+/// `NoPeersSubscribedToTopic` and its transfers stall (a terminal `hosting
+/// publish` beside the systemd publisher did exactly that). A site is
+/// signed with the buyer key loaded on its own ([`crate::hosting::publisher_keypair`]),
+/// so a separate network identity changes nothing about which site it is.
+#[cfg(unix)]
+pub fn buyer_identity_dir(base: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(base)?;
+    let file = open_lock(&base.join(BUYER_LOCK_FILE))?;
+    if try_flock(&file) {
+        BUYER_LOCKS.lock().unwrap_or_else(|e| e.into_inner()).push(file);
+        return Ok(base.to_path_buf());
+    }
+    let sessions = base.with_file_name(format!(
+        "{}-sessions",
+        base.file_name().and_then(|n| n.to_str()).unwrap_or("buyer")
+    ));
+    prune_dead_sessions(&sessions);
+    let dir = sessions.join(std::process::id().to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    say(&format!(
+        "another c0mpute process is using the identity in {}; this one joins the network as its own peer ({}) so neither stalls",
+        base.display(),
+        dir.display()
+    ));
+    Ok(dir)
+}
+
+#[cfg(not(unix))]
+pub fn buyer_identity_dir(base: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(base)?;
+    Ok(base.to_path_buf())
+}
+
+/// Remove per-process buyer directories whose process is gone.
+#[cfg(unix)]
+fn prune_dead_sessions(sessions: &Path) {
+    let Ok(rd) = std::fs::read_dir(sessions) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
+        // SAFETY: kill with signal 0 only checks that the pid exists.
+        let alive = unsafe { libc::kill(pid, 0) == 0 }
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod buyer_lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_buyer_gets_its_own_identity_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("buyer");
+        // Another process holds the lock (flock is per open file description,
+        // so a second open in this process stands in for it).
+        std::fs::create_dir_all(&base).unwrap();
+        let other = open_lock(&base.join(BUYER_LOCK_FILE)).unwrap();
+        assert!(try_flock(&other));
+        let dir = buyer_identity_dir(&base).unwrap();
+        assert_ne!(dir, base);
+        assert!(dir.starts_with(tmp.path().join("buyer-sessions")));
+        drop(other);
+        assert_eq!(buyer_identity_dir(&base).unwrap(), base);
+    }
+}

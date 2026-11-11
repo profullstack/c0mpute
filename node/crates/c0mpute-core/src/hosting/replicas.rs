@@ -416,6 +416,90 @@ impl ReplicaMap {
     }
 }
 
+/// Each peer's machine: the globally unique IPs it announced for direct
+/// dials (relayed `p2p-circuit` addresses name the relay, not the peer, and
+/// private ones repeat across machines). Empty = unknown, a machine of its
+/// own.
+pub type Machines = HashMap<String, Vec<std::net::IpAddr>>;
+
+impl ReplicaMap {
+    /// [`Machines`] for every known peer.
+    pub fn machines(&self) -> Machines {
+        self.peers
+            .iter()
+            .map(|(p, h)| {
+                let mut ips: Vec<std::net::IpAddr> = h
+                    .addrs
+                    .iter()
+                    .filter(|a| !a.contains("p2p-circuit"))
+                    .filter_map(|a| a.parse::<c0mpute_net::Multiaddr>().ok())
+                    .filter_map(|m| super::unique_ip(&m))
+                    .collect();
+                ips.sort();
+                ips.dedup();
+                (p.clone(), ips)
+            })
+            .collect()
+    }
+
+    /// Per group of a striped site, its holders with at most one per
+    /// machine (see [`one_per_machine`]): what a copy count means. Two
+    /// nodes on one box are one copy: the box going away takes both.
+    pub fn distinct_group_holders(&self, site_id: &str, n: usize) -> Vec<Vec<String>> {
+        let machines = self.machines();
+        let preferred = self.effective_preferred(site_id);
+        self.group_holders(site_id, n, true)
+            .into_iter()
+            .enumerate()
+            .map(|(g, hs)| one_per_machine(&machines, &super::stripe::group_key(site_id, g as u32), &hs, &preferred).0)
+            .collect()
+    }
+}
+
+/// Whether `a` and `b` run on one machine (they share a unique IP).
+pub fn same_machine(machines: &Machines, a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (machines.get(a), machines.get(b)) {
+        (Some(x), Some(y)) => x.iter().any(|ip| y.contains(ip)),
+        _ => false,
+    }
+}
+
+/// Split `holders` of one site or group (`key`) into one holder per machine
+/// and the extra holders on a machine already counted. Per machine the
+/// keeper is a `keep_first` peer (a paid host) if there is one, else the
+/// one ranking highest for `key`, so every node picks the same keeper.
+pub fn one_per_machine(
+    machines: &Machines,
+    key: &str,
+    holders: &[String],
+    keep_first: &[String],
+) -> (Vec<String>, Vec<String>) {
+    if holders.len() < 2 {
+        return (holders.to_vec(), Vec::new());
+    }
+    let mut ranked: Vec<&String> = holders.iter().collect();
+    ranked.sort_by(|a, b| {
+        let pa = keep_first.contains(*a);
+        let pb = keep_first.contains(*b);
+        pb.cmp(&pa).then(score(key, b).cmp(&score(key, a))).then(a.cmp(b))
+    });
+    let mut keep: Vec<String> = Vec::new();
+    let mut extra: Vec<String> = Vec::new();
+    for p in ranked {
+        if keep.iter().any(|k| same_machine(machines, k, p)) {
+            extra.push(p.clone());
+        } else {
+            keep.push(p.clone());
+        }
+    }
+    keep.sort();
+    extra.sort();
+    (keep, extra)
+}
+
 /// Rendezvous score: higher ranks first. Same inputs, same answer, on every
 /// node.
 pub fn score(site_id: &str, peer: &str) -> [u8; 32] {
