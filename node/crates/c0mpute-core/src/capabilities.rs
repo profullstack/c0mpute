@@ -104,6 +104,12 @@ pub fn role_tags(config: &Config) -> Vec<String> {
             Role::Crawl => tags.push(crate::crawl::ROLE_TAG.to_string()),
             Role::Hosting => tags.push(crate::hosting::ROLE_TAG.to_string()),
             Role::Apps => tags.push(crate::apps::ROLE_TAG.to_string()),
+            Role::Containers => {
+                // Only once docker + buildx answered the start-up probe.
+                if crate::container_run::probed().is_some_and(|r| r.ready()) {
+                    tags.push(crate::container_run::ROLE_TAG.to_string());
+                }
+            }
             Role::Ocr => {
                 // Only where `tesseract` actually runs (probed once).
                 if crate::ocr::runtime().ready() {

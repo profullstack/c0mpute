@@ -1,0 +1,50 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Built into the c0mpute binary as the `container.run` workload (DIP 0033,
+# node/crates/c0mpute-core/src/container_run.rs). Offload a docker build, or a
+# command in a digest-pinned image, to a builder on the network and get the
+# image (docker save | gzip) or the output files back. No git: the input is a
+# tarball of any directory, sealed to the winner and moved in pieces.
+#
+# Opt-in role `containers` (needs docker with buildx). Builders serve only
+# trusted buyers by default ([containers] buyers + this machine's identities);
+# buyers send jobs only to named builders unless --any-worker. Builds use the
+# daemon's own BuildKit (never a privileged builder); run steps get hard
+# limits, no mounts, dropped capabilities and an egress-guarded bridge.
+
+[module]
+id          = "containers"
+name        = "Containers — remote docker builds and jobs"
+version     = "0.3.38"
+kind        = "workload"
+category    = "developer"
+status      = "available"
+builtin     = true
+description = "Build a Dockerfile or run a command in a container on another machine and get the image or output files back. No git, no registry: any directory, sealed end to end, trusted builders only by default."
+author      = "Profullstack"
+license     = "MIT"
+keywords    = ["docker", "build", "ci", "container", "buildkit", "offload"]
+
+[module.requirements]
+c0mpute      = ">=0.3.39"
+os           = ["linux"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["bin:docker", "bin:docker-buildx", "network:egress"]
+
+[module.workloads]
+"container.run" = { command = "container-run", validation = "result_schema_and_hashes" }
+
+[module.dispatch]
+mode = "in-process"
+
+[module.surfaces]
+cli = "c0mpute build | c0mpute run | c0mpute containers"
+mcp = "c0mpute apps mcp (container_build, container_run)"
+api = "c0mpute jobs serve (POST /v1/blobs, POST /v1/jobs)"
+
+[module.config.defaults]
+max_jobs        = 1
+max_disk_gb     = 100
+cache_gb        = 20
+egress_guard    = true
+open            = false

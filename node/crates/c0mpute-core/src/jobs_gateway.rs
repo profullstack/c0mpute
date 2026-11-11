@@ -7,7 +7,9 @@
 //! Accepts `workflow.step`, `crawl.fetch`, `ocr.extract` (input by hash),
 //! `embed.text`, `captcha.solve` (images inline), `blender.render-frame` (input pieces by hash; the bridge
 //! fetches and checks the frames and returns them base64-encoded) and
-//! `infernet.inference` (chat completions);
+//! `infernet.inference` (chat completions), and `container.run` (DIP 0033:
+//! upload the context with `POST /v1/blobs`, name it as `context_blob` /
+//! `input_blob`, download the image and outputs from `GET /v1/blobs/{id}`);
 //! [`Workload`] is where more go.
 //!
 //! Same hardening as `c0mpute speech serve`: a required bearer token
@@ -153,7 +155,6 @@ pub struct JobsBridge {
     net: Arc<Libp2pNetwork>,
     // Specs used to be served from here by hash; sealed specs (DIP-0032)
     // go point to point instead. Kept for the bridge's own inputs.
-    #[allow(dead_code)]
     store: ChunkStore,
     token: Arc<str>,
     max_price_usd: f64,
@@ -270,6 +271,11 @@ pub fn router(state: JobsBridge) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/jobs", post(submit))
+        .route(
+            "/v1/blobs",
+            post(upload_blob).layer(DefaultBodyLimit::max(crate::container_run::MAX_INPUT_BYTES as usize)),
+        )
+        .route("/v1/blobs/{id}", get(download_blob))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -321,7 +327,8 @@ fn bad_request(detail: impl Into<String>) -> ApiError {
 }
 
 async fn healthz(State(state): State<JobsBridge>) -> Json<Value> {
-    let workloads: Vec<&str> = Workload::ALL.iter().map(|w| w.name()).collect();
+    let mut workloads: Vec<&str> = Workload::ALL.iter().map(|w| w.name()).collect();
+    workloads.push(crate::container_run::WORKLOAD);
     Json(json!({
         "ok": true,
         "peer_id": state.net.peer_id().to_base58(),
@@ -364,6 +371,9 @@ async fn submit_inner(
     }
     let req: JobRequest =
         serde_json::from_slice(body).map_err(|e| bad_request(format!("invalid request: {e}")))?;
+    if req.workload == crate::container_run::WORKLOAD {
+        return run_container_job(state, req).await;
+    }
     let workload = Workload::parse(&req.workload).ok_or_else(|| {
         ApiError(
             StatusCode::BAD_REQUEST,
@@ -544,6 +554,244 @@ async fn run_job(
         "price": outcome.accepted_bid.price_usd,
         "output_hash": output_hash,
         "result": result,
+    }))
+}
+
+// ─── container.run over HTTP (DIP 0033) ──────────────────────────────────
+
+/// How long uploaded and downloaded blobs stay on the bridge.
+const BLOB_TTL: Duration = Duration::from_secs(3600);
+
+fn blob_dir() -> std::path::PathBuf {
+    crate::config::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+        .join("jobs-bridge")
+        .join("blobs")
+}
+
+fn valid_blob_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|u| u.to_string() == id)
+}
+
+/// Drop blobs older than [`BLOB_TTL`].
+async fn sweep_blobs(dir: &std::path::Path) {
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else { return };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let old = e
+            .metadata()
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > BLOB_TTL);
+        if old {
+            let path = e.path();
+            let _ = if path.is_dir() { tokio::fs::remove_dir_all(&path).await } else { tokio::fs::remove_file(&path).await };
+        }
+    }
+}
+
+fn unauthorized() -> ApiError {
+    ApiError(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }))
+}
+
+/// `POST /v1/blobs`: store a build context or input tarball (the raw body,
+/// up to 2 GiB) for a later `container.run`; answers `{blob, size}`.
+async fn upload_blob(State(state): State<JobsBridge>, headers: HeaderMap, body: axum::body::Body) -> Response {
+    use futures::TryStreamExt;
+    use tokio::io::AsyncWriteExt;
+    if !matches!(check_bearer(&headers, &state.token), BearerCheck::Ok) {
+        return unauthorized().into_response();
+    }
+    let dir = blob_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return ApiError(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "storage", "detail": e.to_string()})).into_response();
+    }
+    sweep_blobs(&dir).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = dir.join(&id);
+    let result: Result<u64> = async {
+        let mut file = tokio::fs::File::create(&path).await?;
+        let mut stream = body.into_data_stream();
+        let mut size = 0u64;
+        while let Some(chunk) = stream.try_next().await.map_err(|e| anyhow::anyhow!("request body: {e}"))? {
+            size += chunk.len() as u64;
+            if size > crate::container_run::MAX_INPUT_BYTES {
+                bail!("blob is over the {}-byte limit", crate::container_run::MAX_INPUT_BYTES);
+            }
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        if size == 0 {
+            bail!("empty body");
+        }
+        Ok(size)
+    }
+    .await;
+    match result {
+        Ok(size) => (StatusCode::CREATED, Json(json!({ "blob": id, "size": size }))).into_response(),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            bad_request(format!("{e:#}")).into_response()
+        }
+    }
+}
+
+/// `GET /v1/blobs/{id}`: an uploaded blob, or an image / output a
+/// `container.run` job returned (listed in its response).
+async fn download_blob(
+    State(state): State<JobsBridge>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    if !matches!(check_bearer(&headers, &state.token), BearerCheck::Ok) {
+        return unauthorized().into_response();
+    }
+    if !valid_blob_id(&id) {
+        return bad_request("unknown blob").into_response();
+    }
+    let path = blob_dir().join(&id);
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        return ApiError(StatusCode::NOT_FOUND, json!({"error": "not_found"})).into_response();
+    };
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let stream = futures::stream::unfold(file, |mut f| async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 256 * 1024];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(Bytes::from(buf)), f))
+            }
+            Err(e) => Some((Err(e), f)),
+        }
+    });
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+            (axum::http::header::CONTENT_LENGTH, len.to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+/// A `container.run` request: the container.run spec with blobs named by
+/// upload id (`context_blob`, `input_blob`) instead of piece hashes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContainerHttpSpec {
+    #[serde(default)]
+    context_blob: Option<String>,
+    #[serde(default)]
+    input_blob: Option<String>,
+    #[serde(default)]
+    build: Option<crate::container_run::BuildSpec>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    cmd: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    outputs: Vec<String>,
+    #[serde(default)]
+    return_image: bool,
+    #[serde(default)]
+    cpus: Option<f64>,
+    #[serde(default)]
+    memory_mb: Option<u64>,
+    #[serde(default)]
+    disk_mb: Option<u64>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    network: Option<bool>,
+    /// Accept any builder when neither the request nor the bridge names any.
+    #[serde(default)]
+    any_worker: bool,
+}
+
+async fn run_container_job(state: &JobsBridge, req: JobRequest) -> Result<Value, ApiError> {
+    let spec: ContainerHttpSpec =
+        serde_json::from_value(req.spec).map_err(|e| bad_request(format!("invalid container.run spec: {e}")))?;
+    let dir = blob_dir();
+    let blob = |id: &Option<String>| -> Result<Option<std::path::PathBuf>, ApiError> {
+        match id {
+            None => Ok(None),
+            Some(id) if valid_blob_id(id) && dir.join(id).is_file() => Ok(Some(dir.join(id))),
+            Some(id) => Err(bad_request(format!("unknown blob {id:?} (upload it with POST /v1/blobs)"))),
+        }
+    };
+    let builders = effective_allow_peers(&state.allow_peers, req.allow_peers.as_deref())?;
+    if builders.is_empty() && !spec.any_worker {
+        return Err(bad_request(
+            "container.run needs allow_peers (or C0MPUTE_JOBS_ALLOW_PEERS): a builder controls the image it returns; set any_worker to accept anyone",
+        ));
+    }
+    let max_price = match req.max_price {
+        None => state.max_price_usd,
+        Some(p) if p.is_finite() && p >= 0.0 => p.min(state.max_price_usd),
+        Some(_) => return Err(bad_request("max_price must be a non-negative number")),
+    };
+    let request = crate::container_run::Request {
+        context: blob(&spec.context_blob)?,
+        input: blob(&spec.input_blob)?,
+        build: spec.build,
+        image: spec.image,
+        cmd: spec.cmd,
+        env: spec.env,
+        workdir: spec.workdir,
+        outputs: spec.outputs,
+        return_image: spec.return_image,
+        cpus: spec.cpus,
+        memory_mb: spec.memory_mb,
+        disk_mb: spec.disk_mb,
+        timeout_secs: spec.timeout_secs,
+        network: spec.network,
+        builders,
+        any_worker: spec.any_worker,
+        max_price_usd: max_price,
+    };
+    let _slot = state.slots.clone().acquire_owned().await.map_err(|_| {
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": "bridge is shutting down" }))
+    })?;
+    let out_dir = dir.join(uuid::Uuid::new_v4().to_string());
+    let progress: crate::container_run::Progress = Arc::new(|line: &str| tracing::info!(target: "c0mpute::container", "{line}"));
+    let outcome = crate::container_run::submit(state.net.clone(), state.store.clone(), request, &out_dir, progress)
+        .await
+        .map_err(|e| {
+            let detail = format!("{e:#}");
+            let status = if detail.contains("no bids") || detail.contains("No bids") || detail.contains("NoPeers") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            ApiError(status, json!({ "error": if status == StatusCode::SERVICE_UNAVAILABLE { "no_bids" } else { "worker_failed" }, "detail": detail }))
+        })?;
+    // Expose each fetched artifact as a blob of its own.
+    let publish = |path: &std::path::Path| -> Option<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        std::fs::rename(path, dir.join(&id)).ok().map(|_| format!("/v1/blobs/{id}"))
+    };
+    let image_url = outcome.image.as_deref().and_then(publish);
+    let outputs: Vec<Value> = outcome
+        .outputs
+        .iter()
+        .map(|(p, f)| json!({ "path": p, "url": publish(f) }))
+        .collect();
+    let _ = tokio::fs::remove_dir_all(&out_dir).await;
+    Ok(json!({
+        "job_id": outcome.job_id,
+        "worker": outcome.worker,
+        "price": outcome.price_usd,
+        "result": outcome.result,
+        "image_url": image_url,
+        "outputs": outputs,
     }))
 }
 

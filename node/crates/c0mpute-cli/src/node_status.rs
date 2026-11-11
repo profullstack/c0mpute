@@ -200,6 +200,15 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
                 gated(role, "no game image pulled (`c0mpute gameserver setup`)")
             }
         }
+        Role::Containers => {
+            let rt = tokio::task::spawn_blocking(|| c0mpute_core::container_run::runtime().clone()).await.unwrap_or_default();
+            if rt.ready() {
+                let who = if cfg.containers.open { "any buyer" } else { "trusted buyers" };
+                serving(role, Some(format!("docker {} + buildx, {who}", rt.docker_version.unwrap_or_default())))
+            } else {
+                gated(role, rt.reason.unwrap_or_else(|| "docker is not ready".into()))
+            }
+        }
         Role::Storage if !cfg.storage_enabled() => gated(role, "turned off (--no-storage, [storage] enabled = false or C0MPUTE_STORAGE=0)"),
         Role::Hosting if !cfg.hosting_enabled() => gated(role, "turned off (--no-hosting, [hosting] enabled = false or C0MPUTE_HOSTING=0)"),
         _ => serving(role, None),

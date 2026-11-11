@@ -71,6 +71,11 @@ pub struct Config {
     /// network and how much memory they may take together.
     #[serde(default)]
     pub apps: AppsConfig,
+    /// `container.run` (`containers` role, opt-in; DIP 0033): builds and
+    /// container jobs for trusted buyers, and the builders this machine
+    /// sends `c0mpute build` / `c0mpute run` to.
+    #[serde(default)]
+    pub containers: crate::container_run::ContainersConfig,
     /// Money movement (hosting settlement; ads billing later). Off unless
     /// `enabled = true` and the rail's key is in the environment.
     #[serde(default)]
@@ -714,6 +719,7 @@ impl Default for Config {
             captcha: CaptchaConfig::default(),
             gameserver: GameserverConfig::default(),
             apps: AppsConfig::default(),
+            containers: Default::default(),
             payments: Default::default(),
             crowdgpt: Default::default(),
             x402: Default::default(),
