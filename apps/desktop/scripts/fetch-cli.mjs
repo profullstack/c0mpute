@@ -53,9 +53,17 @@ if (from) {
   if (want !== got) throw new Error(`${asset}: sha256 ${got} does not match ${want}`);
   const work = mkdtempSync(join(tmpdir(), "c0cli-"));
   writeFileSync(join(work, asset), body);
+  // On Windows runners `tar` on PATH is Git Bash's GNU tar, which reads
+  // `C:\...` as a remote host ("Cannot connect to C: resolve failed") and
+  // cannot open zips. Windows ships bsdtar as System32\tar.exe: it takes
+  // drive-letter paths and unpacks .zip.
+  const tar =
+    process.platform === "win32"
+      ? join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe")
+      : "tar";
   const r = asset.endsWith(".zip")
-    ? spawnSync("tar", ["-xf", join(work, asset), "-C", work], { stdio: "inherit" })
-    : spawnSync("tar", ["-xzf", join(work, asset), "-C", work], { stdio: "inherit" });
+    ? spawnSync(tar, ["-xf", join(work, asset), "-C", work], { stdio: "inherit" })
+    : spawnSync(tar, ["-xzf", join(work, asset), "-C", work], { stdio: "inherit" });
   if (r.status !== 0) throw new Error(`could not unpack ${asset}`);
   cpSync(join(work, exe), join(dest, exe));
   rmSync(work, { recursive: true, force: true });

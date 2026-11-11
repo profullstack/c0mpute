@@ -36,3 +36,25 @@ jobs:
       - name: Bundle
         working-directory: apps/desktop
         run: node scripts/build.mjs
+
+  # The release's Windows desktop job runs fetch-cli.mjs under Git Bash, where
+  # `tar` is GNU tar and `C:\...` reads as a remote host. Run that exact step
+  # on a Windows runner on every desktop change, against the last published
+  # release, so it cannot break unseen until the next tag.
+  windows-fetch-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Bundle the CLI from the latest release (as release.yml does)
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)
+          node scripts/fetch-cli.mjs --tag "$tag" --platform windows-x86_64
+          test -s resources/cli/c0mpute.exe && ls -la resources/cli/
