@@ -246,7 +246,8 @@ pub async fn serve(bind: std::net::SocketAddr, token: String, max_price_usd: f64
         .await
         .with_context(|| format!("bind c0mpute speech gateway at {bind}"))?;
     tracing::info!(%bind, "c0mpute speech gateway listening");
-    axum::serve(listener, app).await?;
+    let local = listener.local_addr().unwrap_or(bind);
+    axum::serve(listener, c0mpute_gateway::host_guard::guard_loopback(app, local)).await?;
     Ok(())
 }
 

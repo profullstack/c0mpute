@@ -685,6 +685,9 @@ impl Supervisor {
             Err(e) => tracing::warn!(err = %e, "secure-chat: not started"),
         }
 
+        // Agent swarms (DIP 0034): every node, whatever its roles.
+        let swarm = crate::agent_swarm::start_for_node(self.libp2p.clone(), &self.config).await;
+
         // Ads: every node that runs hosting keeps the campaign index and
         // relays c0mpute/ads/v1 (gossipsub forwards only through subscribed
         // peers); only gateways answer ad requests.
@@ -774,6 +777,9 @@ impl Supervisor {
             }
             if let Some(a) = &apps {
                 app = app.merge(a.router());
+            }
+            if let Some(s) = &swarm {
+                app = app.merge(crate::agent_swarm::router(s.clone()));
             }
             if let Some(h) = &hosting {
                 let mut r = h.router();

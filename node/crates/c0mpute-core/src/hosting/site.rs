@@ -995,6 +995,41 @@ pub fn scan_dir(
     })
 }
 
+/// Names never published from a folder, whatever else it holds: SSH and
+/// other private-key files, keystores, and dependency trees. Dotfiles
+/// (`.env*`, `.git`, `.npmrc`, `.netrc`, `.ssh`) are already skipped by
+/// every walker; these are the secrets that do not start with a dot.
+pub fn never_share_name(name: &str, is_dir: bool) -> bool {
+    if is_dir {
+        return name == "node_modules";
+    }
+    let lower = name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | "id_ecdsa_sk" | "id_ed25519_sk") {
+        return true;
+    }
+    [".p12", ".pfx", ".keystore", ".jks", ".ppk"].iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Whether a `.pem` / `.key` file holds a private key (a certificate in a
+/// `.pem` is public and may be published; a key never is). Reads at most the
+/// first 64 KiB.
+pub fn holds_private_key(path: &Path) -> bool {
+    let lower = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !(lower.ends_with(".pem") || lower.ends_with(".key")) {
+        return false;
+    }
+    use std::io::Read;
+    let mut buf = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(f) => {
+            let _ = f.take(64 * 1024).read_to_end(&mut buf);
+        }
+        Err(_) => return true,
+    }
+    let text = String::from_utf8_lossy(&buf);
+    text.contains("PRIVATE KEY") || (lower.ends_with(".key") && !text.contains("PUBLIC KEY"))
+}
+
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
@@ -1007,8 +1042,14 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()>
         if ft.is_symlink() {
             continue;
         }
+        if never_share_name(&fname, ft.is_dir()) {
+            tracing::warn!(path = %path.display(), "hosting: not publishing a key file or dependency tree");
+            continue;
+        }
         if ft.is_dir() {
             walk(root, &path, out)?;
+        } else if ft.is_file() && holds_private_key(&path) {
+            tracing::warn!(path = %path.display(), "hosting: not publishing a private key");
         } else if ft.is_file() {
             let rel = path
                 .strip_prefix(root)
@@ -1433,6 +1474,32 @@ mod tests {
         assert!(!valid_path("../etc/passwd"));
         assert!(!valid_path("/abs"));
         assert!(!valid_path("a//b"));
+    }
+
+    #[test]
+    fn keys_and_dependency_trees_are_never_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("index.html"), b"hi").unwrap();
+        std::fs::write(d.join("id_ed25519"), b"-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+        std::fs::write(d.join("id_ed25519.pub"), b"ssh-ed25519 AAAA").unwrap();
+        std::fs::write(d.join("server.key"), b"-----BEGIN RSA PRIVATE KEY-----").unwrap();
+        std::fs::write(d.join("tls.pem"), b"-----BEGIN PRIVATE KEY-----").unwrap();
+        std::fs::write(d.join("ca.pem"), b"-----BEGIN CERTIFICATE-----").unwrap();
+        std::fs::write(d.join("store.p12"), b"x").unwrap();
+        std::fs::create_dir_all(d.join("node_modules/x")).unwrap();
+        std::fs::write(d.join("node_modules/x/index.js"), b"x").unwrap();
+        std::fs::create_dir_all(d.join("keys")).unwrap();
+        std::fs::write(d.join("keys/id_rsa"), b"-----BEGIN RSA PRIVATE KEY-----").unwrap();
+
+        let built = build_from_dir(d, "site").unwrap();
+        let mut names: Vec<&String> = built.manifest.files.keys().collect();
+        names.sort();
+        assert_eq!(names, vec!["ca.pem", "id_ed25519.pub", "index.html"], "only the public files are published");
+        assert!(never_share_name("ID_RSA", false));
+        assert!(!never_share_name("id_rsa.pub", false));
+        assert!(never_share_name("node_modules", true));
+        assert!(!never_share_name("node_modules", false));
     }
 
     #[test]

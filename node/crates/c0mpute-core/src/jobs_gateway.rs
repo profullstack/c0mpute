@@ -306,7 +306,8 @@ pub async fn serve(
         .await
         .with_context(|| format!("bind c0mpute jobs bridge at {bind}"))?;
     tracing::info!(%bind, "c0mpute jobs bridge listening");
-    axum::serve(listener, router(state)).await?;
+    let local = listener.local_addr().unwrap_or(bind);
+    axum::serve(listener, c0mpute_gateway::host_guard::guard_loopback(router(state), local)).await?;
     Ok(())
 }
 

@@ -1958,6 +1958,36 @@ async fn run_parsed(
 
 // ─── buyer ───────────────────────────────────────────────────────────────
 
+/// Files left out of every packed directory: the context goes to another
+/// machine, so local credentials stay home. Patterns match at any depth (GNU
+/// and BSD tar both treat an unanchored `--exclude` that way). A build that
+/// really needs one of these sets `C0MPUTE_PACK_INCLUDE_SECRETS=1`.
+pub const SECRET_EXCLUDES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    ".env.production",
+    ".env.development",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".ssh",
+    ".aws",
+    ".docker/config.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "*.p12",
+    "*.pfx",
+    "*.keystore",
+    "*.jks",
+];
+
+fn include_secrets() -> bool {
+    std::env::var("C0MPUTE_PACK_INCLUDE_SECRETS").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Pack `dir` into a gzipped tarball at `dest` with the system `tar`. For a
 /// build context, `.dockerignore` patterns are applied as excludes where GNU
 /// tar can express them exactly (the file still ships, and docker applies it
@@ -1976,6 +2006,9 @@ pub fn pack_dir(dir: &Path, dest: &Path, dockerignore: bool) -> Result<u64> {
         && let Ok(text) = std::fs::read_to_string(dir.join(".dockerignore"))
     {
         args.extend(dockerignore_excludes(&text));
+    }
+    if !include_secrets() {
+        args.extend(SECRET_EXCLUDES.iter().map(|p| format!("--exclude={p}")));
     }
     args.extend([
         "-C".into(),
@@ -2470,6 +2503,31 @@ pub fn identity_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_contexts_leave_credentials_home() {
+        let src = tempfile::tempdir().unwrap();
+        let d = src.path();
+        std::fs::write(d.join("Dockerfile"), "FROM scratch").unwrap();
+        std::fs::write(d.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(d.join(".env.example"), "SECRET=").unwrap();
+        std::fs::write(d.join(".npmrc"), "//registry/:_authToken=x").unwrap();
+        std::fs::create_dir_all(d.join("deploy/.ssh")).unwrap();
+        std::fs::write(d.join("deploy/.ssh/config"), "x").unwrap();
+        std::fs::write(d.join("deploy/id_ed25519"), "key").unwrap();
+        std::fs::write(d.join("deploy/run.sh"), "echo").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("ctx.tar.gz");
+        pack_dir(d, &dest, false).unwrap();
+        let list = std::process::Command::new("tar").arg("-tzf").arg(&dest).output().unwrap();
+        let list = String::from_utf8_lossy(&list.stdout);
+        for kept in ["Dockerfile", ".env.example", "deploy/run.sh"] {
+            assert!(list.contains(kept), "{kept} is packed: {list}");
+        }
+        for gone in ["./.env\n", ".npmrc", ".ssh", "id_ed25519"] {
+            assert!(!list.contains(gone), "{gone:?} stays home: {list}");
+        }
+    }
 
     fn hash() -> String {
         Hash::of(b"ctx").to_hex()

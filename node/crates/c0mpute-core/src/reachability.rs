@@ -1,8 +1,11 @@
 //! Getting results back from workers that cannot be dialed.
 //!
-//! Workers listen on a random port, usually behind NAT or a firewall, and
-//! c0mpute has no relay, so a buyer often cannot open a connection to the
-//! worker that holds its result. A buyer gateway, on the other hand, is one
+//! Workers listen on a random port, usually behind NAT or a firewall. Every
+//! node now runs circuit relay v2 + DCUtR + AutoNAT (c0mpute-net, see
+//! docs/protocol/relay.md): a worker behind NAT reserves a slot on a public
+//! node and is dialable through `/p2p-circuit`, and hole punching upgrades
+//! the connection to a direct one when it can. The dial-back below stays as
+//! the fast path: it needs no relay and no hole punch. A buyer gateway is one
 //! machine we control: it listens on a fixed open port (`C0MPUTE_P2P_LISTEN`)
 //! and advertises its public address (`C0MPUTE_P2P_EXTERNAL`) in every
 //! `JobAccept`. The winning worker dials that address before publishing its
