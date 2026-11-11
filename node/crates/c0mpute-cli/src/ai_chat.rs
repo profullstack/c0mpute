@@ -652,10 +652,10 @@ async fn find_saved(url: &str, id: &str, key: Option<String>) -> Result<Convo> {
     if let Some(c) = chat_history::load_in(&dir, id) {
         return Ok(c);
     }
-    if let Some(key) = key {
-        if let Some(c) = chat_history::get(url, &key, id).await? {
-            return Ok(c);
-        }
+    if let Some(key) = key
+        && let Some(c) = chat_history::get(url, &key, id).await?
+    {
+        return Ok(c);
     }
     bail!("no conversation {id:?} (see `c0mpute chat history`)")
 }
