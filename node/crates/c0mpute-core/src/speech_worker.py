@@ -61,6 +61,22 @@ def session_options():
     return options
 
 
+def kokoro_model(model_root: Path) -> Path:
+    """The full-precision Kokoro when it is installed, else the int8 build.
+
+    int8 sounds fuzzy and loses the top octave, and on ONNX Runtime CPU it is
+    not even faster; it stays only as the fallback for nodes mid-upgrade.
+    """
+    full = model_root / "kokoro-v1.0.onnx"
+    return full if full.is_file() else model_root / "kokoro-v1.0.int8.onnx"
+
+
+def default_whisper_model(root: Path) -> str:
+    """Whisper small when provisioned (far fewer word errors than base), else base."""
+    cache = root / "models" / "whisper"
+    return "small" if any(cache.glob("models--Systran--faster-whisper-small*")) else "base"
+
+
 def tts(root: Path, output: Path, request: dict) -> None:
     text = request["text"]
     engine = request["engine"]
@@ -95,7 +111,7 @@ def tts(root: Path, output: Path, request: dict) -> None:
         )
 
         model_root = root / "models" / "kokoro"
-        kokoro = Kokoro(str(model_root / "kokoro-v1.0.int8.onnx"), str(model_root / "voices-v1.0.bin"))
+        kokoro = Kokoro(str(kokoro_model(model_root)), str(model_root / "voices-v1.0.bin"))
         try:
             audio, sample_rate = kokoro.create(
                 text, voice=voice, speed=float(request.get("speed", 1.0)),
@@ -128,14 +144,14 @@ def tts(root: Path, output: Path, request: dict) -> None:
 def stt(root: Path, audio: Path, output: Path, request: dict) -> None:
     from faster_whisper import WhisperModel
 
-    model_name = request.get("model", "base")
+    model_name = request.get("model") or default_whisper_model(root)
     model = WhisperModel(
         model_name, device="cpu", compute_type="int8",
         cpu_threads=cpu_thread_count(), num_workers=1,
         download_root=str(root / "models" / "whisper"),
     )
     segments, info = model.transcribe(
-        str(audio), beam_size=1,
+        str(audio), beam_size=int(request.get("beam_size", 5)),
         language=request.get("language") or None,
         vad_filter=True,
     )
@@ -165,7 +181,7 @@ def load_kokoro(root: Path):
     )
     model_root = root / "models" / "kokoro"
     return Kokoro(
-        str(model_root / "kokoro-v1.0.int8.onnx"), str(model_root / "voices-v1.0.bin")
+        str(kokoro_model(model_root)), str(model_root / "voices-v1.0.bin")
     )
 
 

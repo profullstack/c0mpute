@@ -1,6 +1,6 @@
 {
   "name": "@profullstack/c0mpute-captcha",
-  "version": "0.3.38",
+  "version": "0.3.39",
   "description": "Solve image, slider, gap, click-text, audio and math captchas on the c0mpute network: library (fetch().then(solveCaptcha)), CLI and stdio MCP server.",
   "type": "module",
   "license": "MIT",
