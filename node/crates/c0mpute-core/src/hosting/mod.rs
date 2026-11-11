@@ -157,6 +157,12 @@ pub enum HostingMsg {
         /// a group. Absent from older nodes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         room: Option<u64>,
+        /// An opaque id of the machine and disk it stores on (see
+        /// [`failure_domain`]): two nodes with the same id are one copy, even
+        /// when neither has a public address to compare. Absent from older
+        /// nodes (they are told apart by address only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
     },
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
@@ -500,6 +506,7 @@ impl Hosting {
                         full,
                         room_gib,
                         room,
+                        machine,
                     } => {
                         if let Some(pid) = msg.source {
                             for a in addrs.iter().take(8) {
@@ -546,6 +553,7 @@ impl Hosting {
                             );
                             map.set_full(&source, full);
                             map.set_room(&source, room_gib);
+                            map.set_machine(&source, machine.filter(|m| m.len() <= 64));
                         }
                     }
                     HostingMsg::Receipt { receipt } => {
@@ -627,10 +635,12 @@ impl Hosting {
             room,
             addrs.clone(),
         );
+        let machine = failure_domain(self.0.store.root(), self.disk().1);
         {
             let mut map = self.0.map.write().await;
             map.set_full(&self.0.me, full);
             map.set_room(&self.0.me, room_gib);
+            map.set_machine(&self.0.me, machine.clone());
         }
         // Split by count and by size: group bitmaps make striped entries big.
         let mut chunks: Vec<Vec<Held>> = vec![Vec::new()];
@@ -660,6 +670,7 @@ impl Hosting {
                 full,
                 room_gib,
                 room,
+                machine: machine.clone(),
             })
             .await;
         }
@@ -3206,6 +3217,7 @@ mod tests {
             full: false,
             room_gib: Some(u64::MAX),
             room: Some(u64::MAX),
+            machine: None,
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -3259,6 +3271,7 @@ mod tests {
             full: false,
             room_gib: Some(3000),
             room: None,
+            machine: None,
         };
         let bytes = serde_json::to_vec(&m).unwrap();
         assert!(bytes.len() < 1024);
@@ -3296,6 +3309,7 @@ mod tests {
             full: true,
             room_gib: Some(u64::MAX),
             room: Some(u64::MAX),
+            machine: None,
         })
         .unwrap();
         assert!(bytes.len() < 64 * 1024, "{} bytes", bytes.len());
@@ -3358,6 +3372,46 @@ pub const REANNOUNCE_CAP: Duration = Duration::from_secs(60);
 
 /// How often a publisher checks the replica map while it waits.
 const COPY_POLL: Duration = Duration::from_secs(2);
+
+/// An opaque id for the failure domain a node's copies live in: this OS
+/// install (`/etc/machine-id`) and the filesystem the chunk store is on (its
+/// fsid and size). Two nodes on one box and disk get the same id, and so
+/// count as one copy; a hash, so it says nothing about the machine. `None`
+/// when there is no machine id (many containers), and then nodes are told
+/// apart by address.
+pub fn failure_domain(store_root: &std::path::Path, disk_total: u64) -> Option<String> {
+    let id = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let fsid = fs_id(store_root).unwrap_or(0);
+    let h = Hash::of(format!("c0mpute-failure-domain\n{id}\n{fsid}\n{disk_total}").as_bytes());
+    Some(h.to_hex()[..32].to_string())
+}
+
+#[cfg(unix)]
+fn fs_id(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    // The store directory may not exist yet: walk up to one that does.
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent()?;
+    }
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c is a valid NUL-terminated path, st a valid out-pointer.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Some(st.f_fsid as u64)
+}
+
+#[cfg(not(unix))]
+fn fs_id(_path: &std::path::Path) -> Option<u64> {
+    None
+}
 
 /// The IP of `addr` when it names one machine only: not loopback, private,
 /// link-local or unspecified (those repeat across machines, e.g. every

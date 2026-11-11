@@ -464,7 +464,9 @@ mod tests {
         let mut g = HashMap::new();
         g.insert(rec.site_id.clone(), groups.into_iter().collect::<BTreeSet<u32>>());
         let addrs = map.peers.get(p).map(|h| h.addrs.clone()).unwrap_or_default();
+        let machine = map.peers.get(p).and_then(|h| h.machine.clone());
         map.apply_holding_full(p, sites, g, Instant::now(), true, None, None, Some(u64::MAX), addrs);
+        map.set_machine(p, machine);
     }
 
     #[test]
@@ -515,6 +517,41 @@ mod tests {
             assert_eq!(n, 1, "group {g}");
         }
         assert!(drops("b").is_empty() && drops("c").is_empty());
+    }
+
+    #[test]
+    fn relayed_nodes_on_one_disk_are_one_copy_by_their_announced_domain() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let m = manifest(64 * 4);
+        let rec = big_record(&kp, &m);
+        let layout = Layout::of(&m);
+        // x1 + x2: two relay-only nodes on one 11 TB disk (no address to
+        // compare, the same failure domain). n1 + n2: two homes behind one
+        // NAT address, different domains: two copies.
+        let relay = "/ip4/198.51.100.9/tcp/1/p2p/12D3KooWRelay/p2p-circuit";
+        let peers: Vec<(String, &str)> = vec![
+            ("x1".into(), relay),
+            ("x2".into(), relay),
+            ("n1".into(), "/ip4/203.0.113.50/tcp/1"),
+            ("n2".into(), "/ip4/203.0.113.50/tcp/2"),
+        ];
+        let mut map = map_on(&peers, &rec);
+        map.set_machine("x1", Some("disk-a".into()));
+        map.set_machine("x2", Some("disk-a".into()));
+        map.set_machine("n1", Some("home-1".into()));
+        map.set_machine("n2", Some("home-2".into()));
+        let all: Vec<u32> = (0..layout.len() as u32).collect();
+        hold_all(&mut map, &rec, "x1", all.clone());
+        hold_all(&mut map, &rec, "x2", all.clone());
+        hold_all(&mut map, &rec, "n1", all.clone());
+        let h = health(&map.distinct_group_holders(&rec.site_id, layout.len()), 3);
+        assert_eq!(h.min_copies, 2, "x1+x2 are one copy");
+        // n2 is another machine: it takes every group.
+        let pl = plan(&map, &rec.site_id, &layout, "n2", true, 3, 5, &|_| 0, &|_| false);
+        assert_eq!(pl.fetch.len(), layout.len());
+        hold_all(&mut map, &rec, "n2", all.clone());
+        let h = health(&map.distinct_group_holders(&rec.site_id, layout.len()), 3);
+        assert_eq!((h.min_copies, h.short), (3, 0));
     }
 
     #[test]

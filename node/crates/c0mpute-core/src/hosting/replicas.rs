@@ -54,6 +54,8 @@ pub struct Holding {
     pub room: Option<u64>,
     /// Where to dial it (announced multiaddrs).
     pub addrs: Vec<String>,
+    /// Its failure-domain id (machine + disk), when it says.
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -139,8 +141,16 @@ impl ReplicaMap {
                 groups,
                 room,
                 addrs,
+                machine: None,
             },
         );
+    }
+
+    /// Record the failure domain `peer` announced (see [`Holding::machine`]).
+    pub fn set_machine(&mut self, peer: &str, machine: Option<String>) {
+        if let Some(h) = self.peers.get_mut(peer) {
+            h.machine = machine;
+        }
     }
 
     /// Record how much room `peer` says it has (see [`Holding::room_gib`]).
@@ -416,11 +426,18 @@ impl ReplicaMap {
     }
 }
 
-/// Each peer's machine: the globally unique IPs it announced for direct
-/// dials (relayed `p2p-circuit` addresses name the relay, not the peer, and
-/// private ones repeat across machines). Empty = unknown, a machine of its
-/// own.
-pub type Machines = HashMap<String, Vec<std::net::IpAddr>>;
+/// Where a peer's copies live: the failure-domain id it announced, and the
+/// globally unique IPs it announced for direct dials (relayed `p2p-circuit`
+/// addresses name the relay, not the peer, and private ones repeat across
+/// machines).
+#[derive(Clone, Debug, Default)]
+pub struct Machine {
+    pub domain: Option<String>,
+    pub ips: Vec<std::net::IpAddr>,
+}
+
+/// [`Machine`] per peer.
+pub type Machines = HashMap<String, Machine>;
 
 impl ReplicaMap {
     /// [`Machines`] for every known peer.
@@ -437,7 +454,7 @@ impl ReplicaMap {
                     .collect();
                 ips.sort();
                 ips.dedup();
-                (p.clone(), ips)
+                (p.clone(), Machine { domain: h.machine.clone(), ips })
             })
             .collect()
     }
@@ -462,7 +479,10 @@ pub fn same_machine(machines: &Machines, a: &str, b: &str) -> bool {
         return true;
     }
     match (machines.get(a), machines.get(b)) {
-        (Some(x), Some(y)) => x.iter().any(|ip| y.contains(ip)),
+        // Both say which machine and disk: that settles it (two homes
+        // behind one NAT address are still two copies).
+        (Some(Machine { domain: Some(x), .. }), Some(Machine { domain: Some(y), .. })) => x == y,
+        (Some(x), Some(y)) => x.ips.iter().any(|ip| y.ips.contains(ip)),
         _ => false,
     }
 }
