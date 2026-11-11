@@ -222,10 +222,14 @@ pub const MAX_PROMPT_CHARS: usize = 2000;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
-/// How long a single clip may take before the container is killed. Generous:
-/// a 14B model at 720p on a busy card is minutes, and the alternative to
-/// waiting is failing a job that was nearly done.
-pub const JOB_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// How long one clip may render once a worker has taken it: 2 hours. It is
+/// the worker's kill timeout (sd-cli or the container), the gateway's receipt
+/// timeout and, plus a margin, the auction deadline. Measured from the award,
+/// not from when the request was queued, so a clip that waited for a worker
+/// still gets its full 2 h. A CPU Wan 2.1 1.3B clip on a loaded box (vienna,
+/// load 2-3 per CPU, 2026-11-10) was cut at the old 45 min while still
+/// rendering; the alternative to waiting is failing a job that was nearly done.
+pub const JOB_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// One video job, as it arrives in `JobAccept.spec_inline`.
 #[derive(Deserialize, Serialize, Clone, Debug)]

@@ -465,7 +465,10 @@ fn set_draining(on: bool) {
 pub const MAX_UPGRADE_STAGGER: Duration = Duration::from_secs(120);
 
 /// Longest the poller waits for running jobs before re-executing anyway.
-pub const MAX_DRAIN: Duration = Duration::from_secs(30 * 60);
+/// Covers the longest job a worker takes (a video clip may render for 2 h,
+/// `c0mpute_core::video::JOB_TIMEOUT`), so an update never kills one that
+/// was awarded just before it landed.
+pub const MAX_DRAIN: Duration = Duration::from_secs(2 * 60 * 60 + 5 * 60);
 
 /// Wait (up to `max`) until no long job runs; returns how many still run.
 pub async fn drain(max: Duration, every: Duration) -> usize {
