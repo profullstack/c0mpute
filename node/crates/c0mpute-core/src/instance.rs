@@ -1991,6 +1991,17 @@ mod buyer_lock_tests {
         assert_ne!(dir, base);
         assert!(dir.starts_with(tmp.path().join("buyer-sessions")));
         drop(other);
-        assert_eq!(buyer_identity_dir(&base).unwrap(), base);
+        // Freed again: the next buyer gets the shared identity. (A process
+        // another test forks inherits our descriptors until it execs, so the
+        // lock can stay held for a moment after the drop.)
+        let mut got = PathBuf::new();
+        for _ in 0..50 {
+            got = buyer_identity_dir(&base).unwrap();
+            if got == base {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(got, base);
     }
 }
