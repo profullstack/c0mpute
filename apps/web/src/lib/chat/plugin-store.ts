@@ -120,7 +120,7 @@ export function pluginKey(raw: string | undefined): Buffer | null {
 /** v1.<iv>.<tag>.<ciphertext>, all base64url. Additional data binds it to its row. */
 export function seal(key: Buffer, plain: string, aad: string): string {
   const iv = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", key, iv);
+  const c = createCipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
   c.setAAD(Buffer.from(aad));
   const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
   return ["v1", iv.toString("base64url"), c.getAuthTag().toString("base64url"), ct.toString("base64url")].join(".");
@@ -130,7 +130,7 @@ export function unseal(key: Buffer, sealed: string, aad: string): string | null 
   const [v, iv, tag, ct] = sealed.split(".");
   if (v !== "v1" || !iv || !tag || ct === undefined) return null;
   try {
-    const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
+    const d = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"), { authTagLength: 16 });
     d.setAAD(Buffer.from(aad));
     d.setAuthTag(Buffer.from(tag, "base64url"));
     return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
