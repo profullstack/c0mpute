@@ -248,6 +248,12 @@ export interface RoleStatus {
   detail: string | null;
 }
 
+/**
+ * `c0mpute status --json`: the base report the desktop app also reads
+ * (version, worker, peer id, nickname, config) plus, from the CLI that
+ * ships with this TUI, `role_states` (serving or gated and why), `tags`,
+ * `host` and the worker process it found.
+ */
 export interface NodeStatusJson {
   version: string;
   config_path: string;
@@ -255,10 +261,12 @@ export interface NodeStatusJson {
   name: string | null;
   private: boolean;
   auto_update: boolean;
-  worker: { pid: number; argv: string[] } | null;
+  /** Configured roles (the base report); role_states has the effective set. */
+  roles?: string[];
+  worker_process: { pid: number; argv: string[] } | null;
   roles_source: string;
   hardware: string;
-  roles: RoleStatus[];
+  role_states: RoleStatus[];
   tags: string[];
   host: { cpus: number; job_threads: number; load_1m: number; ram_total_bytes: number; ram_free_bytes: number };
 }
@@ -266,7 +274,7 @@ export interface NodeStatusJson {
 export function parseStatusJson(text: string): NodeStatusJson | null {
   try {
     const v = JSON.parse(text) as NodeStatusJson;
-    return v && Array.isArray(v.roles) && Array.isArray(v.tags) ? v : null;
+    return v && Array.isArray(v.role_states) && Array.isArray(v.tags) ? v : null;
   } catch {
     return null;
   }

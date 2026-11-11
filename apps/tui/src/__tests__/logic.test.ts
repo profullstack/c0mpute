@@ -291,7 +291,9 @@ describe("node probes", () => {
   it("accepts only a real status report", () => {
     expect(parseStatusJson("{}")).toBeNull();
     expect(parseStatusJson("not json")).toBeNull();
-    expect(parseStatusJson(JSON.stringify({ roles: [], tags: [] }))).toEqual({ roles: [], tags: [] } as never);
+    // The base report alone (the desktop app's, CLI 0.3.33) has no role states.
+    expect(parseStatusJson(JSON.stringify({ version: "0.3.33", roles: ["tts"], worker: { running: true } }))).toBeNull();
+    expect(parseStatusJson(JSON.stringify({ role_states: [], tags: [] }))).toEqual({ role_states: [], tags: [] } as never);
   });
 });
 

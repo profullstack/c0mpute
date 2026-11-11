@@ -22,7 +22,7 @@ export function parseMusicCommand(text: string): MusicCommand | null {
 
 export const MAX_TEXT_CHARS = 100_000;
 export const MIN_SECONDS = 10;
-export const MAX_SECONDS = 180;
+export const MAX_SECONDS = 600;
 
 /** Validate a POST body; returns the body to forward or an error string. */
 export function parseMusicRequest(

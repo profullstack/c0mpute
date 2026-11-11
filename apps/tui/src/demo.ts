@@ -98,10 +98,10 @@ export const demoStatus: NodeStatusJson = {
   name: "profullstack",
   private: false,
   auto_update: true,
-  worker: { pid: 2442803, argv: ["/home/op/.c0mpute/bin/c0mpute", "worker", "start"] },
+  worker_process: { pid: 2442803, argv: ["/home/op/.c0mpute/bin/c0mpute", "worker", "start"] },
   roles_source: "worker defaults",
   hardware: "c0mpute:cpu",
-  roles: [
+  role_states: [
     { role: "storage", serving: true, reason: null, detail: null },
     { role: "tts", serving: true, reason: null, detail: "piper, kokoro" },
     { role: "stt", serving: true, reason: null, detail: "faster-whisper" },

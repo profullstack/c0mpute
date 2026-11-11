@@ -88,13 +88,13 @@ export function roleLines(node: NodeSnapshot, width: number, theme: Theme): Line
     if (!node.statusError && !node.statusText) out.push({ text: "asking c0mpute status --json…", fg: theme.muted });
     return out;
   }
-  const serving = s.roles.filter((r) => r.serving).length;
-  out.push({ text: `${serving}/${s.roles.length} roles serving · roles from ${s.roles_source}`, fg: theme.muted });
+  const serving = s.role_states.filter((r) => r.serving).length;
+  out.push({ text: `${serving}/${s.role_states.length} roles serving · roles from ${s.roles_source}`, fg: theme.muted });
   if (node.worker.otherUser) {
     out.push({ text: "worker runs as another user: gates below use your config/env, its own may differ", fg: theme.warning });
   }
-  const nameW = Math.min(14, Math.max(...s.roles.map((r) => r.role.length)) + 1);
-  for (const r of s.roles) {
+  const nameW = Math.min(14, Math.max(...s.role_states.map((r) => r.role.length)) + 1);
+  for (const r of s.role_states) {
     const mark = r.serving ? "✓" : "✗";
     const text = r.serving ? (r.detail ?? "serving") : (r.reason ?? "not serving");
     const lines = wrapBlock(text, width - nameW - 3, "");
