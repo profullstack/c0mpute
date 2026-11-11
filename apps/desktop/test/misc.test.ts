@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCreds } from "../src/main/account";
-import { locateCli, parseJsonOutput, planShim, shimScript } from "../src/main/cli";
+import { cliError, cliOutput, locateCli, parseJsonOutput, planShim, shimScript } from "../src/main/cli";
 import { matchMediaPoll, summarize } from "../src/main/jobs";
 import { gatewayUrl, tailFile, workerStartArgs } from "../src/main/node";
 import { isNewer, pickAsset } from "../src/main/updater";
@@ -24,6 +24,12 @@ describe("CLI output", () => {
     expect(parseJsonOutput<{ a: number }>('{"a":1}\n')).toEqual({ a: 1 });
     expect(parseJsonOutput<{ a: number }>('2026-11-10 INFO something\n{"a":2}')).toEqual({ a: 2 });
     expect(() => parseJsonOutput("worker: running")).toThrow("no JSON");
+  });
+
+  test("CLI errors without tracing noise", () => {
+    const stderr = "\x1b[2m2026-11-11T00:24:33.287301Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mc0mpute_core\x1b[0m: tracing initialised\nError: GET http://127.0.0.1:7997/hosting/v1/sites\n";
+    expect(cliError({ code: 1, stdout: "", stderr })).toBe("Error: GET http://127.0.0.1:7997/hosting/v1/sites");
+    expect(cliOutput({ code: 0, stdout: "saved to /h/.c0mpute/name\n", stderr })).toBe("saved to /h/.c0mpute/name\nError: GET http://127.0.0.1:7997/hosting/v1/sites");
   });
 
   test("gateway url from the bind address", () => {

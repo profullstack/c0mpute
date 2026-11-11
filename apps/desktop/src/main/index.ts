@@ -13,7 +13,7 @@ import { basename, join } from "node:path";
 import { readCreds, api, complete, models, chatJsonPath, type Me } from "./account";
 import { AgentSession, type AgentEvent, type Decision } from "./agent";
 import { buildTools } from "./agent-tools";
-import { Cli, locateCli, onPath, planShim, shimScript } from "./cli";
+import { Cli, cliOutput, locateCli, onPath, planShim, shimScript } from "./cli";
 import { matchMediaPoll, pollJob, type MediaJob } from "./jobs";
 import { McpManager } from "./mcp-client";
 import {
@@ -437,7 +437,8 @@ const handlers: Record<string, Handler> = {
     return { storage, held: sites ? sites.sites.length : null };
   },
 
-  "hosting:mySites": async () => nodeMgr.mySites(lastStatus ?? (await nodeMgr.status())),
+  // null (not an error) when the local gateway is down: the worker is stopped.
+  "hosting:mySites": async () => nodeMgr.mySites(lastStatus ?? (await nodeMgr.status())).catch(() => null),
   "hosting:jobs": () => hosting.list(),
   "hosting:pickDir": async () => {
     const r = await dialog.showOpenDialog(win!, { properties: ["openDirectory"] });
@@ -472,7 +473,7 @@ const handlers: Record<string, Handler> = {
   "account:logout": async () => {
     const r = await cli.run(["chat", "logout"]);
     chatView?.webContents.reload();
-    return (r.stdout + r.stderr).trim();
+    return cliOutput(r);
   },
   "account:nodes": () => api("/api/v1/hosting/nodes"),
   "account:pushes": () => api("/api/v1/hosting/pushes"),

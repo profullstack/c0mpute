@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { isLogLine, stripAnsi } from "./progress";
 
 export const EXE = process.platform === "win32" ? "c0mpute.exe" : "c0mpute";
 
@@ -102,9 +103,23 @@ export class Cli {
 
   async json<T>(args: string[], timeoutMs = 30_000): Promise<T> {
     const r = await this.run(args, { timeoutMs });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `c0mpute ${args.join(" ")} exited ${r.code}`);
+    if (r.code !== 0) throw new Error(cliError(r) || `c0mpute ${args.join(" ")} exited ${r.code}`);
     return parseJsonOutput<T>(r.stdout);
   }
+}
+
+/** What a failed CLI run said, without colour codes or tracing log lines. */
+export function cliError(r: RunResult): string {
+  return stripAnsi(r.stderr || r.stdout)
+    .split(/\r?\n/)
+    .filter((l) => l.trim() && !isLogLine(l))
+    .join("\n")
+    .trim();
+}
+
+/** Everything a CLI run printed, minus colour codes and tracing log lines. */
+export function cliOutput(r: RunResult): string {
+  return cliError({ ...r, stderr: `${r.stdout}\n${r.stderr}`, stdout: "" });
 }
 
 /** The JSON object in CLI stdout (tolerates log lines printed before it). */

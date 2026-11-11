@@ -6,7 +6,7 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Cli } from "./cli";
+import { cliError, cliOutput, type Cli } from "./cli";
 import { isLogLine, LineSplitter, parseProgressLine, parsePublishSummary, type PublishProgress } from "./progress";
 import { applyNodeSettings, checkConfigText, readNodeSettings, type NodeSettings } from "./toml-edit";
 
@@ -79,45 +79,45 @@ export class NodeManager {
 
   async start(o: Parameters<typeof workerStartArgs>[0]) {
     const r = await this.cli.run(workerStartArgs(o), { timeoutMs: 120_000 });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `worker start exited ${r.code}`);
-    return (r.stdout + r.stderr).trim();
+    if (r.code !== 0) throw new Error(cliError(r) || `worker start exited ${r.code}`);
+    return cliOutput(r);
   }
 
   async stop() {
     const r = await this.cli.run(["worker", "stop"], { timeoutMs: 60_000 });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return (r.stdout + r.stderr).trim();
+    if (r.code !== 0) throw new Error(cliError(r));
+    return cliOutput(r);
   }
 
   async installService() {
     if (process.platform !== "linux") throw new Error("running as a service is systemd-only (Linux) for now");
     const r = await this.cli.run(["worker", "install"], { timeoutMs: 120_000 });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return (r.stdout + r.stderr).trim();
+    if (r.code !== 0) throw new Error(cliError(r));
+    return cliOutput(r);
   }
 
   async setName(handle: string) {
     const args = handle ? ["name", handle] : ["name", "--clear"];
     const r = await this.cli.run(args);
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return r.stdout.trim();
+    if (r.code !== 0) throw new Error(cliError(r));
+    return cliOutput(r);
   }
 
   async setPrivate(on: boolean) {
     const r = await this.cli.run(["private", on ? "on" : "off"]);
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return r.stdout.trim();
+    if (r.code !== 0) throw new Error(cliError(r));
+    return cliOutput(r);
   }
 
   async checkUpdate() {
     const r = await this.cli.run(["update", "--check"], { timeoutMs: 60_000 });
-    return (r.stdout + r.stderr).trim();
+    return cliOutput(r);
   }
 
   async update() {
     const r = await this.cli.run(["update"], { timeoutMs: 300_000 });
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return (r.stdout + r.stderr).trim();
+    if (r.code !== 0) throw new Error(cliError(r));
+    return cliOutput(r);
   }
 
   logs(status: NodeStatus, lines = 300): string[] {
@@ -210,7 +210,8 @@ export class HostingJobs extends EventEmitter {
       job.lines.push(l);
       if (job.lines.length > 400) job.lines.splice(0, job.lines.length - 400);
       const p = parseProgressLine(l);
-      if (p && p.phase !== "info") job.progress = { ...p, overall: p.overall ?? job.progress.overall };
+      // `rm` has no progress to measure: only its text changes until it ends.
+      if (p && p.phase !== "info" && job.kind === "publish") job.progress = { ...p, overall: p.overall ?? job.progress.overall };
       else if (p) job.progress = { ...job.progress, text: p.text };
       this.emit("update", job);
     };
