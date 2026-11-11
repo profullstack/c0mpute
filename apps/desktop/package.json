@@ -1,0 +1,42 @@
+{
+  "name": "@c0mpute/desktop",
+  "productName": "c0mpute",
+  "desktopName": "c0mpute-desktop.desktop",
+  "version": "0.3.28",
+  "private": true,
+  "type": "module",
+  "description": "c0mpute desktop: chat, agent with your MCP servers and skills, node manager, hosting and tasks, with the c0mpute CLI bundled.",
+  "homepage": "https://c0mpute.com",
+  "author": {
+    "name": "Profullstack, Inc.",
+    "email": "hello@profullstack.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/profullstack/c0mpute.git"
+  },
+  "main": "dist/main/index.cjs",
+  "scripts": {
+    "setup": "node scripts/ensure-electron.mjs",
+    "build": "node scripts/build.mjs",
+    "cli": "node scripts/fetch-cli.mjs",
+    "start": "node scripts/ensure-electron.mjs && node scripts/build.mjs && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "package": "node scripts/ensure-electron.mjs && node scripts/build.mjs && electron-builder --config electron-builder.yml --publish never",
+    "package:linux": "node scripts/ensure-electron.mjs && node scripts/build.mjs && electron-builder --config electron-builder.yml --linux AppImage deb --publish never"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/bun": "latest",
+    "@types/node": "^26.6.5",
+    "electron": "^45.3.0",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.25.12",
+    "fflate": "^0.8.3",
+    "smol-toml": "^1.9.1",
+    "typescript": "^7.0.2",
+    "yaml": "^2.9.1"
+  }
+}

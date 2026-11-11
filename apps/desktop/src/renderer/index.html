@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>c0mpute</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <nav id="nav">
+        <div class="brand"><img src="icon.png" alt="" /> c0mpute</div>
+        <button data-tab="chat">Chat</button>
+        <button data-tab="agent">Agent</button>
+        <button data-tab="node">Node</button>
+        <button data-tab="hosting">Hosting</button>
+        <button data-tab="tasks">Tasks</button>
+        <button data-tab="mcp">MCP servers</button>
+        <button data-tab="skills">Skills</button>
+        <button data-tab="settings">Account</button>
+        <div class="spacer"></div>
+        <div id="nodepill" class="pill">node …</div>
+      </nav>
+      <main id="main"></main>
+    </div>
+    <div id="modal" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>

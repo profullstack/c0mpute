@@ -1,0 +1,6 @@
+{
+  "_note": "readm3 document reader: read_url (render any URL/doc as readable markdown). No key needed.",
+  "mcpServers": {
+    "readm3": { "type": "http", "url": "https://readm3.com/mcp" }
+  }
+}

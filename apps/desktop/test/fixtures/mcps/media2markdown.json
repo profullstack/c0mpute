@@ -1,0 +1,6 @@
+{
+  "_note": "media2markdown (local stdio, npm @profullstack/media2markdown-mcp): turn a link, video or book into a chaptered Markdown bundle on this machine. No key. Optional MEDIA2MARKDOWN_OUT sets the output directory.",
+  "mcpServers": {
+    "media2markdown": { "command": "npx", "args": ["-y", "@profullstack/media2markdown-mcp"] }
+  }
+}

@@ -1,0 +1,76 @@
+appId: com.c0mpute.desktop
+productName: c0mpute
+copyright: Copyright 2026 Profullstack, Inc.
+# Releases are attached by .github/workflows/release.yml (gh release upload),
+# never by electron-builder itself.
+publish: []
+# main, preload and renderer are esbuild bundles with every dependency inlined
+# (scripts/build.mjs), so there is nothing in node_modules to pack or rebuild.
+npmRebuild: false
+buildDependenciesFromSource: false
+directories:
+  buildResources: resources
+  output: release
+files:
+  - dist/**/*
+  - package.json
+  - '!dist/**/*.map'
+# The c0mpute CLI (the Rust binary), put in resources/cli by
+# scripts/fetch-cli.mjs. Shipped outside the asar so it can be exec'd; the
+# .deb links it as /usr/bin/c0mpute (resources/after-install.sh) and the app's
+# "Install the c0mpute command" writes a ~/.local/bin shim.
+extraResources:
+  - from: resources/cli
+    to: cli
+    filter:
+      - '**/*'
+artifactName: c0mpute-desktop-${version}-${os}-${arch}.${ext}
+linux:
+  executableName: c0mpute-desktop
+  target:
+    - AppImage
+    - deb
+  icon: resources/icon.png
+  syncDesktopName: true
+  category: Network
+  maintainer: Profullstack, Inc. <hello@profullstack.com>
+  synopsis: c0mpute chat, agent, node manager and hosting
+  description: The c0mpute desktop app with the c0mpute CLI bundled. Chat on c0mpute.com, an agent with your MCP servers and skills, run and configure your node, publish sites and follow your jobs.
+  desktop:
+    entry:
+      Name: c0mpute
+      Keywords: c0mpute;p2p;compute;ai;hosting;mcp;
+deb:
+  # Copied from diskpush (resources/after-install.sh explains the sandbox
+  # fix); ours also links the bundled CLI as /usr/bin/c0mpute.
+  afterInstall: resources/after-install.sh
+  afterRemove: resources/after-remove.sh
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libgbm1
+    - libasound2t64 | libasound2
+# Signing: unsigned until certificates exist. electron-builder signs and
+# notarizes from env (CSC_LINK / CSC_KEY_PASSWORD, APPLE_API_KEY / _ID /
+# _ISSUER) when they are set in the release workflow.
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+  icon: resources/icon.png
+win:
+  target:
+    - nsis
+  icon: resources/icon.png
+nsis:
+  shortcutName: c0mpute
+  uninstallDisplayName: c0mpute
+  createDesktopShortcut: always

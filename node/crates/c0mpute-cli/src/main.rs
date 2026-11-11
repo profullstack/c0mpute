@@ -186,7 +186,12 @@ enum Cmd {
     },
     /// This node at a glance: the worker, auto-update, bench, idle donation
     /// (same as `c0mpute worker status`).
-    Status,
+    Status {
+        /// One JSON object instead of the text report (for the desktop app
+        /// and scripts): version, worker pid, peer id, nickname, config.
+        #[arg(long)]
+        json: bool,
+    },
     /// Video generation (Wan 2.2) in the runner container.
     Video {
         #[command(subcommand)]
@@ -579,7 +584,11 @@ enum WorkerCmd {
         no_start: bool,
     },
     /// Show worker status.
-    Status,
+    Status {
+        /// One JSON object instead of the text report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -952,6 +961,12 @@ enum HostingCmd {
         /// Gateway to ask.
         #[arg(long, default_value = "http://127.0.0.1:7777")]
         gateway: String,
+        /// Only the sites this machine published (signed with its key).
+        #[arg(long)]
+        mine: bool,
+        /// Print the gateway's JSON (`{target_copies, sites: [...]}`).
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1760,7 +1775,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Stt { cmd } => run_stt(cmd).await,
         Cmd::Video { cmd } => run_video(cmd).await,
         Cmd::Crowdgpt { cmd } => crowdgpt::run(cmd, &config_path).await,
-        Cmd::Status => run_worker(WorkerCmd::Status, &config_path).await,
+        Cmd::Status { json } => run_worker(WorkerCmd::Status { json }, &config_path).await,
         Cmd::Speech { cmd } => {
             let cfg = Config::load_or_default(&config_path)?;
             start_auto_update_poller(cfg.update_auto);
@@ -2181,6 +2196,57 @@ fn ensure_current_version_benchmark() {
     }
 }
 
+/// `c0mpute status --json`: everything the text report says, as one object.
+/// Reads only: no identity is generated, no network is touched.
+fn worker_status_json(config_path: &std::path::Path) -> Result<serde_json::Value> {
+    let cfg = Config::load_or_default(config_path)?;
+    let pid = read_worker_pid();
+    let running = pid.is_some_and(pid_alive);
+    let (pid_file, log_file) = worker_runtime_paths();
+    let worker_peer = config::config_dir().and_then(|d| c0mpute_net::identity::existing_peer_id(&d));
+    let publisher_peer = config::data_dir()
+        .and_then(|d| c0mpute_net::identity::existing_peer_id(&d.join("buyer")));
+    let bench = c0mpute_bench::load(&bench_report_path()).ok().flatten().map(|r| {
+        serde_json::json!({
+            "score": r.score,
+            "quick": r.metadata.quick,
+            "cores": r.metadata.cores,
+            "at": r.metadata.start_time,
+            "version": r.metadata.version,
+        })
+    });
+    Ok(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "worker": {
+            "running": running,
+            "pid": pid,
+            "stale_pid": pid.is_some() && !running,
+            "pid_file": pid_file,
+            "log_file": log_file,
+        },
+        "peer_id": worker_peer.map(|p| p.to_string()),
+        // The key sites are signed with (`hosting ls --mine` matches on it).
+        "publisher": publisher_peer.as_ref().and_then(c0mpute_net::identity::ed25519_public_hex),
+        "name": c0mpute_core::capabilities::node_name(),
+        "private": cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+        "auto_update": cfg.update_auto,
+        "storage": cfg.storage_enabled(),
+        "hosting": cfg.hosting_enabled(),
+        "roles": cfg.roles,
+        "gateway_bind": cfg.gateway.bind,
+        "payments": {
+            "enabled": cfg.payments.enabled,
+            "rail": cfg.payments.rail,
+            "api_key_env": cfg.payments.coinpay.api_key_env,
+            "api_key_set": std::env::var(&cfg.payments.coinpay.api_key_env).is_ok_and(|v| !v.is_empty()),
+        },
+        "bench": bench,
+        "config_path": config_path,
+        "config_dir": config::config_dir(),
+        "data_dir": config::data_dir(),
+    }))
+}
+
 async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
         WorkerCmd::Register => {
@@ -2212,7 +2278,11 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             println!("  c0mpute worker start   # join the swarm");
             Ok(())
         }
-        WorkerCmd::Status => {
+        WorkerCmd::Status { json: true } => {
+            println!("{}", serde_json::to_string_pretty(&worker_status_json(config_path)?)?);
+            Ok(())
+        }
+        WorkerCmd::Status { json: false } => {
             println!("version: c0mpute {}", env!("CARGO_PKG_VERSION"));
             match read_worker_pid() {
                 Some(pid) if pid_alive(pid) => println!("worker: running (pid {pid})"),
@@ -4477,13 +4547,28 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             }
             Ok(())
         }
-        HostingCmd::Ls { gateway } => {
+        HostingCmd::Ls { gateway, mine, json } => {
             let url = format!("{}/hosting/v1/sites", gateway.trim_end_matches('/'));
-            let v: serde_json::Value = reqwest::get(&url)
+            let mut v: serde_json::Value = reqwest::get(&url)
                 .await
                 .with_context(|| format!("GET {url}"))?
                 .json()
                 .await?;
+            if mine {
+                // Read the key without creating one: no key, no sites.
+                let owner = config::data_dir()
+                    .and_then(|d| c0mpute_net::identity::existing_peer_id(&d.join("buyer")))
+                    .as_ref()
+                    .and_then(c0mpute_net::identity::ed25519_public_hex)
+                    .unwrap_or_else(|| "-".into());
+                if let Some(list) = v["sites"].as_array_mut() {
+                    list.retain(|s| s["owner"].as_str() == Some(owner.as_str()));
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
             let sites = v["sites"].as_array().cloned().unwrap_or_default();
             if sites.is_empty() {
                 println!("no sites known to {gateway} yet");
@@ -6745,5 +6830,39 @@ mod infernet_tests {
     fn node_id_is_one_path_segment() {
         assert_eq!(url_path_segment("provider-0f44326c"), "provider-0f44326c");
         assert_eq!(url_path_segment("../x?y"), "..%2Fx%3Fy");
+    }
+}
+
+#[cfg(test)]
+mod json_flag_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("c0mpute").chain(args.iter().copied())).expect("parses")
+    }
+
+    /// The desktop app (apps/desktop) shells out to these; they must keep parsing.
+    #[test]
+    fn desktop_app_command_lines_parse() {
+        assert!(matches!(parse(&["status", "--json"]).command, Some(Cmd::Status { json: true })));
+        assert!(matches!(
+            parse(&["worker", "status", "--json"]).command,
+            Some(Cmd::Worker { cmd: WorkerCmd::Status { json: true } })
+        ));
+        assert!(matches!(
+            parse(&["hosting", "ls", "--mine", "--json", "--gateway", "http://127.0.0.1:7999"]).command,
+            Some(Cmd::Hosting { cmd: HostingCmd::Ls { mine: true, json: true, .. } })
+        ));
+        assert!(matches!(parse(&["status"]).command, Some(Cmd::Status { json: false })));
+    }
+
+    #[test]
+    fn status_json_reads_without_creating_anything() {
+        let dir = std::env::temp_dir().join(format!("c0-status-json-{}", std::process::id()));
+        let v = worker_status_json(&dir.join("config.toml")).expect("status json");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert!(v["worker"]["running"].is_boolean());
+        assert!(v["payments"]["api_key_env"].is_string());
+        assert!(!dir.exists(), "status --json must not write a config");
     }
 }
