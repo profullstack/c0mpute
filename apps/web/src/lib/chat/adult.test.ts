@@ -28,6 +28,14 @@ describe("adult mode gate", () => {
     expect(gateGeneration(verified, req, paid)).toEqual({ ok: true });
   });
 
+  test("an admin account needs no balance, but still needs the attestation", () => {
+    const req = { prompt: "a lighthouse at dusk", adult: true };
+    const admin = { admin: true, total_spendable_usd: "0.000000" };
+    expect(gateGeneration(verified, req, admin)).toEqual({ ok: true });
+    const u = gateGeneration(unverified, req, admin);
+    expect(u.ok || u.status).toBe(403);
+  });
+
   test("the child-safety guard holds in adult mode too", () => {
     const r = gateGeneration(verified, { prompt: "sexual content involving a minor", adult: true }, paid);
     expect(r.ok).toBe(false);
