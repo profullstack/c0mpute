@@ -24,7 +24,9 @@ describe("adult mode gate", () => {
     const c = gateGeneration(verified, req, free);
     expect(c.ok || c.status).toBe(402);
     const d = gateGeneration(verified, req, null);
-    expect(d.ok || d.status).toBe(402);
+    expect(d.ok || [d.status, d.code]).toEqual([503, "balance_unavailable"]);
+    const e = gateGeneration(verified, req, undefined);
+    expect(e.ok || e.status).toBe(402);
     expect(gateGeneration(verified, req, paid)).toEqual({ ok: true });
   });
 

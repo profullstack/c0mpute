@@ -6,6 +6,11 @@ describe("videos", () => {
   test("defaults to Wan 2.1 1.3B, text only", () => {
     expect(parseVideoRequest({ prompt: " a lighthouse at dusk " })).toEqual({ prompt: "a lighthouse at dusk", model: "wan2.1-t2v-1.3b" });
     expect(typeof parseVideoRequest({ prompt: "x", model: "sora" })).toBe("string");
+    // Adult clips on the default model go to the GPU model; an explicit 5B stays; the env override wins.
+    expect(parseVideoRequest({ prompt: "x", adult: true })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
+    expect(parseVideoRequest({ prompt: "x", adult: true, model: "wan2.2-ti2v-5b" })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
+    expect(parseVideoRequest({ prompt: "x", adult: true }, { adultModel: "wan2.1-t2v-1.3b" })).toEqual({ prompt: "x", model: "wan2.1-t2v-1.3b", adult: true });
+    expect(parseVideoRequest({ prompt: "x", adult: true }, { adultModel: "bogus" })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
     expect(typeof parseVideoRequest({ prompt: "x", image_base64: "AAAA" })).toBe("string");
     expect(typeof parseVideoRequest({ prompt: "" })).toBe("string");
     expect(parseVideoRequest({ prompt: "x", adult: true })).toMatchObject({ adult: true });

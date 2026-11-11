@@ -622,8 +622,8 @@ impl VideoConfig {
 
 /// CPU text-to-speech provisioning.
 ///
-/// Kokoro is small enough — an int8 ONNX export of hexgrad/Kokoro-82M, about
-/// 115 MB of model plus voices, CPU-only — that every node can serve speech,
+/// Kokoro is small enough — the full-precision ONNX export of hexgrad/Kokoro-82M,
+/// about 355 MB of model plus voices, CPU-only — that every node can serve speech,
 /// so `auto_install` is on by default and a worker provisions it in the
 /// background on first start. Operators opt out with `c0mpute tts auto off`,
 /// `C0MPUTE_TTS_AUTO=0`, or this section.

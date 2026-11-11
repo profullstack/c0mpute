@@ -16,7 +16,7 @@ export const ATTESTATION = "I am 18 or older, adult content is legal where I am,
 
 export type AdultCaller = { id: string; adult_verified_at?: string | null } | null;
 
-export type Gate = { ok: true } | { ok: false; status: number; code: RefusalCode | "adult_needs_balance"; message: string };
+export type Gate = { ok: true } | { ok: false; status: number; code: RefusalCode | "adult_needs_balance" | "balance_unavailable"; message: string };
 
 const paid = (balance: Record<string, unknown> | null | undefined) => {
   // Infernet admins (INFERNET_ADMIN_USER_IDS) are unmetered: no payment needed.
@@ -36,6 +36,11 @@ export function gateGeneration(caller: AdultCaller, req: PolicyRequest, balance?
   };
   if (req.adult) {
     if (!caller?.adult_verified_at) return refuse("adult_not_enabled", 403);
+    // null means the balance could not be read (Infernet slow or down), not
+    // that it is empty: say so and let them retry, instead of a false 402.
+    if (balance === null) {
+      return { ok: false, status: 503, code: "balance_unavailable", message: "Couldn't read your compute balance just now. Try again in a minute." };
+    }
     if (!paid(balance)) {
       return { ok: false, status: 402, code: "adult_needs_balance", message: "Adult mode needs a paid compute balance (free-tier queries cannot use it)." };
     }

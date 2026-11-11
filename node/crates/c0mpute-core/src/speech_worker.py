@@ -61,6 +61,22 @@ def session_options():
     return options
 
 
+def kokoro_model(model_root: Path) -> Path:
+    """The full-precision Kokoro when it is installed, else the int8 build.
+
+    int8 sounds fuzzy and loses the top octave, and on ONNX Runtime CPU it is
+    not even faster; it stays only as the fallback for nodes mid-upgrade.
+    """
+    full = model_root / "kokoro-v1.0.onnx"
+    return full if full.is_file() else model_root / "kokoro-v1.0.int8.onnx"
+
+
+def default_whisper_model(root: Path) -> str:
+    """Whisper small when provisioned (far fewer word errors than base), else base."""
+    cache = root / "models" / "whisper"
+    return "small" if any(cache.glob("models--Systran--faster-whisper-small*")) else "base"
+
+
 def tts(root: Path, output: Path, request: dict) -> None:
     text = request["text"]
     engine = request["engine"]
@@ -95,7 +111,7 @@ def tts(root: Path, output: Path, request: dict) -> None:
         )
 
         model_root = root / "models" / "kokoro"
-        kokoro = Kokoro(str(model_root / "kokoro-v1.0.int8.onnx"), str(model_root / "voices-v1.0.bin"))
+        kokoro = Kokoro(str(kokoro_model(model_root)), str(model_root / "voices-v1.0.bin"))
         try:
             audio, sample_rate = kokoro.create(
                 text, voice=voice, speed=float(request.get("speed", 1.0)),
@@ -128,14 +144,14 @@ def tts(root: Path, output: Path, request: dict) -> None:
 def stt(root: Path, audio: Path, output: Path, request: dict) -> None:
     from faster_whisper import WhisperModel
 
-    model_name = request.get("model", "base")
+    model_name = request.get("model") or default_whisper_model(root)
     model = WhisperModel(
         model_name, device="cpu", compute_type="int8",
         cpu_threads=cpu_thread_count(), num_workers=1,
         download_root=str(root / "models" / "whisper"),
     )
     segments, info = model.transcribe(
-        str(audio), beam_size=1,
+        str(audio), beam_size=int(request.get("beam_size", 5)),
         language=request.get("language") or None,
         vad_filter=True,
     )
@@ -165,11 +181,39 @@ def load_kokoro(root: Path):
     )
     model_root = root / "models" / "kokoro"
     return Kokoro(
-        str(model_root / "kokoro-v1.0.int8.onnx"), str(model_root / "voices-v1.0.bin")
+        str(kokoro_model(model_root)), str(model_root / "voices-v1.0.bin")
     )
 
 
-def serve(root: Path) -> None:
+class PocketSpeaker:
+    """Pocket TTS held in memory, with each voice's prompt state cached.
+
+    Pocket is the default agent voice (2026-11-11): far more natural prosody
+    than Kokoro (Anthony: "its still computerish. we need to be more human"),
+    and warm it runs about 1x realtime on 8 CPU threads.
+    """
+
+    def __init__(self) -> None:
+        import torch
+        from pocket_tts import TTSModel
+
+        torch.set_num_threads(max(1, int(os.environ.get("OMP_NUM_THREADS", str(cpu_thread_count())))))
+        self.model = TTSModel.load_model(language="english_2m_2026-10")
+        self.states: dict = {}
+
+    def create(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us"):
+        import numpy as np
+
+        if lang.split("-", 1)[0] != "en":
+            raise ValueError("Pocket TTS currently supports English voice jobs only")
+        state = self.states.get(voice)
+        if state is None:
+            state = self.states[voice] = self.model.get_state_for_audio_prompt(voice)
+        audio = self.model.generate_audio(state, text).detach().cpu().numpy().reshape(-1)
+        return np.clip(audio, -1.0, 1.0).astype(np.float32), self.model.sample_rate
+
+
+def serve(root: Path, engine: str = "kokoro") -> None:
     """Answer utterances from a model held in memory, one JSON line each.
 
     Protocol, so a caller never has to guess how far along we are:
@@ -185,9 +229,13 @@ def serve(root: Path) -> None:
     import soundfile as sf
 
     started = time.monotonic()
-    kokoro = load_kokoro(root)
+    try:
+        kokoro = PocketSpeaker() if engine == "pocket" else load_kokoro(root)
+    except Exception as error:  # noqa: BLE001 - tell the caller why, then stop
+        print(json.dumps({"ready": False, "engine": engine, "error": f"{error}"[:300]}), flush=True)
+        return
     load_ms = int((time.monotonic() - started) * 1000)
-    print(json.dumps({"ready": True, "engine": "kokoro", "load_ms": load_ms}), flush=True)
+    print(json.dumps({"ready": True, "engine": engine, "load_ms": load_ms}), flush=True)
 
     for raw in sys.stdin:
         line = raw.strip()
@@ -206,7 +254,7 @@ def serve(root: Path) -> None:
             output = Path(request["out"])
             audio, sample_rate = kokoro.create(
                 request["text"],
-                voice=request.get("voice", "am_michael"),
+                voice=request.get("voice", "bill_boerst" if engine == "pocket" else "am_michael"),
                 speed=float(request.get("speed", 1.0)),
                 lang=str(request.get("locale", "en-US")).lower(),
             )
@@ -229,7 +277,8 @@ def serve(root: Path) -> None:
             )
 
     try:
-        kokoro.voices.close()
+        if engine != "pocket":
+            kokoro.voices.close()
     except Exception:  # noqa: BLE001 - we are on the way out anyway
         pass
 
@@ -242,7 +291,7 @@ def main() -> None:
     elif action == "stt":
         stt(root, Path(sys.argv[3]), Path(sys.argv[4]), json.load(sys.stdin))
     elif action == "serve":
-        serve(root)
+        serve(root, sys.argv[3] if len(sys.argv) > 3 else "kokoro")
     else:
         raise ValueError("unknown speech action")
 

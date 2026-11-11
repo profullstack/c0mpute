@@ -7,7 +7,7 @@
 [module]
 id          = "coinpay"
 name        = "CoinPay — DID, payments, escrow, reputation"
-version     = "0.3.38"
+version     = "0.3.39"
 kind        = "service"
 category    = "applications"
 status      = "available"

@@ -14,9 +14,17 @@ use tracing::warn;
 const WORKER: &str = include_str!("speech_worker.py");
 /// The same worker source, for the warm-session path in `speech_session`.
 pub(crate) const WORKER_SOURCE: &str = WORKER;
-const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.int8.onnx";
+/// Full-precision Kokoro. The int8 build we shipped first is audibly worse
+/// (fuzzy, ~7 dB less air above 7 kHz on am_michael; Anthony 2026-11-11: "not
+/// crisp and clean like it should be") and on ONNX Runtime CPU it is also
+/// SLOWER (rtf 4.0-4.3 vs 2.3-2.6 measured side by side), so it bought nothing.
+pub(crate) const KOKORO_MODEL_FILE: &str = "kokoro-v1.0.onnx";
+const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.onnx";
 const KOKORO_MODEL_SHA256: &str =
-    "ae315a79b623f244700e4afb9246c46a26066782e049ba174bf3ba433970ee9c";
+    "beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a";
+/// What older nodes provisioned. Still served (the worker prefers the full
+/// model when both exist) so a node mid-upgrade never drops out of TTS.
+pub(crate) const KOKORO_LEGACY_MODEL_FILE: &str = "kokoro-v1.0.int8.onnx";
 const KOKORO_VOICES_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin";
 const KOKORO_VOICES_SHA256: &str =
     "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d";
@@ -149,6 +157,17 @@ pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Which engine serves `voice`. Voice ids are unique across engines.
+pub fn engine_for_voice(voice: &str) -> &'static str {
+    if POCKET_VOICES.contains(&voice) {
+        "pocket"
+    } else if PIPER_VOICES.contains(&voice) {
+        "piper"
+    } else {
+        "kokoro"
+    }
+}
+
 pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
     let root = speech_root();
     // Kokoro may run from its own venv, so it is the one engine whose
@@ -161,7 +180,8 @@ pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
             return false;
         };
         return python.is_file()
-            && root.join("models/kokoro/kokoro-v1.0.int8.onnx").is_file()
+            && (kokoro_full_model_present()
+                || root.join("models/kokoro").join(KOKORO_LEGACY_MODEL_FILE).is_file())
             && root.join("models/kokoro/voices-v1.0.bin").is_file();
     }
     if !python_path().is_file() {
@@ -222,6 +242,15 @@ fn kokoro_ready() -> bool {
     KOKORO_VOICES
         .iter()
         .all(|voice| tts_voice_available("kokoro", voice))
+        && kokoro_full_model_present()
+}
+
+/// True once the full-precision model is on disk (see [`KOKORO_MODEL_FILE`]).
+pub fn kokoro_full_model_present() -> bool {
+    speech_root()
+        .join("models/kokoro")
+        .join(KOKORO_MODEL_FILE)
+        .is_file()
 }
 
 fn pocket_ready() -> bool {
@@ -261,7 +290,7 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
             pip_install_with(&python, &["kokoro-onnx==0.6.1", "soundfile==0.13.1"]).await?;
             download_verified(
                 KOKORO_MODEL_URL,
-                &root.join("models/kokoro/kokoro-v1.0.int8.onnx"),
+                &root.join("models/kokoro").join(KOKORO_MODEL_FILE),
                 KOKORO_MODEL_SHA256,
             )
             .await?;
@@ -275,7 +304,7 @@ pub async fn setup_tts(engine: &str) -> Result<()> {
             // to re-derive it (see `kokoro_python_installed`).
             tokio::fs::write(
                 root.join(".kokoro-ready"),
-                format!("kokoro-onnx 0.6.1 int8\npython={}\n", python.display()),
+                format!("kokoro-onnx 0.6.1 fp32\npython={}\n", python.display()),
             )
             .await?;
             Ok(())
@@ -331,25 +360,39 @@ async fn pip_install_pocket() -> Result<()> {
 
 pub async fn setup_stt() -> Result<()> {
     if stt_ready() {
+        // Nodes provisioned before v0.3.39 have Whisper base. Upgrade them to
+        // small, best effort: a failed download leaves base serving (the
+        // worker picks small only once it is on disk) and never blocks start.
+        let marker = std::fs::read_to_string(speech_root().join(".stt-ready")).unwrap_or_default();
+        if !marker.contains(" small ") {
+            if let Err(error) = install_whisper_small().await {
+                warn!(err = %error, "could not upgrade STT to Whisper small; still serving base");
+            }
+        }
         return Ok(());
     }
     ensure_venv().await?;
     // faster-whisper 1.2.1 still passes `metadata_errors` to av.open;
     // PyAV 19 removed that keyword, so keep the runtime on the compatible API.
     pip_install(&["faster-whisper==1.2.1", "av<19"]).await?;
+    install_whisper_small().await
+}
+
+/// Download Whisper small into the speech root and record it in `.stt-ready`.
+async fn install_whisper_small() -> Result<()> {
     let root = speech_root();
     tokio::fs::create_dir_all(root.join("models/whisper")).await?;
-    let code = "from faster_whisper import WhisperModel; import sys; WhisperModel('base', device='cpu', compute_type='int8', download_root=sys.argv[1])";
+    let code = "from faster_whisper import WhisperModel; import sys; WhisperModel('small', device='cpu', compute_type='int8', download_root=sys.argv[1])";
     let mut command = Command::new(python_path());
     command.arg("-c").arg(code).arg(root.join("models/whisper"));
     run_checked(
         command,
-        "download the multilingual faster-whisper base model",
+        "download the multilingual faster-whisper small model",
     )
     .await?;
     tokio::fs::write(
         root.join(".stt-ready"),
-        b"faster-whisper 1.2.1 base multilingual\n",
+        b"faster-whisper 1.2.1 small multilingual\n",
     )
     .await?;
     Ok(())
@@ -644,12 +687,15 @@ pub(crate) fn free_bytes_for(root: &Path) -> u64 {
 ///
 /// Returns true when Kokoro is ready to serve.
 pub async fn ensure_kokoro(config: &crate::config::SpeechConfig) -> bool {
-    if available_tts_engines().contains(&"kokoro") {
+    let serving = available_tts_engines().contains(&"kokoro");
+    if serving && kokoro_full_model_present() {
         return true;
     }
+    // A node that still has only the int8 model keeps serving it; the upgrade
+    // below is best effort and never takes TTS away.
     if !config.auto_install_enabled() {
         tracing::debug!("kokoro auto-provisioning is off; not installing");
-        return false;
+        return serving;
     }
     let free = free_bytes_for_speech_root();
     let required = config.min_free_disk_gb.saturating_mul(1024 * 1024 * 1024);
@@ -659,11 +705,11 @@ pub async fn ensure_kokoro(config: &crate::config::SpeechConfig) -> bool {
             required_mb = required / 1024 / 1024,
             "skipping kokoro install: not enough free disk"
         );
-        return false;
+        return serving;
     }
     if in_install_backoff() {
         tracing::debug!("kokoro install failed recently; waiting out the backoff");
-        return false;
+        return serving;
     }
     tracing::info!("installing Kokoro CPU voices so this node can serve tts.synthesize");
     match setup_tts("kokoro").await {
@@ -680,10 +726,11 @@ pub async fn ensure_kokoro(config: &crate::config::SpeechConfig) -> bool {
             let _ = tokio::fs::write(retry_marker(), retry_after.to_string()).await;
             warn!(
                 err = %error,
-                "could not install Kokoro; this node will not serve TTS. \
+                serving,
+                "could not install the full Kokoro model; serving whatever is already installed. \
                  Turn provisioning off with `c0mpute tts auto off`."
             );
-            false
+            serving
         }
     }
 }
