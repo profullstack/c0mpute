@@ -2,7 +2,7 @@
 // tools (load_skill, read_skill_file, run_skill_script) and the opt-in shell.
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentTool } from "./agent";
 import type { McpManager } from "./mcp-client";
@@ -102,9 +102,22 @@ export function buildTools(opts: { mcp: McpManager; skills: Skill[]; settings: S
       run: async (a) => {
         const s = find(a.name);
         const p = resolveInside(s.dir, String(a.path ?? ""));
-        if (!p || !existsSync(p) || !statSync(p).isFile()) throw new Error(`no file ${a.path} in ${s.name}`);
-        if (statSync(p).size > 512 * 1024) throw new Error("file is larger than 512 KiB");
-        return readFileSync(p, "utf8");
+        if (!p) throw new Error(`no file ${a.path} in ${s.name}`);
+        // Open once and check the open file, so what is checked is what is read.
+        let fd: number;
+        try {
+          fd = openSync(p, "r");
+        } catch {
+          throw new Error(`no file ${a.path} in ${s.name}`);
+        }
+        try {
+          const st = fstatSync(fd);
+          if (!st.isFile()) throw new Error(`no file ${a.path} in ${s.name}`);
+          if (st.size > 512 * 1024) throw new Error("file is larger than 512 KiB");
+          return readFileSync(fd, "utf8");
+        } finally {
+          closeSync(fd);
+        }
       },
     });
     tools.push({

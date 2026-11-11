@@ -4,7 +4,7 @@
 
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { cliError, cliOutput, type Cli } from "./cli";
 import { isLogLine, LineSplitter, parseProgressLine, parsePublishSummary, type PublishProgress } from "./progress";
@@ -55,11 +55,15 @@ export function workerStartArgs(o: { roles?: string; noStorage?: boolean; noHost
 
 /** Last `bytes` of a file as lines. */
 export function tailFile(path: string, bytes = 64 * 1024): string[] {
-  if (!existsSync(path)) return [];
-  const size = statSync(path).size;
-  const start = Math.max(0, size - bytes);
-  const fd = openSync(path, "r");
+  let fd: number;
   try {
+    fd = openSync(path, "r");
+  } catch {
+    return [];
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
     const buf = Buffer.alloc(size - start);
     readSync(fd, buf, 0, buf.length, start);
     const lines = buf.toString("utf8").split(/\r?\n/);
