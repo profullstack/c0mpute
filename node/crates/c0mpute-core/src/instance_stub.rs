@@ -27,3 +27,10 @@ pub fn claim(_identity_dir: &Path) -> Result<()> {
 }
 
 pub fn spawn_runtime_heartbeat(_identity_dir: PathBuf) {}
+
+/// Buyer identity directory (see `instance.rs`): no flock here, so every
+/// buyer process shares `base`, as before #332.
+pub fn buyer_identity_dir(base: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(base)?;
+    Ok(base.to_path_buf())
+}
