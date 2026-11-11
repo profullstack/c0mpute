@@ -3,7 +3,10 @@ import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/v1/videos/<id>: 202 while queued or rendering, 200 { status: "done", video } when ready. */
+/**
+ * GET /api/v1/videos/<id>: 202 while queued or rendering, 200 { status: "done", video } when ready.
+ * `error.retry: true` marks a transient answer (the network restarting): the job is not lost, poll again.
+ */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await currentUser(req);
   if (!user) return unauthorized();
@@ -13,15 +16,15 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   try {
     upstream = await infernet(`/api/chat/video/${id}`, { signal: AbortSignal.timeout(20_000) });
   } catch (e) {
-    return json({ error: { message: `network unreachable: ${e instanceof Error ? e.message : e}`, code: 502 } }, 502);
+    return json({ error: { message: `network unreachable: ${e instanceof Error ? e.message : e}`, code: 502, retry: true } }, 502);
   }
   const body = (await upstream.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!body) return json({ error: { message: "the c0mpute network is restarting; try again in a minute", code: 503 } }, 503);
+  if (!body) return json({ error: { message: "the c0mpute network is restarting; try again in a minute", code: 503, retry: true } }, 503);
   const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : undefined);
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   if (upstream.status === 202) {
     return json(
-      { id, status: "pending", seconds: num(body.seconds) ?? null, stage: str(body.stage), detail: str(body.detail), queue_position: num(body.queue_position), eta_s: num(body.eta_s) },
+      { id, status: "pending", seconds: num(body.seconds) ?? null, stage: str(body.stage), detail: str(body.detail), queue_position: num(body.queue_position), eta_s: num(body.eta_s), worker: str(body.worker ?? body.worker_peer_id) },
       202,
     );
   }
