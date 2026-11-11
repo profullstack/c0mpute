@@ -17,7 +17,8 @@
 //! ```toml
 //! [x402]
 //! enabled = true
-//! pay_to = "0x..."                      # your EVM wallet (USDC on Base/Polygon/Ethereum)
+//! # pay_to: optional. Empty = read from your CoinPay account (the key's
+//! # business USDC wallet, GET /api/x402/pay-to, refreshed hourly).
 //! api_key_env = "C0MPUTE_X402_COINPAY_KEY"  # env var holding a CoinPay key (x402 scope) gitleaks:allow
 //! price_cents = 100                     # per day
 //! ```
@@ -49,7 +50,8 @@ pub struct X402Config {
     /// Charge training crawlers for what this gateway serves. Default false.
     #[serde(default)]
     pub enabled: bool,
-    /// Your EVM address. One address takes USDC on Base, Polygon and Ethereum.
+    /// Override the receiving EVM address. Empty (default): the wallet comes
+    /// from the CoinPay account the key belongs to, re-read every hour.
     #[serde(default)]
     pub pay_to: String,
     /// Environment variable holding a CoinPay API key that may verify and
@@ -139,17 +141,68 @@ impl Default for X402Config {
 const OPEN_PATHS: &[&str] = &["/healthz", "/hosting/v1/", "/p/"];
 
 /// The gate in front of hosted files.
+///
+/// The x402 `Gateway` is built once the wallet is known. With `pay_to` in
+/// config that is at once; without it, the node asks CoinPay
+/// (`GET /api/x402/pay-to`, the key's own business wallets) in the
+/// background and refreshes hourly, so changing the receiving wallet in the
+/// CoinPay account reaches every node. Until it is known, nothing is charged.
 pub struct HostingGate {
-    gw: Gateway,
+    gw: std::sync::RwLock<Option<Arc<Gateway>>>,
     exclude_sites: Vec<String>,
     exclude_hosts: Vec<String>,
     pub gate_storage: bool,
     pub path: String,
 }
 
+/// Everything needed to (re)build the x402 gateway for a given wallet.
+#[derive(Clone)]
+struct GateParts {
+    x: X402Config,
+    key: String,
+    secret: String,
+    site_url: String,
+    sales: PathBuf,
+}
+
+impl GateParts {
+    fn build(&self, pay_to: &str) -> Option<Gateway> {
+        let sales = self.sales.clone();
+        let opts = Options {
+            site_url: self.site_url.clone(),
+            site_name: Some(format!("c0mpute gateway {}", host_of(&self.site_url))),
+            coinpay_api_key: self.key.clone(),
+            coinpay_base_url: self.x.coinpay_url.clone(),
+            pay_to: pay_to.to_string(),
+            price_cents: self.x.price_cents,
+            pass_minutes: self.x.pass_minutes,
+            max_days: self.x.max_days,
+            path: self.x.path.clone(),
+            open_paths: open_paths(self.x.gate_storage),
+            charge_spoofed_browsers: self.x.charge_spoofed_browsers,
+            secret: self.secret.clone(),
+            contact: self.x.contact.clone(),
+            on_sale: Some(Arc::new(move |s: Sale| record_sale(&sales, &s))),
+            transport: Some(Box::new(ReqwestTransport::new())),
+            ..Options::default()
+        };
+        match Gateway::new(opts) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                warn!(err = %e, "x402: gateway config rejected");
+                None
+            }
+        }
+    }
+}
+
+/// How often the wallet is re-read from CoinPay, and the retry after a miss.
+const PAY_TO_REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+const PAY_TO_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl HostingGate {
-    /// Build the gate from config, or None when it is off or incomplete
-    /// (incomplete is logged: a gate that cannot settle would only annoy).
+    /// Build the gate from config, or None when it is off or has no CoinPay
+    /// key (logged: a gate that cannot settle would only annoy).
     pub fn from_config(cfg: &crate::config::Config) -> Option<Arc<HostingGate>> {
         let x = &cfg.x402;
         if !x.enabled {
@@ -159,12 +212,9 @@ impl HostingGate {
             warn!("x402: private mode serves nothing public; gate off");
             return None;
         }
-        let key = std::env::var(&x.api_key_env).unwrap_or_default();
-        if key.trim().is_empty() || x.pay_to.trim().is_empty() {
-            warn!(
-                env = %x.api_key_env,
-                "x402: enabled but pay_to or the CoinPay key is missing; gate off"
-            );
+        let key = std::env::var(&x.api_key_env).unwrap_or_default().trim().to_string();
+        if key.is_empty() {
+            warn!(env = %x.api_key_env, "x402: enabled but the CoinPay key is missing; gate off");
             return None;
         }
         let dir = crate::config::data_dir()
@@ -182,46 +232,82 @@ impl HostingGate {
             .clone()
             .or_else(|| cfg.gateway.announce.clone())
             .unwrap_or_else(|| format!("http://{}", cfg.gateway.bind));
-        let sales = dir.join("sales.jsonl");
-        let opts = Options {
-            site_url: site_url.clone(),
-            site_name: Some(format!("c0mpute gateway {}", host_of(&site_url))),
-            coinpay_api_key: key.trim().to_string(),
-            coinpay_base_url: x.coinpay_url.clone(),
-            pay_to: x.pay_to.trim().to_string(),
-            price_cents: x.price_cents,
-            pass_minutes: x.pass_minutes,
-            max_days: x.max_days,
-            path: x.path.clone(),
-            open_paths: open_paths(x.gate_storage),
-            charge_spoofed_browsers: x.charge_spoofed_browsers,
+        let parts = GateParts {
+            x: x.clone(),
+            key,
             secret,
-            contact: x.contact.clone(),
-            on_sale: Some(Arc::new(move |s: Sale| record_sale(&sales, &s))),
-            transport: Some(Box::new(ReqwestTransport::new())),
-            ..Options::default()
+            site_url,
+            sales: dir.join("sales.jsonl"),
         };
-        let gw = match Gateway::new(opts) {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(err = %e, "x402: gateway config rejected; gate off");
-                return None;
-            }
-        };
-        info!(
-            site_url = %site_url,
-            pay_to = %x.pay_to,
-            price_cents = x.price_cents,
-            storage = x.gate_storage,
-            "x402: charging training crawlers for hosted files"
-        );
-        Some(Arc::new(HostingGate {
-            gw,
+        let gate = Arc::new(HostingGate::empty(x));
+        let fixed = x.pay_to.trim().to_string();
+        if !fixed.is_empty() {
+            gate.install(&parts, &fixed, "config");
+        } else if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            // Never await CoinPay in boot: fetch in the background.
+            let g = gate.clone();
+            rt.spawn(async move { g.follow_coinpay(parts).await });
+        } else {
+            warn!("x402: no pay_to and no runtime to ask CoinPay; gate off");
+            return None;
+        }
+        Some(gate)
+    }
+
+    fn empty(x: &X402Config) -> HostingGate {
+        HostingGate {
+            gw: std::sync::RwLock::new(None),
             exclude_sites: x.exclude_sites.clone(),
             exclude_hosts: x.exclude_hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
             gate_storage: x.gate_storage,
             path: x.path.clone(),
-        }))
+        }
+    }
+
+    /// The gate with a ready gateway (tests, fixed wallets).
+    pub fn with_gateway(x: &X402Config, gw: Gateway) -> HostingGate {
+        let g = HostingGate::empty(x);
+        *g.gw.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(gw));
+        g
+    }
+
+    fn current(&self) -> Option<Arc<Gateway>> {
+        self.gw.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn install(&self, parts: &GateParts, pay_to: &str, source: &str) {
+        if let Some(gw) = parts.build(pay_to) {
+            *self.gw.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(gw));
+            info!(
+                site_url = %parts.site_url,
+                pay_to = %pay_to,
+                source,
+                price_cents = parts.x.price_cents,
+                storage = parts.x.gate_storage,
+                "x402: charging training crawlers for hosted files"
+            );
+        }
+    }
+
+    /// Keep the wallet in step with the CoinPay account.
+    async fn follow_coinpay(self: Arc<Self>, parts: GateParts) {
+        let mut current = String::new();
+        loop {
+            let wait = match fetch_pay_to(&parts.x.coinpay_url, &parts.key).await {
+                Ok(addr) => {
+                    if addr != current {
+                        self.install(&parts, &addr, "coinpay");
+                        current = addr;
+                    }
+                    PAY_TO_REFRESH
+                }
+                Err(e) => {
+                    warn!(err = %e, "x402: could not read the wallet from CoinPay; retrying");
+                    if current.is_empty() { PAY_TO_RETRY } else { PAY_TO_REFRESH }
+                }
+            };
+            tokio::time::sleep(wait).await;
+        }
     }
 
     /// Requests this operator chose never to charge for.
@@ -250,15 +336,47 @@ impl HostingGate {
 
     /// The gate on parts. None = carry on to the file.
     pub fn check(&self, path: &str, query: Option<&str>, h: &HeaderMap) -> Option<Response<String>> {
+        let gw = self.current()?;
         if path != self.path && self.excluded(path, h) {
             return None;
         }
-        self.gw.handle_parts(path, query, h)
+        gw.handle_parts(path, query, h)
     }
 
     fn needs_io(&self, h: &HeaderMap) -> bool {
-        self.gw.needs_io(h)
+        self.current().map(|g| g.needs_io(h)).unwrap_or(false)
     }
+}
+
+/// `GET <coinpay>/api/x402/pay-to`: the key's own business USDC wallet.
+async fn fetch_pay_to(coinpay_url: &str, key: &str) -> Result<String, String> {
+    let url = format!("{}/api/x402/pay-to", coinpay_url.trim_end_matches('/'));
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent(concat!("c0mpute/", env!("CARGO_PKG_VERSION"), " x402"))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(&url)
+        .header("x-api-key", key)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "{status}: {}",
+            body.get("error").and_then(|v| v.as_str()).unwrap_or("")
+        ));
+    }
+    pay_to_from(&body).ok_or_else(|| "no USDC wallet on the CoinPay business".into())
+}
+
+/// The address out of a pay-to answer; an EVM address only.
+fn pay_to_from(body: &serde_json::Value) -> Option<String> {
+    let a = body.get("pay_to")?.as_str()?.trim();
+    (a.len() == 42 && a.starts_with("0x") && a[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| a.to_string())
 }
 
 fn open_paths(gate_storage: bool) -> Vec<String> {
@@ -433,13 +551,45 @@ mod tests {
             ..Options::default()
         })
         .unwrap();
-        HostingGate {
-            gw,
-            exclude_sites: cfg.exclude_sites,
-            exclude_hosts: cfg.exclude_hosts,
-            gate_storage: cfg.gate_storage,
-            path: cfg.path,
-        }
+        HostingGate::with_gateway(&cfg, gw)
+    }
+
+    #[test]
+    fn nothing_is_charged_before_the_wallet_is_known() {
+        let g = HostingGate::empty(&X402Config::default());
+        assert!(g.check(SITE, None, &ua(GPTBOT)).is_none());
+        assert!(g.check("/_x402/crawl", None, &ua(GPTBOT)).is_none());
+        assert!(!g.needs_io(&ua(GPTBOT)));
+    }
+
+    #[test]
+    fn pay_to_answer_is_parsed_strictly() {
+        let ok = serde_json::json!({"pay_to": "0xEBcEB7b0E8BbC411E7c0AFF3bebc4e5EF54b9702", "networks": {}});
+        assert_eq!(pay_to_from(&ok).as_deref(), Some("0xEBcEB7b0E8BbC411E7c0AFF3bebc4e5EF54b9702"));
+        assert!(pay_to_from(&serde_json::json!({"pay_to": null})).is_none());
+        assert!(pay_to_from(&serde_json::json!({"pay_to": "E8YXaJ3SJyVD1XnzPtiS9RxeTyeHDvZPrrPPQc2eMZ5h"})).is_none());
+        assert!(pay_to_from(&serde_json::json!({"pay_to": "0x123"})).is_none());
+        assert!(pay_to_from(&serde_json::json!({})).is_none());
+    }
+
+    #[tokio::test]
+    async fn fixed_pay_to_needs_no_coinpay_call() {
+        let x = X402Config {
+            pay_to: "0x0000000000000000000000000000000000000002".into(),
+            ..X402Config::default()
+        };
+        let parts = GateParts {
+            x: x.clone(),
+            key: "k".into(),
+            secret: "s".repeat(64),
+            site_url: "http://gw.example:7777".into(),
+            sales: std::env::temp_dir().join("x402-test-sales.jsonl"),
+        };
+        let g = HostingGate::empty(&x);
+        g.install(&parts, &x.pay_to, "config");
+        let r = g.check(SITE, None, &ua(GPTBOT)).expect("gated");
+        assert_eq!(r.status(), 402);
+        assert!(r.body().contains("0x0000000000000000000000000000000000000002"));
     }
 
     fn ua(s: &str) -> HeaderMap {

@@ -29,7 +29,7 @@ without knowing it is talking to a c0mpute node.
 # ~/.config/c0mpute/config.toml
 [x402]
 enabled = true
-pay_to  = "0xYourEvmAddress"   # one address takes USDC on Base, Polygon and Ethereum
+# pay_to = "0x..."             # optional override; by default the wallet comes from CoinPay
 # price_cents  = 100           # one day
 # max_days     = 30            # most days one payment buys (?days=N)
 # gate_storage = false         # also gate /storage/v1 object reads
@@ -46,7 +46,11 @@ export C0MPUTE_X402_COINPAY_KEY=cp_live_...   # name set by [x402] api_key_env
 
 Use a CoinPay business key scoped to x402 (verify + settle). Get one at
 [coinpayportal.com](https://coinpayportal.com). Restart the worker. The log
-says `x402: charging training crawlers for hosted files`. If `pay_to` or the
+says `x402: charging training crawlers for hosted files` with `source=coinpay`.
+The receiving wallet is your CoinPay business's USDC wallet
+(`GET /api/x402/pay-to` with the same key, Base preferred), re-read every hour,
+so changing it in CoinPay changes it on every node. Until it is known nothing
+is charged. If the
 key is missing, it says so and stays off, because a gate that cannot settle
 would only turn crawlers away for nothing.
 
