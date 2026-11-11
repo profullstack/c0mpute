@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }
