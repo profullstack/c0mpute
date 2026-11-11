@@ -138,6 +138,8 @@ const toolNodes = new Map<string, HTMLElement>();
 /** Messages sent while the agent works; they go out as each run ends. */
 const queuedBox: HTMLElement = h("div", { class: "queued" });
 let agentInput: HTMLTextAreaElement | null = null;
+/** The saved conversation is drawn once, the first time the Agent tab opens. */
+let agentHistoryShown = false;
 
 function renderQueued(items: string[]) {
   queuedBox.replaceChildren(
@@ -235,6 +237,15 @@ async function agentView() {
   const input = h("textarea", { placeholder: "Ask the agent. It can use your MCP servers and skills (Ctrl+Enter to send; while it works, Ctrl+Enter queues the message)." }) as HTMLTextAreaElement;
   agentInput = input;
   renderQueued((await call("agent:queued")) ?? []);
+  if (!agentHistoryShown) {
+    agentHistoryShown = true;
+    const past: Any[] = (await call("agent:history")) ?? [];
+    if (past.length && !transcript.childElementCount) {
+      for (const ev of past) renderEvent(ev);
+      for (const d of transcript.querySelectorAll("details")) (d as HTMLDetailsElement).open = false;
+      transcript.append(h("div", { class: "dim" }, "(earlier conversation, saved on this computer · New chat clears it)"));
+    }
+  }
   const sendIt = async () => {
     const t = input.value.trim();
     if (!t) return;
