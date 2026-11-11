@@ -936,7 +936,7 @@ export function ChatApp({ error }: { error: string | null }) {
         set({ status: "failed", error: j.error?.message ?? (res ? `HTTP ${res.status}` : "network error: the video was not started") });
         return;
       }
-      const started = { ...view, id: j.id as string, status: "pending" as const, progress: "queued for a c0mpute worker" };
+      const started = { ...view, id: j.id as string, model: typeof j.model === "string" ? j.model : view.model, status: "pending" as const, progress: "queued for a c0mpute worker" };
       set(started);
       void pollVideo(convo.id, index, started);
     } finally {

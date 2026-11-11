@@ -782,6 +782,104 @@ fn image_present(image: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Why a GPU node will not install the runner on its own, or `None` when it
+/// should. Pure, so the rules are tested without a card.
+pub fn gpu_install_decision(
+    not_ready: Option<&NotReady>,
+    enabled: bool,
+    nvidia_runtime: bool,
+    free_bytes: u64,
+    need_gib: u64,
+) -> Option<String> {
+    match not_ready {
+        // Already serving: nothing to install.
+        None => Some("already installed".into()),
+        Some(NotReady::NoImage) if !enabled => {
+            Some("turned off (C0MPUTE_VIDEO_GPU=0 or [video] gpu = false)".into())
+        }
+        Some(NotReady::NoImage) if !nvidia_runtime => Some(
+            "the container runtime has no NVIDIA runtime (install nvidia-container-toolkit)".into(),
+        ),
+        Some(NotReady::NoImage) if free_bytes < need_gib.saturating_mul(1 << 30) => Some(format!(
+            "{} GiB free where the images live, the runner needs {need_gib} GiB",
+            free_bytes >> 30
+        )),
+        Some(NotReady::NoImage) => None,
+        Some(other) => Some(other.reason().into()),
+    }
+}
+
+/// A box worth installing on: docker mode, a card and a runtime, image not
+/// yet present, auto-install on. Blocking (spawns nvidia-smi and docker);
+/// the cheap checks go first so a CPU box pays for one `nvidia-smi`.
+pub fn wants_gpu_install(config: &crate::config::VideoConfig) -> bool {
+    config.gpu_auto_install()
+        && runner_mode() == VideoRunner::Docker
+        && matches!(readiness(RUNNER_IMAGE), Some(NotReady::NoImage))
+}
+
+fn container_info() -> String {
+    crate::container::command_sync()
+        .args(["info"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Where the runtime keeps images (`DockerRootDir`), else `/`.
+fn images_root(info: &str) -> PathBuf {
+    info.lines()
+        .find_map(|l| l.trim().strip_prefix("Docker Root Dir:"))
+        .map(|p| PathBuf::from(p.trim()))
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+static GPU_INSTALL: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+
+/// Install the GPU runner in the background if this box should have it,
+/// once per process (txt2vid and img2vid share the one install). True when
+/// the node can serve GPU video afterwards.
+pub async fn ensure_gpu(config: &crate::config::VideoConfig, scratch: &Path) -> bool {
+    let config = config.clone();
+    let scratch = scratch.to_path_buf();
+    *GPU_INSTALL
+        .get_or_init(|| async move {
+            let probe = {
+                let need = config.min_free_disk_gpu_gb;
+                let enabled = config.gpu_auto_install();
+                tokio::task::spawn_blocking(move || {
+                    let not_ready = readiness(RUNNER_IMAGE);
+                    if !matches!(not_ready, Some(NotReady::NoImage)) {
+                        return gpu_install_decision(not_ready.as_ref(), enabled, true, u64::MAX, need)
+                            .filter(|why| why != "already installed");
+                    }
+                    let info = container_info();
+                    let free = crate::diffusion::free_disk_bytes(&images_root(&info));
+                    gpu_install_decision(not_ready.as_ref(), enabled, info.to_ascii_lowercase().contains("nvidia"), free, need)
+                })
+                .await
+                .unwrap_or_else(|e| Some(format!("probe failed: {e}")))
+            };
+            if let Some(why) = probe {
+                info!(reason = %why, "GPU video: not installing the runner");
+                return false;
+            }
+            info!(image = RUNNER_IMAGE, "GPU video: NVIDIA card found, installing the runner in the background");
+            let _ = fs::create_dir_all(&scratch).await;
+            match setup(false, &scratch, &|line: &str| info!("GPU video setup: {line}")).await {
+                Ok(how) => info!(?how, "GPU video: runner installed"),
+                Err(e) => {
+                    warn!(err = %e, "GPU video: runner install failed; `c0mpute video setup` retries by hand");
+                    return false;
+                }
+            }
+            tokio::task::spawn_blocking(|| readiness_cached(RUNNER_IMAGE).is_none())
+                .await
+                .unwrap_or(false)
+        })
+        .await
+}
+
 /// Spawn the video runner. One job at a time per node: a clip wants the whole
 /// card, and two concurrent jobs on one GPU is how both of them OOM.
 pub fn spawn_video_runner(
@@ -1371,5 +1469,34 @@ mod tests {
     fn weights_live_under_the_cache_root() {
         let dir = weights_dir(Path::new("/var/c0mpute"));
         assert_eq!(dir, PathBuf::from("/var/c0mpute/video/weights"));
+    }
+
+    #[test]
+    fn gpu_install_rules() {
+        let gib = 1u64 << 30;
+        assert_eq!(gpu_install_decision(Some(&NotReady::NoImage), true, true, 100 * gib, 80), None);
+        assert!(gpu_install_decision(Some(&NotReady::NoImage), false, true, 100 * gib, 80).unwrap().contains("turned off"));
+        assert!(gpu_install_decision(Some(&NotReady::NoImage), true, false, 100 * gib, 80).unwrap().contains("nvidia-container-toolkit"));
+        assert!(gpu_install_decision(Some(&NotReady::NoImage), true, true, 20 * gib, 80).unwrap().contains("needs 80 GiB"));
+        assert!(gpu_install_decision(Some(&NotReady::NoNvidiaGpu), true, true, 100 * gib, 80).is_some());
+        assert!(gpu_install_decision(Some(&NotReady::NoDocker), true, true, 100 * gib, 80).is_some());
+        assert_eq!(gpu_install_decision(None, true, true, 0, 80).as_deref(), Some("already installed"));
+    }
+
+    #[test]
+    fn images_root_from_docker_info() {
+        assert_eq!(images_root(" Docker Root Dir: /mnt/vdb/docker\n Debug Mode: false"), PathBuf::from("/mnt/vdb/docker"));
+        assert_eq!(images_root("podman says hi"), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn gpu_auto_install_defaults_on() {
+        if std::env::var("C0MPUTE_VIDEO_GPU").is_ok() {
+            return;
+        }
+        assert!(crate::config::VideoConfig::default().gpu_auto_install());
+        let off: crate::config::VideoConfig = toml::from_str("gpu = false").unwrap();
+        assert!(!off.gpu_auto_install());
+        assert_eq!(crate::config::VideoConfig::default().min_free_disk_gpu_gb, 80);
     }
 }

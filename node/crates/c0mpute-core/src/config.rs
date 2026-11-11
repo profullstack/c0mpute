@@ -548,6 +548,14 @@ impl MusicConfig {
 ///   box that passes the gates, then serve.
 /// - `cpu = false` (or `C0MPUTE_VIDEO_CPU=0`): never serve, even if installed.
 ///
+/// GPU video installs itself: on a box with an NVIDIA card and a container
+/// runtime that has the NVIDIA runtime, the worker pulls (or builds) the
+/// runner image in the background at boot and starts serving, the same way
+/// TTS and music provision themselves. `gpu = false` (or
+/// `C0MPUTE_VIDEO_GPU=0`) turns that off; an image installed by hand with
+/// `c0mpute video setup` is still served. `min_free_disk_gpu_gb` is the
+/// free space the install needs (image plus the first model's weights).
+///
 /// `runner` picks how GPU clips run: `"docker"` (the default) starts the
 /// runner image per job; `"local"` execs `runner.py` in this environment,
 /// for a node that itself runs inside the runner image (a rented GPU
@@ -557,6 +565,11 @@ impl MusicConfig {
 pub struct VideoConfig {
     #[serde(default)]
     pub cpu: Option<bool>,
+    /// Install the GPU runner on a capable box by default (`None` = yes).
+    #[serde(default)]
+    pub gpu: Option<bool>,
+    #[serde(default = "default_video_min_free_disk_gpu_gb")]
+    pub min_free_disk_gpu_gb: u64,
     #[serde(default)]
     pub runner: VideoRunner,
     #[serde(default = "default_video_min_ram_gb")]
@@ -577,6 +590,8 @@ impl Default for VideoConfig {
     fn default() -> Self {
         Self {
             cpu: None,
+            gpu: None,
+            min_free_disk_gpu_gb: default_video_min_free_disk_gpu_gb(),
             runner: VideoRunner::default(),
             min_ram_gb: default_video_min_ram_gb(),
             min_free_ram_gb: default_video_min_free_ram_gb(),
@@ -624,6 +639,11 @@ fn default_video_min_free_disk_gb() -> u64 {
     // 5.4 GB of weights on top of the sd.cpp runtime, plus frames.
     12
 }
+fn default_video_min_free_disk_gpu_gb() -> u64 {
+    // The runner image is ~15 GB; Wan 2.2 5B pulls 32 GB of weights on its
+    // first clip (2026-11-06) and the 1.3B another ~29 GB with its encoder.
+    80
+}
 fn default_video_min_cpu_threads() -> usize {
     // The per-job budget is half the box (`resources::cpu_threads_per_job`),
     // so 16 here demanded a 32-core machine and a 16-core box that runs the
@@ -641,6 +661,12 @@ impl VideoConfig {
             }
             _ => self.cpu,
         }
+    }
+
+    /// Install the GPU runner on its own? On unless `gpu = false` or
+    /// `C0MPUTE_VIDEO_GPU=0`; the environment wins.
+    pub fn gpu_auto_install(&self) -> bool {
+        auto_install_enabled_with(self.gpu.unwrap_or(true), std::env::var("C0MPUTE_VIDEO_GPU").ok())
     }
 }
 
