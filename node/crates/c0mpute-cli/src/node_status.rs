@@ -140,6 +140,11 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
             let gpu = tokio::task::spawn_blocking(|| video::readiness(video::RUNNER_IMAGE)).await.ok().flatten();
             match gpu {
                 None => serving(role, Some("GPU (Wan 2.2)".into())),
+                Some(video::NotReady::NoImage)
+                    if cfg.video.gpu_auto_install() && video::runner_mode() == c0mpute_core::config::VideoRunner::Docker =>
+                {
+                    gated(role, "GPU: the worker installs the runner image in the background at start (or run `c0mpute video setup`)")
+                }
                 Some(not_ready) => match video_cpu::gate_reason(&cfg.video) {
                     None => serving(role, Some(format!("CPU ({})", video_cpu::MODEL_ID))),
                     Some(cpu) => gated(role, format!("GPU: {}; CPU: {cpu}", not_ready.reason())),

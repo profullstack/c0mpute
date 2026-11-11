@@ -20,7 +20,7 @@ const holdCap = () => {
  * by default; 20-30 minutes once a worker is free, queued up to 2 h).
  *
  *   POST { prompt, model?, negative_prompt?, seed?, adult?: true }
- *     -> 202 { id, status, poll, video }       (default)
+ *     -> 202 { id, status, model, poll, video } (default; `model` is what renders: adult clips move to Wan 2.2 5B)
  *     -> 200 video/mp4                          (with `Prefer: wait=N` and done within N s, N <= 7200)
  *
  * Poll GET /api/v1/videos/<id>; fetch GET /api/v1/videos/<id>/video (Range
@@ -61,7 +61,7 @@ export async function POST(req: Request) {
   }
   const id = body.id;
   const accepted = (extra: Record<string, unknown> = {}) =>
-    json({ id, status: "pending", poll: `/api/v1/videos/${id}`, video: `/api/v1/videos/${id}/video`, ...extra }, 202, {
+    json({ id, status: "pending", model: parsed.model, poll: `/api/v1/videos/${id}`, video: `/api/v1/videos/${id}/video`, ...extra }, 202, {
       "cache-control": "no-store",
       location: `/api/v1/videos/${id}`,
     });

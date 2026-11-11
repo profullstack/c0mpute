@@ -517,6 +517,44 @@ impl Supervisor {
                 });
                 continue;
             }
+            // Video on a GPU box that has not installed the runner yet: install
+            // it in the background (pull, or build from the public repo), then
+            // subscribe. Every NVIDIA node serves video by default, like TTS
+            // and music; `[video] gpu = false` / C0MPUTE_VIDEO_GPU=0 opts out.
+            if (workload_type == crate::video::WORKLOAD_TXT2VID
+                || workload_type == crate::video::WORKLOAD_IMG2VID)
+                && crate::video::wants_gpu_install(&self.config.video)
+            {
+                let net = net.clone();
+                let store = self.store.clone();
+                let cache_root = cache_root.clone();
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    if !crate::video::ensure_gpu(&config.video, &cache_root.join("video-setup")).await {
+                        info!(%workload_type, "not subscribing: GPU video runner is not installed");
+                        return;
+                    }
+                    let runner_tx = crate::video::spawn_video_runner(
+                        net.clone(),
+                        store,
+                        cache_root,
+                        workload_type.clone(),
+                        crate::video::RUNNER_IMAGE.to_string(),
+                        load.clone(),
+                    );
+                    info!(%workload_type, "subscribing to job topic (GPU video, installed at boot)");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        workload_type,
+                        capabilities::tags_from_config(&config),
+                        Some(runner_tx),
+                        None,
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
             // Video on a box with no usable GPU: CPU text-to-video (Wan 2.1
             // 1.3B on stable-diffusion.cpp) if the operator opted in. Same
             // shape as CPU images: provision in the background, subscribe
