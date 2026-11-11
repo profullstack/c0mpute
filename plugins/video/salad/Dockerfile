@@ -38,11 +38,11 @@ RUN mkdir -p /home/runner /logs /weights/hf \
 USER 10001:10001
 
 # Local runner mode; weights cache on the container disk (warmed at start by
-# prefetch.py, shared with the runner through HF_HOME). No self-update: the
-# image pins the binary it was built with.
+# prefetch.py, shared with the runner through HF_HOME). The worker
+# auto-updates a copy of the binary under $HOME/bin (see entrypoint.sh); set
+# C0MPUTE_NO_AUTO_UPDATE=1 on the container to pin the image's binary.
 ENV C0MPUTE_VIDEO_RUNNER=local \
     C0MPUTE_VIDEO_RUNNER_PY=/opt/c0mpute-video/runner.py \
-    C0MPUTE_NO_AUTO_UPDATE=1 \
     HF_HOME=/weights/hf \
     C0MPUTE_PREFETCH_MODELS=wan2.1-t2v-1.3b \
     C0MPUTE_NAME=profullstack \

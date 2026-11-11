@@ -18,3 +18,17 @@ text encoder is loaded on the CPU first), enough disk for the weights, port
 8080 behind the container gateway (auth on) for `/boot.log`, `/worker.log`
 and `/bench.log`. Delete the group when done: a rented card bills by the
 minute, image pull included.
+
+Buyers: c0mpute has no relay, and a rented container cannot be dialed, so
+the buyer gateway that sends the jobs must be reachable: run
+`c0mpute speech serve` with `C0MPUTE_P2P_LISTEN=/ip4/0.0.0.0/tcp/<port>`
+and `C0MPUTE_P2P_EXTERNAL=/ip4/<public ip>/tcp/<port>` and that port open.
+A gateway on a random firewalled port wins the auction and then fails with
+"fetch the sealed spec from the buyer: Failed to dial the requested peer".
+
+Note: the gateway clips `wan2.1-t2v-1.3b` requests to the CPU size
+(33 frames of 480x272) whatever the GPU could do; ask for
+`wan2.2-ti2v-5b` for a full-size clip.
+
+First run (2026-11-11, RTX 3090, Salad high): image pull 8.5 min, 29 GB
+prefetch 9.5 min, 1.3B clip (33f 480x272) rendered in 53 s.
