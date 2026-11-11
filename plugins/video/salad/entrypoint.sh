@@ -35,7 +35,7 @@ c0mpute video check || true
 # renders ACE-Step songs on CUDA in well under a minute (a CPU node takes
 # 11-30 min); "tts" serves the expressive Chatterbox voices (provisioned by
 # `worker start`). Default stays video only.
-ROLES="${C0MPUTE_ROLES:-video}"
+ROLES="${C0MPUTE_ROLES:-video,tts}"
 echo "== $(date -u +%FT%TZ) starting worker (roles: $ROLES)"
 c0mpute worker start --roles "$ROLES" --no-storage --no-hosting 2>&1 | tee -a "$LOGS/worker.log"
 echo "== $(date -u +%FT%TZ) worker exited ${PIPESTATUS[0]}"
