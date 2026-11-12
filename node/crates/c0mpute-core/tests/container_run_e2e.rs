@@ -155,6 +155,7 @@ async fn builds_runs_and_returns_results() {
             context: Some(ctx_tar.clone()),
             build: Some(build.clone()),
             builders: vec![worker_id.clone()],
+            max_price_usd: 1.0,
             timeout_secs: Some(600),
             ..Default::default()
         },
@@ -206,6 +207,7 @@ async fn builds_runs_and_returns_results() {
             input: Some(in_tar.clone()),
             outputs: vec!["out".into(), "nope".into()],
             builders: vec![worker_id.clone()],
+            max_price_usd: 1.0,
             timeout_secs: Some(600),
             memory_mb: Some(256),
             cpus: Some(1.0),
@@ -256,6 +258,7 @@ async fn builds_runs_and_returns_results() {
             build: Some(build.clone()),
             cmd: vec!["sh".into(), "-c".into(), "echo boom; exit 3".into()],
             builders: vec![worker_id.clone()],
+            max_price_usd: 1.0,
             timeout_secs: Some(600),
             ..Default::default()
         },
@@ -293,6 +296,7 @@ async fn builds_runs_and_returns_results() {
             context: Some(ctx_tar.clone()),
             build: Some(build),
             builders: vec![worker_id.clone()],
+            max_price_usd: 1.0,
             timeout_secs: Some(60),
             ..Default::default()
         },

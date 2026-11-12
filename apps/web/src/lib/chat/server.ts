@@ -2,6 +2,7 @@
 // CoinPay OAuth, the Infernet upstream and a per-user rate limit.
 import { Database } from "@sqlitecloud/drivers";
 import { unwrapData } from "./envelope";
+import { infernetCall, modelPool, sharedRouter, sqlStatsStore } from "./routed";
 import { createHash, randomBytes } from "node:crypto";
 // Read at runtime: Next can inline a literal `process.env.NAME` at build time.
 export const env = (name: string): string => (process.env as Record<string, string | undefined>)[name] ?? "";
@@ -55,6 +56,14 @@ export const oauthStore = () => (_oauthStore ??= createOAuthStore(cloudSql));
 let _convoStore: ConvoStore | null = null;
 export const convoStore = () =>
   (_convoStore ??= createConvoStore(cloudSql, { key: convoKey(pluginKey(env("C0MPUTE_CHAT_KEY")), pluginKey(env("C0MPUTE_PLUGIN_KEY"))) }));
+
+/**
+ * The model router behind `model: "auto"` (DIP 0035): one per process, its
+ * learned stats in SQLite Cloud. Calls default to the unbilled upstream;
+ * routedChat passes a per-user one.
+ */
+export const modelRouter = () =>
+  sharedRouter({ pool: modelPool(infernet), store: sqlStatsStore(cloudSql), call: infernetCall(infernet) });
 
 let _pluginStore: PluginStoreDb | null = null;
 /** Chat plugins (remote MCP servers) per account, tokens sealed with C0MPUTE_PLUGIN_KEY. */

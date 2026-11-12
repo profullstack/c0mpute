@@ -104,7 +104,7 @@ async fn chat_turns_are_answered_peer_to_peer() {
     let runner = inference::spawn_inference_runner(worker.clone(), worker_store, base.clone(), load.clone());
     let mut tags = vec![inference::ROLE_TAG.to_string(), "c0mpute:cpu".to_string()];
     tags.extend(models.iter().map(|m| inference::model_tag(m)));
-    dispatch::run_worker_subscriber_with_load(worker.clone(), inference::WORKLOAD.to_string(), tags, Some(runner), Some(inference::offer_filter()), Some(PricingConfig::default()), Some(load));
+    dispatch::run_worker_subscriber_with_load(worker.clone(), inference::WORKLOAD.to_string(), tags, Some(runner), Some(inference::offer_filter()), Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }), Some(load));
 
     // ── buyer ──────────────────────────────────────────────────────────
     let (buyer, buyer_store) = node(&tmp.path().join("b"), vec![worker_addr]).await;

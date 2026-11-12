@@ -3,7 +3,8 @@ import { hasEnabledPlugins } from "@/lib/chat/plugins";
 import { pluginChatResponse } from "@/lib/chat/plugin-http";
 import { runManager } from "@/lib/chat/run-manager";
 import { RunLimitError, SSE_HEADERS } from "@/lib/chat/runs";
-import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { routeRequest, routedChat, routerEnabled } from "@/lib/chat/routed";
+import { currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -15,6 +16,12 @@ const err = (status: number, message: string, headers: Record<string, string> = 
  * OpenAI-compatible chat completions on the c0mpute network.
  *   Authorization: Bearer c0k_...   (or the c0mpute.com session cookie)
  *   POST { model?, messages, stream?, temperature?, max_tokens?, plugins?: false, approvals?: string[], plugin_events?: true }
+ *
+ * `model`: a model id goes straight to that model. "auto" (or absent),
+ * "auto:fast" | "auto:standard" | "auto:high" | "auto:max" goes through the
+ * model router; `router: { effort?, max_cost_usd?, max_latency_ms? }` refines
+ * it. Routed answers carry `x-c0mpute-route` and (JSON / last SSE chunk) the
+ * full `x_c0mpute_route` receipt. POST /api/v1/route explains a plan for free.
  * With chat plugins on, the stream also carries `{"object":"c0mpute.plugin_event","event":{...}}`
  * chunks (tool calls, results, approvals) when the request sets plugin_events: true.
  *
@@ -53,6 +60,27 @@ export async function POST(req: Request) {
 
   if (withPlugins) {
     return pluginChatResponse({ userId: user.id, upstream: infernetFor(user.coinpay_sub), req: parsed, approvals, events: raw?.plugin_events === true, signal: req.signal });
+  }
+
+  // Model router (DIP 0035): `model` "auto", "auto:<effort>" or absent picks
+  // the model(s) and pattern per request. Any failure here falls back to the
+  // direct path below, so routing can never take chat down.
+  const route = routerEnabled(env) ? routeRequest(raw) : null;
+  if (route) {
+    try {
+      const rf = (raw?.response_format ?? null) as { type?: string } | null;
+      return await routedChat({
+        router: modelRouter(),
+        upstream: infernetFor(user.coinpay_sub),
+        req: parsed,
+        route,
+        responseFormatJson: rf?.type === "json_object" || rf?.type === "json_schema",
+        signal: req.signal,
+      });
+    } catch (e) {
+      if (req.signal.aborted) throw e;
+      console.warn("router: falling back to direct", e instanceof Error ? e.message : e);
+    }
   }
 
   let upstream: Response;

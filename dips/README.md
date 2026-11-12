@@ -139,3 +139,4 @@ superseded-by: <DIP-NNNN if this gets replaced>
 | 0032 | End-to-end encrypted jobs (sealed spec, inputs and results)       | Accepted   |
 | 0033 | `container.run`: builds and container jobs, results back, no git  | Review     |
 | 0034 | Agent swarms on every node: leased tasks, peer review, paid results | Accepted |
+| 0035 | Model router: models and pattern per task, checked, with a receipt | Accepted |
