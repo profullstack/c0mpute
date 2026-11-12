@@ -64,8 +64,8 @@ export async function execute(args: {
     const signals = [args.signal, Number.isFinite(deadline) ? AbortSignal.timeout(Math.max(1000, remainingMs())) : undefined].filter(Boolean) as AbortSignal[];
     try {
       const r = await call(model, msgs, { maxTokens, temperature: opts.temperature, signal: signals.length ? AbortSignal.any(signals) : undefined });
-      const inTok = r.inTokens ?? inEst;
-      const outTok = r.outTokens ?? estimateTokens(r.text);
+      const inTok = r.inTokens || inEst; // 0 = not reported
+      const outTok = r.outTokens || estimateTokens(r.text);
       const m = price.get(model);
       const costUsd = m ? (inTok * m.priceIn + outTok * m.priceOut) / 1e6 : 0;
       spent += costUsd;
@@ -111,6 +111,8 @@ export async function execute(args: {
     }
     if (!canAfford(backup, f.promptTokens, 300)) return a;
     state.fired = true;
+    // Recorded now: the losing call may only settle after the receipt is built.
+    steps.push({ role: "hedge", model: backup, ok: true, ms: 0, inTokens: 0, outTokens: 0, costUsd: 0, note: `${model} had not answered after ${Math.round(hedgeMs)} ms; same request sent to ${backup}, first answer wins` });
     const b = run(backup, second, "fallback");
     const winner = await firstNonNull([a, b]);
     if (winner?.model === model) second.abort();
@@ -124,8 +126,8 @@ export async function execute(args: {
     const inEst = estimateTokens(messages.map((m) => m.content).join("\n"));
     try {
       const r = await call(model, messages, { maxTokens: opts.maxTokens, temperature: opts.temperature, signal });
-      const inTok = r.inTokens ?? inEst;
-      const outTok = r.outTokens ?? estimateTokens(r.text);
+      const inTok = r.inTokens || inEst; // 0 = not reported
+      const outTok = r.outTokens || estimateTokens(r.text);
       const m = price.get(model);
       const costUsd = m ? (inTok * m.priceIn + outTok * m.priceOut) / 1e6 : 0;
       spent += costUsd;

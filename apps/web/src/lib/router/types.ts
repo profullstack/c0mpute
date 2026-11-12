@@ -100,7 +100,7 @@ export type RouteOptions = {
 
 export type Verification = { pass: boolean; score: number; issues: string[] };
 
-export type StepRole = "draft" | "verify" | "judge" | "escalate" | "critic" | "revise" | "fallback" | "synthesize";
+export type StepRole = "draft" | "verify" | "judge" | "escalate" | "critic" | "revise" | "fallback" | "synthesize" | "hedge";
 
 export type StepRecord = {
   role: StepRole;

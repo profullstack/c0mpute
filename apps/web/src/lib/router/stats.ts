@@ -14,6 +14,8 @@ export const PRIOR_WEIGHT = 6;
 export const ERROR_STREAK_COOLDOWN = 3;
 export const COOLDOWN_MS = 2 * 60_000;
 const EWMA = 0.2;
+/** One observation counts as at most this slow (ms per output token). */
+export const MAX_SAMPLE_MS_PER_TOKEN = 400;
 
 export type QualityRow = { ok: number; fail: number };
 export type HealthRow = {
@@ -91,7 +93,9 @@ export class Stats {
       h.coolUntil = undefined;
       if (r.outTokens > 8) {
         // Split wall time into overhead + per-token cost with a fixed 400 ms overhead guess.
-        const per = Math.max(1, (r.ms - 400) / r.outTokens);
+        // Capped: a cold model load on a node (60-100 s once) must not
+        // read as the model's speed forever; EWMA does the rest.
+        const per = Math.min(MAX_SAMPLE_MS_PER_TOKEN, Math.max(1, (r.ms - 400) / r.outTokens));
         h.msPerToken = h.msPerToken === undefined ? per : h.msPerToken * (1 - EWMA) + per * EWMA;
         h.overheadMs = h.overheadMs === undefined ? 400 : h.overheadMs * (1 - EWMA) + 400 * EWMA;
       }
