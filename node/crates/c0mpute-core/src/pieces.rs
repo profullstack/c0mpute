@@ -709,7 +709,7 @@ pub async fn publish_result_bytes(
 /// the result over that same direction before it sends the receipt, and the
 /// buyer's fetch finds the chunks locally. Content-addressed, so a pushed
 /// chunk is only ever used when its hash is the one a receipt names.
-pub const RESULT_PUSH_SERVICE: &str = "c0mpute/result-push/1";
+pub const RESULT_PUSH_SERVICE: &str = "c0mpute/result-push/2";
 /// Results bigger than this are left to the pull path.
 const RESULT_PUSH_MAX_TOTAL: usize = 64 * 1024 * 1024;
 /// How long a pushed chunk waits for its buyer to read it.
@@ -750,15 +750,57 @@ fn hold_pushed_chunk(bytes: Vec<u8>) -> Hash {
     hash
 }
 
+type PartialPushes = std::sync::Mutex<std::collections::HashMap<Hash, (Vec<u8>, usize, std::time::Instant)>>;
+
+fn partial_pushes() -> &'static PartialPushes {
+    static PARTIAL: std::sync::OnceLock<PartialPushes> = std::sync::OnceLock::new();
+    PARTIAL.get_or_init(Default::default)
+}
+
+/// Bytes of a chunk sent per push request (well under the 1 MiB RPC cap).
+const RESULT_PUSH_FRAGMENT: usize = 256 * 1024;
+
 struct ResultPushHandler;
 
 #[async_trait::async_trait]
 impl c0mpute_net::RpcHandler for ResultPushHandler {
     async fn handle(&self, _peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
-        if body.is_empty() || body.len() > RESULT_PIECE_BYTES.max(MAX_MANIFEST_BYTES) + 64 * 1024 {
-            return Err("pushed chunk is empty or too big".into());
+        // A fragment: 32-byte chunk hash, total length, offset (u64 BE), data.
+        // Fragments keep each request under the RPC's 1 MiB cap, which a
+        // whole result chunk plus framing exceeds (2026-11-12: "IO error on
+        // outbound stream" on every long line).
+        if body.len() < 48 {
+            return Err("pushed fragment is too short".into());
         }
-        Ok(hold_pushed_chunk(body).to_hex().into_bytes())
+        let hash = Hash(body[..32].try_into().map_err(|_| "bad hash")?);
+        let total = u64::from_be_bytes(body[32..40].try_into().map_err(|_| "bad length")?) as usize;
+        let offset = u64::from_be_bytes(body[40..48].try_into().map_err(|_| "bad offset")?) as usize;
+        let data = &body[48..];
+        if total == 0 || total > RESULT_PIECE_BYTES.max(MAX_MANIFEST_BYTES) + 64 * 1024 || offset + data.len() > total {
+            return Err("pushed fragment is out of range".into());
+        }
+        let done = {
+            let mut partial = partial_pushes().lock().map_err(|_| "lock")?;
+            partial.retain(|_, (_, _, at)| at.elapsed() < RESULT_PUSH_TTL);
+            let entry = partial.entry(hash).or_insert_with(|| (vec![0u8; total], 0usize, std::time::Instant::now()));
+            if entry.0.len() != total {
+                return Err("pushed fragment disagrees on length".into());
+            }
+            entry.0[offset..offset + data.len()].copy_from_slice(data);
+            entry.1 += data.len();
+            if entry.1 >= total {
+                partial.remove(&hash).map(|(buf, _, _)| buf)
+            } else {
+                None
+            }
+        };
+        if let Some(buf) = done {
+            if Hash::of(&buf) != hash {
+                return Err("pushed chunk does not match its hash".into());
+            }
+            hold_pushed_chunk(buf);
+        }
+        Ok(b"ok".to_vec())
     }
 }
 
@@ -804,7 +846,19 @@ async fn push_result_to_buyer(net: &Libp2pNetwork, store: &ChunkStore, accept: &
     if let Err(error) = net.reach(buyer, Duration::from_secs(30)).await {
         tracing::debug!(%buyer, err = %error, "result push: buyer not reachable yet; trying anyway");
     }
-    for chunk in chunks {
+    let mut fragments = Vec::new();
+    for chunk in &chunks {
+        let hash = Hash::of(chunk);
+        for (i, data) in chunk.chunks(RESULT_PUSH_FRAGMENT).enumerate() {
+            let mut body = Vec::with_capacity(48 + data.len());
+            body.extend_from_slice(&hash.0);
+            body.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
+            body.extend_from_slice(&((i * RESULT_PUSH_FRAGMENT) as u64).to_be_bytes());
+            body.extend_from_slice(data);
+            fragments.push(body);
+        }
+    }
+    for chunk in fragments {
         let mut pushed = false;
         for attempt in 0..3u32 {
             match net.rpc(buyer, RESULT_PUSH_SERVICE, chunk.clone()).await {
