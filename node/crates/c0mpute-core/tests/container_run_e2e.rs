@@ -72,6 +72,8 @@ fn docker(args: &[&str]) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn builds_runs_and_returns_results() {
+    // Run only against this test's loopback worker, not dev2 workers found by mDNS.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let rt = tokio::task::spawn_blocking(|| container_run::runtime().clone())
         .await
         .unwrap();
