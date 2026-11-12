@@ -20,6 +20,8 @@ export interface ChatMsg {
   /** A generation turn: its live state is the job's. */
   jobId?: string;
   error?: boolean;
+  /** A resumable turn still streaming (reattached after a restart or a dropped connection). */
+  run?: string;
   at: number;
 }
 
@@ -29,6 +31,8 @@ export interface Convo {
   /** null = the default model (Settings), or any live model. */
   model: string | null;
   messages: ChatMsg[];
+  /** Last change, unix ms: the account sync's clock (last writer wins). */
+  updated?: number;
 }
 
 export interface ChatState {
@@ -37,6 +41,12 @@ export interface ChatState {
   /** Keys go to the input. Esc leaves it, so letters work as shortcuts. */
   typing: boolean;
   streaming: boolean;
+  /**
+   * Lines sent while an answer (and its plugin tool calls) was still running.
+   * They go out in order, one per finished answer; Esc stops the answer and
+   * the next one goes at once.
+   */
+  queued: string[];
   /** Lines scrolled up from the bottom of the transcript. */
   scroll: number;
   /** Lines typed before, newest last, for ↑/↓. */
@@ -116,6 +126,7 @@ export function initialState(parts: {
       input: { value: "", cursor: 0 },
       typing: true,
       streaming: false,
+      queued: [],
       scroll: 0,
       history: [],
       historyAt: null,

@@ -1,7 +1,7 @@
 import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
 import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
-import { currentUser, infernetFor, json, mcpUnauthorized, pluginStore, pushStore, rateLimit, siteUrl } from "@/lib/chat/server";
+import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, pluginStore, pushStore, rateLimit, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore() })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }

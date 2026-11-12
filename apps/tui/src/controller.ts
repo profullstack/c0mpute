@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { kittyVirtualImage, type TextEditState } from "@profullstack/hqtui";
-import { Api, ApiError, errorMessage, LOGIN_HINT } from "./api.ts";
+import { Api, ApiError, errorMessage, LOGIN_HINT, type SyncConvo, type SyncSummary } from "./api.ts";
 import { loadBench } from "./bench.ts";
 import { parseLine, HELP_COMMANDS, type Command } from "./commands.ts";
 import { expandHome, loadCreds, paths, saveCreds, saveSettings, writeJson, type PreviewMode } from "./config.ts";
@@ -24,7 +24,7 @@ import {
   readJobTimes,
 } from "./node.ts";
 import { fetchMe, fetchModels, fetchNodes, fetchPricing, fetchStatus, load } from "./network.ts";
-import { activeModel, adultActive, jobById, newConvo, SETTINGS_ROWS, TABS, type AppState, type ChatMsg, type Tab } from "./state.ts";
+import { activeModel, adultActive, jobById, newConvo, SETTINGS_ROWS, TABS, type AppState, type ChatMsg, type Convo, type Tab } from "./state.ts";
 import { textHistory } from "./web/images.ts";
 import { collectPushFiles, type PushCommand, type ConnectCommand, type PushMsg } from "./web/push-shared.ts";
 
@@ -78,6 +78,7 @@ export class Controller {
 
   start(): void {
     for (const job of this.state.jobs) this.runner.resume(job);
+    void this.resumePending();
     if (this.deps.probes === false) return;
     // First paint happens before any of this lands.
     setTimeout(() => {
@@ -106,6 +107,8 @@ export class Controller {
     every(30_000, () => (this.state.tab === "network" ? void this.refreshNetwork() : undefined));
     every(120_000, () => (this.state.tab !== "network" ? void this.refreshNetwork() : undefined));
     every(60_000, () => void this.refreshAccount());
+    every(60_000, () => void this.syncConvo());
+    setTimeout(() => void this.syncConvo(), 1500);
     every(30 * 60_000, () => void this.refreshVersion());
   }
 
@@ -265,7 +268,7 @@ export class Controller {
     const messages = [...convo.messages, ...msgs.map((m) => ({ ...m, at }))];
     const firstUser = msgs.find((m) => m.role === "user");
     const title = convo.messages.length === 0 && firstUser ? firstUser.content.slice(0, 60) : convo.title;
-    this.set({ chat: { ...this.state.chat, convo: { ...convo, title, messages }, scroll: 0 } });
+    this.set({ chat: { ...this.state.chat, convo: { ...convo, title, messages, updated: at }, scroll: 0 } });
     this.schedulePersist();
     return messages.length - 1;
   }
@@ -275,7 +278,7 @@ export class Controller {
     if (!convo.messages[index]) return;
     const messages = convo.messages.slice();
     messages[index] = { ...messages[index]!, ...patch };
-    this.set({ chat: { ...this.state.chat, convo: { ...convo, messages } } });
+    this.set({ chat: { ...this.state.chat, convo: { ...convo, messages, updated: this.now() } } });
     this.schedulePersist();
   }
 
@@ -288,14 +291,37 @@ export class Controller {
   async submit(): Promise<void> {
     const text = this.state.chat.input.value.trim();
     if (!text) return;
+    const history = [...this.state.chat.history.filter((h) => h !== text), text].slice(-100);
     if (this.state.chat.streaming) {
-      this.toast("still answering; Esc stops it", "info");
+      // Busy: hold the line and send it when this answer finishes.
+      const queued = [...this.state.chat.queued, text];
+      this.set({ chat: { ...this.state.chat, input: { value: "", cursor: 0 }, history, historyAt: null, queued } });
+      this.toast(`queued (${queued.length}); sends when this answer finishes · Esc stops it now`, "info");
       return;
     }
-    const history = [...this.state.chat.history.filter((h) => h !== text), text].slice(-100);
     this.set({ chat: { ...this.state.chat, input: { value: "", cursor: 0 }, history, historyAt: null } });
     const cmd = parseLine(text);
     if (cmd) await this.run(cmd, text);
+  }
+
+  /** Send the next queued line, if the answer before it has finished. */
+  private async drainQueue(): Promise<void> {
+    const [next, ...rest] = this.state.chat.queued;
+    if (next === undefined || this.state.chat.streaming) return;
+    this.set({ chat: { ...this.state.chat, queued: rest } });
+    const cmd = parseLine(next);
+    if (cmd) await this.run(cmd, next);
+    // A command that does not stream (/help, /image…) leaves the rest waiting.
+    if (!this.state.chat.streaming && this.state.chat.queued.length) await this.drainQueue();
+  }
+
+  /** ↑ on an empty input with lines queued: take the last one back to edit. */
+  unqueueLast(): boolean {
+    const queued = this.state.chat.queued;
+    const last = queued.at(-1);
+    if (last === undefined) return false;
+    this.set({ chat: { ...this.state.chat, queued: queued.slice(0, -1), input: { value: last, cursor: last.length }, historyAt: null } });
+    return true;
   }
 
   async run(cmd: Command, text: string): Promise<void> {
@@ -308,6 +334,10 @@ export class Controller {
         return this.newChat();
       case "jobs":
         return this.setTab("jobs");
+      case "history":
+        return this.history(text);
+      case "open":
+        return this.open(text, cmd.target);
       case "models": {
         await this.refreshModels();
         const m = this.state.models.data ?? [];
@@ -351,27 +381,142 @@ export class Controller {
     );
     const index = this.pushMsgs({ role: "user", content: text }, { role: "assistant", content: "" });
     const messages = [...before.map(({ role, content }) => ({ role, content })), { role: "user", content: text }];
+    await this.follow(index, (onDelta, signal, opts) => this.deps.api.streamChat(messages, activeModel(this.state), onDelta, signal, opts));
+  }
+
+  /**
+   * Stream an answer into message `index`: a new turn, or one reattached by
+   * run id. Esc stops it (and cancels the run on the server).
+   */
+  private async follow(
+    index: number,
+    go: (onDelta: (t: string) => void, signal: AbortSignal, opts: { onRun: (id: string) => void; onReset: () => void }) => Promise<string>,
+    run?: string,
+  ): Promise<void> {
     this.abort = new AbortController();
     this.set({ chat: { ...this.state.chat, streaming: true } });
     let acc = "";
+    let runId = run;
     try {
-      await this.deps.api.streamChat(
-        messages,
-        activeModel(this.state),
+      await go(
         (t) => {
           acc += t;
           this.patchMsg(index, { content: acc });
         },
         this.abort.signal,
+        {
+          onRun: (id) => {
+            runId = id;
+            this.patchMsg(index, { run: id });
+            this.schedulePersist();
+          },
+          onReset: () => {
+            acc = "";
+            this.patchMsg(index, { content: "" });
+          },
+        },
       );
-      if (!acc) this.patchMsg(index, { content: "(empty answer)", error: true });
+      this.patchMsg(index, { run: undefined, ...(acc ? {} : { content: "(empty answer)", error: true }) });
     } catch (e) {
-      const msg = e instanceof ApiError && e.kind === "aborted" ? "stopped" : e instanceof Error ? e.message : String(e);
-      this.patchMsg(index, { content: acc ? `${acc}\n\n// ${msg}` : msg, error: !acc || msg !== "stopped" });
+      const stopped = e instanceof ApiError && e.kind === "aborted";
+      if (stopped && runId) void this.deps.api.cancelRun(runId);
+      const msg = stopped ? "stopped" : e instanceof Error ? e.message : String(e);
+      this.patchMsg(index, { run: undefined, content: acc ? `${acc}\n\n// ${msg}` : msg, error: !acc || msg !== "stopped" });
     } finally {
       this.abort = null;
       this.set({ chat: { ...this.state.chat, streaming: false } });
       this.schedulePersist();
+    }
+    void this.syncConvo();
+    await this.drainQueue();
+  }
+
+  /** After a restart: an answer that was still streaming is picked up again. */
+  private async resumePending(): Promise<void> {
+    const msgs = this.state.chat.convo.messages;
+    const i = msgs.length - 1;
+    const last = msgs[i];
+    if (!last || last.role !== "assistant" || !last.run || !this.deps.api.signedIn) return;
+    const run = last.run;
+    await this.follow(i, (onDelta, signal, opts) => this.deps.api.resumeRun(run, onDelta, signal, opts.onReset), run);
+  }
+
+  // ─── account sync ─────────────────────────────────────────────────────
+
+  /** This conversation in the account's shape (notes kept, local fields dropped). */
+  private syncShape(): SyncConvo {
+    const c = this.state.chat.convo;
+    return {
+      id: c.id,
+      title: c.title,
+      model: c.model ?? "auto",
+      updated: c.updated ?? c.messages.at(-1)?.at ?? this.now(),
+      messages: c.messages.map(({ role, content, jobId, error }) => ({ role, content, ...(jobId ? { jobId } : {}), ...(error ? { error } : {}) })),
+    };
+  }
+
+  private adoptConvo(s: SyncConvo): void {
+    const at = s.updated;
+    const messages: ChatMsg[] = s.messages
+      .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "note")
+      .map((m) => ({
+        role: m.role as ChatMsg["role"],
+        content: m.content,
+        at,
+        ...(typeof m.jobId === "string" ? { jobId: m.jobId } : {}),
+        ...(m.error === true ? { error: true } : {}),
+      }));
+    const convo: Convo = { id: s.id, title: s.title, model: s.model === "auto" ? null : s.model, messages, updated: s.updated };
+    this.set({ chat: { ...this.state.chat, convo, scroll: 0 } });
+    this.schedulePersist();
+  }
+
+  /** Save this conversation to the account (and take a newer copy from it). Quiet on failure. */
+  async syncConvo(): Promise<void> {
+    if (!this.deps.api.signedIn || this.state.chat.streaming) return;
+    const c = this.state.chat.convo;
+    if (!c.messages.length) return;
+    await this.once("sync", async () => {
+      try {
+        const r = await this.deps.api.putConversation(this.syncShape());
+        if (!r.ok && r.newer && !this.state.chat.streaming && this.state.chat.convo.id === r.newer.id) this.adoptConvo(r.newer);
+      } catch {
+        // Offline, or sync off on this server: the next tick tries again.
+      }
+    });
+  }
+
+  private historyList: SyncSummary[] = [];
+
+  private async history(text: string): Promise<void> {
+    if (this.needSignIn(text)) return;
+    try {
+      await this.syncConvo();
+      const all = (await this.deps.api.listConversations()).filter((c) => !c.deleted).slice(0, 30);
+      this.historyList = all;
+      if (!all.length) return this.note("no conversations on your account yet; they sync as you chat (web, TUI and CLI).", text);
+      const cur = this.state.chat.convo.id;
+      const lines = all.map((c, i) => `${String(i + 1).padStart(2)}. ${c.id === cur ? "* " : "  "}${new Date(c.updated).toISOString().slice(0, 16).replace("T", " ")}  ${c.title.slice(0, 60)}  (${c.id})`);
+      this.note(`your conversations, newest first:\n${lines.join("\n")}\n\n/open <n> switches to one`, text);
+    } catch (e) {
+      this.note(`could not list conversations: ${e instanceof Error ? e.message : String(e)}`, text);
+    }
+  }
+
+  private async open(text: string, target: string): Promise<void> {
+    if (this.needSignIn(text)) return;
+    if (this.state.chat.streaming) return this.toast("still answering; Esc stops it first", "info");
+    const n = /^\d+$/.test(target) ? Number(target) : NaN;
+    const id = Number.isFinite(n) ? this.historyList[n - 1]?.id : target;
+    if (!id) return this.note("no such number; run /history first", text);
+    try {
+      await this.syncConvo();
+      const c = await this.deps.api.getConversation(id);
+      if (!c) return this.note(`no conversation ${id} on your account`, text);
+      this.adoptConvo(c);
+      this.toast(`opened: ${c.title}`, "ok");
+    } catch (e) {
+      this.note(`could not open ${id}: ${e instanceof Error ? e.message : String(e)}`, text);
     }
   }
 
@@ -409,8 +554,9 @@ export class Controller {
   }
 
   newChat(): void {
+    void this.syncConvo();
     this.abort?.abort();
-    this.set({ chat: { ...this.state.chat, convo: newConvo(this.state.chat.convo.model, this.now()), scroll: 0, streaming: false } });
+    this.set({ chat: { ...this.state.chat, convo: newConvo(this.state.chat.convo.model, this.now()), scroll: 0, streaming: false, queued: [] } });
     this.schedulePersist();
   }
 

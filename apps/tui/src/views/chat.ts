@@ -87,6 +87,11 @@ export function transcriptLines(state: AppState, width: number, theme: Theme): L
     lines.forEach((l, k) => out.push({ text: `${k === 0 ? "c0 › " : "     "}${l}`, fg: m.error ? theme.danger : theme.foreground }));
     if (streaming && m.content) out.push({ text: `     ${spin(state.now)}`, fg: theme.muted });
   });
+  for (const q of state.chat.queued) {
+    out.push({ text: "" });
+    wrapBlock(q, width - 9, "").forEach((l, k) => out.push({ text: `${k === 0 ? "queued › " : "         "}${l}`, fg: theme.muted }));
+  }
+  if (state.chat.queued.length) out.push({ text: "         sends after this answer · ↑ on an empty line edits it", fg: theme.muted, dim: true });
   return out;
 }
 
@@ -125,7 +130,7 @@ export function renderChat(ui: Container, state: AppState, theme: Theme, h: Chat
         border: "rounded",
         borderColor: state.chat.typing ? theme.borderFocused : theme.border,
         padding: [0, 1],
-        title: state.chat.streaming ? " answering… Esc stops " : state.chat.typing ? undefined : " Esc'd: i or Enter to type ",
+        title: state.chat.streaming ? " answering… Enter queues · Esc stops " : state.chat.typing ? undefined : " Esc'd: i or Enter to type ",
         titleColor: theme.muted,
         onClick: () => h.onFocusInput?.(),
       },

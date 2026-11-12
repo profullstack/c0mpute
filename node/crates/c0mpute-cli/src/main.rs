@@ -25,6 +25,7 @@ mod apps_mcp;
 mod container_cli;
 mod ai_chat;
 mod chat_connect;
+mod chat_history;
 mod chat_plugins;
 mod chat_push;
 mod crowdgpt;

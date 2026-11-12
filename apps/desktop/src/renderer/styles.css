@@ -73,3 +73,5 @@ th { color: var(--dim); font-weight: 500; }
 .msg.err { border-color: var(--bad); color: var(--bad); }
 .composer { position: sticky; bottom: 0; background: var(--bg); padding-top: 8px; display: flex; gap: 8px; }
 .composer textarea { min-height: 64px; font-family: inherit; font-size: 14px; }
+.b.small, button.b.small { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
+.queued .msg { opacity: .75; }

@@ -31,6 +31,7 @@ import {
 import { ConnectBridge, HostingJobs, NodeManager, type NodeStatus } from "./node";
 import { lookupVar, secretNames, setSecret } from "./secrets";
 import { loadSettings, saveSettings, type Settings } from "./settings";
+import { historyEvents, loadAgentHistory, saveAgentHistory } from "./agent-history";
 import { createSkill, defaultSkillsDir, importSkillFolder, importSkillZip, loadSkills, skillsPrompt } from "./skills";
 import { checkForUpdate } from "./updater";
 import { LineSplitter } from "./progress";
@@ -266,7 +267,6 @@ function createWindow() {
 // ── agent ──────────────────────────────────────────────────────────────
 
 const pendingConfirms = new Map<string, (d: Decision) => void>();
-let agentAbort: AbortController | null = null;
 
 function currentSkills() {
   return loadSkills(defaultSkillsDir(), settings.skillsDisabled);
@@ -284,9 +284,12 @@ const agent = new AgentSession(
         if (win && !win.isFocused()) win.flashFrame(true);
       }),
     emit: (ev: AgentEvent) => send("agent:event", ev),
+    persist: (messages) => saveAgentHistory(messages),
   },
   { model: settings.agentModel || undefined },
 );
+// The last conversation, from ~/.c0mpute/desktop-agent-chat.json (local only).
+agent.messages = loadAgentHistory();
 
 // ── MCP ────────────────────────────────────────────────────────────────
 
@@ -506,11 +509,15 @@ const handlers: Record<string, Handler> = {
     pollMedia();
   },
 
-  "agent:send": async (text: string) => {
-    agentAbort = new AbortController();
-    agent.send(text, agentAbort.signal);
+  // Not awaited: a message sent while the agent works is queued and the
+  // call returns at once.
+  "agent:send": (text: string) => {
+    void agent.submit(String(text));
   },
-  "agent:stop": () => agentAbort?.abort(),
+  "agent:stop": () => agent.stop(),
+  "agent:unqueue": (index: number) => agent.unqueue(Number(index)) ?? null,
+  "agent:queued": () => [...agent.queued],
+  "agent:history": () => historyEvents(agent.messages),
   "agent:reset": () => {
     agent.reset();
     agent.allowed.clear();

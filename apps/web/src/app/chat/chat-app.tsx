@@ -10,6 +10,7 @@ import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCo
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
+import { adopt, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
 import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
 const PUSH_NODE = "c0_push_node";
@@ -143,6 +144,8 @@ type Msg = {
   video?: VideoView;
   /** Chat plugin tool steps this assistant turn took (calls, results, approvals). */
   tools?: ToolView[];
+  /** A resumable turn still streaming: reattached after a reload or a dropped connection. */
+  run?: string;
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -312,6 +315,9 @@ const newConvo = (model: string): Convo => ({
   updated: Date.now(),
 });
 
+/** An error the server put in the stream (not a dropped connection, so not worth reattaching). */
+class StreamError extends Error {}
+
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
 async function readStream(res: Response, onDelta: (t: string) => void, onEvent?: (e: PluginEvent) => void) {
   const reader = res.body!.getReader();
@@ -334,7 +340,7 @@ async function readStream(res: Response, onDelta: (t: string) => void, onEvent?:
       } catch {
         continue;
       }
-      if (j.error) throw new Error(j.error.message ?? "stream error");
+      if (j.error) throw new StreamError(j.error.message ?? "stream error");
       if (j.object === PLUGIN_EVENT_OBJECT) {
         if (j.event && onEvent) onEvent(j.event as PluginEvent);
         continue;
@@ -352,6 +358,10 @@ export function ChatApp({ error }: { error: string | null }) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Lines sent while busy (an answer, its plugin tool calls, or a generation):
+  // they go out in order once the work in front of them finishes. Stop ends
+  // the current work, so the next queued line goes at once.
+  const [queued, setQueued] = useState<string[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [tab, setTab] = useState<"chat" | "connect" | "plugins">("chat");
   const abort = useRef<AbortController | null>(null);
@@ -399,11 +409,98 @@ export function ChatApp({ error }: { error: string | null }) {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [active?.messages]);
 
+  // ── account sync: every signed-in device sees the same conversations ──
+  const convosRef = useRef<Convo[]>([]);
+  convosRef.current = convos;
+  const syncing = useRef(false);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  const syncNow = useCallback(async () => {
+    if (syncing.current) return;
+    syncing.current = true;
+    try {
+      const r = await fetch("/api/v1/chat/conversations?since=1");
+      if (r.status === 503 || r.status === 401) return setSyncNote(r.status === 503 ? "sync is off on this server" : null);
+      if (!r.ok) return;
+      const server = ((await r.json()).data ?? []) as ServerSummary[];
+      // Empty "new chat"s and turns still streaming stay local until they have something to keep.
+      const local = convosRef.current.filter((c) => c.messages.length > 0 && !c.messages.some((m) => m.run));
+      const plan = syncPlan(local, server);
+      const pulled: Convo[] = [];
+      for (const id of plan.pull) {
+        const g = await fetch(`/api/v1/chat/conversations/${encodeURIComponent(id)}`);
+        if (g.ok) pulled.push(await g.json());
+      }
+      for (const id of plan.push) {
+        const c = convosRef.current.find((x) => x.id === id);
+        if (!c) continue;
+        const res = await fetch(`/api/v1/chat/conversations/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(slimForSync(c)),
+        });
+        if (res.status === 409) {
+          const j = await res.json().catch(() => ({}));
+          if (j.conversation) pulled.push(j.conversation);
+        }
+      }
+      if (pulled.length || plan.drop.length) {
+        setConvos((all) => {
+          let next = all.filter((c) => !plan.drop.includes(c.id) || c.messages.some((m) => m.run));
+          for (const sc of pulled) {
+            const i = next.findIndex((c) => c.id === sc.id);
+            // Never overwrite a conversation that is streaming right now.
+            if (i >= 0 && next[i].messages.some((m) => m.run)) continue;
+            const merged = adopt(i >= 0 ? next[i] : undefined, sc) as Convo;
+            next = i >= 0 ? next.map((c, k) => (k === i ? merged : c)) : [...next, merged];
+          }
+          next.sort((a, b) => b.updated - a.updated);
+          save(next);
+          return next;
+        });
+        setActiveId((cur) => cur ?? pulled[0]?.id ?? null);
+      }
+      setSyncNote(null);
+    } catch {
+      // Offline: the next pass catches up.
+    } finally {
+      syncing.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    if (!me) return;
+    void syncNow();
+    const t = setInterval(() => void syncNow(), 60_000);
+    const onFocus = () => void syncNow();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [me, syncNow]);
+  // After an answer lands, save it to the account soon rather than on the next tick.
+  useEffect(() => {
+    if (!me || busy) return;
+    const t = setTimeout(() => void syncNow(), 1500);
+    return () => clearTimeout(t);
+  }, [busy, me, syncNow]);
+
+  // ── resumable turns: reattach to answers still streaming after a reload ──
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (resumed.current || !convos.length) return;
+    resumed.current = true;
+    const pending = convos.flatMap((c) => {
+      const last = c.messages[c.messages.length - 1];
+      return last?.role === "assistant" && last.run ? [{ id: c.id, run: last.run }] : [];
+    });
+    for (const p of pending) void reattach(p.id, p.run);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convos.length]);
+
   async function drawImage(convo: Convo, text: string, prompt: string) {
     const id = convo.id;
     const adult = adultMode;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -491,7 +588,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function composeMusic(convo: Convo, text: string, music: MusicCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -609,7 +705,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function makeAlbum(convo: Convo, text: string, cmd: AlbumCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -712,7 +807,6 @@ export function ChatApp({ error }: { error: string | null }) {
   async function makePromo(convo: Convo, text: string, req: PromoCommand) {
     const id = convo.id;
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     const started = Date.now();
@@ -790,7 +884,6 @@ export function ChatApp({ error }: { error: string | null }) {
   function addTurn(convo: Convo, text: string, reply: Msg): number {
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
     const index = convo.messages.length + 1;
-    setInput("");
     setFailure(null);
     setConvos((all) => {
       const base = all.some((c) => c.id === convo.id) ? all : [convo, ...all];
@@ -1069,9 +1162,27 @@ export function ChatApp({ error }: { error: string | null }) {
     void pollPush(convo.id, index, view);
   }
 
-  async function send() {
-    const text = input.trim();
-    if (!text || busy) return;
+  // A destructive tool call waiting on Approve/Deny holds the queue: sending
+  // past it would silently drop the approval.
+  const lastMsg = active?.messages[active.messages.length - 1];
+  const awaitingApproval = !!lastMsg?.tools?.some((t) => t.status === "approval");
+  useEffect(() => {
+    if (busy || awaitingApproval || !queued.length) return;
+    const [next, ...rest] = queued;
+    setQueued(rest);
+    void send(next);
+    // send() reads the latest render's state; this runs after that render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, awaitingApproval, queued]);
+
+  async function send(line?: string) {
+    const text = (line ?? input).trim();
+    if (!text) return;
+    if (line === undefined) setInput("");
+    if (busy || awaitingApproval) {
+      setQueued((q) => [...q, text]);
+      return;
+    }
     let convo = active;
     if (!convo) {
       convo = newConvo("auto");
@@ -1136,7 +1247,6 @@ export function ChatApp({ error }: { error: string | null }) {
     }
     const history: Msg[] = [...convo.messages, { role: "user", content: text }];
     const title = convo.messages.length === 0 ? text.slice(0, 60) : convo.title;
-    setInput("");
     setFailure(null);
     setBusy(true);
     // Insert the user turn plus an empty assistant turn that streams in.
@@ -1162,13 +1272,7 @@ export function ChatApp({ error }: { error: string | null }) {
     const ctrl = new AbortController();
     abort.current = ctrl;
     setBusy(true);
-    const setTools = (fn: (t: ToolView[]) => ToolView[]) =>
-      update(id, (c) => {
-        const msgs = c.messages.slice();
-        const last = msgs[msgs.length - 1];
-        msgs[msgs.length - 1] = { ...last, tools: fn(last.tools ?? []) };
-        return { ...c, messages: msgs, updated: Date.now() };
-      });
+    let runId: string | null = null;
     try {
       const res = await fetch("/api/v1/chat/completions", {
         method: "POST",
@@ -1178,14 +1282,129 @@ export function ChatApp({ error }: { error: string | null }) {
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
           plugin_events: true,
+          // The server finishes the turn even if this tab closes or the
+          // connection drops; the run id lets us (or a reload) reattach.
+          resumable: true,
           ...(approvals.length ? { approvals } : {}),
         }),
         signal: ctrl.signal,
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        throw new Error(j.error?.message ?? `HTTP ${res.status}`);
+        throw new StreamError(j.error?.message ?? `HTTP ${res.status}`);
       }
+      runId = res.headers.get("x-c0mpute-run");
+      if (runId) setLastRun(id, runId);
+      await consume(id, res, ctrl.signal);
+      setLastRun(id, undefined);
+    } catch (e) {
+      const stopped = e instanceof DOMException && e.name === "AbortError";
+      if (stopped && runId) {
+        // Stop: closing the connection no longer ends a resumable turn.
+        void fetch(`/api/v1/chat/runs/${runId}`, { method: "DELETE" }).catch(() => {});
+        setLastRun(id, undefined);
+      } else if (!stopped && runId && !(e instanceof StreamError)) {
+        // The connection dropped mid-answer: reattach and replay.
+        abort.current = null;
+        await reattach(id, runId);
+        return;
+      } else if (!stopped) {
+        setLastRun(id, undefined);
+        setFailure(e instanceof Error ? e.message : String(e));
+        // Drop an empty assistant turn so a retry starts clean.
+        update(id, (c) => {
+          const last = c.messages[c.messages.length - 1];
+          return last?.role === "assistant" && !last.content && !last.tools?.length ? { ...c, messages: c.messages.slice(0, -1) } : c;
+        });
+      }
+    } finally {
+      if (abort.current === ctrl) {
+        setBusy(false);
+        abort.current = null;
+      }
+    }
+  }
+
+  /** Mark (or clear) the run id on a chat's last message. */
+  function setLastRun(id: string, run: string | undefined) {
+    update(id, (c) => {
+      const msgs = c.messages.slice();
+      const last = msgs[msgs.length - 1];
+      if (!last || last.role !== "assistant") return c;
+      msgs[msgs.length - 1] = { ...last, run };
+      return { ...c, messages: msgs };
+    });
+  }
+
+  /**
+   * Reattach to a resumable turn: the server replays it from the start, so
+   * the partial answer and its tool rows are rebuilt from the replay.
+   */
+  async function reattach(id: string, run: string) {
+    const ctrl = new AbortController();
+    abort.current = ctrl;
+    setBusy(true);
+    try {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, Math.min(8000, 500 * 2 ** attempt)));
+        let res: Response;
+        try {
+          res = await fetch(`/api/v1/chat/runs/${run}`, { signal: ctrl.signal });
+        } catch (e) {
+          if (e instanceof DOMException && e.name === "AbortError") throw e;
+          continue;
+        }
+        if (res.status === 404) {
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            msgs[msgs.length - 1] = { ...last, run: undefined, content: last.content ? `${last.content}\n\n// cut off: the connection dropped and the server no longer has this answer` : "// the connection dropped and the server no longer has this answer; send it again" };
+            return { ...c, messages: msgs };
+          });
+          return;
+        }
+        if (!res.ok) continue;
+        update(id, (c) => {
+          const msgs = c.messages.slice();
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: "", tools: [] };
+          return { ...c, messages: msgs };
+        });
+        try {
+          await consume(id, res, ctrl.signal);
+          setLastRun(id, undefined);
+          return;
+        } catch (e) {
+          if (e instanceof StreamError) throw e;
+          if (e instanceof DOMException && e.name === "AbortError") throw e;
+        }
+      }
+      setFailure("lost the connection to this answer; it may still finish: reload to try again");
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        void fetch(`/api/v1/chat/runs/${run}`, { method: "DELETE" }).catch(() => {});
+        setLastRun(id, undefined);
+      } else {
+        setLastRun(id, undefined);
+        setFailure(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (abort.current === ctrl) {
+        setBusy(false);
+        abort.current = null;
+      }
+    }
+  }
+
+  /** Read a turn's SSE into the chat's last message (answer text and tool rows). */
+  async function consume(id: string, res: Response, _signal: AbortSignal) {
+    const setTools = (fn: (t: ToolView[]) => ToolView[]) =>
+      update(id, (c) => {
+        const msgs = c.messages.slice();
+        const last = msgs[msgs.length - 1];
+        msgs[msgs.length - 1] = { ...last, tools: fn(last.tools ?? []) };
+        return { ...c, messages: msgs, updated: Date.now() };
+      });
+    {
       await readStream(
         res,
         (t) =>
@@ -1211,18 +1430,6 @@ export function ChatApp({ error }: { error: string | null }) {
           }
         },
       );
-    } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError")) {
-        setFailure(e instanceof Error ? e.message : String(e));
-        // Drop an empty assistant turn so a retry starts clean.
-        update(id, (c) => {
-          const last = c.messages[c.messages.length - 1];
-          return last?.role === "assistant" && !last.content && !last.tools?.length ? { ...c, messages: c.messages.slice(0, -1) } : c;
-        });
-      }
-    } finally {
-      setBusy(false);
-      abort.current = null;
     }
   }
 
@@ -1355,14 +1562,16 @@ export function ChatApp({ error }: { error: string | null }) {
               <button
                 aria-label="delete chat"
                 className="opacity-0 group-hover:opacity-100 px-1 text-[var(--color-dim)] hover:text-[var(--color-warn)]"
-                onClick={() =>
+                onClick={() => {
                   setConvos((all) => {
                     const next = all.filter((x) => x.id !== c.id);
                     save(next);
                     if (activeId === c.id) setActiveId(next[0]?.id ?? null);
                     return next;
-                  })
-                }
+                  });
+                  // Gone on the account too, so other devices drop it at their next sync.
+                  if (me) void fetch(`/api/v1/chat/conversations/${encodeURIComponent(c.id)}`, { method: "DELETE" }).catch(() => {});
+                }}
               >
                 ×
               </button>
@@ -1370,6 +1579,7 @@ export function ChatApp({ error }: { error: string | null }) {
           ))}
         </nav>
         <div className="border-t border-[var(--color-rule)] pt-3 space-y-2 text-xs text-[var(--color-dim)]">
+          <p title="conversations sync to your c0mpute account: the web chat, the TUI and the CLI share them">{me ? (syncNote ?? "synced to your account") : "saved in this browser · sign in to sync"}</p>
           <button onClick={() => setTab("plugins")} className={`block ${tab === "plugins" ? "accent" : "hover:text-[var(--color-fg)]"}`}>
             plugins
           </button>
@@ -1585,6 +1795,30 @@ export function ChatApp({ error }: { error: string | null }) {
               </div>
             ))}
             {failure && <p className="text-[var(--color-warn)] text-xs">error: {failure}</p>}
+            {queued.length > 0 && (
+              <ol className="space-y-1" aria-label="queued messages">
+                {queued.map((q, i) => (
+                  <li key={`${i}-${q}`} className="flex items-start gap-2 text-sm text-[var(--color-dim)]">
+                    <span className="shrink-0">queued ›</span>
+                    <span className="flex-1 whitespace-pre-wrap break-words">{q}</span>
+                    <button
+                      type="button"
+                      className="text-xs underline hover:text-[var(--color-fg)]"
+                      onClick={() => {
+                        setQueued((all) => all.filter((_, k) => k !== i));
+                        if (!input.trim()) setInput(q);
+                      }}
+                    >
+                      edit
+                    </button>
+                    <button type="button" className="text-xs underline hover:text-[var(--color-warn)]" onClick={() => setQueued((all) => all.filter((_, k) => k !== i))}>
+                      remove
+                    </button>
+                  </li>
+                ))}
+                <li className="text-xs text-[var(--color-dim)]">{awaitingApproval && !busy ? "sends after you approve or deny the tool call above" : "sends when the current answer finishes · stop to send it now"}</li>
+              </ol>
+            )}
             <div ref={bottom} />
           </div>
           <form
@@ -1604,13 +1838,18 @@ export function ChatApp({ error }: { error: string | null }) {
                 }
               }}
               rows={2}
-              placeholder="message, /image <prompt>, /video <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"
+              placeholder={busy ? "type now: Enter queues it for when this answer finishes (stop sends it at once)" : "message, /image <prompt>, /video <prompt>, /music <style>, /album <idea>, /promo <url>, or /push hosting <name> (Enter to send, Shift+Enter for a new line)"}
               className="flex-1 resize-y bg-[var(--color-card)] border border-[var(--color-rule)] p-2 text-sm"
             />
             {busy ? (
-              <button type="button" onClick={() => abort.current?.abort()} className="border border-[var(--color-warn)] px-4 text-[var(--color-warn)]">
-                stop
-              </button>
+              <div className="flex flex-col gap-1">
+                <button type="button" onClick={() => abort.current?.abort()} className="border border-[var(--color-warn)] px-4 flex-1 text-[var(--color-warn)]">
+                  stop
+                </button>
+                <button type="submit" disabled={!input.trim()} className="border border-[var(--color-rule)] px-4 text-xs disabled:opacity-40" title="send after the current answer finishes">
+                  queue
+                </button>
+              </div>
             ) : (
               <button type="submit" className="border border-[var(--color-accent)] px-4 accent hover:bg-[var(--color-accent-dim)]">
                 send

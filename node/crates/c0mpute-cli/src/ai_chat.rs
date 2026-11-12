@@ -7,7 +7,9 @@
 //! c0mpute chat --p2p "explain LoRA"      # a worker answers over libp2p, no account
 //! c0mpute chat login                     # device sign-in: approve on c0mpute.com with CoinPay (DID required)
 //! c0mpute chat "explain LoRA"            # one answer, streamed
-//! c0mpute chat                           # interactive session (TTY)
+//! c0mpute chat                           # interactive session (TTY), saved under ~/.c0mpute/chats
+//! c0mpute chat --resume [id]             # reopen the last (or a given) conversation
+//! c0mpute chat history                   # saved conversations, this machine's and the account's
 //! cat notes.md | c0mpute chat --system "summarize"
 //! c0mpute chat models | whoami | logout
 //! c0mpute chat mcp                       # stdio MCP bridge to https://c0mpute.com/api/mcp
@@ -27,6 +29,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::chat_history::{self, Convo};
 
 const DEFAULT_URL: &str = "https://c0mpute.com";
 
@@ -75,6 +79,11 @@ struct Args {
     /// c0mpute site URL (default https://c0mpute.com, or $C0MPUTE_URL).
     #[arg(long)]
     url: Option<String>,
+    /// Reopen a saved conversation in the interactive session: the most
+    /// recent with no value, or one id from `c0mpute chat history` (this
+    /// machine's, else the account's).
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "ID")]
+    resume: Option<String>,
     /// The prompt. Omit for an interactive session, or pipe it on stdin.
     prompt: Vec<String>,
 }
@@ -169,6 +178,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         Some("connect") => return crate::chat_connect::run(args.get(1..).unwrap_or_default()).await,
         Some("push") => return crate::chat_push::run(args.get(1..).unwrap_or_default()).await,
         Some("plugins") | Some("plugin") => return crate::chat_plugins::run(args.get(1..).unwrap_or_default()).await,
+        Some("history") => return history(&base_url(None)).await,
         _ => {}
     }
     let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
@@ -193,14 +203,25 @@ pub async fn run(args: &[String]) -> Result<()> {
     if let Some(s) = &a.system {
         messages.push(json!({"role": "system", "content": s}));
     }
+    if let Some(id) = &a.resume {
+        if !prompt.trim().is_empty() {
+            bail!("--resume opens the interactive session: drop the prompt, then type it there");
+        }
+        let convo = find_saved(&url, id, if p2p { None } else { api_key() }).await?;
+        if p2p {
+            return P2pChat::boot(&a).await?.repl(&a, convo).await;
+        }
+        return repl(&url, &require_key()?, &a, convo).await;
+    }
     if prompt.trim().is_empty() {
         if !std::io::stdin().is_terminal() {
             bail!("no prompt: pass it as an argument or pipe it on stdin");
         }
+        let convo = Convo::new(a.model.as_deref(), messages);
         if p2p {
-            return P2pChat::boot(&a).await?.repl(&a, messages).await;
+            return P2pChat::boot(&a).await?.repl(&a, convo).await;
         }
-        return repl(&url, &require_key()?, &a, messages).await;
+        return repl(&url, &require_key()?, &a, convo).await;
     }
     messages.push(json!({"role": "user", "content": prompt}));
     if p2p {
@@ -214,7 +235,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let key = require_key()?;
-    let mut turn = complete(&url, &key, &a, &messages, a.json, &[]).await?;
+    let mut turn = complete(&url, &key, &a, &messages, a.json, &[], None).await?;
     if a.json {
         println!("{}", turn.answer);
         return Ok(());
@@ -225,7 +246,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         if ok.is_empty() {
             break;
         }
-        turn = complete(&url, &key, &a, &messages, false, &ok).await?;
+        turn = complete(&url, &key, &a, &messages, false, &ok, None).await?;
     }
     Ok(())
 }
@@ -280,9 +301,157 @@ fn ask_approvals(waiting: &[(String, String)]) -> Result<Vec<String>> {
     Ok(ok)
 }
 
-/// One completion. Streams text to stdout (returns it too), or returns raw JSON with `json`.
-async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool, approvals: &[String]) -> Result<Turn> {
+/// A resumable turn's run id, known once the server names it. Shared so the
+/// REPL can still cancel the run after Ctrl+C dropped the request, and saved
+/// into the conversation file at once (`pending_run`) so `--resume` can
+/// reattach after a crash.
+pub(crate) struct RunTrack {
+    id: std::sync::Mutex<Option<String>>,
+    save: Option<Convo>,
+}
+
+impl RunTrack {
+    fn new(save: Option<Convo>) -> Self {
+        Self { id: std::sync::Mutex::new(None), save }
+    }
+
+    fn id(&self) -> Option<String> {
+        self.id.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn seen(&self, id: &str) {
+        let Ok(mut g) = self.id.lock() else { return };
+        if g.as_deref() == Some(id) {
+            return;
+        }
+        *g = Some(id.to_string());
+        if let Some(c) = &self.save {
+            let mut c = c.clone();
+            c.pending_run = Some(id.to_string());
+            chat_history::save(&c).ok();
+        }
+    }
+}
+
+/// The run id in a `{"object":"c0mpute.run","id":...}` SSE event.
+fn run_event_id(v: &Value) -> Option<&str> {
+    (v["object"].as_str() == Some("c0mpute.run")).then(|| v["id"].as_str()).flatten().filter(|id| !id.is_empty() && id.len() <= 128)
+}
+
+const CUT_OFF: &str = "the answer stream was cut off (the serving node or the network restarted); try again";
+
+enum StreamEnd {
+    Done,
+    /// The connection broke before [DONE]: worth reattaching to the run.
+    Cut,
+}
+
+/// Read one SSE answer to the end: text to stdout, plugin steps to stderr.
+async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: &mut Vec<(String, String)>, track: Option<&RunTrack>) -> Result<StreamEnd> {
+    let mut out = std::io::stdout();
+    let mut buf = String::new();
+    loop {
+        let chunk = match res.chunk().await {
+            Ok(Some(c)) => c,
+            // A plain stream may end without [DONE] (the old behaviour: that
+            // is the answer). A resumable run always ends with [DONE], so an
+            // early end there means the connection broke.
+            Ok(None) if track.and_then(RunTrack::id).is_none() => return Ok(StreamEnd::Done),
+            Ok(None) => return Ok(StreamEnd::Cut),
+            Err(_) if track.and_then(RunTrack::id).is_none() => bail!(CUT_OFF),
+            Err(_) => return Ok(StreamEnd::Cut),
+        };
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(nl) = buf.find('\n') {
+            let line = buf[..nl].trim().to_string();
+            buf.drain(..=nl);
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
+            if data == "[DONE]" {
+                return Ok(StreamEnd::Done);
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
+                out.flush().ok();
+                bail!("{msg}");
+            }
+            if let Some(id) = run_event_id(&v) {
+                if let Some(t) = track {
+                    t.seen(id);
+                }
+                continue;
+            }
+            if v["object"].as_str() == Some("c0mpute.plugin_event") {
+                show_plugin_event(&v["event"], waiting);
+                continue;
+            }
+            if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                answer.push_str(t);
+                print!("{t}");
+                out.flush().ok();
+            }
+        }
+    }
+}
+
+/// GET the run's replay, retrying a dropped network for about 30 s.
+/// None: the run is gone (unknown, expired, or the server restarted).
+async fn reattach(url: &str, key: &str, id: &str) -> Result<Option<reqwest::Response>> {
+    let client = client()?;
+    for wait in [0u64, 1, 2, 4, 8, 15] {
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+        match client.get(format!("{url}/api/v1/chat/runs/{id}")).bearer_auth(key).send().await {
+            Ok(r) if r.status().is_success() => return Ok(Some(r)),
+            Ok(r) if r.status().as_u16() == 404 => return Ok(None),
+            Ok(r) if r.status().as_u16() == 401 => bail!("{}\nrun `c0mpute chat login`", api_error(r.status(), &r.text().await.unwrap_or_default())),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+/// Stream a turn, reattaching to its run when the connection drops.
+async fn stream_turn(url: &str, key: &str, mut res: reqwest::Response, track: Option<&RunTrack>) -> Result<Turn> {
+    let mut answer = String::new();
+    let mut waiting = Vec::new();
+    for _ in 0..5 {
+        match read_stream(&mut res, &mut answer, &mut waiting, track).await? {
+            StreamEnd::Done => {
+                println!();
+                return Ok(Turn { answer, approvals: waiting });
+            }
+            StreamEnd::Cut => {
+                let Some(id) = track.and_then(RunTrack::id) else { bail!(CUT_OFF) };
+                let Some(r) = reattach(url, key, &id).await? else { bail!(CUT_OFF) };
+                // The replay starts from the beginning of the answer.
+                eprintln!("\n\x1b[2m(reconnected, replaying)\x1b[0m");
+                answer.clear();
+                waiting.clear();
+                res = r;
+            }
+        }
+    }
+    bail!(CUT_OFF)
+}
+
+/// Stop a resumable run on the server (closing the connection no longer
+/// does). Fire and forget.
+fn cancel_run(url: &str, key: &str, id: &str) {
+    let (url, key, id) = (url.to_string(), key.to_string(), id.to_string());
+    tokio::spawn(async move {
+        if let Ok(c) = client() {
+            let _ = c.delete(format!("{url}/api/v1/chat/runs/{id}")).bearer_auth(&key).timeout(Duration::from_secs(10)).send().await;
+        }
+    });
+}
+
+/// One completion. Streams text to stdout (returns it too), or returns raw
+/// JSON with `json`. With a `track` the turn is resumable: it outlives a
+/// dropped connection on the server and is reattached here.
+async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: bool, approvals: &[String], track: Option<&RunTrack>) -> Result<Turn> {
     let mut body = json!({"messages": messages, "stream": !json_out, "plugin_events": true});
+    if !json_out && track.is_some() {
+        body["resumable"] = json!(true);
+    }
     if !approvals.is_empty() {
         body["approvals"] = json!(approvals);
     }
@@ -295,7 +464,7 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
     if let Some(t) = a.temperature {
         body["temperature"] = json!(t);
     }
-    let mut res = client()?
+    let res = client()?
         .post(format!("{url}/api/v1/chat/completions"))
         .bearer_auth(key)
         .json(&body)
@@ -313,66 +482,236 @@ async fn complete(url: &str, key: &str, a: &Args, messages: &[Value], json_out: 
     if json_out {
         return Ok(Turn { answer: res.text().await?, approvals: Vec::new() });
     }
+    if let (Some(t), Some(id)) = (track, res.headers().get("x-c0mpute-run").and_then(|h| h.to_str().ok())) {
+        t.seen(id);
+    }
+    stream_turn(url, key, res, track).await
+}
 
-    let mut out = std::io::stdout();
-    let mut answer = String::new();
-    let mut waiting = Vec::new();
-    let mut buf = String::new();
-    'read: while let Some(chunk) = res
-        .chunk()
-        .await
-        .map_err(|_| anyhow!("the answer stream was cut off (the serving node or the network restarted); try again"))?
-    {
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = buf.find('\n') {
-            let line = buf[..nl].trim().to_string();
-            buf.drain(..=nl);
-            let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
-            if data == "[DONE]" {
-                break 'read;
+/// `--resume` with an answer still streaming when the session ended: replay
+/// it if the server still has the run. None when it is gone.
+async fn resume_pending(url: &str, key: &str, id: &str) -> Result<Option<Turn>> {
+    let Some(res) = reattach(url, key, id).await? else { return Ok(None) };
+    let track = RunTrack::new(None);
+    track.seen(id);
+    stream_turn(url, key, res, Some(&track)).await.map(Some)
+}
+
+/// What happened to a turn run through [`Input::during`].
+enum TurnOutcome<T> {
+    Done(T),
+    /// Ctrl+C: the request was dropped (which closes it, so the server stops
+    /// the model and any plugin tool loop).
+    Interrupted,
+}
+
+/// The interactive session's keyboard: lines arrive from a reader thread, so
+/// the person can keep typing while an answer streams. A line typed during a
+/// turn is queued and sent when the turn ends; Ctrl+C interrupts the turn and
+/// the next queued line goes at once. Ctrl+C at an empty prompt exits.
+struct Input {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    queue: std::collections::VecDeque<String>,
+    closed: bool,
+}
+
+impl Input {
+    fn spawn() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            loop {
+                let mut line = String::new();
+                match stdin.lock().read_line(&mut line) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if tx.send(line.trim_end_matches(['\r', '\n']).to_string()).is_err() {
+                            return;
+                        }
+                    }
+                }
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
-            if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
-                out.flush().ok();
-                bail!("{msg}");
+        });
+        Self::from_receiver(rx)
+    }
+
+    fn from_receiver(rx: tokio::sync::mpsc::UnboundedReceiver<String>) -> Self {
+        Self { rx, queue: Default::default(), closed: false }
+    }
+
+    /// The next line to act on: a queued one first, else wait for the
+    /// keyboard. None on end of input or Ctrl+C.
+    async fn next(&mut self) -> Option<String> {
+        if let Some(q) = self.queue.pop_front() {
+            eprintln!("\x1b[32m> \x1b[0m{q}  \x1b[2m(queued)\x1b[0m");
+            return Some(q);
+        }
+        if self.closed {
+            return None;
+        }
+        eprint!("\x1b[32m> \x1b[0m");
+        std::io::stderr().flush().ok();
+        tokio::select! {
+            l = self.rx.recv() => {
+                if l.is_none() {
+                    self.closed = true;
+                    eprintln!();
+                }
+                l
             }
-            if v["object"].as_str() == Some("c0mpute.plugin_event") {
-                show_plugin_event(&v["event"], &mut waiting);
-                continue;
-            }
-            if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
-                answer.push_str(t);
-                print!("{t}");
-                out.flush().ok();
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!();
+                None
             }
         }
     }
-    println!();
-    Ok(Turn { answer, approvals: waiting })
+
+    /// One raw line (approval prompts), bypassing the queue.
+    async fn line(&mut self) -> Option<String> {
+        if self.closed {
+            return None;
+        }
+        let l = self.rx.recv().await;
+        if l.is_none() {
+            self.closed = true;
+        }
+        l
+    }
+
+    /// Run a turn while still listening: typed lines queue, Ctrl+C interrupts.
+    async fn during<T>(&mut self, fut: impl std::future::Future<Output = T>) -> TurnOutcome<T> {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                r = &mut fut => return TurnOutcome::Done(r),
+                l = self.rx.recv(), if !self.closed => match l {
+                    None => self.closed = true,
+                    Some(l) if l.trim().is_empty() => {}
+                    Some(l) => {
+                        self.queue.push_back(l.trim().to_string());
+                        eprintln!(
+                            "\x1b[2m(queued {}: sends when this answer finishes · Ctrl+C stops it now)\x1b[0m",
+                            self.queue.len()
+                        );
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    println!();
+                    eprintln!(
+                        "\x1b[33m(stopped{})\x1b[0m",
+                        if self.queue.is_empty() { String::new() } else { format!("; sending {} queued", self.queue.len()) }
+                    );
+                    return TurnOutcome::Interrupted;
+                }
+            }
+        }
+    }
 }
 
-async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Result<()> {
-    let mut model = a.model.clone();
-    eprintln!(
-        "c0mpute chat · {} · /model <id>, /models, /reset, /exit",
-        model.as_deref().unwrap_or("any live model")
-    );
-    let stdin = std::io::stdin();
-    let base = messages.clone();
-    loop {
-        eprint!("\x1b[32m> \x1b[0m");
+/// y/N for each waiting call, read through the session's [`Input`].
+async fn ask_approvals_in(input: &mut Input, waiting: &[(String, String)]) -> Vec<String> {
+    let mut ok = Vec::new();
+    for (what, token) in waiting {
+        eprint!("approve {what}? [y/N] ");
         std::io::stderr().flush().ok();
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            eprintln!();
-            return Ok(());
+        let line = input.line().await.unwrap_or_default();
+        if matches!(line.trim(), "y" | "Y" | "yes") {
+            ok.push(token.clone());
         }
+    }
+    ok
+}
+
+/// Save locally and (signed in) to the account; a failure only warns.
+async fn persist(c: &mut Convo, account: Option<(&str, &str)>) {
+    if !c.messages.iter().any(|m| m["role"] == "user") {
+        return;
+    }
+    if let Err(e) = chat_history::save(c) {
+        eprintln!("\x1b[2m(not saved: {e:#})\x1b[0m");
+    }
+    if let Some((url, key)) = account {
+        let before = c.updated;
+        match chat_history::put(url, key, c).await {
+            Ok(()) if c.updated != before => {
+                chat_history::save(c).ok();
+            }
+            Ok(()) => {}
+            Err(e) => eprintln!("\x1b[2m(not synced to your account: {e:#})\x1b[0m"),
+        }
+    }
+}
+
+/// The conversation `--resume [id]` names: this machine's first, then the
+/// account's.
+async fn find_saved(url: &str, id: &str, key: Option<String>) -> Result<Convo> {
+    let dir = chat_history::chats_dir()?;
+    if id.is_empty() {
+        return chat_history::latest_in(&dir).ok_or_else(|| anyhow!("no saved conversations yet (they are saved as you chat)"));
+    }
+    if let Some(c) = chat_history::load_in(&dir, id) {
+        return Ok(c);
+    }
+    if let Some(key) = key
+        && let Some(c) = chat_history::get(url, &key, id).await?
+    {
+        return Ok(c);
+    }
+    bail!("no conversation {id:?} (see `c0mpute chat history`)")
+}
+
+/// Show where a resumed conversation left off.
+fn show_resumed(c: &Convo) {
+    let turns: Vec<&Value> = c.messages.iter().filter(|m| matches!(m["role"].as_str(), Some("user" | "assistant"))).collect();
+    eprintln!("\x1b[2m(resumed \"{}\", {} messages)\x1b[0m", c.title, turns.len());
+    for m in turns.iter().skip(turns.len().saturating_sub(4)) {
+        let text: String = m["content"].as_str().unwrap_or("").chars().take(300).collect();
+        let who = if m["role"] == "user" { "> " } else { "" };
+        eprintln!("\x1b[2m{who}{}\x1b[0m", text.trim_end());
+    }
+}
+
+async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
+    if a.model.is_some() {
+        convo.model = a.model.clone().unwrap_or_default();
+    }
+    let resumed = !convo.messages.is_empty() && convo.messages.iter().any(|m| m["role"] == "user");
+    eprintln!(
+        "c0mpute chat · {} · /model <id>, /models, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
+        convo.model_opt().as_deref().unwrap_or("any live model")
+    );
+    let account = Some((url, key));
+    if resumed {
+        show_resumed(&convo);
+    }
+    // An answer that was still streaming when the last session ended.
+    if let Some(run) = convo.pending_run.take() {
+        eprintln!("\x1b[2m(reattaching to the answer that was streaming)\x1b[0m");
+        match resume_pending(url, key, &run).await {
+            Ok(Some(turn)) => {
+                convo.messages.push(json!({"role": "assistant", "content": turn.answer}));
+            }
+            Ok(None) => {
+                eprintln!("\x1b[2m(that answer is gone from the server; ask again)\x1b[0m");
+                if convo.messages.last().is_some_and(|m| m["role"] == "user") {
+                    convo.messages.pop();
+                }
+            }
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+        convo.updated = chat_history::now_ms();
+        persist(&mut convo, account).await;
+    }
+    let mut input = Input::spawn();
+    let base: Vec<Value> = convo.messages.iter().filter(|m| m["role"] == "system").cloned().collect();
+    loop {
+        let Some(line) = input.next().await else { return Ok(()) };
         let line = line.trim();
         match line {
             "" => continue,
             "/exit" | "/quit" => return Ok(()),
             "/reset" => {
-                messages = base.clone();
+                convo = Convo::new(convo.model_opt().as_deref(), base.clone());
                 eprintln!("(new conversation)");
                 continue;
             }
@@ -382,33 +721,78 @@ async fn repl(url: &str, key: &str, a: &Args, mut messages: Vec<Value>) -> Resul
             }
             _ if line.starts_with("/model") => {
                 let m = line.trim_start_matches("/model").trim();
-                model = (!m.is_empty() && m != "auto").then(|| m.to_string());
-                eprintln!("(model: {})", model.as_deref().unwrap_or("any live model"));
+                convo.model = if m.is_empty() { "auto".into() } else { m.to_string() };
+                eprintln!("(model: {})", convo.model_opt().as_deref().unwrap_or("any live model"));
                 continue;
             }
             _ => {}
         }
-        messages.push(json!({"role": "user", "content": line}));
-        let args = Args { model: model.clone(), ..clone_args(a) };
-        let mut result = complete(url, key, &args, &messages, false, &[]).await;
-        while let Ok(turn) = &result {
+        convo.messages.push(json!({"role": "user", "content": line}));
+        convo.retitle();
+        convo.updated = chat_history::now_ms();
+        let messages = convo.model_messages();
+        let args = Args { model: convo.model_opt(), ..clone_args(a) };
+        let track = RunTrack::new(Some(convo.clone()));
+        let mut result = input.during(complete(url, key, &args, &messages, false, &[], Some(&track))).await;
+        while let TurnOutcome::Done(Ok(turn)) = &result {
             if turn.approvals.is_empty() {
                 break;
             }
-            let ok = ask_approvals(&turn.approvals)?;
+            let ok = ask_approvals_in(&mut input, &turn.approvals).await;
             if ok.is_empty() {
                 break;
             }
-            result = complete(url, key, &args, &messages, false, &ok).await;
+            result = input.during(complete(url, key, &args, &messages, false, &ok, Some(&track))).await;
         }
         match result {
-            Ok(turn) => messages.push(json!({"role": "assistant", "content": turn.answer})),
-            Err(e) => {
-                messages.pop();
+            TurnOutcome::Done(Ok(turn)) => convo.messages.push(json!({"role": "assistant", "content": turn.answer})),
+            TurnOutcome::Done(Err(e)) => {
+                convo.messages.pop();
                 eprintln!("error: {e:#}");
             }
+            // The cut-off answer is not kept, so the next message starts
+            // clean; the run is stopped on the server too.
+            TurnOutcome::Interrupted => {
+                if let Some(id) = track.id() {
+                    cancel_run(url, key, &id);
+                }
+                convo.messages.pop();
+            }
         }
+        convo.pending_run = None;
+        convo.updated = chat_history::now_ms();
+        persist(&mut convo, account).await;
     }
+}
+
+/// `c0mpute chat history`: saved conversations, newest first.
+async fn history(url: &str) -> Result<()> {
+    let local = chat_history::chats_dir().map(|d| chat_history::list_in(&d)).unwrap_or_default();
+    let remote = match api_key() {
+        Some(key) => match chat_history::list_remote(url, &key).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("(account list unavailable: {e:#})");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let rows = chat_history::merge_rows(&local, &remote);
+    if rows.is_empty() {
+        println!("no saved conversations yet (`c0mpute chat` saves them as you go)");
+        return Ok(());
+    }
+    for r in rows {
+        let place = match (r.local, r.account) {
+            (true, true) => "both",
+            (true, false) => "here",
+            _ => "account",
+        };
+        println!("{:<14} {}  {:<7} {}", r.id, chat_history::when(r.updated), place, r.title);
+    }
+    println!("\nreopen one: c0mpute chat --resume <id>");
+    Ok(())
 }
 
 fn clone_args(a: &Args) -> Args {
@@ -422,6 +806,7 @@ fn clone_args(a: &Args) -> Args {
         max_price: a.max_price,
         timeout_s: a.timeout_s,
         url: a.url.clone(),
+        resume: None,
         prompt: vec![],
     }
 }
@@ -474,24 +859,30 @@ impl P2pChat {
         Ok((v["text"].as_str().unwrap_or_default().to_string(), r))
     }
 
-    async fn repl(&self, a: &Args, mut messages: Vec<Value>) -> Result<()> {
-        let mut model = a.model.clone();
-        eprintln!("c0mpute chat (peer to peer) · {} · /model <id>, /reset, /exit", model.as_deref().unwrap_or("any served model"));
-        let stdin = std::io::stdin();
-        let base = messages.clone();
+    async fn repl(&self, a: &Args, mut convo: Convo) -> Result<()> {
+        if a.model.is_some() {
+            convo.model = a.model.clone().unwrap_or_default();
+        }
+        convo.pending_run = None;
+        let mut model = convo.model_opt();
+        eprintln!(
+            "c0mpute chat (peer to peer) · {} · /model <id>, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
+            model.as_deref().unwrap_or("any served model")
+        );
+        if convo.messages.iter().any(|m| m["role"] == "user") {
+            show_resumed(&convo);
+        }
+        let mut input = Input::spawn();
+        let base: Vec<Value> = convo.messages.iter().filter(|m| m["role"] == "system").cloned().collect();
+        let mut messages = convo.model_messages();
         loop {
-            eprint!("\x1b[32m> \x1b[0m");
-            std::io::stderr().flush().ok();
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line)? == 0 {
-                eprintln!();
-                return Ok(());
-            }
+            let Some(line) = input.next().await else { return Ok(()) };
             let line = line.trim();
             match line {
                 "" => continue,
                 "/exit" | "/quit" => return Ok(()),
                 "/reset" => {
+                    convo = Convo::new(model.as_deref(), base.clone());
                     messages = base.clone();
                     eprintln!("(new conversation)");
                     continue;
@@ -499,21 +890,33 @@ impl P2pChat {
                 _ if line.starts_with("/model") => {
                     let m = line.trim_start_matches("/model").trim();
                     model = (!m.is_empty() && m != "auto").then(|| m.to_string());
+                    convo.model = model.clone().unwrap_or_else(|| "auto".into());
                     eprintln!("(model: {})", model.as_deref().unwrap_or("any served model"));
                     continue;
                 }
                 _ => {}
             }
             messages.push(json!({"role": "user", "content": line}));
-            match self.ask(a, model.clone(), &messages).await {
-                Ok((answer, _)) => {
+            match input.during(self.ask(a, model.clone(), &messages)).await {
+                TurnOutcome::Done(Ok((answer, _))) => {
                     println!("{answer}");
                     messages.push(json!({"role": "assistant", "content": answer}));
                 }
-                Err(e) => {
+                TurnOutcome::Done(Err(e)) => {
                     messages.pop();
                     eprintln!("error: {e:#}");
                 }
+                TurnOutcome::Interrupted => {
+                    messages.pop();
+                }
+            }
+            // Saved on this machine only (no account in peer-to-peer mode).
+            let system: Vec<Value> = convo.messages.iter().filter(|m| m["role"] == "system").cloned().collect();
+            if messages.iter().any(|m| m["role"] == "user") {
+                convo.messages = if messages.first().is_some_and(|m| m["role"] == "system") { messages.clone() } else { [system, messages.clone()].concat() };
+                convo.retitle();
+                convo.updated = chat_history::now_ms();
+                persist(&mut convo, None).await;
             }
         }
     }
@@ -704,6 +1107,77 @@ fn rpc_error(id: Option<Value>, msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spots_the_run_event_and_nothing_else() {
+        assert_eq!(run_event_id(&json!({"object": "c0mpute.run", "id": "r_abc"})), Some("r_abc"));
+        assert_eq!(run_event_id(&json!({"object": "c0mpute.run", "id": ""})), None);
+        assert_eq!(run_event_id(&json!({"object": "c0mpute.plugin_event", "id": "x"})), None);
+        assert_eq!(run_event_id(&json!({"choices": [{"delta": {"content": "c0mpute.run"}}]})), None);
+    }
+
+    #[test]
+    fn resume_flag_takes_an_optional_id() {
+        let a = Args::try_parse_from(["c0mpute chat", "--resume"]).unwrap();
+        assert_eq!(a.resume.as_deref(), Some(""));
+        let a = Args::try_parse_from(["c0mpute chat", "--resume", "abc123"]).unwrap();
+        assert_eq!(a.resume.as_deref(), Some("abc123"));
+        assert!(a.prompt.is_empty());
+        let a = Args::try_parse_from(["c0mpute chat", "hi"]).unwrap();
+        assert_eq!(a.resume, None);
+    }
+
+    #[tokio::test]
+    async fn run_track_saves_the_pending_run_once_known() {
+        let dir = tempfile::tempdir().unwrap();
+        // chat_history::save writes under $HOME/.c0mpute/chats.
+        let old = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        let mut c = Convo::new(None, vec![json!({"role": "user", "content": "hi"})]);
+        c.id = "trackme1".into();
+        let t = RunTrack::new(Some(c.clone()));
+        assert_eq!(t.id(), None);
+        t.seen("run_1");
+        t.seen("run_1");
+        assert_eq!(t.id().as_deref(), Some("run_1"));
+        let saved = chat_history::load_in(&dir.path().join(".c0mpute/chats"), "trackme1").unwrap();
+        assert_eq!(saved.pending_run.as_deref(), Some("run_1"));
+        match old {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[tokio::test]
+    async fn lines_typed_during_a_turn_queue_and_come_back_first_in_order() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut input = Input::from_receiver(rx);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<&str>();
+        let typing = tx.clone();
+        let turn = async move { done_rx.await.unwrap() };
+        let feeder = tokio::spawn(async move {
+            typing.send("second".into()).unwrap();
+            typing.send("   ".into()).unwrap();
+            typing.send("third".into()).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            done_tx.send("answer").unwrap();
+        });
+        match input.during(turn).await {
+            TurnOutcome::Done(a) => assert_eq!(a, "answer"),
+            TurnOutcome::Interrupted => panic!("not interrupted"),
+        }
+        feeder.await.unwrap();
+        assert_eq!(input.queue, ["second", "third"]);
+        tx.send("typed later".into()).unwrap();
+        assert_eq!(input.next().await.as_deref(), Some("second"));
+        assert_eq!(input.next().await.as_deref(), Some("third"));
+        assert_eq!(input.next().await.as_deref(), Some("typed later"));
+        drop(tx);
+        assert_eq!(input.next().await, None);
+        // End of input during a turn does not spin or end the turn early.
+        let r = input.during(async { tokio::time::sleep(Duration::from_millis(5)).await; 7 }).await;
+        assert!(matches!(r, TurnOutcome::Done(7)));
+    }
 
     #[test]
     fn parses_prompt_and_flags() {
