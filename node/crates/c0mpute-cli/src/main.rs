@@ -110,6 +110,7 @@ enum Cmd {
     ///
     /// Dynamic (default) undercuts the buyer's cap when idle and rises as the
     /// queue fills; fixed always asks one price. Neither goes under `--min`.
+    /// New nodes default to a $0.001 minimum per job; explicit settings persist.
     /// A running worker picks a change up on restart.
     Pricing {
         #[command(subcommand)]
