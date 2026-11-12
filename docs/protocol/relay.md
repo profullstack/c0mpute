@@ -22,7 +22,7 @@ libp2p protocols, so any node can be dialed by peer id.
 confirmed public addresses (from AutoNAT, or from `C0MPUTE_P2P_EXTERNAL`,
 which a gateway with a fixed open port sets and which is confirmed at
 start). A node with no confirmed external address refuses reservations
-outright (a reservation rate limiter gated on it, since v0.3.59): before
+outright (a reservation rate limiter gated on it, since v0.3.60): before
 that, nodes behind NAT or Docker granted empty reservations that clients
 then rejected with `NoAddressesInReservation`. In practice the public
 gateways and cloud workers carry the relays.
