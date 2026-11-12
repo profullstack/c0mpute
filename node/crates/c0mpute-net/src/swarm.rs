@@ -8,6 +8,12 @@
 //!   - request/response under `/c0mpute/rpc/1.0.0`: small named-service
 //!     calls between peers (secure-chat mailboxes use it); services register
 //!     an [`RpcHandler`] with [`Libp2pNetwork::register_rpc`]
+//!   - NAT traversal on every node: AutoNAT (am I dialable?), circuit relay
+//!     v2 server (a publicly reachable node relays for others) and client (a
+//!     node behind NAT reserves a slot on up to [`MAX_RELAY_RESERVATIONS`]
+//!     public relays and is reachable at `<relay>/p2p/<relay>/p2p-circuit/p2p/<us>`),
+//!     and DCUtR, which upgrades a relayed connection to a direct one by hole
+//!     punching. See docs/protocol/relay.md.
 //!
 //! The swarm runs on a tokio task; the `Network` trait impl talks to it
 //! through mpsc channels.
@@ -22,8 +28,9 @@ use async_trait::async_trait;
 use c0mpute_proto::{ChunkRequest, Hash};
 use futures::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, gossipsub, identify, identity, kad, mdns, ping,
-    request_response,
+    Multiaddr, PeerId, StreamProtocol, autonat, dcutr, gossipsub, identify, identity, kad, mdns,
+    multiaddr::Protocol, ping, relay, request_response,
+    core::transport::ListenerId,
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -67,6 +74,121 @@ pub const DIRECT_TOPIC_PREFIX: &str = "c0mpute/jobs/";
 
 fn mdns_disabled() -> bool {
     std::env::var("C0MPUTE_DISABLE_MDNS").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `C0MPUTE_DISABLE_RELAY=1` stops this node from reserving relay slots
+/// (tests that want only direct connections). The relay server, DCUtR and
+/// AutoNAT stay on: every node offers them.
+fn relay_client_disabled() -> bool {
+    std::env::var("C0MPUTE_DISABLE_RELAY").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// `C0MPUTE_RELAY_ALLOW_PRIVATE=1` lets a node reserve on a relay that has
+/// only private or loopback addresses. Tests only: on a real network a
+/// private relay address is unreachable for everyone else.
+fn relay_allow_private() -> bool {
+    std::env::var("C0MPUTE_RELAY_ALLOW_PRIVATE").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Relays a node behind NAT reserves a slot on at once. Two, so losing one
+/// relay never leaves the node unreachable.
+pub const MAX_RELAY_RESERVATIONS: usize = 2;
+
+/// Relay server limits. libp2p's defaults (2 min, 128 KiB per circuit) fit
+/// hole-punch coordination only; a job result has to be able to cross a
+/// relayed connection when hole punching fails.
+fn relay_server_config() -> relay::Config {
+    relay::Config {
+        max_reservations: 256,
+        max_reservations_per_peer: 4,
+        reservation_duration: Duration::from_secs(60 * 60),
+        max_circuits: 64,
+        max_circuits_per_peer: 8,
+        max_circuit_duration: Duration::from_secs(10 * 60),
+        max_circuit_bytes: 32 * 1024 * 1024,
+        ..relay::Config::default()
+    }
+}
+
+/// Whether `addr` names a globally routable IP: not loopback, private,
+/// link-local, CGNAT, unspecified, documentation or unique-local. DNS names
+/// count as public. A relay is only worth a reservation if others can dial it.
+pub fn is_public_addr(addr: &Multiaddr) -> bool {
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(ip) => {
+                let o = ip.octets();
+                let cgnat = o[0] == 100 && (o[1] & 0xc0) == 64;
+                let bench = o[0] == 198 && (o[1] == 18 || o[1] == 19);
+                return !(ip.is_loopback()
+                    || ip.is_private()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    || ip.is_broadcast()
+                    || ip.is_documentation()
+                    || ip.is_multicast()
+                    || cgnat
+                    || bench
+                    || o[0] == 0);
+            }
+            Protocol::Ip6(ip) => {
+                let seg = ip.segments();
+                let unique_local = (seg[0] & 0xfe00) == 0xfc00;
+                let link_local = (seg[0] & 0xffc0) == 0xfe80;
+                let doc = seg[0] == 0x2001 && seg[1] == 0x0db8;
+                return !(ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || unique_local || link_local || doc);
+            }
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `addr` as a plain dialable TCP address, `/ip4|ip6|dns*/../tcp/<port>`,
+/// or None for anything else (a circuit address, QUIC, a bare IP). A
+/// trailing `/p2p/<id>` is dropped.
+pub fn plain_tcp_addr(addr: &Multiaddr) -> Option<Multiaddr> {
+    let mut parts = addr.iter();
+    let host = parts.next()?;
+    if !matches!(host, Protocol::Ip4(_) | Protocol::Ip6(_) | Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_)) {
+        return None;
+    }
+    let port = parts.next()?;
+    if !matches!(port, Protocol::Tcp(_)) {
+        return None;
+    }
+    // Only a trailing `/p2p/<id>` may follow; anything else (a circuit,
+    // a websocket) is not a plain TCP address of this peer.
+    match (parts.next(), parts.next()) {
+        (None, _) | (Some(Protocol::P2p(_)), None) => Some(Multiaddr::empty().with(host).with(port)),
+        _ => None,
+    }
+}
+
+/// Whether a node should reserve a slot on one more relay: relaying is not
+/// turned off, AutoNAT has not shown us publicly reachable, and we hold fewer
+/// than [`MAX_RELAY_RESERVATIONS`] (pending ones included).
+pub fn wants_relay_reservation(disabled: bool, nat_public: bool, held: usize) -> bool {
+    !disabled && !nat_public && held < MAX_RELAY_RESERVATIONS
+}
+
+/// Public addresses from a `C0MPUTE_P2P_EXTERNAL`-style list
+/// (comma-separated multiaddrs), any `/p2p/<id>` suffix dropped. Private or
+/// unparsable entries are ignored.
+pub fn external_from_env(raw: Option<&str>) -> Vec<Multiaddr> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter_map(|s| s.parse::<Multiaddr>().ok())
+        .filter(is_public_addr)
+        .filter_map(|a| plain_tcp_addr(&a))
+        .collect()
+}
+
+/// The circuit listen address that reserves a slot on `relay` at `relay_addr`.
+pub fn circuit_listen_addr(relay_addr: &Multiaddr, relay: PeerId) -> Multiaddr {
+    relay_addr.clone().with(Protocol::P2p(relay)).with(Protocol::P2pCircuit)
 }
 
 /// `[u16 BE topic length][topic][payload]`.
@@ -137,6 +259,11 @@ enum Cmd {
     /// dial or fetch by peer id can reach it.
     AddAddress {
         peer: PeerId,
+        addr: Multiaddr,
+    },
+    /// Declare `addr` a confirmed public address of ours (an operator-set
+    /// external address): relays serve from it and we stop reserving relays.
+    AddExternal {
         addr: Multiaddr,
     },
     /// Our own dialable addresses: confirmed external ones, then listeners.
@@ -296,7 +423,7 @@ impl Libp2pNetwork {
         let (gossip_tx, _) = broadcast::channel::<GossipMessage>(256);
 
         let rpc_handlers: RpcHandlers = Arc::new(std::sync::RwLock::new(HashMap::new()));
-        let task = SwarmTask::new(
+        let mut task = SwarmTask::new(
             keypair.clone(),
             config.local_source,
             gossip_tx.clone(),
@@ -304,6 +431,18 @@ impl Libp2pNetwork {
             cmd_tx.downgrade(),
         )
         .await?;
+        // An operator-declared public address (`C0MPUTE_P2P_EXTERNAL`, set
+        // on gateways with a fixed open port) is confirmed at once: the node
+        // relays for others from the first minute and never reserves a relay
+        // itself. Everyone else learns it from AutoNAT.
+        let declared = external_from_env(std::env::var("C0MPUTE_P2P_EXTERNAL").ok().as_deref());
+        if !declared.is_empty() {
+            let mut sw = task.swarm.lock().await;
+            for a in &declared {
+                sw.add_external_address(a.clone());
+            }
+            task.nat_public = true;
+        }
         for addr in &config.listen {
             task.swarm
                 .lock()
@@ -592,6 +731,13 @@ impl Libp2pNetwork {
         let _ = self.cmd_tx.send(Cmd::AddAddress { peer, addr }).await;
     }
 
+    /// Declare `addr` one of our confirmed public addresses (as
+    /// `C0MPUTE_P2P_EXTERNAL` does at start): the relay server hands it out
+    /// in reservations, and this node stops reserving relays for itself.
+    pub async fn add_external_address(&self, addr: Multiaddr) {
+        let _ = self.cmd_tx.send(Cmd::AddExternal { addr }).await;
+    }
+
     /// This node's dialable addresses (external first, then listeners).
     pub async fn advertised_addrs(&self) -> Vec<Multiaddr> {
         let (tx, rx) = oneshot::channel();
@@ -677,6 +823,14 @@ struct C0mputeBehaviour {
     rpc: request_response::Behaviour<request_response::cbor::codec::Codec<RpcRequest, RpcResponse>>,
     gossipsub: gossipsub::Behaviour,
     mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
+    /// Circuit relay v2 server: relays for peers that cannot be dialed.
+    relay: relay::Behaviour,
+    /// Circuit relay v2 client: reservations on other nodes' relays.
+    relay_client: relay::client::Behaviour,
+    /// Hole punching over a relayed connection.
+    dcutr: dcutr::Behaviour,
+    /// Whether we are publicly dialable; confirms external addresses.
+    autonat: autonat::Behaviour,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -789,7 +943,17 @@ struct SwarmTask {
     /// Consecutive gossipsub heartbeats on which each peer dropped messages
     /// (its send queue was full), and when the last one was reported.
     slow_peers: HashMap<PeerId, (u32, std::time::Instant)>,
+    /// Relay reservations we asked for: relay peer -> circuit listener.
+    relay_listeners: HashMap<PeerId, ListenerId>,
+    /// Relays whose reservation failed, and when: not asked again for
+    /// [`RELAY_RETRY_AFTER`] (identify re-runs every few minutes).
+    relay_failed: HashMap<PeerId, std::time::Instant>,
+    /// AutoNAT's latest verdict: true once it has seen us dialed back.
+    nat_public: bool,
 }
+
+/// How long a relay that refused or dropped our reservation is left alone.
+const RELAY_RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Heartbeats in a row a peer may fail to drain its gossipsub send queue
 /// before we close its connections. A stuck connection never drains: every
@@ -828,7 +992,8 @@ impl SwarmTask {
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )?
-            .with_behaviour(|key| {
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+            .with_behaviour(|key, relay_client| {
                 let local_peer_id = key.public().to_peer_id();
                 let store = kad::store::MemoryStore::new(local_peer_id);
                 let mut kad_cfg = kad::Config::new(KAD_PROTOCOL);
@@ -836,10 +1001,13 @@ impl SwarmTask {
                 let mut kad = kad::Behaviour::with_config(local_peer_id, store, kad_cfg);
                 kad.set_mode(Some(kad::Mode::Server));
 
-                let identify = identify::Behaviour::new(identify::Config::new(
-                    IDENTIFY_PROTOCOL.into(),
-                    key.public(),
-                ));
+                // Push listen-address changes at once: a relay reservation
+                // (a new `/p2p-circuit` address) must reach peers now, not at
+                // the next periodic identify.
+                let identify = identify::Behaviour::new(
+                    identify::Config::new(IDENTIFY_PROTOCOL.into(), key.public())
+                        .with_push_listen_addr_updates(true),
+                );
                 let ping = ping::Behaviour::default();
                 let fetch = request_response::cbor::Behaviour::<FetchRequest, FetchResponse>::new(
                     [(FETCH_PROTOCOL, request_response::ProtocolSupport::Full)],
@@ -879,6 +1047,20 @@ impl SwarmTask {
                     Some(mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?)
                 };
                 let mdns = libp2p::swarm::behaviour::toggle::Toggle::from(mdns);
+                let relay = relay::Behaviour::new(local_peer_id, relay_server_config());
+                let dcutr = dcutr::Behaviour::new(local_peer_id);
+                let autonat = autonat::Behaviour::new(
+                    local_peer_id,
+                    autonat::Config {
+                        // Probe soon after start: a node learns it is public
+                        // (and stops reserving relays) only from a probe.
+                        boot_delay: Duration::from_secs(10),
+                        retry_interval: Duration::from_secs(90),
+                        refresh_interval: Duration::from_secs(15 * 60),
+                        only_global_ips: true,
+                        ..autonat::Config::default()
+                    },
+                );
                 Ok(C0mputeBehaviour {
                     kad,
                     identify,
@@ -888,6 +1070,10 @@ impl SwarmTask {
                     rpc,
                     gossipsub,
                     mdns,
+                    relay,
+                    relay_client,
+                    dcutr,
+                    autonat,
                 })
             })
             .map_err(|e| anyhow!("build behaviour: {e}"))?
@@ -909,6 +1095,9 @@ impl SwarmTask {
             cmd_weak,
             gossip_tx,
             slow_peers: HashMap::new(),
+            relay_listeners: HashMap::new(),
+            relay_failed: HashMap::new(),
+            nat_public: false,
         })
     }
 
@@ -959,6 +1148,10 @@ impl SwarmTask {
             }
             Cmd::AddAddress { peer, addr } => {
                 self.swarm.lock().await.behaviour_mut().kad.add_address(&peer, addr);
+            }
+            Cmd::AddExternal { addr } => {
+                self.swarm.lock().await.add_external_address(addr);
+                self.nat_public = true;
             }
             Cmd::Advertised { reply } => {
                 let swarm = self.swarm.lock().await;
@@ -1127,9 +1320,60 @@ impl SwarmTask {
             })) => {
                 // Add the peer's listen addrs to Kad so it can be routed to.
                 self.note_addrs(peer_id, info.listen_addrs.iter().cloned());
-                let mut sw = self.swarm.lock().await;
-                for addr in info.listen_addrs {
-                    sw.behaviour_mut().kad.add_address(&peer_id, addr);
+                let is_relay = info.protocols.iter().any(|p| *p == relay::HOP_PROTOCOL_NAME);
+                {
+                    let mut sw = self.swarm.lock().await;
+                    for addr in &info.listen_addrs {
+                        sw.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    }
+                }
+                if is_relay {
+                    self.maybe_reserve_relay(peer_id, &info.listen_addrs).await;
+                }
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::RelayClient(ev)) => match ev {
+                relay::client::Event::ReservationReqAccepted {
+                    relay_peer_id, renewal, ..
+                } => {
+                    if !renewal {
+                        info!(relay = %relay_peer_id, "relay: reservation accepted; reachable through it");
+                    }
+                }
+                other => debug!(?other, "relay client"),
+            },
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Relay(ev)) => {
+                debug!(?ev, "relay server");
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Dcutr(ev)) => match ev.result {
+                Ok(_) => info!(peer = %ev.remote_peer_id, "dcutr: hole punch succeeded; direct connection"),
+                Err(e) => debug!(peer = %ev.remote_peer_id, err = %e, "dcutr: hole punch failed; staying relayed"),
+            },
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Autonat(autonat::Event::StatusChanged { old, new })) => {
+                info!(?old, ?new, "autonat: reachability changed");
+                self.nat_public = new.is_public();
+                if self.nat_public {
+                    // Dialable directly: give the relay slots back.
+                    let held: Vec<(PeerId, ListenerId)> = self.relay_listeners.drain().collect();
+                    let mut sw = self.swarm.lock().await;
+                    for (relay, id) in held {
+                        debug!(%relay, "relay: releasing reservation, we are public");
+                        sw.remove_listener(id);
+                    }
+                }
+            }
+            SwarmEvent::Behaviour(C0mputeBehaviourEvent::Autonat(ev)) => {
+                debug!(?ev, "autonat");
+            }
+            SwarmEvent::ListenerClosed {
+                listener_id, reason, ..
+            } => {
+                let relay = self.relay_listeners.iter().find(|(_, id)| **id == listener_id).map(|(p, _)| *p);
+                if let Some(relay) = relay {
+                    self.relay_listeners.remove(&relay);
+                    if reason.is_err() {
+                        self.relay_failed.insert(relay, std::time::Instant::now());
+                    }
+                    info!(%relay, ?reason, "relay: reservation closed");
                 }
             }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Kad(
@@ -1335,6 +1579,33 @@ impl SwarmTask {
                     .remove_explicit_peer(&peer_id);
             }
             _ => {}
+        }
+    }
+
+    /// Reserve a slot on `relay` when we want another one and it has a public
+    /// TCP address. The circuit listener's address joins our listen
+    /// addresses, so identify and Kad hand it to peers like any other.
+    async fn maybe_reserve_relay(&mut self, relay: PeerId, listen_addrs: &[Multiaddr]) {
+        if self.relay_failed.get(&relay).is_some_and(|t| t.elapsed() < RELAY_RETRY_AFTER) {
+            return;
+        }
+        if self.relay_listeners.contains_key(&relay)
+            || !wants_relay_reservation(relay_client_disabled(), self.nat_public, self.relay_listeners.len())
+        {
+            return;
+        }
+        let any = relay_allow_private();
+        let Some(base) = listen_addrs.iter().filter(|a| any || is_public_addr(a)).find_map(plain_tcp_addr) else {
+            return;
+        };
+        let addr = circuit_listen_addr(&base, relay);
+        let r = self.swarm.lock().await.listen_on(addr.clone());
+        match r {
+            Ok(id) => {
+                info!(%relay, %addr, "relay: requesting a reservation");
+                self.relay_listeners.insert(relay, id);
+            }
+            Err(e) => debug!(%relay, err = %e, "relay: listen on circuit failed"),
         }
     }
 
@@ -1666,6 +1937,128 @@ mod tests {
         assert_eq!(received.data, payload);
         assert_eq!(received.source, Some(net_a.peer_id()));
     }
+    #[test]
+    fn public_addr_classification() {
+        let p = |s: &str| is_public_addr(&s.parse::<Multiaddr>().unwrap());
+        assert!(p("/ip4/8.8.8.8/tcp/4001"));
+        assert!(p("/ip6/2606:4700::1111/tcp/4001"));
+        assert!(p("/dns4/gateway.c0mpute.com/tcp/4001"));
+        for private in [
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip4/10.1.2.3/tcp/1",
+            "/ip4/192.168.1.5/tcp/1",
+            "/ip4/172.17.0.2/tcp/1",
+            "/ip4/100.64.0.1/tcp/1",
+            "/ip4/169.254.1.1/tcp/1",
+            "/ip4/0.0.0.0/tcp/1",
+            "/ip6/::1/tcp/1",
+            "/ip6/fd00::1/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+        ] {
+            assert!(!p(private), "{private} is not public");
+        }
+    }
+
+    #[test]
+    fn relay_reservation_decision_and_addrs() {
+        assert!(wants_relay_reservation(false, false, 0));
+        assert!(wants_relay_reservation(false, false, MAX_RELAY_RESERVATIONS - 1));
+        assert!(!wants_relay_reservation(false, false, MAX_RELAY_RESERVATIONS));
+        assert!(!wants_relay_reservation(false, true, 0), "a public node never reserves");
+        assert!(!wants_relay_reservation(true, false, 0), "C0MPUTE_DISABLE_RELAY wins");
+
+        let peer = PeerId::random();
+        let plain = plain_tcp_addr(&format!("/ip4/8.8.8.8/tcp/4001/p2p/{peer}").parse().unwrap()).unwrap();
+        assert_eq!(plain.to_string(), "/ip4/8.8.8.8/tcp/4001");
+        assert!(plain_tcp_addr(&"/ip4/8.8.8.8/udp/4001/quic-v1".parse().unwrap()).is_none());
+        assert!(
+            plain_tcp_addr(&format!("/ip4/8.8.8.8/tcp/1/p2p/{peer}/p2p-circuit").parse().unwrap()).is_none(),
+            "a circuit address is not a relay's own address"
+        );
+        let c = circuit_listen_addr(&plain, peer);
+        assert_eq!(c.to_string(), format!("/ip4/8.8.8.8/tcp/4001/p2p/{peer}/p2p-circuit"));
+
+        let ext = external_from_env(Some(" /ip4/8.8.8.8/tcp/7000 , /ip4/10.0.0.1/tcp/7000,junk,/dns4/x.example/tcp/1"));
+        let ext: Vec<String> = ext.iter().map(ToString::to_string).collect();
+        assert_eq!(ext, vec!["/ip4/8.8.8.8/tcp/7000", "/dns4/x.example/tcp/1"]);
+        assert!(external_from_env(None).is_empty());
+    }
+
+    /// A node that cannot be dialed directly reserves a slot on a public
+    /// relay and is reached through `/p2p-circuit`: a third node that never
+    /// learned its real address dials the circuit and an RPC goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreachable_node_is_reached_through_a_relay() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "c0mpute_net=info".into()))
+            .with_test_writer()
+            .try_init();
+        // SAFETY: set before any node starts; the test owns its process env.
+        unsafe {
+            std::env::set_var("C0MPUTE_DISABLE_MDNS", "1");
+        }
+        let relay = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("relay-r")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        let r_addr = wait_for_listen(&relay).await;
+        // Loopback stands in for the relay's public address.
+        relay.add_external_address(r_addr.clone()).await;
+
+        // `hidden` listens nowhere: the only way in is the circuit.
+        let hidden = Libp2pNetwork::spawn(NetworkConfig::for_dir(tempdir("relay-hidden")).with_listen(vec![]))
+            .await
+            .unwrap();
+        struct Echo;
+        #[async_trait]
+        impl RpcHandler for Echo {
+            async fn handle(&self, _peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+                Ok(body)
+            }
+        }
+        hidden.register_rpc("test.echo", Arc::new(Echo));
+        let circuit = circuit_listen_addr(&r_addr, relay.peer_id());
+        hidden.dial(r_addr.clone().with(Protocol::P2p(relay.peer_id()))).await.unwrap();
+        // Reserve over an open connection, as a node does after identify (a
+        // reservation asked while the first dial is in flight is dropped).
+        for _ in 0..50 {
+            if hidden.is_connected(relay.peer_id()).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        hidden.listen_on(circuit.clone()).await.unwrap();
+
+        // Wait for the reservation: the circuit address shows up as a listener.
+        let mut reserved = false;
+        for _ in 0..100 {
+            if hidden.listen_addrs().await.unwrap().iter().any(|a| a.iter().any(|p| p == Protocol::P2pCircuit)) {
+                reserved = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(reserved, "hidden node got a relay reservation");
+
+        let client = Libp2pNetwork::spawn(
+            NetworkConfig::for_dir(tempdir("relay-client")).with_listen(vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()]),
+        )
+        .await
+        .unwrap();
+        client.dial(circuit.with(Protocol::P2p(hidden.peer_id()))).await.unwrap();
+        let mut answer = None;
+        for _ in 0..50 {
+            if client.is_connected(hidden.peer_id()).await {
+                answer = Some(client.rpc(hidden.peer_id(), "test.echo", b"through the relay".to_vec()).await);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let answer = answer.expect("client connected to the hidden node through the relay");
+        assert_eq!(answer.unwrap(), b"through the relay");
+    }
+
     /// A direct send arrives on the receiver's gossip stream, attributed to
     /// the sender, with no topic subscription or mesh at all; non-job topics
     /// and sends to ourselves are refused.

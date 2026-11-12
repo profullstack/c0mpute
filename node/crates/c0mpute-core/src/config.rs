@@ -97,6 +97,11 @@ pub struct Config {
     /// `[adult] buyer`. The child-safety guard in `content_policy` always runs.
     #[serde(default)]
     pub adult: AdultConfig,
+    /// Agent swarms (DIP 0034): on by default on every node. Joins the
+    /// public lobby, syncs swarm logs, works paid tasks with the local model
+    /// and pays bounties this node owes.
+    #[serde(default)]
+    pub swarm: crate::agent_swarm::SwarmConfig,
 }
 
 /// Adult mode on the buyer side. Every worker serves adult jobs and
@@ -775,6 +780,7 @@ impl Default for Config {
             x402: Default::default(),
             threatcrush: Default::default(),
             adult: Default::default(),
+            swarm: Default::default(),
         }
     }
 }

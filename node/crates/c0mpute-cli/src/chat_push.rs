@@ -211,7 +211,18 @@ pub(crate) fn inline_files(dir: &Path) -> Result<Vec<Value>> {
             if rel.split('/').any(|s| s.starts_with('.')) {
                 continue; // hidden files stay home, like hosting publish
             }
-            if e.file_type()?.is_dir() {
+            let ft = e.file_type()?;
+            if ft.is_symlink() {
+                continue; // a link could point anywhere on this machine
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if c0mpute_core::hosting::site::never_share_name(&name, ft.is_dir())
+                || (ft.is_file() && c0mpute_core::hosting::site::holds_private_key(&p))
+            {
+                eprintln!("skipping {rel}: key files and node_modules are never pushed");
+                continue;
+            }
+            if ft.is_dir() {
                 stack.push(p);
                 continue;
             }
@@ -277,6 +288,10 @@ mod tests {
         std::fs::create_dir(d.path().join("css")).unwrap();
         std::fs::write(d.path().join("css/site.css"), "body{}").unwrap();
         std::fs::write(d.path().join(".env"), "SECRET=1").unwrap();
+        std::fs::write(d.path().join("id_rsa"), format!("-----BEGIN {}PRIVATE KEY-----", "RSA ")).unwrap();
+        std::fs::write(d.path().join("tls.key"), format!("-----BEGIN {}PRIVATE KEY-----", "")).unwrap();
+        std::fs::create_dir(d.path().join("node_modules")).unwrap();
+        std::fs::write(d.path().join("node_modules/x.js"), "x").unwrap();
         let files = inline_files(d.path()).unwrap();
         let paths: Vec<_> = files.iter().map(|f| f["path"].as_str().unwrap().to_string()).collect();
         assert_eq!(paths, ["index.html", "css/site.css"]);

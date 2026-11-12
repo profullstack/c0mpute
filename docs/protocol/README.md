@@ -81,6 +81,7 @@ from a provider that claimed the capabilities relied on.
 | [offers.md](offers.md) | `offer/v1` |
 | [receipts.md](receipts.md) | `receipt/v1`, acceptance, and derived reputation |
 | [scheduling.md](scheduling.md) | eligibility, offer selection, and reputation scoring |
+| [relay.md](relay.md) | NAT traversal: AutoNAT, circuit relay v2, DCUtR on every node |
 
 ## Implementation
 
@@ -115,7 +116,6 @@ These are real parts of the v2 direction with no specification here,
 because there is no implementation to specify:
 
 - **discovery** — DHT provider lookup and gossip topic layout (Phase 2)
-- **relays** — NAT traversal and outbound-only providers (Phase 2)
 - **settlement** — what a settlement adapter must do (Phase 3)
 - **validation** — the L0–L5 tiers as a wire contract (Phase 3)
 

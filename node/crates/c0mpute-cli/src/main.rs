@@ -37,6 +37,7 @@ mod peers;
 mod private_storage;
 mod promo;
 mod storage;
+mod swarm_cli;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod mount;
 mod node_status;
@@ -472,6 +473,15 @@ enum Cmd {
     /// `c0mpute promo https://example.com --style pixar [--vertical]`.
     /// Needs `c0mpute chat login`.
     Promo(promo::PromoArgs),
+
+    /// Agent swarms (DIP 0034): post jobs that agents on many nodes split,
+    /// claim, do, review and merge; every node is in the public lobby and
+    /// works paid tasks with its local model. `c0mpute swarm mcp` lets any
+    /// coding agent take part.
+    Swarm {
+        #[command(subcommand)]
+        cmd: swarm_cli::SwarmCmd,
+    },
 
     /// Secure DMs — E2E encrypted p2p messaging (DIP-0018). Was `c0mpute chat`.
     Dm {
@@ -1811,6 +1821,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Crawl { cmd } => run_crawl(cmd).await,
         Cmd::Hosting { cmd } => run_hosting(cmd).await,
         Cmd::Apps { cmd } => run_apps(cmd).await,
+        Cmd::Swarm { cmd } => swarm_cli::run(cmd, &config_path).await,
         Cmd::Build(args) => container_cli::run_build(args, &config_path).await,
         Cmd::Run(args) => container_cli::run_run(args, &config_path).await,
         Cmd::Containers { cmd } => container_cli::run_containers(cmd, &config_path),

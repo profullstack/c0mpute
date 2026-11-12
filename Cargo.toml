@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.56"
+version = "0.3.57"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/profullstack/c0mpute"
@@ -57,7 +57,7 @@ directories = "5"
 sysinfo = "0.32"
 zip = { version = "9.4.2", default-features = false, features = ["deflate"] }
 reed-solomon-erasure = "6"
-libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "kad", "identify", "ping", "request-response", "macros", "tokio", "ed25519", "cbor", "gossipsub", "mdns"] }
+libp2p = { version = "0.56", features = ["tcp", "noise", "yamux", "kad", "identify", "ping", "request-response", "macros", "tokio", "ed25519", "cbor", "gossipsub", "mdns", "relay", "dcutr", "autonat"] }
 tempfile = "3"
 # secure-chat crypto stack (DIP-0018) — hybrid classical + post-quantum
 argon2 = "0.5"

@@ -486,7 +486,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "c0mpute-api"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-bench"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "blake3",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -560,6 +560,7 @@ dependencies = [
  "c0mpute-api",
  "c0mpute-bench",
  "c0mpute-doctor",
+ "c0mpute-envelope",
  "c0mpute-gateway",
  "c0mpute-net",
  "c0mpute-proto",
@@ -602,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "serde",
@@ -614,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-envelope"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "blake3",
  "bs58",
@@ -627,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "axum",
@@ -649,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-market"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "c0mpute-envelope",
  "serde",
@@ -659,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -680,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-placement"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -701,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "blake3",
  "hex",
@@ -713,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-sealed"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -735,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -758,7 +759,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "blake3",
@@ -777,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -790,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "hex",
@@ -805,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
-version = "0.3.56"
+version = "0.3.57"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2260,8 +2261,10 @@ dependencies = [
  "futures-timer",
  "getrandom 0.2.17",
  "libp2p-allow-block-list",
+ "libp2p-autonat",
  "libp2p-connection-limits",
  "libp2p-core",
+ "libp2p-dcutr",
  "libp2p-dns",
  "libp2p-gossipsub",
  "libp2p-identify",
@@ -2272,6 +2275,7 @@ dependencies = [
  "libp2p-noise",
  "libp2p-ping",
  "libp2p-quic",
+ "libp2p-relay",
  "libp2p-request-response",
  "libp2p-swarm",
  "libp2p-tcp",
@@ -2292,6 +2296,31 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "libp2p-swarm",
+]
+
+[[package]]
+name = "libp2p-autonat"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fab5e25c49a7d48dac83d95d8f3bac0a290d8a5df717012f6e34ce9886396c0b"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "either",
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-request-response",
+ "libp2p-swarm",
+ "quick-protobuf",
+ "quick-protobuf-codec",
+ "rand 0.8.8",
+ "rand_core 0.6.4",
+ "thiserror 2.0.21",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]
@@ -2327,6 +2356,28 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "unsigned-varint 0.8.0",
+ "web-time",
+]
+
+[[package]]
+name = "libp2p-dcutr"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b4107305e12158af3e66960b6181789c547394c9c9a8696f721521602bfc73a"
+dependencies = [
+ "asynchronous-codec",
+ "either",
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "hashlink 0.10.0",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-swarm",
+ "quick-protobuf",
+ "quick-protobuf-codec",
+ "thiserror 2.0.21",
+ "tracing",
  "web-time",
 ]
 
@@ -2469,11 +2520,13 @@ checksum = "805a555148522cb3414493a5153451910cb1a146c53ffbf4385708349baf62b7"
 dependencies = [
  "futures",
  "libp2p-core",
+ "libp2p-dcutr",
  "libp2p-gossipsub",
  "libp2p-identify",
  "libp2p-identity",
  "libp2p-kad",
  "libp2p-ping",
+ "libp2p-relay",
  "libp2p-swarm",
  "pin-project",
  "prometheus-client",
@@ -2540,6 +2593,30 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "libp2p-relay"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b9b0392ed623243ad298326b9f806d51191829ac7585cc825c54c6c67b04d9"
+dependencies = [
+ "asynchronous-codec",
+ "bytes",
+ "either",
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-swarm",
+ "quick-protobuf",
+ "quick-protobuf-codec",
+ "rand 0.8.8",
+ "static_assertions",
+ "thiserror 2.0.21",
+ "tracing",
+ "web-time",
 ]
 
 [[package]]

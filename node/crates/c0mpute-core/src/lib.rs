@@ -5,6 +5,7 @@
 //! for each role.
 
 pub mod activity;
+pub mod agent_swarm;
 pub mod apps;
 pub mod ads;
 pub mod auction_stats;
