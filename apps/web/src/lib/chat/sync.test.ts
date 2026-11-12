@@ -201,7 +201,7 @@ describe("resumable runs survive a deploy (durable)", () => {
           return u.body(signal);
         }) as RunOpener,
       });
-    return { sql, a: server("a"), b: server("b"), calls, ups, advance: (ms: number) => (t += ms) };
+    return { sql, a: server("a"), b: server("b"), calls, ups, now, advance: (ms: number) => (t += ms) };
   }
 
   test("a server killed mid-answer: another takes the run over and continues from the partial text", async () => {
@@ -299,9 +299,10 @@ describe("resumable runs survive a deploy (durable)", () => {
       c.advance(RUN_STALE_MS + 1);
       expect(await srv.recover()).toEqual([run.id]);
       srv.crash();
-      srv = createRunManager({ sql: c.sql, key: KEY, owner: `x${i}`, now: () => 0, timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
+      srv = createRunManager({ sql: c.sql, key: KEY, owner: `x${i}`, now: c.now, timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
     }
-    const last = createRunManager({ sql: c.sql, key: KEY, owner: "final", now: () => 1_000_000 + 10 * (RUN_STALE_MS + 1), timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
+    c.advance(RUN_STALE_MS + 1);
+    const last = createRunManager({ sql: c.sql, key: KEY, owner: "final", now: c.now, timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
     expect(await last.recover()).toEqual([run.id]);
     expect(await text(last.stream(run.id))).toContain("could not be continued");
     expect((await last.get("u", run.id))?.status).toBe("failed");
