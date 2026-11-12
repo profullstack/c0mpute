@@ -31,7 +31,7 @@ async function query(q: string, params: unknown[] = []) {
     return await db().sql({ query: q, parameters: params as never[] });
   }
 }
-const cloudSql: Sql = {
+export const cloudSql: Sql = {
   all: async (q, p) => {
     const r = await query(q, p);
     return Array.isArray(r) ? (r.map((row) => ({ ...row })) as Record<string, unknown>[]) : [];

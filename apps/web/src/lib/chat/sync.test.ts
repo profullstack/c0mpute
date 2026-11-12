@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ConvoError, convoKey, createConvoStore, parseConversation } from "./convo-store";
-import { _resetRuns, cancelRun, getRun, listRuns, runStream, startRun } from "./runs";
+import { answerText, CONTINUE_PROMPT, createRunManager, RUN_STALE_MS, type RunOpener, type RunRequest } from "./runs";
+import { continuationMessages } from "./run-opener";
 import type { Sql } from "./store";
 import { adopt, slimForSync, syncPlan } from "./sync-merge";
 import { handleRpc } from "./mcp";
@@ -91,67 +92,219 @@ describe("conversation store", () => {
 const enc = new TextEncoder();
 const text = async (s: ReadableStream<Uint8Array>) => new Response(s).text();
 
-describe("resumable runs", () => {
-  beforeEach(() => _resetRuns());
+/** A controllable upstream: push SSE text, end it, or see the abort. */
+function fakeUpstream() {
+  let push: (t: string) => void = () => {};
+  let close: () => void = () => {};
+  let aborted = false;
+  const body = (signal: AbortSignal) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        push = (t) => {
+          try {
+            c.enqueue(enc.encode(t));
+          } catch {}
+        };
+        close = () => {
+          try {
+            c.close();
+          } catch {}
+        };
+        signal.addEventListener("abort", () => {
+          aborted = true;
+          try {
+            c.error(new DOMException("aborted", "AbortError"));
+          } catch {}
+        });
+      },
+    });
+  return { body, push: (t: string) => push(t), close: () => close(), aborted: () => aborted };
+}
+const delta = (t: string) => `data: {"choices":[{"delta":{"content":${JSON.stringify(t)}}}]}\n\n`;
+const req = (over: Partial<RunRequest> = {}): RunRequest => ({ userId: "u", coinpaySub: "sub", body: { messages: [{ role: "user", content: "tell me a story" }], stream: true, resumable: true }, withPlugins: false, ...over });
+const tick = () => new Promise((r) => setTimeout(r, 5));
 
+describe("resumable runs (in memory)", () => {
   test("a turn keeps running with no reader; a late reader replays it all then follows live", async () => {
-    let push: (s: string) => void = () => {};
-    let close: () => void = () => {};
-    const run = await startRun("u", async () =>
-      new ReadableStream<Uint8Array>({
-        start(c) {
-          push = (s) => c.enqueue(enc.encode(s));
-          close = () => c.close();
-        },
-      }),
-    );
-    push('data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n');
-    await new Promise((r) => setTimeout(r, 5));
-    // First reader drops at once (a closed tab).
-    const first = runStream(run).getReader();
+    const up = fakeUpstream();
+    const m = createRunManager({ opener: async (_r, signal) => up.body(signal), timers: false });
+    const run = await m.start(req());
+    up.push(delta("Hel"));
+    await tick();
+    const first = m.stream(run.id).getReader();
     await first.read();
     await first.cancel();
-    const late = text(runStream(run));
-    push('data: {"choices":[{"delta":{"content":"lo"}}]}\n\ndata: [DONE]\n\n');
-    close();
+    const late = text(m.stream(run.id));
+    up.push(delta("lo") + "data: [DONE]\n\n");
+    up.close();
     const body = await late;
     expect(body.startsWith(`data: {"object":"c0mpute.run","id":"${run.id}"}`)).toBe(true);
-    expect(body).toContain('"Hel"');
-    expect(body).toContain('"lo"');
-    expect(body.trim().endsWith("[DONE]")).toBe(true);
+    expect(answerText(body)).toBe("Hello");
     expect(run.status).toBe("done");
-    // Replay after the end, and from a byte offset.
-    expect(await text(runStream(run))).toBe(body);
-    expect(await text(runStream(run, 10))).toBe(body.slice(10));
+    expect(await text(m.stream(run.id))).toBe(body);
+    expect(await text(m.stream(run.id, 10))).toBe(body.slice(10));
   });
 
   test("only the owner sees a run; cancel aborts the upstream", async () => {
-    let aborted = false;
-    const run = await startRun("u", async (signal) => {
-      signal.addEventListener("abort", () => (aborted = true));
-      return new ReadableStream<Uint8Array>({ start() {} });
-    });
-    expect(getRun("other", run.id)).toBeNull();
-    expect(cancelRun("other", run.id)).toBe(false);
-    expect(listRuns("u").map((r) => r.status)).toEqual(["running"]);
-    expect(cancelRun("u", run.id)).toBe(true);
-    expect(aborted).toBe(true);
+    const up = fakeUpstream();
+    const m = createRunManager({ opener: async (_r, signal) => up.body(signal), timers: false });
+    const run = await m.start(req());
+    expect(await m.get("other", run.id)).toBeNull();
+    expect(await m.cancel("other", run.id)).toBe(false);
+    expect((await m.list("u")).map((r) => r.status)).toEqual(["running"]);
+    expect(await m.cancel("u", run.id)).toBe(true);
+    await tick();
+    expect(up.aborted()).toBe(true);
     expect(run.status).toBe("cancelled");
-    expect((await text(runStream(run))).trim().endsWith("[DONE]")).toBe(true);
+    expect((await text(m.stream(run.id))).trim().endsWith("[DONE]")).toBe(true);
   });
 
   test("an upstream that fails to open ends the run with an error a client can show", async () => {
-    const run = await startRun("u", async () => {
-      throw new Error("no provider node");
+    const m = createRunManager({
+      opener: async () => {
+        throw new Error("no provider node");
+      },
+      timers: false,
     });
+    const run = await m.start(req());
     expect(run.status).toBe("failed");
-    expect(await text(runStream(run))).toContain("no provider node");
+    expect(await text(m.stream(run.id))).toContain("no provider node");
   });
 
   test("too many running turns on one account is refused", async () => {
-    for (let i = 0; i < 6; i++) await startRun("busy", async () => new ReadableStream<Uint8Array>({ start() {} }));
-    expect(startRun("busy", async () => null)).rejects.toThrow(/at most 6/);
-    await startRun("someone-else", async () => new ReadableStream<Uint8Array>({ start() {} }));
+    const m = createRunManager({ opener: async (_r, signal) => fakeUpstream().body(signal), timers: false });
+    for (let i = 0; i < 6; i++) await m.start(req({ userId: "busy" }));
+    expect(m.start(req({ userId: "busy" }))).rejects.toThrow(/at most 6/);
+    await m.start(req({ userId: "someone-else" }));
+  });
+});
+
+describe("resumable runs survive a deploy (durable)", () => {
+  /** Two servers on one database, a clock both share. */
+  function cluster() {
+    const { sql } = memSql();
+    let t = 1_000_000;
+    const now = () => t;
+    const calls: { server: string; cont?: { partial: string }; req: RunRequest }[] = [];
+    const ups: Record<string, ReturnType<typeof fakeUpstream>[]> = { a: [], b: [] };
+    const server = (name: "a" | "b") =>
+      createRunManager({
+        sql,
+        key: KEY,
+        owner: name,
+        now,
+        timers: false,
+        opener: (async (r, signal, cont) => {
+          calls.push({ server: name, cont, req: r });
+          const u = fakeUpstream();
+          ups[name].push(u);
+          return u.body(signal);
+        }) as RunOpener,
+      });
+    return { sql, a: server("a"), b: server("b"), calls, ups, advance: (ms: number) => (t += ms) };
+  }
+
+  test("a server killed mid-answer: another takes the run over and continues from the partial text", async () => {
+    const c = cluster();
+    const run = await c.a.start(req());
+    c.ups.a[0]!.push(delta("Once upon a time, "));
+    await tick();
+    await c.a.flush();
+    c.ups.a[0]!.push(delta("never saved"));
+    c.a.crash(); // SIGKILL: no flush, no status change
+
+    // Not stale yet: nothing happens.
+    expect(await c.b.recover()).toEqual([]);
+    c.advance(RUN_STALE_MS + 1);
+    expect(await c.b.recover()).toEqual([run.id]);
+    // b continued it with the saved partial answer (not the unsaved bit).
+    expect(c.calls.at(-1)).toMatchObject({ server: "b", cont: { partial: "Once upon a time, " } });
+    expect(continuationMessages([{ role: "user", content: "tell me a story" }], "Once upon a time, ")).toEqual([
+      { role: "user", content: "tell me a story" },
+      { role: "assistant", content: "Once upon a time, " },
+      { role: "user", content: CONTINUE_PROMPT },
+    ]);
+    // A client reattaching to b gets the whole answer, seamlessly.
+    const replay = text(c.b.stream(run.id));
+    c.ups.b[0]!.push(delta("there was a node.") + "data: [DONE]\n\n");
+    c.ups.b[0]!.close();
+    const body = await replay;
+    expect(answerText(body)).toBe("Once upon a time, there was a node.");
+    await tick();
+    await c.b.flush();
+    expect((await c.b.get("u", run.id))?.status).toBe("done");
+    // The request was stored sealed: no prompt text in the database.
+    const raw = (await c.sql.all("SELECT request FROM chat_runs WHERE id = ?", [run.id]))[0]!.request as string;
+    expect(raw).not.toContain("tell me a story");
+  });
+
+  test("only one server wins the takeover", async () => {
+    const c = cluster();
+    const run = await c.a.start(req());
+    await c.a.flush();
+    c.a.crash();
+    c.advance(RUN_STALE_MS + 1);
+    const third = createRunManager({ sql: c.sql, key: KEY, owner: "c", now: () => 1_000_000 + RUN_STALE_MS + 1, timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
+    const [wonB, wonC] = await Promise.all([c.b.recover(), third.recover()]);
+    expect([...wonB, ...wonC]).toEqual([run.id]);
+  });
+
+  test("a reattach on a server that does not own the run follows it from the database", async () => {
+    const c = cluster();
+    const run = await c.a.start(req());
+    c.ups.a[0]!.push(delta("from a "));
+    await tick();
+    await c.a.flush();
+    expect(await c.b.get("u", run.id)).toMatchObject({ status: "running" });
+    expect(await c.b.get("intruder", run.id)).toBeNull();
+    const follower = text(c.b.stream(run.id, 0, 5));
+    c.ups.a[0]!.push(delta("and more") + "data: [DONE]\n\n");
+    c.ups.a[0]!.close();
+    await tick();
+    await c.a.flush();
+    expect(answerText(await follower)).toBe("from a and more");
+    expect((await c.b.list("u")).map((r) => r.status)).toEqual(["done"]);
+  });
+
+  test("a cancel that lands on another server stops the owner at its next tick", async () => {
+    const c = cluster();
+    const run = await c.a.start(req());
+    await c.a.flush();
+    expect(await c.b.cancel("u", run.id)).toBe(true);
+    await c.a.flush();
+    await tick();
+    expect(c.ups.a[0]!.aborted()).toBe(true);
+    expect(c.a.local(run.id)?.status).toBe("cancelled");
+  });
+
+  test("a plugin turn runs again after a restart, without the approvals it was sent", async () => {
+    const c = cluster();
+    const run = await c.a.start(req({ withPlugins: true, body: { messages: [{ role: "user", content: "delete it" }], stream: true, approvals: ["tok"] } }));
+    await c.a.flush();
+    c.a.crash();
+    c.advance(RUN_STALE_MS + 1);
+    await c.b.recover();
+    expect(c.calls.at(-1)).toMatchObject({ server: "b", cont: { partial: "" } });
+    expect(c.calls.at(-1)!.req.withPlugins).toBe(true);
+    expect(run.id).toBeTruthy();
+  });
+
+  test("a run that keeps dying is given up with a message instead of looping", async () => {
+    const c = cluster();
+    const run = await c.a.start(req());
+    await c.a.flush();
+    c.a.crash();
+    let srv = c.b;
+    for (let i = 0; i < 3; i++) {
+      c.advance(RUN_STALE_MS + 1);
+      expect(await srv.recover()).toEqual([run.id]);
+      srv.crash();
+      srv = createRunManager({ sql: c.sql, key: KEY, owner: `x${i}`, now: () => 0, timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
+    }
+    const last = createRunManager({ sql: c.sql, key: KEY, owner: "final", now: () => 1_000_000 + 10 * (RUN_STALE_MS + 1), timers: false, opener: async (_r, s) => fakeUpstream().body(s) });
+    expect(await last.recover()).toEqual([run.id]);
+    expect(await text(last.stream(run.id))).toContain("could not be continued");
+    expect((await last.get("u", run.id))?.status).toBe("failed");
   });
 });
 
