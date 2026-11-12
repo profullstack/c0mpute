@@ -79,6 +79,9 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
         .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
         .with_test_writer()
         .try_init();
+    // The integration test runs beside live dev2 workers, so keep its local
+    // mesh isolated from LAN peers and real hosting traffic.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
 
     // A hub everyone dials (it also hosts), then four more hosting nodes.
