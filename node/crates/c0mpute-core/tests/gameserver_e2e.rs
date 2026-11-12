@@ -162,7 +162,7 @@ async fn worker(dir: &Path, bootstrap: Vec<libp2p::Multiaddr>, port_min: u16, rt
     let (net, store) = node(dir, bootstrap).await;
     let w = gameserver::Worker::with_runtime(net, store, cfg(port_min), "127.0.0.1".into(), &dir.join("state"), rt);
     let tags = vec![gameserver::ROLE_TAG.to_string(), Game::Minecraft.tag(), Game::Valheim.tag()];
-    gameserver::subscribe(w.clone(), tags, Some(PricingConfig::default()));
+    gameserver::subscribe(w.clone(), tags, Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }));
     w
 }
 

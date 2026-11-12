@@ -78,7 +78,7 @@ async fn transform_step_round_trips_through_the_bridge() {
         vec![workflow::ROLE_TAG.to_string(), "c0mpute:cpu".to_string()],
         Some(runner),
         None,
-        Some(PricingConfig::default()),
+        Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }),
         Some(load),
     );
 

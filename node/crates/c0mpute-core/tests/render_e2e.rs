@@ -72,7 +72,7 @@ async fn worker(dir: &std::path::Path) -> (Arc<Libp2pNetwork>, libp2p::Multiaddr
         tags,
         Some(runner),
         Some(render::offer_filter()),
-        Some(PricingConfig::default()),
+        Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }),
         Some(load),
     );
     (net, addr)

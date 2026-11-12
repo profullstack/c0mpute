@@ -137,7 +137,7 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
         vec![ocr::ROLE_TAG.to_string(), "c0mpute:cpu".to_string()],
         Some(runner),
         Some(ocr::offer_filter()),
-        Some(PricingConfig::default()),
+        Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }),
         Some(load),
     );
 

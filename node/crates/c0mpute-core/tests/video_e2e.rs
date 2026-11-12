@@ -147,7 +147,7 @@ async fn network(tmp: &Path) -> (String, Arc<Libp2pNetwork>) {
         vec![video::ROLE_TAG.to_string(), video::model_tag("wan2.2-ti2v-5b"), "c0mpute:gpu:nvidia".to_string()],
         Some(runner),
         None,
-        Some(PricingConfig::default()),
+        Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }),
         Some(load),
     );
 
@@ -304,7 +304,7 @@ async fn start_worker(dir: &Path, bootstrap: Vec<libp2p::Multiaddr>) -> Arc<Libp
         vec![video::ROLE_TAG.to_string(), video::model_tag("wan2.2-ti2v-5b"), "c0mpute:gpu:nvidia".to_string()],
         Some(runner),
         None,
-        Some(PricingConfig::default()),
+        Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }),
         Some(load),
     );
     worker
