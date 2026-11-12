@@ -1,6 +1,7 @@
 //! How a worker prices its bids: the operator's listing.
 //!
-//! The operator sets a floor (`min_usd`, per job) and a mode:
+//! The operator sets a floor (`min_usd`, per job) and a mode. A new node's
+//! floor defaults to [`DEFAULT_MINIMUM_USD`]:
 //!
 //! - `dynamic` (the default): the node prices itself against the market.
 //!   It starts at [`DYNAMIC_IDLE_SHARE`] of the buyer's cap and learns from
@@ -26,6 +27,9 @@ pub const UNDERCUT: f64 = 0.02;
 /// After a win, close this fraction of the gap to the cap (price discovery
 /// upward, so the market does not only ratchet down).
 pub const WIN_PROBE: f64 = 0.05;
+
+/// New nodes start at a one-tenth-cent minimum bid per job.
+pub const DEFAULT_MINIMUM_USD: f64 = 0.001;
 
 /// What a dynamic node has learned about the clearing price for one
 /// workload, as a share of the buyer's cap. Buyers award the lowest bid
@@ -76,16 +80,30 @@ impl PricingMode {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PricingConfig {
     #[serde(default)]
     pub mode: PricingMode,
     /// The lowest price per job this node accepts, in USD. 0 = no floor.
-    #[serde(default)]
+    #[serde(default = "default_minimum_usd")]
     pub min_usd: f64,
     /// The price per job in `fixed` mode, in USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_usd: Option<f64>,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            mode: PricingMode::default(),
+            min_usd: DEFAULT_MINIMUM_USD,
+            fixed_usd: None,
+        }
+    }
+}
+
+fn default_minimum_usd() -> f64 {
+    DEFAULT_MINIMUM_USD
 }
 
 impl PricingConfig {
@@ -176,6 +194,15 @@ mod tests {
     }
 
     #[test]
+    fn new_nodes_default_to_a_one_tenth_cent_floor() {
+        let p = PricingConfig::default();
+        assert_eq!(p.mode, PricingMode::Dynamic);
+        assert_eq!(p.min_usd, 0.001);
+        assert_eq!(p.quote(0.001, 0.0), Some(0.001));
+        assert_eq!(p.quote(0.0005, 0.0), None);
+    }
+
+    #[test]
     fn fixed_quotes_its_price_and_respects_the_cap() {
         let p = PricingConfig {
             mode: PricingMode::Fixed,
@@ -250,9 +277,12 @@ mod tests {
         let p: PricingConfig = toml::from_str("").unwrap();
         assert_eq!(p, PricingConfig::default());
         assert_eq!(p.mode, PricingMode::Dynamic);
+        assert_eq!(p.min_usd, 0.001);
         let p: PricingConfig =
             toml::from_str("mode = \"fixed\"\nmin_usd = 0.1\nfixed_usd = 0.2").unwrap();
         assert_eq!(p.quote(1.0, 0.0), Some(0.2));
+        let explicit_zero: PricingConfig = toml::from_str("min_usd = 0.0").unwrap();
+        assert_eq!(explicit_zero.min_usd, 0.0);
     }
 
     #[test]

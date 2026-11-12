@@ -1032,6 +1032,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_new_partial_config_gets_the_default_pricing_floor() {
+        let cfg: Config = toml::from_str("roles = []\n").unwrap();
+        assert_eq!(cfg.pricing.min_usd, 0.001);
+    }
+
+    #[test]
     fn gateways_opt_into_adult_and_an_old_serve_key_is_ignored() {
         assert!(!Config::default().adult.buyer);
         let cfg: Config = toml::from_str("[adult]\nserve = false\nbuyer = true\n").unwrap();

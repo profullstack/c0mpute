@@ -179,7 +179,9 @@ $ c0mpute worker start --roles tts,stt`}</CodeBlock>
           cap, nodes bid under it, and the lowest bid wins. Your node prices
           itself by default (it learns the winning price, undercuts it, and asks
           more when busy) and never goes under the minimum you set with{" "}
-          <code>c0mpute pricing set --min 0.05</code>; or ask one fixed price.
+          <code>c0mpute pricing set --min 0.05</code>. New nodes start with a
+          $0.001 minimum per job; existing settings are preserved. Or ask one
+          fixed price.
           When you win, your node runs the job and publishes a receipt. Settlement
           through CoinPay is built for hosting and ads but{" "}
           <strong className="text-[var(--color-fg)]">off by default</strong> while it is

@@ -156,7 +156,9 @@ $ infernet payout set USDC 0xYourAddress --network polygon`}</CodeBlock>
           winning price by {Math.round(UNDERCUT * 100)}% after it loses to a
           cheaper bid, edges back up after it wins, and asks more as its job
           queue fills. All you set is a minimum: it never bids under it, and
-          jobs capped below it are skipped. Or ask one fixed price.
+          jobs capped below it are skipped. New nodes default to a $0.001
+          minimum per job; existing node settings are preserved. Or ask one
+          fixed price.
         </p>
         <CodeBlock>{`$ c0mpute pricing set --min 0.05          # dynamic, never under $0.05 a job
 $ c0mpute pricing set --fixed 0.40        # always $0.40 a job
