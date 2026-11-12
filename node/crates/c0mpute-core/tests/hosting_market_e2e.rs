@@ -86,6 +86,8 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
         .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
         .with_test_writer()
         .try_init();
+    // Keep this local mesh isolated from LAN peers and real hosting traffic.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
 
     // Five hosting nodes, each asking $0.004/GiB-month with a payout wallet.
@@ -104,10 +106,16 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     };
     let (hub_net, hub_store) = node(&tmp.path().join("h0"), vec![]).await;
     let hub_addr = listen_addr(&hub_net).await;
+    // CI does not provide reliable multicast discovery. Connect each node to
+    // all existing loopback peers so provider lookups see the same mesh.
+    let mut mesh_addrs = vec![hub_addr.clone()];
+    let mut mesh_nets = vec![hub_net.clone()];
     let mut hosts: Vec<Hosting> = vec![Hosting::start(hub_net, hub_store, host_opts(&tmp.path().join("h0"), 0)).await.unwrap()];
     for i in 1..5 {
         let d = tmp.path().join(format!("h{i}"));
-        let (n, s) = node(&d, vec![hub_addr.clone()]).await;
+        let (n, s) = node(&d, mesh_addrs.clone()).await;
+        mesh_addrs.push(listen_addr(&n).await);
+        mesh_nets.push(n.clone());
         hosts.push(Hosting::start(n, s, host_opts(&d, i)).await.unwrap());
     }
 
@@ -115,7 +123,9 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     let owner = libp2p::identity::Keypair::generate_ed25519();
     let owner_key = owner_hex(&owner).unwrap();
     let pd = tmp.path().join("pub");
-    let (pn, ps) = node(&pd, vec![hub_addr.clone()]).await;
+    let (pn, ps) = node(&pd, mesh_addrs.clone()).await;
+    mesh_addrs.push(listen_addr(&pn).await);
+    mesh_nets.push(pn.clone());
     let publisher = Hosting::start(
         pn,
         ps,
@@ -136,7 +146,8 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     // A gateway that challenges everything with its own key: its receipts
     // travel on gossip but do not count for the owner's settlement.
     let gd = tmp.path().join("gw");
-    let (gn, gs) = node(&gd, vec![hub_addr.clone()]).await;
+    let (gn, gs) = node(&gd, mesh_addrs.clone()).await;
+    mesh_nets.push(gn.clone());
     let gateway = Hosting::start(
         gn,
         gs,
@@ -152,6 +163,21 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     .await
     .unwrap();
 
+    // Wait for explicit connections before publishing or challenging.
+    let mesh = mesh_nets.clone();
+    wait_for("full loopback mesh", 30, || {
+        let mesh = mesh.clone();
+        async move {
+            let expected = mesh.len() - 1;
+            let mut connected = true;
+            for n in &mesh {
+                connected &= n.connected_peers().await.len() >= expected;
+            }
+            connected
+        }
+    })
+    .await;
+    // Let gossipsub subscriptions settle across the connected peers.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Two of the five are preferred, at $1/GiB-month.
@@ -191,9 +217,9 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
         }
     })
     .await;
-    // Converged: every host sees the same three copies (both preferred) and
-    // keeps seeing them for longer than the trim grace (one holder TTL), so a
-    // copy that was briefly extra has been released and none comes back.
+    // Converged: the publisher and every host see the same three copies (both
+    // preferred) for longer than the trim grace (one holder TTL), so a copy
+    // that was briefly extra has been released and none comes back.
     // Bounded, rather than a fixed sleep that races the trim.
     let stable_for = fast().holder_ttl + Duration::from_secs(2);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -202,6 +228,7 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
         publisher.regossip(&rec).await;
         let view = hosts[0].holders(&site).await;
         let mut agree = view.len() == 3 && preferred.iter().all(|x| view.contains(x));
+        agree &= publisher.holders(&site).await == view;
         for h in &hosts[1..] {
             agree &= h.holders(&site).await == view;
         }
