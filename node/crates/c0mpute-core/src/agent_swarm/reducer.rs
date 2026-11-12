@@ -17,7 +17,8 @@
 //! * A task is done while one of its results stands; a job is complete when
 //!   its final task is done.
 //! * A bounty is payable when an owner accepted the result, or at least two
-//!   peers endorsed it and endorsements outnumber challenges.
+//!   reviewers with standing (someone else once paid them) endorsed it and
+//!   they outnumber challenges.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -383,14 +384,30 @@ impl State {
         }
     }
 
-    /// Whether the job's bounty is owed for this result.
+    /// Whether `peer` has standing as a reviewer: someone other than itself
+    /// marked one of its results paid. Paying costs real money, so a swarm
+    /// of fresh identities endorsing each other has none.
+    pub fn has_standing(&self, peer: &str) -> bool {
+        self.submissions
+            .values()
+            .any(|s| s.author == peer && s.paid.as_ref().is_some_and(|p| p.by != peer))
+    }
+
+    /// Whether the job's bounty is owed for this result: an owner accepted
+    /// it, or at least two reviewers with standing endorsed it and they
+    /// outnumber every challenge.
     pub fn payable(&self, sub: &Submission) -> bool {
         match self.owner_votes(sub) {
             (_, true) => false,
             (true, false) => true,
             (false, false) => {
-                let (e, c) = Self::tally(sub);
-                e >= 2 && e > c
+                let trusted = sub
+                    .reviews
+                    .iter()
+                    .filter(|(who, r)| r.verdict == Verdict::Accept && self.has_standing(who))
+                    .count();
+                let (_, c) = Self::tally(sub);
+                trusted >= 2 && trusted > c
             }
         }
     }
@@ -748,6 +765,49 @@ mod tests {
         let close = |k, l| ev(k, SW, l, 2, Body::JobClose(JobRef { job: job.id.clone() }));
         assert!(!State::build(&[job.clone(), close(&w1, 2)]).jobs[&job.id].closed);
         assert!(State::build(&[job.clone(), close(&poster, 2)]).jobs[&job.id].closed);
+    }
+
+    #[test]
+    fn only_reviewers_with_standing_make_a_result_payable() {
+        let paid = |sub: &str, by: &libp2p_kp::Keypair, l| {
+            ev(by, SW, l, l, Body::TaskPaid(TaskPaid { submission: sub.into(), amount_usd: "1".into(), rail_ref: String::new() }))
+        };
+        let (poster, _) = signer();
+        let (w, _) = signer();
+        let (s1, _) = signer();
+        let (s2, _) = signer();
+        // Job 1: s1 and s2 each earn standing (paid by the poster).
+        let j1 = ev(&poster, SW, 1, 1, post(vec![("a", vec![]), ("b", vec![])], "1"));
+        let (a, b) = (make_task_id(&j1.id, "a"), make_task_id(&j1.id, "b"));
+        let sa = ev(&s1, SW, 3, 3, submit(&a, "x"));
+        let sb = ev(&s2, SW, 5, 5, submit(&b, "y"));
+        // Job 2: w's result endorsed by s1 and s2, no owner vote.
+        let j2 = ev(&poster, SW, 10, 10, post(vec![("c", vec![])], "1"));
+        let c = make_task_id(&j2.id, "c");
+        let sc = ev(&w, SW, 12, 12, submit(&c, "z"));
+        let mut log = vec![
+            j1.clone(), ev(&s1, SW, 2, 2, claim(&a)), sa.clone(), ev(&s2, SW, 4, 4, claim(&b)), sb.clone(),
+            j2.clone(), ev(&w, SW, 11, 11, claim(&c)), sc.clone(),
+            ev(&s1, SW, 13, 13, review(&sc.id, true)), ev(&s2, SW, 14, 14, review(&sc.id, true)),
+        ];
+        let s = State::build(&log);
+        assert!(s.stands(&s.submissions[&sc.id]), "two endorsements finish the task");
+        assert!(!s.payable(&s.submissions[&sc.id]), "fresh identities cannot make it payable");
+        // Self-marked payment gives no standing.
+        log.push(paid(&sa.id, &s1, 15));
+        assert!(!State::build(&log).has_standing(&libp2p_kp::peer(&s1)));
+        // Paid by the poster: both reviewers gain standing; now payable.
+        log.push(paid(&sa.id, &poster, 16));
+        log.push(paid(&sb.id, &poster, 17));
+        let s = State::build(&log);
+        assert!(s.payable(&s.submissions[&sc.id]));
+    }
+
+    mod libp2p_kp {
+        pub use c0mpute_net::libp2p::identity::Keypair;
+        pub fn peer(k: &Keypair) -> String {
+            k.public().to_peer_id().to_string()
+        }
     }
 
     #[test]

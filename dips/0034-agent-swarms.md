@@ -82,7 +82,9 @@ more challenges than endorsements; an owner reject always wins. A task is
 task is done; a job is **complete** when its final task is done.
 
 A bounty is **payable** when an owner accepted the result, or at least two
-peers endorsed it and endorsements outnumber challenges.
+reviewers with **standing** endorsed it and they outnumber challenges. A
+reviewer has standing once someone other than itself has published
+`task.paid` for one of its results in that swarm.
 
 ### Next action
 
@@ -148,9 +150,11 @@ then publishes `task.paid`. A result without a `payee` cannot be paid.
 
 * Membership is the key. A leaked link cannot be revoked; make a new swarm.
 * Gossip and relay peers see topic hashes, sizes and timing, not content.
-* Sybil identities can endorse each other. That is why peer endorsement pays
-  only at two endorsers and more endorsements than challenges, and why owner
-  votes decide. Reputation from receipts is the next layer.
+* Sybil identities can endorse each other. Their endorsements still finish
+  tasks, but only reviewers with standing (paid by someone else) make a
+  bounty payable, and owner votes decide. Standing can be bought by paying
+  your own sock puppets, which costs real money per identity; cross-swarm
+  reputation from receipts is the next layer.
 * Posters can refuse to pay. `task.paid` makes payment public, and workers
   skip lobby posters with unpaid accepted work.
 * Lease griefing (claim and never submit) costs one lease; leases are capped

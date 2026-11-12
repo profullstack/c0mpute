@@ -21,9 +21,11 @@ libp2p protocols, so any node can be dialed by peer id.
 **Every node is a relay server.** A reservation it grants carries its
 confirmed public addresses (from AutoNAT, or from `C0MPUTE_P2P_EXTERNAL`,
 which a gateway with a fixed open port sets and which is confirmed at
-start). A node behind NAT has none, and clients reject a reservation
-without addresses, so in practice the public gateways and cloud workers
-carry the relays.
+start). A node with no confirmed external address refuses reservations
+outright (a reservation rate limiter gated on it, since v0.3.60): before
+that, nodes behind NAT or Docker granted empty reservations that clients
+then rejected with `NoAddressesInReservation`. In practice the public
+gateways and cloud workers carry the relays.
 
 Server limits (raised from libp2p's defaults, which fit hole-punch
 coordination only, so a job result can cross a relay when punching
@@ -43,8 +45,14 @@ confirmed us public, the node listens on
 `<relay addr>/p2p/<relay>/p2p-circuit`, which asks the relay for a
 reservation. It keeps at most two reservations, so losing one relay never
 makes it unreachable. A relay that refuses (or later drops) a reservation
-is left alone for 10 minutes. When AutoNAT later confirms the node public,
-it gives its reservations back.
+is left alone for 10 minutes, or 6 hours when it answered with no
+addresses. When AutoNAT later confirms the node public, it gives its
+reservations back.
+
+Public is sticky for 30 minutes: after AutoNAT said Public, a Private
+verdict starts relay reservations only once that grace has passed (one
+probe server that cannot dial back, being behind NAT itself, used to flip
+public nodes). A node with `C0MPUTE_P2P_EXTERNAL` set is always public.
 
 The accepted reservation shows up as a listen address,
 

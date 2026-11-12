@@ -97,8 +97,12 @@ pub const MAX_RELAY_RESERVATIONS: usize = 2;
 /// Relay server limits. libp2p's defaults (2 min, 128 KiB per circuit) fit
 /// hole-punch coordination only; a job result has to be able to cross a
 /// relayed connection when hole punching fails.
-fn relay_server_config() -> relay::Config {
-    relay::Config {
+/// Relay server limits. `ready` is true while this node has a confirmed
+/// external address: a reservation hands the client our external addresses,
+/// so with none it is useless (the client fails with
+/// `NoAddressesInReservation`) and is refused up front instead.
+fn relay_server_config(ready: Arc<std::sync::atomic::AtomicBool>) -> relay::Config {
+    let mut cfg = relay::Config {
         max_reservations: 256,
         max_reservations_per_peer: 4,
         reservation_duration: Duration::from_secs(60 * 60),
@@ -107,6 +111,37 @@ fn relay_server_config() -> relay::Config {
         max_circuit_duration: Duration::from_secs(10 * 60),
         max_circuit_bytes: 32 * 1024 * 1024,
         ..relay::Config::default()
+    };
+    cfg.reservation_rate_limiters.push(Box::new(
+        // web_time::Instant is std's Instant off wasm.
+        move |_peer: PeerId, _addr: &Multiaddr, _now: std::time::Instant| {
+            ready.load(std::sync::atomic::Ordering::Relaxed)
+        },
+    ));
+    cfg
+}
+
+/// After AutoNAT last said Public, a Private verdict is trusted only once
+/// this long has passed: one probe server that cannot dial back (it sits
+/// behind NAT itself) flipped public nodes to Private and set them
+/// reserving relays they did not need.
+pub const PUBLIC_GRACE: Duration = Duration::from_secs(30 * 60);
+
+/// Whether this node counts as publicly reachable: an operator-declared
+/// external address, AutoNAT's current verdict, or a Public verdict within
+/// [`PUBLIC_GRACE`].
+pub fn effectively_public(declared: bool, nat_public: bool, since_last_public: Option<Duration>) -> bool {
+    declared || nat_public || since_last_public.is_some_and(|d| d < PUBLIC_GRACE)
+}
+
+/// How long to leave a relay alone after its reservation closed with
+/// `reason` (its Debug text). A relay with no external address will not get
+/// one soon: hours, not minutes.
+pub fn relay_backoff(reason: &str) -> Duration {
+    if reason.contains("NoAddressesInReservation") {
+        Duration::from_secs(6 * 60 * 60)
+    } else {
+        RELAY_RETRY_AFTER
     }
 }
 
@@ -442,6 +477,8 @@ impl Libp2pNetwork {
                 sw.add_external_address(a.clone());
             }
             task.nat_public = true;
+            task.declared_public = true;
+            task.relay_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for addr in &config.listen {
             task.swarm
@@ -947,9 +984,17 @@ struct SwarmTask {
     relay_listeners: HashMap<PeerId, ListenerId>,
     /// Relays whose reservation failed, and when: not asked again for
     /// [`RELAY_RETRY_AFTER`] (identify re-runs every few minutes).
-    relay_failed: HashMap<PeerId, std::time::Instant>,
+    relay_failed: HashMap<PeerId, (std::time::Instant, Duration)>,
     /// AutoNAT's latest verdict: true once it has seen us dialed back.
     nat_public: bool,
+    /// The operator declared a public address (`C0MPUTE_P2P_EXTERNAL` or
+    /// [`Libp2pNetwork::add_external_address`]): public whatever AutoNAT says.
+    declared_public: bool,
+    /// When AutoNAT last said Public ([`PUBLIC_GRACE`]).
+    last_public: Option<std::time::Instant>,
+    /// Shared with the relay server's reservation gate: true while we hold
+    /// a confirmed external address.
+    relay_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long a relay that refused or dropped our reservation is left alone.
@@ -985,6 +1030,8 @@ impl SwarmTask {
         rpc_handlers: RpcHandlers,
         cmd_weak: mpsc::WeakSender<Cmd>,
     ) -> Result<Self> {
+        let relay_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay_ready_cfg = relay_ready.clone();
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             .with_tcp(
@@ -1047,7 +1094,7 @@ impl SwarmTask {
                     Some(mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?)
                 };
                 let mdns = libp2p::swarm::behaviour::toggle::Toggle::from(mdns);
-                let relay = relay::Behaviour::new(local_peer_id, relay_server_config());
+                let relay = relay::Behaviour::new(local_peer_id, relay_server_config(relay_ready_cfg.clone()));
                 let dcutr = dcutr::Behaviour::new(local_peer_id);
                 let autonat = autonat::Behaviour::new(
                     local_peer_id,
@@ -1098,6 +1145,9 @@ impl SwarmTask {
             relay_listeners: HashMap::new(),
             relay_failed: HashMap::new(),
             nat_public: false,
+            declared_public: false,
+            last_public: None,
+            relay_ready,
         })
     }
 
@@ -1152,6 +1202,8 @@ impl SwarmTask {
             Cmd::AddExternal { addr } => {
                 self.swarm.lock().await.add_external_address(addr);
                 self.nat_public = true;
+                self.declared_public = true;
+                self.relay_ready.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             Cmd::Advertised { reply } => {
                 let swarm = self.swarm.lock().await;
@@ -1348,10 +1400,20 @@ impl SwarmTask {
                 Ok(_) => info!(peer = %ev.remote_peer_id, "dcutr: hole punch succeeded; direct connection"),
                 Err(e) => debug!(peer = %ev.remote_peer_id, err = %e, "dcutr: hole punch failed; staying relayed"),
             },
+            SwarmEvent::ExternalAddrConfirmed { .. } | SwarmEvent::ExternalAddrExpired { .. } => {
+                let has = self.swarm.lock().await.external_addresses().next().is_some();
+                let was = self.relay_ready.swap(has, std::sync::atomic::Ordering::Relaxed);
+                if has != was {
+                    info!(relaying = has, "relay server: {}", if has { "external address confirmed; accepting reservations" } else { "no external address; refusing reservations" });
+                }
+            }
             SwarmEvent::Behaviour(C0mputeBehaviourEvent::Autonat(autonat::Event::StatusChanged { old, new })) => {
                 info!(?old, ?new, "autonat: reachability changed");
                 self.nat_public = new.is_public();
                 if self.nat_public {
+                    self.last_public = Some(std::time::Instant::now());
+                }
+                if effectively_public(self.declared_public, self.nat_public, self.last_public.map(|t| t.elapsed())) {
                     // Dialable directly: give the relay slots back.
                     let held: Vec<(PeerId, ListenerId)> = self.relay_listeners.drain().collect();
                     let mut sw = self.swarm.lock().await;
@@ -1371,7 +1433,8 @@ impl SwarmTask {
                 if let Some(relay) = relay {
                     self.relay_listeners.remove(&relay);
                     if reason.is_err() {
-                        self.relay_failed.insert(relay, std::time::Instant::now());
+                        let backoff = relay_backoff(&format!("{reason:?}"));
+                        self.relay_failed.insert(relay, (std::time::Instant::now(), backoff));
                     }
                     info!(%relay, ?reason, "relay: reservation closed");
                 }
@@ -1586,11 +1649,12 @@ impl SwarmTask {
     /// TCP address. The circuit listener's address joins our listen
     /// addresses, so identify and Kad hand it to peers like any other.
     async fn maybe_reserve_relay(&mut self, relay: PeerId, listen_addrs: &[Multiaddr]) {
-        if self.relay_failed.get(&relay).is_some_and(|t| t.elapsed() < RELAY_RETRY_AFTER) {
+        if self.relay_failed.get(&relay).is_some_and(|(t, wait)| t.elapsed() < *wait) {
             return;
         }
+        let public = effectively_public(self.declared_public, self.nat_public, self.last_public.map(|t| t.elapsed()));
         if self.relay_listeners.contains_key(&relay)
-            || !wants_relay_reservation(relay_client_disabled(), self.nat_public, self.relay_listeners.len())
+            || !wants_relay_reservation(relay_client_disabled(), public, self.relay_listeners.len())
         {
             return;
         }
@@ -1957,6 +2021,31 @@ mod tests {
         ] {
             assert!(!p(private), "{private} is not public");
         }
+    }
+
+    #[test]
+    fn public_grace_and_relay_backoff() {
+        assert!(effectively_public(true, false, None), "declared address wins");
+        assert!(effectively_public(false, true, None));
+        assert!(effectively_public(false, false, Some(Duration::from_secs(60))), "one Private right after Public is noise");
+        assert!(!effectively_public(false, false, Some(PUBLIC_GRACE)), "grace runs out");
+        assert!(!effectively_public(false, false, None));
+        assert_eq!(
+            relay_backoff("Err(Custom { kind: Other, error: Other(Left(Left(Left(Reservation(Protocol(NoAddressesInReservation)))))) })"),
+            Duration::from_secs(6 * 60 * 60)
+        );
+        assert_eq!(relay_backoff("Err(Io(ConnectionReset))"), RELAY_RETRY_AFTER);
+    }
+
+    #[test]
+    fn relay_server_refuses_reservations_without_an_external_address() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut cfg = relay_server_config(ready.clone());
+        let addr: Multiaddr = "/ip4/8.8.8.8/tcp/1".parse().unwrap();
+        let ours = cfg.reservation_rate_limiters.last_mut().unwrap();
+        assert!(!ours.try_next(PeerId::random(), &addr, std::time::Instant::now()));
+        ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(ours.try_next(PeerId::random(), &addr, std::time::Instant::now()));
     }
 
     #[test]
