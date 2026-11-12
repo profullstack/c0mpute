@@ -138,7 +138,25 @@ async fn boot(config_path: &std::path::Path, quiet: bool) -> Result<Ctx> {
     let cfg = Config::load_or_default(config_path)?;
     let id_dir = agent_swarm::cli_identity_dir().context("no data directory")?;
     let net = c0mpute_core::dm::boot_client(&id_dir).await?;
-    let svc = SwarmService::start(net.clone(), &agent_swarm::dir_under(&cfg.storage.root), cfg.swarm.lobby).await?;
+    let shared = agent_swarm::dir_under(&cfg.storage.root);
+    let dir = if writable(&shared) {
+        shared
+    } else {
+        // The node runs as another user (a root service beside a user
+        // CLI): work from our own directory. This CLI still syncs and
+        // gossips through its own node; that worker just won't see swarms
+        // joined here until joined there too.
+        let own = c0mpute_core::config::data_dir().context("no data directory")?.join("swarm");
+        if !quiet {
+            eprintln!(
+                "note: {} is not writable by this user; using {} (the local worker will not see swarms joined here)",
+                shared.display(),
+                own.display()
+            );
+        }
+        own
+    };
+    let svc = SwarmService::start(net.clone(), &dir, cfg.swarm.lobby).await?;
     // Reach some peers, let gossipsub learn their subscriptions, catch up.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while net.connected_peers().await.is_empty() && tokio::time::Instant::now() < deadline {
@@ -155,6 +173,45 @@ async fn boot(config_path: &std::path::Path, quiet: bool) -> Result<Ctx> {
         }
     }
     Ok(Ctx { svc, cfg })
+}
+
+/// Whether this user can create files in `dir` (creating it if missing).
+fn writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    // The directory, every topic directory in it, and every file we append
+    // to or rewrite (a root-owned file inside a writable directory fails
+    // the same way).
+    fn dir_ok(d: &std::path::Path) -> bool {
+        let probe = d.join(format!(".write-probe-{}", std::process::id()));
+        let ok = std::fs::write(&probe, b"").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    }
+    fn file_ok(f: &std::path::Path) -> bool {
+        std::fs::OpenOptions::new().append(true).open(f).is_ok()
+    }
+    if !dir_ok(dir) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if !dir_ok(&p) {
+                return false;
+            }
+            if let Ok(inner) = std::fs::read_dir(&p)
+                && !inner.flatten().map(|f| f.path()).filter(|f| f.is_file()).all(|f| file_ok(&f))
+            {
+                return false;
+            }
+        } else if p.is_file() && !file_ok(&p) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Give gossip a moment to leave before the process exits.
@@ -631,6 +688,26 @@ mod tests {
         let names: Vec<String> = tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         for n in ["swarm_next", "swarm_claim", "swarm_submit", "swarm_review", "swarm_post"] {
             assert!(names.contains(&n.to_string()), "{n}");
+        }
+    }
+
+    #[test]
+    fn writable_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let sw = d.path().join("swarm");
+        assert!(writable(&sw), "created and writable");
+        std::fs::create_dir_all(sw.join("abc")).unwrap();
+        std::fs::write(sw.join("abc/events.jsonl"), b"").unwrap();
+        assert!(writable(&sw));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = sw.join("abc/events.jsonl");
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+            // root writes anyway; assert only when this user really cannot.
+            if std::fs::OpenOptions::new().append(true).open(&f).is_err() {
+                assert!(!writable(&sw), "a read-only log means: use our own dir");
+            }
         }
     }
 }
