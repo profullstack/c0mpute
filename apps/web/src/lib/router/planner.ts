@@ -92,8 +92,13 @@ export function viewModels(models: ModelProfile[], f: Features, stats: Stats, op
       p *= 1 - Math.min(0.5, stats.errorRate(m.id));
       if (m.providers !== undefined && m.busy !== undefined && m.providers > 0 && m.busy >= m.providers) p *= 0.92;
       p = Math.max(0.01, Math.min(0.99, p));
-      const costUsd = (f.promptTokens * m.priceIn + out * m.priceOut) / 1e6;
-      const latencyMs = 400 + out * speedMsPerToken(m, stats) + f.promptTokens * 0.15;
+      // "Thinking" models write their reasoning out first: on anything but
+      // math/reasoning that is ~3x the tokens for the same answer (qwen3:4b
+      // took 200 s on "name three primary colors", 2026-11-12).
+      const thinks = m.tags.includes("reasoning") && f.category !== "math" && f.category !== "reasoning";
+      const mOut = thinks ? out * 3 : out;
+      const costUsd = (f.promptTokens * m.priceIn + mOut * m.priceOut) / 1e6;
+      const latencyMs = 400 + mOut * speedMsPerToken(m, stats) + f.promptTokens * 0.15;
       return { m, p, costUsd, latencyMs };
     })
     .sort((a, b) => b.p - a.p || a.costUsd - b.costUsd || a.m.id.localeCompare(b.m.id));
