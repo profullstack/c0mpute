@@ -164,7 +164,11 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     std::fs::create_dir_all(site_dir.join("docs")).unwrap();
     std::fs::write(site_dir.join("index.html"), b"<meta property=\"og:image\" content=\"img/hero.png\"><h1>hello from the network</h1>").unwrap();
     std::fs::write(site_dir.join("docs/index.html"), b"docs page").unwrap();
-    let big: Vec<u8> = (0..(5 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+    // Three chunks keep this multi-chunk while limiting loopback traffic on
+    // slower CI runners.
+    let big: Vec<u8> = (0..(2 * 1024 * 1024 + 97))
+        .map(|i| (i % 251) as u8)
+        .collect();
     std::fs::write(site_dir.join("big.bin"), &big).unwrap();
     let built = build_from_dir(&site_dir, "demo").unwrap();
     let owner = libp2p::identity::Keypair::generate_ed25519();
