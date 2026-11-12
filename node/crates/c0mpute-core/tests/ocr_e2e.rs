@@ -117,6 +117,8 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
         .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
         .with_test_writer()
         .try_init();
+    // Keep this loopback OCR job off the live LAN network.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
 
     // ── worker: the real OCR runner, with its bid filter ───────────────
@@ -151,7 +153,7 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
         buyer.clone(),
         buyer_store,
         "test-token-0123456789abcdef".into(),
-        0.0,
+        1.0,
         vec![],
     )
     .unwrap()

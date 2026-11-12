@@ -79,6 +79,8 @@ async fn fake_runtime() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_turns_are_answered_peer_to_peer() {
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
+    // Keep the loopback buyer and worker off the live LAN network.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let live = std::env::var("C0MPUTE_INFERENCE_LIVE_URL").ok().filter(|s| !s.is_empty());
     let base = match &live {
         Some(u) => u.trim_end_matches('/').to_string(),
@@ -108,7 +110,8 @@ async fn chat_turns_are_answered_peer_to_peer() {
 
     // ── buyer ──────────────────────────────────────────────────────────
     let (buyer, buyer_store) = node(&tmp.path().join("b"), vec![worker_addr]).await;
-    let bridge = JobsBridge::new(buyer.clone(), buyer_store, "test-token-0123456789abcdef".into(), 0.0, vec![]).unwrap().with_bid_window(Duration::from_secs(2));
+    // This paid inference scenario needs a cap above the default node floor.
+    let bridge = JobsBridge::new(buyer.clone(), buyer_store, "test-token-0123456789abcdef".into(), 1.0, vec![]).unwrap().with_bid_window(Duration::from_secs(2));
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // A multi-turn conversation, any model.

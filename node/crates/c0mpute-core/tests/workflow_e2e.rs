@@ -63,6 +63,8 @@ async fn transform_step_round_trips_through_the_bridge() {
         .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
         .with_test_writer()
         .try_init();
+    // Keep loopback jobs off the live LAN network.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
 
     // ── worker: the real workflow.step runner ──────────────────────────
@@ -84,7 +86,7 @@ async fn transform_step_round_trips_through_the_bridge() {
 
     // ── buyer: the bridge, dialing the worker directly ─────────────────
     let (buyer, buyer_store) = node(&tmp.path().join("b"), vec![worker_addr]).await;
-    let bridge = JobsBridge::new(buyer.clone(), buyer_store, TOKEN.into(), 0.0, vec![])
+    let bridge = JobsBridge::new(buyer.clone(), buyer_store, TOKEN.into(), 1.0, vec![])
         .unwrap()
         .with_bid_window(Duration::from_secs(2));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
