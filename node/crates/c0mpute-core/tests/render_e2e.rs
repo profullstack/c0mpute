@@ -114,6 +114,8 @@ async fn frames_render_across_workers() {
         .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
         .with_test_writer()
         .try_init();
+    // Keep these loopback render jobs off the live LAN network.
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let tmp = tempdir().unwrap();
     let blend = tmp.path().join("scene.blend");
     make_scene(&blend);
@@ -139,7 +141,7 @@ async fn frames_render_across_workers() {
         resolution_pct: None,
         samples: Some(4),
         frame_timeout: Duration::from_secs(300),
-        max_price_usd: 0.0,
+        max_price_usd: 1.0,
         concurrency: 3,
         attempts: 3,
         out_dir: out.clone(),
@@ -179,7 +181,7 @@ async fn frames_render_across_workers() {
         buyer.clone(),
         buyer_store,
         "test-token-0123456789abcdef".into(),
-        0.0,
+        1.0,
         vec![],
     )
     .unwrap()

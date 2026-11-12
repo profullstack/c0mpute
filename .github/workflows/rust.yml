@@ -78,6 +78,8 @@ jobs:
       - name: Test
         env:
           C0MPUTE_REQUIRE_FUSE: "1"
+          # Keep loopback E2Es isolated when the runner is near real workers.
+          C0MPUTE_DISABLE_MDNS: "1"
         run: cargo test --workspace --locked
 
       # Blocking, unlike the lint job: this invariant has no legacy debt to
