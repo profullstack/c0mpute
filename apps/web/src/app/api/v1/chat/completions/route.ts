@@ -1,7 +1,8 @@
 import { forwardChat, parseChatRequest } from "@/lib/chat/completions";
 import { hasEnabledPlugins } from "@/lib/chat/plugins";
 import { pluginChatResponse } from "@/lib/chat/plugin-http";
-import { RunLimitError, SSE_HEADERS, runStream, startRun } from "@/lib/chat/runs";
+import { runManager } from "@/lib/chat/run-manager";
+import { RunLimitError, SSE_HEADERS } from "@/lib/chat/runs";
 import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -38,26 +39,12 @@ export async function POST(req: Request) {
   const approvals = Array.isArray(raw?.approvals) ? raw.approvals : [];
   const withPlugins = raw?.plugins !== false && (approvals.length > 0 || (await hasEnabledPlugins(user.id)));
 
-  if (raw?.resumable === true && parsed.stream) {
+  if (raw?.resumable === true && parsed.stream && raw) {
     try {
-      const run = await startRun(user.id, async (signal) => {
-        if (withPlugins) {
-          const res = await pluginChatResponse({ userId: user.id, upstream: infernetFor(user.coinpay_sub), req: parsed, approvals, events: raw?.plugin_events === true, signal });
-          return res.body;
-        }
-        const up = await forwardChat(infernetFor(user.coinpay_sub), parsed, signal);
-        const type = up.headers.get("content-type") ?? "";
-        if (!up.ok || !type.includes("event-stream")) {
-          const text = await up.text().catch(() => "");
-          let message = `the c0mpute network is restarting or busy (upstream HTTP ${up.status}); try again in a minute`;
-          try {
-            message = JSON.parse(text).error?.message ?? message;
-          } catch {}
-          throw new Error(message);
-        }
-        return up.body;
-      });
-      return new Response(runStream(run), { headers: { ...SSE_HEADERS, "x-c0mpute-run": run.id } });
+      // Kept (sealed) with the run so any server can continue it after a deploy.
+      const runs = runManager();
+      const run = await runs.start({ userId: user.id, coinpaySub: user.coinpay_sub ?? null, body: raw, withPlugins });
+      return new Response(runs.stream(run.id), { headers: { ...SSE_HEADERS, "x-c0mpute-run": run.id } });
     } catch (e) {
       if (e instanceof RunLimitError) return err(429, e.message, { "retry-after": "10" });
       throw e;
