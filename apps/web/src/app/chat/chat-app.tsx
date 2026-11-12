@@ -388,7 +388,8 @@ export function ChatApp({ error }: { error: string | null }) {
       .catch(() => setMe(null));
     fetch("/api/v1/models")
       .then((r) => (r.ok ? r.json() : { data: [] }))
-      .then((j) => setModels((j.data ?? []).map((m: { id: string }) => m.id)))
+      // Router entries ("auto", "auto:high", ...) have their own options above.
+      .then((j) => setModels((j.data ?? []).map((m: { id: string }) => m.id).filter((id: string) => !/^auto(:|$)/.test(id))))
       .catch(() => {});
     const c = load();
     setConvos(c);
@@ -1616,7 +1617,10 @@ export function ChatApp({ error }: { error: string | null }) {
                 if (active) update(active.id, (c) => ({ ...c, model: e.target.value }));
               }}
             >
-              <option value="auto">auto (any live node)</option>
+              <option value="auto">auto: router picks (standard)</option>
+              <option value="auto:fast">auto:fast (quickest good model)</option>
+              <option value="auto:high">auto:high (checked, escalates)</option>
+              <option value="auto:max">auto:max (several models, fused)</option>
               {models.map((m) => (
                 <option key={m} value={m}>
                   {m}

@@ -2,6 +2,8 @@
 // provider node (p2p_only: never the paid hosted fallback) under c0mpute's
 // trusted client key; c0mpute users are rate-limited per account here.
 
+import { parseAutoModel } from "@/lib/router";
+
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ChatRequest = {
   model?: string;
@@ -32,7 +34,8 @@ export function parseChatRequest(body: unknown): ChatRequest | string {
   }
   if (chars > MAX_CHARS) return `messages total more than ${MAX_CHARS} characters`;
   const out: ChatRequest = { messages, stream: b.stream === true };
-  if (typeof b.model === "string" && b.model && b.model !== "auto") out.model = b.model.slice(0, 200);
+  // "auto" and the router aliases ("auto:high", ...) are not model ids.
+  if (typeof b.model === "string" && b.model && !parseAutoModel(b.model)) out.model = b.model.slice(0, 200);
   if (typeof b.temperature === "number" && Number.isFinite(b.temperature)) {
     out.temperature = Math.min(2, Math.max(0, b.temperature));
   }
