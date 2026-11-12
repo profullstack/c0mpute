@@ -87,6 +87,11 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     // A hub everyone dials (it also hosts), then four more hosting nodes.
     let (hub_net, hub_store) = node(&tmp.path().join("h0"), vec![]).await;
     let hub_addr = listen_addr(&hub_net).await;
+    // The test disables mDNS, so explicitly connect each new node to all
+    // existing loopback peers. This keeps DHT provider lookups deterministic
+    // on CI, where multicast discovery is unavailable.
+    let mut mesh_addrs = vec![hub_addr.clone()];
+    let mut mesh_nets = vec![hub_net.clone()];
     let mut hosts: Vec<Hosting> = Vec::new();
     let opts = |dir: &std::path::Path| Options {
         hosts: true,
@@ -99,13 +104,17 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     hosts.push(Hosting::start(hub_net.clone(), hub_store, opts(&tmp.path().join("h0"))).await.unwrap());
     for i in 1..5 {
         let d = tmp.path().join(format!("h{i}"));
-        let (n, s) = node(&d, vec![hub_addr.clone()]).await;
+        let (n, s) = node(&d, mesh_addrs.clone()).await;
+        mesh_addrs.push(listen_addr(&n).await);
+        mesh_nets.push(n.clone());
         hosts.push(Hosting::start(n, s, opts(&d)).await.unwrap());
     }
 
     // A gateway that hosts nothing.
     let gd = tmp.path().join("gw");
-    let (gn, gs) = node(&gd, vec![hub_addr.clone()]).await;
+    let (gn, gs) = node(&gd, mesh_addrs.clone()).await;
+    mesh_addrs.push(listen_addr(&gn).await);
+    mesh_nets.push(gn.clone());
     let gateway = Hosting::start(
         gn,
         gs,
@@ -120,7 +129,8 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
 
     // The publisher: seeds its own site, does not count as a copy.
     let pd = tmp.path().join("pub");
-    let (pn, ps) = node(&pd, vec![hub_addr.clone()]).await;
+    let (pn, ps) = node(&pd, mesh_addrs).await;
+    mesh_nets.push(pn.clone());
     let publisher = Hosting::start(
         pn,
         ps,
@@ -133,7 +143,21 @@ async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     .await
     .unwrap();
 
-    // gossipsub mesh warm-up
+    // Wait for the explicit mesh to be ready before advertising the site.
+    let mesh = mesh_nets.clone();
+    wait_for("full loopback mesh", 30, || {
+        let mesh = mesh.clone();
+        async move {
+            let expected = mesh.len() - 1;
+            let mut connected = true;
+            for n in &mesh {
+                connected &= n.connected_peers().await.len() >= expected;
+            }
+            connected
+        }
+    })
+    .await;
+    // Let gossipsub subscriptions settle across the connected peers.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let site_dir = tmp.path().join("site");
