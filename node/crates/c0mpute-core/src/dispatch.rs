@@ -265,11 +265,14 @@ pub fn run_worker_subscriber_with_load(
                     capacity.total_slots,
                     load.as_ref().and_then(WorkerLoad::recent_job_duration),
                 );
+                // Tags that appear after boot (inference models) are read
+                // live, not from the snapshot this subscriber started with.
+                let live = live_tags(&workload_type, &advertised_tags, &crate::inference::ready_models());
                 if let Some((price, expires_at_ms, payload, session)) = handle_offer(
                     &net,
                     &topic,
                     &offer,
-                    &advertised_tags,
+                    &live,
                     pricing.as_ref(),
                     queue_load(tx),
                     &market,
@@ -611,6 +614,25 @@ fn unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// The tag set an offer is matched against: the subscriber's boot snapshot,
+/// with the inference role and model tags replaced by what the runtime lists
+/// now. The runtime is probed after the subscriber starts (and the house
+/// llama-server may install later still), so the snapshot never had them and
+/// every inference offer was refused as missing capabilities.
+pub(crate) fn live_tags(workload_type: &str, advertised: &[String], inference_models: &[String]) -> Vec<String> {
+    let mut tags = advertised.to_vec();
+    if workload_type == crate::inference::WORKLOAD {
+        let role = crate::inference::ROLE_TAG;
+        let model_prefix = crate::inference::model_tag("");
+        tags.retain(|t| t.as_str() != role && !t.starts_with(&model_prefix));
+        if !inference_models.is_empty() {
+            tags.push(role.to_string());
+            tags.extend(inference_models.iter().map(|m| crate::inference::model_tag(m)));
+        }
+    }
+    tags
 }
 
 /// The offer's required tags this worker does not advertise. Empty: eligible.
@@ -973,6 +995,29 @@ mod tests {
             bid_window_ms: window,
             e2e: None,
         }
+    }
+
+    #[test]
+    fn inference_models_that_appear_after_boot_make_the_worker_eligible() {
+        let mut offer = offer_at(NOW, None);
+        offer.workload_type = crate::inference::WORKLOAD.into();
+        offer.required_capabilities = crate::inference::required_capabilities(
+            &serde_json::json!({"v": 1, "model": "qwen2.5:0.5b", "messages": [{"role": "user", "content": "hi"}]}),
+        );
+        // The boot snapshot: taken before the runtime listed any model.
+        let boot = vec!["c0mpute:cpu".to_string()];
+        let w = crate::inference::WORKLOAD;
+        assert_eq!(missing_capabilities(&offer, &live_tags(w, &boot, &[])).len(), 2);
+        let models = vec!["qwen2.5:0.5b".to_string(), "qwen2.5:7b".to_string()];
+        assert!(missing_capabilities(&offer, &live_tags(w, &boot, &models)).is_empty());
+        // A model the runtime does not list is still refused.
+        offer.required_capabilities.push(crate::inference::model_tag("llama3:70b"));
+        assert_eq!(missing_capabilities(&offer, &live_tags(w, &boot, &models)).len(), 1);
+        // A model the runtime dropped stops matching even if the snapshot had it.
+        let stale = live_tags(w, &live_tags(w, &boot, &models), &["qwen2.5:7b".to_string()]);
+        assert!(!stale.contains(&crate::inference::model_tag("qwen2.5:0.5b")));
+        // Other workloads keep their snapshot untouched.
+        assert_eq!(live_tags("diffusion.txt2img", &boot, &models), boot);
     }
 
     #[test]
