@@ -444,26 +444,37 @@ impl Supervisor {
                 continue;
             }
             // Chat completions from the operator's own OpenAI-compatible
-            // runtime. Probe it now and every minute; bid only while it lists
-            // chat models (the offer filter re-checks), advertise likewise.
+            // runtime, or, on a box without one, from the house llama-server
+            // the worker installs and supervises (`inference_auto`). Probe it
+            // now and every minute; bid only while it lists chat models (the
+            // offer filter re-checks, plus load gates for the house runtime),
+            // advertise likewise. Choosing may install in the background, so
+            // it never blocks the other roles.
             if workload_type == crate::inference::WORKLOAD {
-                let Some(base) = crate::inference::runtime_url() else {
+                let Some(operator) = crate::inference::runtime_url() else {
                     info!(%workload_type, "not subscribing: {} is off", crate::inference::RUNTIME_URL_ENV);
                     continue;
                 };
-                tokio::spawn(crate::inference::refresh_loop(base.clone()));
-                let load = crate::inference::worker_load();
-                let runner_tx = crate::inference::spawn_inference_runner(net.clone(), self.store.clone(), base, load.clone());
-                info!(%workload_type, "subscribing to job topic");
-                dispatch::run_worker_subscriber_with_load(
-                    net.clone(),
-                    workload_type,
-                    tags.clone(),
-                    Some(runner_tx),
-                    Some(crate::inference::offer_filter()),
-                    Some(self.config.pricing.clone()),
-                    Some(load),
-                );
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                let tags = tags.clone();
+                tokio::spawn(async move {
+                    let base = crate::inference_auto::choose_runtime(operator, &config.inference).await;
+                    tokio::spawn(crate::inference::refresh_loop(base.clone()));
+                    let load = crate::inference::worker_load();
+                    let runner_tx = crate::inference::spawn_inference_runner(net.clone(), store, base, load.clone());
+                    info!(workload_type = crate::inference::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::inference::WORKLOAD.to_string(),
+                        tags,
+                        Some(runner_tx),
+                        Some(crate::inference::offer_filter()),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
                 continue;
             }
             // Embeddings: provision fastembed in the background (never blocks

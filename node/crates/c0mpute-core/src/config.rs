@@ -60,6 +60,11 @@ pub struct Config {
     /// Captcha solving (`captcha.solve`, ddddocr) provisioning.
     #[serde(default)]
     pub captcha: CaptchaConfig,
+    /// The house LLM runtime (`infernet.inference`): a prebuilt llama.cpp
+    /// `llama-server` plus a small Qwen GGUF, for nodes without their own
+    /// Ollama or llama-server.
+    #[serde(default)]
+    pub inference: InferenceConfig,
     /// Ads: gateways serve VAST/VMAP and podcast ad insertion from the
     /// gossiped campaign index.
     #[serde(default)]
@@ -395,6 +400,59 @@ fn default_captcha_min_free_disk_gb() -> u64 {
 impl CaptchaConfig {
     pub fn auto_install_enabled(&self) -> bool {
         auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_CAPTCHA_AUTO").ok())
+    }
+}
+
+/// Chat completions (`infernet.inference`) on nodes that do not run their own
+/// Ollama or llama-server: the worker downloads a pinned, prebuilt llama.cpp
+/// `llama-server` and one small house GGUF (Qwen2.5 1.5B Instruct, or 0.5B on
+/// a box with less than `min_ram_gb`) and runs it on loopback. On by default;
+/// opt out with `C0MPUTE_INFERENCE_AUTO=0` or `auto_install = false`. A node
+/// whose own runtime answers at the default address, or whose operator set
+/// `C0MPUTE_INFERENCE_URL`, never installs it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InferenceConfig {
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
+    /// Total RAM for the 1.5B model; boxes with half of it get the 0.5B one.
+    #[serde(default = "default_inference_min_ram_gb")]
+    pub min_ram_gb: u64,
+    /// Available RAM needed to start the runtime (halved for the 0.5B model).
+    #[serde(default = "default_inference_min_free_ram_gb")]
+    pub min_free_ram_gb: u64,
+    /// Free disk in the data dir needed before installing.
+    #[serde(default = "default_inference_min_free_disk_gb")]
+    pub min_free_disk_gb: u64,
+    /// Busiest the box may be (1-minute load per logical CPU) and still bid.
+    #[serde(default = "default_diffusion_max_load_per_cpu")]
+    pub max_load_per_cpu: f64,
+}
+
+impl Default for InferenceConfig {
+    fn default() -> Self {
+        Self {
+            auto_install: true,
+            min_ram_gb: default_inference_min_ram_gb(),
+            min_free_ram_gb: default_inference_min_free_ram_gb(),
+            min_free_disk_gb: default_inference_min_free_disk_gb(),
+            max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+        }
+    }
+}
+
+fn default_inference_min_ram_gb() -> u64 {
+    8
+}
+fn default_inference_min_free_ram_gb() -> u64 {
+    4
+}
+fn default_inference_min_free_disk_gb() -> u64 {
+    5
+}
+
+impl InferenceConfig {
+    pub fn auto_install_enabled(&self) -> bool {
+        auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_INFERENCE_AUTO").ok())
     }
 }
 
@@ -772,6 +830,7 @@ impl Default for Config {
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
             captcha: CaptchaConfig::default(),
+            inference: InferenceConfig::default(),
             gameserver: GameserverConfig::default(),
             apps: AppsConfig::default(),
             containers: Default::default(),

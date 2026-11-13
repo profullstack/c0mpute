@@ -98,6 +98,10 @@ fn role_name(role: &Role) -> String {
         .unwrap_or_else(|| format!("{role:?}").to_ascii_lowercase())
 }
 
+/// Suffix on the inference detail when the house llama-server serves; the
+/// tag list below strips it to get the model ids.
+const AUTO_DETAIL: &str = " (house llama-server)";
+
 fn serving(role: &Role, detail: Option<String>) -> RoleState {
     RoleState { role: role_name(role), serving: true, reason: None, detail }
 }
@@ -116,7 +120,7 @@ fn from_gate(role: &Role, reason: Option<String>, detail: &str) -> RoleState {
 /// The verdict for one role on this machine, now. Blocking probes (nvidia-smi,
 /// docker, blender, tesseract) are run off the async threads by the caller.
 async fn role_state(role: &Role, cfg: &Config) -> RoleState {
-    use c0mpute_core::{captcha, diffusion, embed, gameserver, inference, music, ocr, render, speech, video, video_cpu};
+    use c0mpute_core::{captcha, diffusion, embed, gameserver, inference, inference_auto, music, ocr, render, speech, video, video_cpu};
     match role {
         Role::Tts => {
             let engines = speech::available_tts_engines();
@@ -169,8 +173,24 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
             None => gated(role, format!("turned off ({}=off)", inference::RUNTIME_URL_ENV)),
             Some(base) => match inference::list_models(&base).await {
                 Ok(models) if !models.is_empty() => serving(role, Some(models.join(", "))),
-                Ok(_) => gated(role, format!("{base} lists no chat models (pull one into Ollama, or set {})", inference::RUNTIME_URL_ENV)),
-                Err(_) => gated(role, format!("no Ollama or llama-server at {base} (start one, or set {})", inference::RUNTIME_URL_ENV)),
+                operator => {
+                    // No runtime of the operator's: the house llama-server.
+                    let auto = inference_auto::auto_url();
+                    match inference::list_models(&auto).await {
+                        Ok(models) if !models.is_empty() && !inference_auto::operator_configured() => {
+                            serving(role, Some(format!("{}{AUTO_DETAIL}", models.join(", "))))
+                        }
+                        _ if inference_auto::operator_configured() => match operator {
+                            Ok(_) => gated(role, format!("{base} lists no chat models (pull one, or unset {})", inference::RUNTIME_URL_ENV)),
+                            Err(_) => gated(role, format!("no Ollama or llama-server at {base} (start one, or unset {})", inference::RUNTIME_URL_ENV)),
+                        },
+                        _ => {
+                            let c = cfg.inference.clone();
+                            let why = tokio::task::spawn_blocking(move || inference_auto::gate_reason(&c)).await.unwrap_or_default();
+                            gated(role, format!("no Ollama or llama-server at {base}; house runtime: {why}"))
+                        }
+                    }
+                }
             },
         },
         Role::Captcha => {
@@ -238,7 +258,7 @@ pub async fn report(cfg: &Config, roles: &[Role], worker: Option<(i32, Vec<Strin
         && !tags.iter().any(|t| t == c0mpute_core::inference::ROLE_TAG)
     {
         tags.push(c0mpute_core::inference::ROLE_TAG.to_string());
-        tags.extend(inf.detail.iter().flat_map(|d| d.split(", ")).map(c0mpute_core::inference::model_tag));
+        tags.extend(inf.detail.iter().flat_map(|d| d.trim_end_matches(AUTO_DETAIL).split(", ")).map(c0mpute_core::inference::model_tag));
     }
     let hardware = tokio::task::spawn_blocking(c0mpute_core::capabilities::detect_hardware_tag).await.unwrap_or_default();
     tags.push(hardware.clone());
