@@ -16,6 +16,25 @@
 //! own copy rather than relaying from another holder; relaying costs the
 //! relayer bandwidth and latency, and the rest of the network still has the
 //! data, so the site stays up either way.
+//!
+//! What narrows the relay, without a new message:
+//!
+//! * a relay through the challenger itself is seen (the challenged chunk is
+//!   read from the challenger's store while it waits) and is not a pass
+//!   (`Hosting::holds_now`);
+//! * a holder refuses chunk fetches from peers that announce the same site
+//!   whole ([`super::relay`]);
+//! * a copy is let go only on the strength of holders that passed at
+//!   several separate times over hours (`DROP_STANDING_SPAN`).
+//!
+//! What was weighed and left out: a response deadline tight enough to miss a
+//! relay's extra round trip also fails honest holders behind a relayed or
+//! slow link, which is the churn the fill must not cause; asking for several
+//! chunks, or a keyed digest over ranges of them, multiplies an honest
+//! holder's cost by the same factor as the relay's (the relay still passes,
+//! it only pays more) and the digest needs a message old nodes do not have.
+//! A relay from a holder other than the challenger, under a second key,
+//! still passes.
 
 use anyhow::Result;
 use c0mpute_proto::Hash;
@@ -31,6 +50,9 @@ pub const KEEP_PER_HOLDER: usize = 16;
 pub const RECENT: usize = 5;
 /// …and loses preference when at least this many of them failed.
 pub const FAIL_LIMIT: usize = 3;
+/// How far ahead of this node's clock a receipt may be dated and still be
+/// read as a recent proof (see `ReplicaMap::proven`).
+pub const CLOCK_SKEW_SECS: u64 = 300;
 
 /// "I asked `holder` for chunk `chunk` of `site_id` at `at`; it passed or not."
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -287,7 +287,15 @@ impl DistributedStorage {
                         errors.push(format!("{peer_id}: served the wrong bytes"));
                         continue;
                     }
-                    received[shard_index as usize] = Some(Shard {
+                    // The index is the manifest's word: one past the
+                    // block's shards is an error, not a slot to write.
+                    let Some(slot) = received.get_mut(shard_index as usize) else {
+                        bail!(
+                            "block {index} of object {}: shard index {shard_index} is outside its {n} shards",
+                            manifest.object_hash
+                        );
+                    };
+                    *slot = Some(Shard {
                         index: shard_index,
                         bytes,
                     });
@@ -305,11 +313,18 @@ impl DistributedStorage {
         // written with keep_local_copy, still reads.
         if found < k {
             for shard in &entry.shards {
-                if received[shard.index as usize].is_some() {
+                let Some(slot) = received.get_mut(shard.index as usize) else {
+                    bail!(
+                        "block {index} of object {}: shard index {} is outside its {n} shards",
+                        manifest.object_hash,
+                        shard.index
+                    );
+                };
+                if slot.is_some() {
                     continue;
                 }
                 if let Ok(bytes) = self.local.chunk_store().get(&shard.hash).await {
-                    received[shard.index as usize] = Some(Shard {
+                    *slot = Some(Shard {
                         index: shard.index,
                         bytes,
                     });
@@ -434,6 +449,53 @@ impl BlockState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_shard_index_outside_the_block_is_an_error_not_a_panic() {
+        use crate::peer::{PeerCatalog, PeerInfo};
+        use crate::transport::memory::MemoryTransport;
+        let dir = std::env::temp_dir().join(format!(
+            "c0mpute-placement-index-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let local = Storage::new(c0mpute_store::ChunkStore::open(&dir).await.unwrap());
+        let peers: Vec<PeerInfo> = (0..20)
+            .map(|i| PeerInfo {
+                peer_id: format!("peer{i}"),
+                endpoint: format!("http://peer{i}.test:7780"),
+                reputation: 0.95,
+                uptime_30d: 0.995,
+                free_bytes: 1 << 30,
+                rtt_ms: 20 + i as u32,
+                asn: Some(64500 + i as u32),
+                region: None,
+                ip_prefix: None,
+            })
+            .collect();
+        let storage = DistributedStorage::new(
+            local.clone(),
+            Arc::new(MemoryTransport::new()),
+            Arc::new(RwLock::new(PeerCatalog::new(peers))),
+        );
+        let data: Vec<u8> = (0..50_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        // Shards fetched from peers: an index past the block's 14.
+        let mut placed = storage.put(&data, Tier::Standard).await.unwrap();
+        assert_eq!(storage.read_block(&placed, 0).await.unwrap(), data);
+        for shard in placed.blocks[0].shards.iter_mut() {
+            shard.index = 200;
+        }
+        let err = storage.read_block(&placed, 0).await.unwrap_err().to_string();
+        assert!(err.contains("outside its 14 shards"), "{err}");
+        // Shards read from the local store (no host hints): the same.
+        let mut kept = local.put(&data).await.unwrap();
+        kept.blocks[0].shards[0].index = 14;
+        let err = storage.read_block(&kept, 0).await.unwrap_err().to_string();
+        assert!(err.contains("outside its 14 shards"), "{err}");
+    }
 
     #[test]
     fn write_quorum_is_k_plus_half_the_parity() {

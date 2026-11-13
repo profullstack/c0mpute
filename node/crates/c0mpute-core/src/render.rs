@@ -21,7 +21,11 @@
 //! Safety: Blender always runs with `--disable-autoexec` before the file is
 //! loaded, so Python embedded in the `.blend` (drivers, registered text
 //! blocks, app handlers) never runs. The only Python is the one-line settings
-//! expression this module builds from validated integers.
+//! expression this module builds from validated integers, and the constant
+//! [`SANITIZE_EXPR`], which cuts every file reference that leaves the job
+//! directory before the render starts. Where bubblewrap works (Linux),
+//! Blender also runs inside it, with no network and nothing of the host but
+//! the system directories and the job directory ([`Sandbox`]).
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -73,6 +77,65 @@ pub const MAX_SAMPLES: u32 = 16_384;
 /// How much `.blend` cache a worker keeps (oldest files go first).
 const CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+
+// ─── config ──────────────────────────────────────────────────────────────
+
+/// `[render]` in config.toml.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RenderConfig {
+    /// `"auto"` (the default): run Blender inside bubblewrap where it works,
+    /// otherwise with scene sanitisation only. `"off"`: never use
+    /// bubblewrap. `"require"`: serve no render that cannot be sandboxed.
+    /// `C0MPUTE_RENDER_SANDBOX` wins over the file.
+    pub sandbox: String,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self { sandbox: "auto".into() }
+    }
+}
+
+impl RenderConfig {
+    /// The mode `sandbox` (or `env`, when set) names. A value that is not
+    /// one of the three is read as `auto`, so a typo never stops a node.
+    pub fn mode_with(&self, env: Option<String>) -> SandboxMode {
+        let value = env.filter(|v| !v.trim().is_empty()).unwrap_or_else(|| self.sandbox.clone());
+        SandboxMode::parse(&value).unwrap_or_else(|| {
+            warn!(value = %value, "render: sandbox must be auto, off or require; using auto");
+            SandboxMode::Auto
+        })
+    }
+}
+
+/// Whether Blender runs inside bubblewrap (`[render] sandbox`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SandboxMode {
+    #[default]
+    Auto,
+    Off,
+    Require,
+}
+
+impl SandboxMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            "require" => Some(Self::Require),
+            _ => None,
+        }
+    }
+}
+
+/// The node's `[render] sandbox`, from its config file and the environment.
+/// The render role is started without a config handle, so this reads the
+/// file itself, as the speech gateway does for `[adult]`.
+fn sandbox_mode() -> SandboxMode {
+    let file = crate::config::Config::load_raw(&crate::config::default_config_path()).unwrap_or_default();
+    file.render.mode_with(std::env::var("C0MPUTE_RENDER_SANDBOX").ok())
+}
 
 // ─── spec ────────────────────────────────────────────────────────────────
 
@@ -634,17 +697,27 @@ pub struct Runtime {
     pub version: (u32, u32, u32),
     /// Cycles GPU backends with at least one device, best first.
     pub gpu_backends: Vec<String>,
+    /// The bubblewrap sandbox Blender runs in, where one works.
+    pub sandbox: Option<Sandbox>,
+    pub sandbox_mode: SandboxMode,
 }
 
 /// Preference order when several backends see devices.
 const GPU_BACKENDS: &[&str] = &["OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"];
 
 impl Runtime {
+    /// Blender answers and, with `sandbox = "require"`, the sandbox works.
     pub fn ready(&self) -> bool {
         self.version_line.is_some()
+            && (self.sandbox_mode != SandboxMode::Require || self.sandbox.is_some())
     }
     pub fn gpu(&self) -> Option<&str> {
         self.gpu_backends.first().map(String::as_str)
+    }
+    /// Outside `require` every job may run; with it, only what the sandbox
+    /// was seen to do (`can`).
+    fn sandbox_allows(&self, can: impl Fn(&Sandbox) -> bool) -> bool {
+        self.sandbox_mode != SandboxMode::Require || self.sandbox.as_ref().is_some_and(can)
     }
     pub fn can_serve(&self, parsed: &Parsed) -> bool {
         self.can_serve_engine(parsed.engine, parsed.device)
@@ -652,7 +725,8 @@ impl Runtime {
     pub fn can_serve_engine(&self, engine: Engine, device: Device) -> bool {
         self.ready()
             && match (engine.needs_gpu(), device) {
-                (true, _) | (false, Device::Gpu) => self.gpu().is_some(),
+                (true, _) => self.gpu().is_some() && self.sandbox_allows(|s| s.raster),
+                (false, Device::Gpu) => self.gpu().is_some() && self.sandbox_allows(|s| s.cycles_gpu),
                 (false, _) => true,
             }
     }
@@ -661,7 +735,25 @@ impl Runtime {
         if parsed.engine != Engine::Cycles || parsed.device == Device::Cpu {
             return None;
         }
+        // `require` with a sandbox that cannot reach the GPU: AUTO means CPU.
+        if !self.sandbox_allows(|s| s.cycles_gpu) {
+            return None;
+        }
         self.gpu().map(str::to_string)
+    }
+    /// The sandbox this job's Blender runs in. `None` runs it directly:
+    /// there is no sandbox, or (outside `require`) the job needs a GPU the
+    /// sandbox was not seen to reach.
+    pub fn sandbox_for(&self, parsed: &Parsed) -> Option<&Sandbox> {
+        let sandbox = self.sandbox.as_ref()?;
+        let usable = if parsed.engine.needs_gpu() {
+            sandbox.raster
+        } else if self.cycles_device(parsed).is_some() {
+            sandbox.cycles_gpu
+        } else {
+            true
+        };
+        usable.then_some(sandbox)
     }
     pub fn tags(&self) -> Vec<String> {
         if !self.ready() {
@@ -669,14 +761,21 @@ impl Runtime {
         }
         let mut tags = vec![ROLE_TAG.to_string(), Engine::Cycles.tag()];
         if self.gpu().is_some() {
-            tags.push(GPU_TAG.to_string());
-            tags.push(Engine::Eevee.tag());
-            tags.push(Engine::Workbench.tag());
-            tags.extend(
-                self.gpu_backends
-                    .iter()
-                    .map(|b| format!("c0mpute:render:device:{}", b.to_ascii_lowercase())),
-            );
+            let cycles = self.sandbox_allows(|s| s.cycles_gpu);
+            if cycles {
+                tags.push(GPU_TAG.to_string());
+            }
+            if self.sandbox_allows(|s| s.raster) {
+                tags.push(Engine::Eevee.tag());
+                tags.push(Engine::Workbench.tag());
+            }
+            if cycles {
+                tags.extend(
+                    self.gpu_backends
+                        .iter()
+                        .map(|b| format!("c0mpute:render:device:{}", b.to_ascii_lowercase())),
+                );
+            }
         }
         tags
     }
@@ -762,12 +861,29 @@ fn probe() -> Runtime {
             .map(|out| parse_gpu_probe(&out))
             .unwrap_or_default()
     };
-    let rt = Runtime {
+    let mut rt = Runtime {
         version_line: Some(line),
         version,
         gpu_backends,
+        sandbox: None,
+        sandbox_mode: sandbox_mode(),
     };
     info!(blender = ?rt.version_line, gpu = ?rt.gpu_backends, "render: blender found");
+    if rt.sandbox_mode != SandboxMode::Off {
+        rt.sandbox = probe_sandbox(&rt.gpu_backends);
+    }
+    // Said once: the probe runs once per process.
+    match (&rt.sandbox, rt.sandbox_mode) {
+        (Some(sb), _) => info!(
+            bwrap = %sb.bwrap.display(),
+            cycles_gpu = sb.cycles_gpu,
+            raster = sb.raster,
+            "render: blender runs inside bubblewrap (no network, only the job directory writable)"
+        ),
+        (None, SandboxMode::Off) => info!("render: [render] sandbox is off; renders run with scene sanitisation only"),
+        (None, SandboxMode::Auto) => info!("render: bubblewrap does not work on this machine; renders run with scene sanitisation only"),
+        (None, SandboxMode::Require) => warn!("render: [render] sandbox is \"require\" but bubblewrap does not work on this machine; not serving renders"),
+    }
     rt
 }
 
@@ -801,6 +917,269 @@ pub fn parse_gpu_probe(text: &str) -> Vec<String> {
         .filter(|b| found.contains(b))
         .map(|b| b.to_string())
         .collect()
+}
+
+// ─── the sandbox ─────────────────────────────────────────────────────────
+
+/// One thing of the host the sandbox shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mount {
+    /// A file or directory, read-only, at its own path.
+    RoBind(PathBuf),
+    /// A device node (or a directory of them), usable, at its own path.
+    DevBind(PathBuf),
+    /// A symlink the host has (`/bin` to `usr/bin`), made again.
+    Symlink { target: PathBuf, link: PathBuf },
+}
+
+/// How Blender is confined on this machine, found once by the probe: a
+/// bubblewrap (`bwrap`) command line that was seen to start this Blender.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sandbox {
+    pub bwrap: PathBuf,
+    /// The Blender binary with symlinks resolved; run by this path inside.
+    pub blender: PathBuf,
+    pub mounts: Vec<Mount>,
+    /// The operator's home directory: an empty tmpfs inside.
+    pub home: Option<PathBuf>,
+    /// The worker is root, so bubblewrap is told to drop every capability
+    /// (it keeps them for uid 0 otherwise).
+    pub as_root: bool,
+    /// Cycles found the same GPU backends inside the sandbox as outside.
+    pub cycles_gpu: bool,
+    /// A Workbench frame rendered inside the sandbox (EEVEE and Workbench
+    /// need a GPU context, which a missing display socket can take away).
+    pub raster: bool,
+}
+
+/// The `bwrap` arguments that come before the Blender binary: no network,
+/// new pid, ipc and hostname namespaces, an empty root with a private
+/// `/tmp` and home, the host's `mounts`, and `job_dir` (absolute) as the
+/// only writable part of the host. `blend`, the job's input inside it, is
+/// read-only again: it can be a hard link to the node's cached copy. Pure,
+/// so it is tested without bwrap.
+pub fn bwrap_args(sandbox: &Sandbox, job_dir: &Path, blend: Option<&Path>) -> Vec<OsString> {
+    let mut a: Vec<OsString> = [
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--hostname",
+        "c0mpute-render",
+        "--die-with-parent",
+        "--new-session",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    if sandbox.as_root {
+        a.extend(["--cap-drop", "ALL"].map(OsString::from));
+    }
+    a.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(OsString::from));
+    // The tmpfs comes before the binds: a Blender or a job directory under
+    // the home (or under /tmp) is then mounted on top of it.
+    if let Some(home) = &sandbox.home {
+        a.push("--tmpfs".into());
+        a.push(home.into());
+    }
+    for mount in &sandbox.mounts {
+        let (flag, from, to) = match mount {
+            Mount::RoBind(p) => ("--ro-bind", p, p),
+            Mount::DevBind(p) => ("--dev-bind", p, p),
+            Mount::Symlink { target, link } => ("--symlink", target, link),
+        };
+        a.push(flag.into());
+        a.push(from.into());
+        a.push(to.into());
+    }
+    a.push("--bind".into());
+    a.push(job_dir.into());
+    a.push(job_dir.into());
+    if let Some(blend) = blend {
+        a.push("--ro-bind".into());
+        a.push(blend.into());
+        a.push(blend.into());
+    }
+    a.push("--setenv".into());
+    a.push("HOME".into());
+    a.push(sandbox.home.clone().unwrap_or_else(|| PathBuf::from("/tmp")).into());
+    a.push("--chdir".into());
+    a.push(job_dir.into());
+    a.push("--".into());
+    a
+}
+
+/// Is `path` under something already bound read-only?
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn covered(mounts: &[Mount], path: &Path) -> bool {
+    mounts.iter().any(|m| matches!(m, Mount::RoBind(root) if path.starts_with(root)))
+}
+
+/// May a directory outside the system directories be shown read-only? Not
+/// the root, not a top-level directory, and nothing that holds the home.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn shareable(dir: &Path, home: Option<&Path>) -> bool {
+    dir.is_absolute()
+        && dir.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count() >= 2
+        && !home.is_some_and(|h| h.starts_with(dir))
+}
+
+/// Sets a 16x16 frame for the sandbox's Workbench test render.
+#[cfg(target_os = "linux")]
+const RASTER_PROBE_EXPR: &str = "import bpy\n\
+s = bpy.context.scene\n\
+s.render.resolution_x = 16\n\
+s.render.resolution_y = 16\n\
+s.render.resolution_percentage = 100\n";
+
+/// What `/etc` holds that a dynamically linked, GPU-using Blender reads.
+/// Never the whole directory: a root worker can read all of it.
+#[cfg(target_os = "linux")]
+const ETC_ENTRIES: &[&str] = &["ld.so.cache", "ld.so.conf", "ld.so.conf.d", "alternatives", "OpenCL", "vulkan", "glvnd", "egl"];
+
+#[cfg(target_os = "linux")]
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join(name)).find(|p| p.is_file())
+}
+
+/// Show `path` read-only where it really lives, keeping the symlink when it
+/// is one (`/bin`, `/opt/rocm`).
+#[cfg(target_os = "linux")]
+fn add_ro(mounts: &mut Vec<Mount>, path: &Path) {
+    let (Ok(meta), Ok(real)) = (std::fs::symlink_metadata(path), path.canonicalize()) else {
+        return;
+    };
+    if meta.file_type().is_symlink()
+        && let Ok(target) = std::fs::read_link(path)
+    {
+        mounts.push(Mount::Symlink { target, link: path.to_path_buf() });
+    }
+    if !covered(mounts, &real) {
+        mounts.push(Mount::RoBind(real));
+    }
+}
+
+/// What of this host Blender needs: the system directories, the loader and
+/// GPU vendor files under `/etc`, `/sys` and the GPU device nodes, and the
+/// directory Blender is installed in when that is not a system directory (a
+/// blender.org tarball under `/opt` or the operator's home). `None` when
+/// showing that directory would show the home itself.
+#[cfg(target_os = "linux")]
+fn host_mounts(blender: &Path, home: Option<&Path>) -> Option<Vec<Mount>> {
+    let mut mounts = Vec::new();
+    for dir in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/sys", "/opt/rocm"] {
+        add_ro(&mut mounts, Path::new(dir));
+    }
+    for name in ETC_ENTRIES {
+        add_ro(&mut mounts, &Path::new("/etc").join(name));
+    }
+    // Driver libraries the operator points the loader at (a CUDA or ROCm
+    // install outside the system directories).
+    if let Some(paths) = std::env::var_os("LD_LIBRARY_PATH") {
+        for dir in std::env::split_paths(&paths) {
+            if let Ok(real) = dir.canonicalize()
+                && real.is_dir()
+                && !covered(&mounts, &real)
+                && shareable(&real, home)
+            {
+                mounts.push(Mount::RoBind(real));
+            }
+        }
+    }
+    let install = blender.parent()?;
+    if !covered(&mounts, install) {
+        if !shareable(install, home) {
+            return None;
+        }
+        mounts.push(Mount::RoBind(install.to_path_buf()));
+    }
+    for dev in ["/dev/dri", "/dev/kfd"] {
+        if Path::new(dev).exists() {
+            mounts.push(Mount::DevBind(dev.into()));
+        }
+    }
+    let mut nvidia: Vec<PathBuf> = std::fs::read_dir("/dev")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("nvidia"))
+        .map(|e| e.path())
+        .collect();
+    nvidia.sort();
+    mounts.extend(nvidia.into_iter().map(Mount::DevBind));
+    Some(mounts)
+}
+
+/// Find out, once, whether bubblewrap can run this machine's Blender: build
+/// the sandbox and start Blender inside it. A machine without `bwrap`, with
+/// unprivileged user namespaces switched off (Ubuntu 24.04's AppArmor
+/// default without a bwrap profile), or with a Blender the sandbox cannot
+/// start (a snap, a wrapper script around an install elsewhere) gets `None`.
+/// With a GPU, also checks that Cycles and Workbench still reach it inside.
+#[cfg(target_os = "linux")]
+fn probe_sandbox(gpu_backends: &[String]) -> Option<Sandbox> {
+    let bwrap = find_on_path("bwrap")?;
+    let blender = find_on_path("blender")?.canonicalize().ok()?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute() && h.parent().is_some());
+    let mounts = host_mounts(&blender, home.as_deref())?;
+    let mut sandbox = Sandbox {
+        bwrap,
+        blender,
+        mounts,
+        home,
+        as_root: crate::container_run::is_root(),
+        cycles_gpu: false,
+        raster: false,
+    };
+    let dir = std::env::temp_dir().join(format!("c0mpute-render-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let run = |sandbox: &Sandbox, args: &[&std::ffi::OsStr]| {
+        let mut cmd = std::process::Command::new(&sandbox.bwrap);
+        cmd.args(bwrap_args(sandbox, &dir, None)).arg(&sandbox.blender).args(args);
+        run_with_deadline(cmd, PROBE_TIMEOUT)
+    };
+    let os = |s: &'static str| std::ffi::OsStr::new(s);
+    let works = run(&sandbox, &[os("--factory-startup"), os("--version")])
+        .is_some_and(|out| parse_version(&out).is_some());
+    if works && !gpu_backends.is_empty() {
+        sandbox.cycles_gpu = run(
+            &sandbox,
+            &[os("--background"), os("--factory-startup"), os("--disable-autoexec"), os("--python-expr"), os(GPU_PROBE_EXPR)],
+        )
+        .is_some_and(|out| parse_gpu_probe(&out) == gpu_backends);
+        let frame = dir.join("probe_####");
+        sandbox.raster = run(
+            &sandbox,
+            &[
+                os("--background"),
+                os("--factory-startup"),
+                os("--disable-autoexec"),
+                os("--python-expr"),
+                os(RASTER_PROBE_EXPR),
+                os("--engine"),
+                os("BLENDER_WORKBENCH"),
+                os("--render-output"),
+                frame.as_os_str(),
+                os("--render-format"),
+                os("PNG"),
+                os("--render-frame"),
+                os("1"),
+            ],
+        )
+        .is_some()
+            && dir.join("probe_0001.png").is_file();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    works.then_some(sandbox)
+}
+
+/// Bubblewrap is Linux only: everywhere else renders run with scene
+/// sanitisation only.
+#[cfg(not(target_os = "linux"))]
+fn probe_sandbox(_gpu_backends: &[String]) -> Option<Sandbox> {
+    None
 }
 
 /// Bid filter: skip offers this box cannot render (a GPU engine or device
@@ -863,6 +1242,176 @@ pub fn settings_expr(parsed: &Parsed, cycles_device: Option<&str>) -> String {
     lines.join("\n")
 }
 
+/// The job directory and its output directory, handed to [`SANITIZE_EXPR`]
+/// in the environment so that no path is ever written into the script.
+pub const JOB_DIR_ENV: &str = "C0MPUTE_RENDER_JOB_DIR";
+pub const OUT_DIR_ENV: &str = "C0MPUTE_RENDER_OUT_DIR";
+/// Blender's exit code when [`SANITIZE_EXPR`] could not finish: the scene is
+/// not rendered at all rather than rendered as the buyer saved it.
+pub const SANITIZE_EXIT: i32 = 97;
+
+/// Python run after the file loads and before the render, on every OS: it
+/// leaves the scene able to read and write inside the job directory only.
+/// A constant: nothing from the job is formatted into it (the two
+/// directories come from the environment), so a buyer cannot reach it.
+///
+/// A `.blend` names files by path: image textures, movie clips, sounds,
+/// fonts, linked libraries, caches, sequencer strips. Blender reads them
+/// from the worker's disk when it renders, so a scene that names
+/// `/home/<user>/Pictures/x.png` would return that picture inside a frame.
+/// Every such path that is absolute or leaves the job directory is emptied
+/// (the scene then renders with Blender's pink "missing" texture, the
+/// built-in font, or without the strip or cache); data packed into the
+/// `.blend` is untouched. Linked libraries are loaded by Blender while the
+/// file opens, before this runs, so what came from them is deleted instead.
+/// Compositor File Output nodes are removed, Open Shading Language is turned
+/// off (a compiled shader may open any image by name), and every scene's
+/// output path is set to the node's own output directory.
+///
+/// Written for Blender 3.x to 5.x: attributes a version lacks are skipped
+/// (`getattr`), and any other failure exits with [`SANITIZE_EXIT`].
+pub const SANITIZE_EXPR: &str = r#"import bpy, os, sys, traceback
+
+def _c0_sanitize():
+    D = bpy.data
+    job_dir = os.environ.get('C0MPUTE_RENDER_JOB_DIR')
+    out_dir = os.environ.get('C0MPUTE_RENDER_OUT_DIR')
+    if not job_dir or not out_dir:
+        raise RuntimeError('the job and output directories are not set')
+    root = os.path.normcase(os.path.realpath(job_dir))
+    cut = [0]
+
+    def inside(path, lib=None):
+        try:
+            full = os.path.normcase(os.path.realpath(bpy.path.abspath(path, library=lib)))
+            return os.path.commonpath([root, full]) == root
+        except Exception:
+            return False
+
+    def drop(owner, attr, lib=None, to=''):
+        path = getattr(owner, attr, None)
+        if not isinstance(path, str) or path in ('', to) or inside(path, lib):
+            return False
+        setattr(owner, attr, to)
+        cut[0] += 1
+        return True
+
+    def outside_libs():
+        return [lib for lib in D.libraries if not inside(lib.filepath)]
+
+    bad = outside_libs()
+    if bad:
+        def from_bad(i):
+            if i.library in bad:
+                return True
+            ref = getattr(getattr(i, 'override_library', None), 'reference', None)
+            return ref is not None and ref.library in bad
+        D.batch_remove([i for i in D.user_map() if from_bad(i)])
+        cut[0] += len(bad)
+        for lib in outside_libs():
+            D.libraries.remove(lib)
+        if outside_libs():
+            raise RuntimeError('a linked library could not be removed')
+
+    for im in D.images:
+        packed = im.packed_file is not None or len(getattr(im, 'packed_files', ())) > 0
+        if packed and im.source in ('FILE', 'TILED'):
+            continue
+        drop(im, 'filepath', im.library)
+    for name, keep_packed in (('movieclips', False), ('sounds', True), ('volumes', True), ('cache_files', False)):
+        for item in getattr(D, name, ()):
+            if keep_packed and getattr(item, 'packed_file', None) is not None:
+                continue
+            drop(item, 'filepath', item.library)
+    for font in D.fonts:
+        if font.packed_file is None:
+            drop(font, 'filepath', font.library, '<builtin>')
+
+    for ob in D.objects:
+        for mod in ob.modifiers:
+            domain = getattr(mod, 'domain_settings', None)
+            if domain is not None:
+                drop(domain, 'cache_directory', ob.library, os.path.join(job_dir, 'fluid_cache'))
+            drop(mod, 'filepath', ob.library)
+            drop(mod, 'bake_directory', ob.library)
+            for bake in getattr(mod, 'bakes', ()):
+                drop(bake, 'directory', ob.library)
+            caches = [getattr(mod, 'point_cache', None)]
+            for surface in getattr(getattr(mod, 'canvas_settings', None), 'canvas_surfaces', ()):
+                caches.append(getattr(surface, 'point_cache', None))
+            for cache in caches:
+                if cache is not None:
+                    drop(cache, 'filepath', ob.library)
+        for psys in ob.particle_systems:
+            cache = getattr(psys, 'point_cache', None)
+            if cache is not None:
+                drop(cache, 'filepath', ob.library)
+
+    trees = list(D.node_groups)
+    for name in ('materials', 'worlds', 'lights', 'textures', 'linestyles', 'scenes'):
+        for item in getattr(D, name, ()):
+            tree = getattr(item, 'node_tree', None)
+            if tree is not None:
+                trees.append(tree)
+    for tree in trees:
+        for node in list(tree.nodes):
+            if node.type == 'OUTPUT_FILE':
+                try:
+                    tree.nodes.remove(node)
+                except Exception:
+                    node.mute = True
+                    for attr in ('base_path', 'directory'):
+                        if hasattr(node, attr):
+                            setattr(node, attr, out_dir)
+                cut[0] += 1
+            else:
+                drop(node, 'filepath', tree.library)
+
+    for sc in D.scenes:
+        r = sc.render
+        r.filepath = os.path.join(out_dir, 'frame_####')
+        r.use_file_extension = True
+        for attr in ('use_render_cache', 'use_stamp_hostname', 'use_stamp_filename'):
+            if hasattr(r, attr):
+                setattr(r, attr, False)
+        cycles = getattr(sc, 'cycles', None)
+        if cycles is not None and hasattr(cycles, 'shading_system'):
+            cycles.shading_system = False
+        world = getattr(sc, 'rigidbody_world', None)
+        if world is not None and getattr(world, 'point_cache', None) is not None:
+            drop(world.point_cache, 'filepath', sc.library)
+        ed = sc.sequence_editor
+        if ed is None:
+            continue
+        if drop(ed, 'proxy_dir', sc.library) and hasattr(ed, 'proxy_storage'):
+            ed.proxy_storage = 'PER_STRIP'
+        strips = getattr(ed, 'strips_all', None)
+        if strips is None:
+            strips = getattr(ed, 'sequences_all', ())
+        for strip in strips:
+            hit = drop(strip, 'filepath', sc.library)
+            hit = drop(strip, 'directory', sc.library) or hit
+            if hit:
+                strip.mute = True
+            proxy = getattr(strip, 'proxy', None)
+            if proxy is not None:
+                hit = drop(proxy, 'filepath', sc.library)
+                hit = drop(proxy, 'directory', sc.library) or hit
+                if hit and hasattr(strip, 'use_proxy'):
+                    strip.use_proxy = False
+
+    left = [p for p in bpy.utils.blend_paths(absolute=True, packed=False, local=False) if not inside(p)]
+    print('c0mpute: scene sanitised: %d outside references cut, %d path fields a render does not read left as they were' % (cut[0], len(left)))
+
+try:
+    _c0_sanitize()
+except BaseException:
+    traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(97)
+"#;
+
 /// The full `blender` argument list for one job. `out_dir` must not contain
 /// `#` (Blender's frame-number placeholder). The `.blend` path is one
 /// argument (no shell is involved), and `--disable-autoexec` comes before it
@@ -885,6 +1434,8 @@ pub fn blender_args(
     args.push(blend.as_os_str().to_owned());
     args.push("--python-expr".into());
     args.push(settings_expr(parsed, cycles_device).into());
+    args.push("--python-expr".into());
+    args.push(SANITIZE_EXPR.into());
     args.push("--engine".into());
     args.push(parsed.engine.blender_id(version).into());
     args.push("--render-output".into());
@@ -931,8 +1482,11 @@ pub struct Rendered {
 /// output. Needs a ready [`runtime`].
 pub async fn render(blend: &Path, parsed: &Parsed, job_dir: &Path) -> Result<Vec<Rendered>> {
     let rt = runtime();
-    if !rt.ready() {
+    if rt.version_line.is_none() {
         bail!("blender is not installed on this node");
+    }
+    if !rt.ready() {
+        bail!("this node renders only inside a sandbox, and bubblewrap does not work here");
     }
     if !rt.can_serve(parsed) {
         bail!(
@@ -941,11 +1495,29 @@ pub async fn render(blend: &Path, parsed: &Parsed, job_dir: &Path) -> Result<Vec
             parsed.device.name()
         );
     }
+    tokio::fs::create_dir_all(job_dir.join("out")).await?;
+    let sandbox = rt.sandbox_for(parsed);
+    // Bubblewrap binds the job directory by its real path. Without it the
+    // path only has to be absolute: the sanitiser reads it after Blender has
+    // changed into the job directory.
+    let job_dir = &match sandbox {
+        Some(_) => tokio::fs::canonicalize(job_dir).await?,
+        None => std::path::absolute(job_dir)?,
+    };
     let out_dir = job_dir.join("out");
-    tokio::fs::create_dir_all(&out_dir).await?;
+    let blend = &stage_input(blend, job_dir).await?;
     let cycles_device = rt.cycles_device(parsed);
-    let mut command = Command::new("blender");
+    let mut command = match sandbox {
+        Some(sb) => {
+            let mut command = Command::new(&sb.bwrap);
+            command.args(bwrap_args(sb, job_dir, Some(blend.as_path()))).arg(&sb.blender);
+            command
+        }
+        None => Command::new("blender"),
+    };
+    // Environment only, so the limits reach Blender through bubblewrap too.
     let threads = crate::resources::apply_job_limits(&mut command);
+    command.env(JOB_DIR_ENV, job_dir).env(OUT_DIR_ENV, &out_dir);
     command.args(blender_args(
         blend,
         &out_dir,
@@ -972,6 +1544,10 @@ pub async fn render(blend: &Path, parsed: &Parsed, job_dir: &Path) -> Result<Vec
             bail!("blender timed out after {}s", timeout.as_secs());
         }
     };
+    if status.code() == Some(SANITIZE_EXIT) {
+        let tail = log_tail(&log_path).await;
+        bail!("the scene could not be made safe to render, so it was not rendered: {tail}");
+    }
     let ext = parsed.format.extension();
     let mut found: HashMap<u32, PathBuf> = HashMap::new();
     let mut entries = tokio::fs::read_dir(&out_dir).await?;
@@ -1009,6 +1585,27 @@ pub async fn render(blend: &Path, parsed: &Parsed, job_dir: &Path) -> Result<Vec
         });
     }
     Ok(frames)
+}
+
+/// The `.blend` as this job's own file, `<job_dir>/input.blend`: a hard link
+/// to the cached copy (a copy where the filesystem cannot link). Blender
+/// resolves `//relative` paths against the file's directory, and the cache
+/// directory holds other buyers' scenes; the job directory holds only this
+/// job's.
+async fn stage_input(blend: &Path, job_dir: &Path) -> Result<PathBuf> {
+    // Already the job's own (an opened sealed input), however it is spelled.
+    let real = tokio::fs::canonicalize(blend).await.context("find the .blend")?;
+    if real.parent() == tokio::fs::canonicalize(job_dir).await.ok().as_deref()
+        && let Some(name) = blend.file_name()
+    {
+        return Ok(job_dir.join(name));
+    }
+    let staged = job_dir.join("input.blend");
+    let _ = tokio::fs::remove_file(&staged).await;
+    if tokio::fs::hard_link(blend, &staged).await.is_err() {
+        tokio::fs::copy(blend, &staged).await.context("copy the .blend into the job directory")?;
+    }
+    Ok(staged)
 }
 
 async fn log_tail(path: &Path) -> String {
@@ -1934,6 +2531,8 @@ mod tests {
             version_line: Some("Blender 3.4.1".into()),
             version: (3, 4, 1),
             gpu_backends: vec![],
+            sandbox: None,
+            sandbox_mode: SandboxMode::Auto,
         };
         let gpu = Runtime {
             gpu_backends: vec!["CUDA".into()],
@@ -1955,6 +2554,213 @@ mod tests {
         assert!(tags.contains(&"c0mpute:render:device:cuda".to_string()));
         assert!(tags.contains(&"c0mpute:render:engine:eevee".to_string()));
         assert!(Runtime::default().tags().is_empty());
+    }
+
+    #[test]
+    fn sandbox_setting_parses_and_a_typo_means_auto() {
+        use crate::config::Config;
+        // A config written before the section existed, and the default.
+        let cfg: Config = toml::from_str("roles = []\n").unwrap();
+        assert_eq!(cfg.render.mode_with(None), SandboxMode::Auto);
+        assert_eq!(Config::default().render.sandbox, "auto");
+        let mode = |text: &str| toml::from_str::<Config>(text).unwrap().render.mode_with(None);
+        assert_eq!(mode("[render]\nsandbox = \"off\"\n"), SandboxMode::Off);
+        assert_eq!(mode("[render]\nsandbox = \"require\"\n"), SandboxMode::Require);
+        assert_eq!(mode("[render]\nsandbox = \" Require \"\n"), SandboxMode::Require);
+        // A value that is none of the three never stops the node: it is auto.
+        assert_eq!(mode("[render]\nsandbox = \"always\"\n"), SandboxMode::Auto);
+        // The environment wins when it is set to something.
+        let cfg: Config = toml::from_str("[render]\nsandbox = \"require\"\n").unwrap();
+        assert_eq!(cfg.render.mode_with(Some("off".into())), SandboxMode::Off);
+        assert_eq!(cfg.render.mode_with(Some("  ".into())), SandboxMode::Require);
+    }
+
+    fn sandbox(cycles_gpu: bool, raster: bool) -> Sandbox {
+        Sandbox {
+            bwrap: "/usr/bin/bwrap".into(),
+            blender: "/home/op/blender-4.2/blender".into(),
+            mounts: vec![
+                Mount::RoBind("/usr".into()),
+                Mount::Symlink { target: "usr/bin".into(), link: "/bin".into() },
+                Mount::RoBind("/etc/ld.so.cache".into()),
+                Mount::RoBind("/sys".into()),
+                Mount::RoBind("/home/op/blender-4.2".into()),
+                Mount::DevBind("/dev/dri".into()),
+                Mount::DevBind("/dev/nvidia0".into()),
+            ],
+            home: Some("/home/op".into()),
+            as_root: false,
+            cycles_gpu,
+            raster,
+        }
+    }
+
+    #[test]
+    fn bwrap_argv_shows_the_system_read_only_and_only_the_job_writable() {
+        let job = Path::new("/home/op/.local/share/c0mpute/cache/jobs/j1");
+        let blend = job.join("input.blend");
+        let a: Vec<String> = bwrap_args(&sandbox(true, true), job, Some(&blend)).iter().map(|x| x.to_string_lossy().into_owned()).collect();
+        let at = |w: &[&str]| a.windows(w.len()).position(|x| x == w).unwrap_or_else(|| panic!("{w:?} not in {a:?}"));
+        for flag in ["--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session"] {
+            assert!(a.iter().any(|x| x == flag), "{flag}");
+        }
+        at(&["--proc", "/proc"]);
+        at(&["--ro-bind", "/usr", "/usr"]);
+        at(&["--symlink", "usr/bin", "/bin"]);
+        at(&["--ro-bind", "/sys", "/sys"]);
+        at(&["--dev-bind", "/dev/nvidia0", "/dev/nvidia0"]);
+        // /dev is made fresh before the GPU nodes are put back in it.
+        assert!(at(&["--dev", "/dev"]) < at(&["--dev-bind", "/dev/dri", "/dev/dri"]));
+        // The home is an empty tmpfs; Blender's own directory and the job
+        // directory, both under it, are mounted on top afterwards.
+        let home = at(&["--tmpfs", "/home/op"]);
+        assert!(at(&["--tmpfs", "/tmp"]) < home);
+        assert!(home < at(&["--ro-bind", "/home/op/blender-4.2", "/home/op/blender-4.2"]));
+        let job_s = job.to_str().unwrap();
+        assert!(home < at(&["--bind", job_s, job_s]));
+        // The input (a hard link to the cached copy) is read-only inside it.
+        let blend_s = blend.to_str().unwrap();
+        assert!(at(&["--bind", job_s, job_s]) < at(&["--ro-bind", blend_s, blend_s]));
+        at(&["--setenv", "HOME", "/home/op"]);
+        at(&["--chdir", job_s]);
+        assert_eq!(a.last().unwrap(), "--");
+        // Exactly one writable bind of the host, and it is the job directory.
+        assert_eq!(a.iter().filter(|x| *x == "--bind").count(), 1);
+        assert!(!a.iter().any(|x| x == "--share-net" || x == "--dev-bind-try" || x == "/home" || x == "/root" || x == "/etc"));
+        // An unprivileged worker gets no capabilities from bwrap; root must drop them.
+        assert!(!a.iter().any(|x| x == "--cap-drop"));
+        let root = Sandbox { as_root: true, home: None, ..sandbox(false, false) };
+        let r: Vec<String> = bwrap_args(&root, Path::new("/var/lib/c0mpute/jobs/j1"), None).iter().map(|x| x.to_string_lossy().into_owned()).collect();
+        assert!(r.windows(2).any(|w| w == ["--cap-drop", "ALL"]));
+        assert!(r.windows(3).any(|w| w == ["--setenv", "HOME", "/tmp"]), "no home: HOME is the private /tmp");
+    }
+
+    #[test]
+    fn only_install_directories_that_do_not_hold_the_home_are_shown() {
+        let home = Some(Path::new("/home/op"));
+        assert!(shareable(Path::new("/opt/blender-4.2"), home));
+        assert!(shareable(Path::new("/home/op/blender-4.2"), home));
+        assert!(!shareable(Path::new("/home/op"), home), "the home itself");
+        assert!(!shareable(Path::new("/home"), home));
+        assert!(!shareable(Path::new("/opt"), home), "a top-level directory");
+        assert!(!shareable(Path::new("/"), None));
+        assert!(!shareable(Path::new("blender"), None));
+        let mounts = vec![Mount::RoBind("/usr".into()), Mount::DevBind("/dev/dri".into())];
+        assert!(covered(&mounts, Path::new("/usr/bin")));
+        assert!(!covered(&mounts, Path::new("/usrlocal")));
+        assert!(!covered(&mounts, Path::new("/dev/dri/card0")), "a device bind is not a read-only view");
+    }
+
+    #[test]
+    fn require_serves_only_what_the_sandbox_was_seen_to_do() {
+        let p = |extra: Value| parse_spec(&spec(extra)).unwrap();
+        let base = Runtime {
+            version_line: Some("Blender 4.2.3 LTS".into()),
+            version: (4, 2, 3),
+            gpu_backends: vec!["OPTIX".into()],
+            sandbox: None,
+            sandbox_mode: SandboxMode::Require,
+        };
+        // No working sandbox: no role, no tags, no bids.
+        assert!(!base.ready());
+        assert!(base.tags().is_empty());
+        assert!(!base.can_serve(&p(json!({"device":"CPU"}))));
+        // A sandbox that starts Blender but cannot reach the GPU: CPU Cycles only.
+        let cpu_only = Runtime { sandbox: Some(sandbox(false, false)), ..base.clone() };
+        assert!(cpu_only.ready());
+        assert!(cpu_only.can_serve(&p(json!({}))));
+        assert_eq!(cpu_only.cycles_device(&p(json!({}))), None, "AUTO renders on the CPU inside the sandbox");
+        assert!(!cpu_only.can_serve(&p(json!({"device":"GPU"}))));
+        assert!(!cpu_only.can_serve(&p(json!({"engine":"EEVEE"}))));
+        assert_eq!(cpu_only.tags(), vec![ROLE_TAG, "c0mpute:render:engine:cycles"]);
+        assert!(cpu_only.sandbox_for(&p(json!({}))).is_some());
+        // A sandbox that reaches the GPU serves everything, inside it.
+        let full = Runtime { sandbox: Some(sandbox(true, true)), ..base.clone() };
+        assert!(full.can_serve(&p(json!({"device":"GPU"}))) && full.can_serve(&p(json!({"engine":"EEVEE"}))));
+        assert_eq!(full.cycles_device(&p(json!({}))).as_deref(), Some("OPTIX"));
+        assert!(full.sandbox_for(&p(json!({"engine":"EEVEE"}))).is_some());
+        assert!(full.tags().contains(&GPU_TAG.to_string()));
+
+        // "auto" keeps today's behaviour: every job runs, and a GPU job the
+        // sandbox cannot serve runs outside it.
+        let auto = Runtime { sandbox_mode: SandboxMode::Auto, ..cpu_only.clone() };
+        assert!(auto.can_serve(&p(json!({"device":"GPU"}))) && auto.can_serve(&p(json!({"engine":"EEVEE"}))));
+        assert_eq!(auto.cycles_device(&p(json!({}))).as_deref(), Some("OPTIX"));
+        assert!(auto.sandbox_for(&p(json!({}))).is_none(), "GPU Cycles, sandbox without the GPU");
+        assert!(auto.sandbox_for(&p(json!({"engine":"EEVEE"}))).is_none());
+        assert!(auto.sandbox_for(&p(json!({"device":"CPU"}))).is_some());
+        let none = Runtime { sandbox: None, ..auto.clone() };
+        assert!(none.ready() && none.sandbox_for(&p(json!({"device":"CPU"}))).is_none());
+    }
+
+    #[test]
+    fn no_buyer_text_reaches_the_python_blender_runs() {
+        // Everything a buyer chooses, at its most hostile: the file's path
+        // (its hash names it in practice) and every spec field.
+        let p = parse_spec(&spec(json!({
+            "frame_start": MAX_FRAME - 1, "frame_end": MAX_FRAME, "resolution_pct": MAX_RESOLUTION_PCT,
+            "samples": MAX_SAMPLES, "format": "jpg", "engine": "cycles", "device": "gpu", "frame_timeout_secs": 10,
+        })))
+        .unwrap();
+        let blend = Path::new("/cache/'); import os; os.system('id') #.blend");
+        let out = Path::new("/jobs/\"]); __import__('os')/out");
+        let args: Vec<String> = blender_args(blend, out, &p, (4, 2, 0), Some("CUDA"), 4)
+            .unwrap()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let exprs: Vec<&String> = args.iter().zip(args.iter().skip(1)).filter(|(flag, _)| *flag == "--python-expr").map(|(_, e)| e).collect();
+        assert_eq!(exprs.len(), 2, "the settings expression and the sanitiser");
+        // The sanitiser is the constant, byte for byte, whatever the job is.
+        assert_eq!(exprs[1], SANITIZE_EXPR);
+        let other = parse_spec(&spec(json!({"engine": "EEVEE", "samples": 1}))).unwrap();
+        let other_args = blender_args(Path::new("/x.blend"), Path::new("/o"), &other, (3, 4, 1), None, 1).unwrap();
+        assert!(other_args.iter().any(|a| a.to_str() == Some(SANITIZE_EXPR)));
+        // The settings expression holds the validated numbers and fixed words only.
+        for needle in ["os.system", "__import__", "/cache", "/jobs", ".blend", "CUDA"] {
+            assert!(!exprs[0].contains(needle), "{needle} in {}", exprs[0]);
+        }
+        assert!(exprs[0].contains(&format!("s.cycles.samples = {MAX_SAMPLES}")));
+        // Both run before the render and after the file is loaded.
+        let at = |needle: &str| args.iter().position(|a| a == needle).unwrap();
+        assert!(at(SANITIZE_EXPR) > at(blend.to_str().unwrap()) && at(SANITIZE_EXPR) < at("--render-anim"));
+        // The directories reach the script through the environment, and a
+        // script that cannot finish stops Blender instead of rendering.
+        assert!(SANITIZE_EXPR.contains(&format!("os.environ.get('{JOB_DIR_ENV}')")));
+        assert!(SANITIZE_EXPR.contains(&format!("os.environ.get('{OUT_DIR_ENV}')")));
+        assert!(SANITIZE_EXPR.contains(&format!("os._exit({SANITIZE_EXIT})")));
+        // Python needs its indentation (a `\` line continuation in a Rust
+        // string would strip it), and the script has no format placeholders.
+        assert!(SANITIZE_EXPR.contains("\n    D = bpy.data\n") && SANITIZE_EXPR.contains("\n        try:\n"));
+        assert!(!SANITIZE_EXPR.contains("{}") && !SANITIZE_EXPR.contains("{0}"));
+        for covered in ["D.libraries", "D.images", "'movieclips'", "'sounds'", "'volumes'", "'cache_files'", "D.fonts", "OUTPUT_FILE", "sequence_editor", "shading_system", "blend_paths"] {
+            assert!(SANITIZE_EXPR.contains(covered), "{covered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_blend_is_staged_into_the_job_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("render-inputs");
+        let job = dir.path().join("jobs").join("j1");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(cache.join("abc.blend"), b"BLENDER").unwrap();
+        std::fs::write(cache.join("other-buyer.blend"), b"BLENDER2").unwrap();
+        let staged = stage_input(&cache.join("abc.blend"), &job).await.unwrap();
+        assert_eq!(staged, job.join("input.blend"));
+        assert_eq!(std::fs::read(&staged).unwrap(), b"BLENDER");
+        // Its directory holds this job's file only, not the other scenes.
+        assert_eq!(std::fs::read_dir(&job).unwrap().count(), 1);
+        // The cached copy outlives the job directory.
+        std::fs::remove_dir_all(&job).unwrap();
+        assert!(cache.join("abc.blend").exists());
+        // An input already in the job directory (an opened sealed .blend) stays where it is.
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(job.join("input.blend"), b"PLAIN").unwrap();
+        let same = stage_input(&job.join("input.blend"), &job).await.unwrap();
+        assert_eq!(same, job.join("input.blend"));
+        assert_eq!(std::fs::read(&same).unwrap(), b"PLAIN");
     }
 
     /// Runs only where `blender` is installed; elsewhere it says so and
@@ -1998,6 +2804,58 @@ mod tests {
             (frames[0].info.format, frames[0].info.width),
             (Format::Jpeg, 32)
         );
+    }
+
+    /// Runs only where `blender` is installed. A scene that names an image
+    /// outside the job directory by absolute path still renders, with that
+    /// reference cut before the render starts.
+    #[tokio::test]
+    async fn a_scene_naming_a_host_file_renders_without_it() {
+        let rt = tokio::task::spawn_blocking(runtime).await.unwrap();
+        if !rt.ready() {
+            eprintln!("skipping: blender is not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let (blend, secret) = (dir.path().join("scene.blend"), outside.join("secret.png"));
+        // Saved once before the image is added: Blender turns absolute paths
+        // into relative ones on a file's first save, and this scene must
+        // keep naming the image by its absolute path.
+        let expr = format!(
+            "import bpy\ns = bpy.context.scene\ns.render.engine = 'CYCLES'\n\
+             s.render.resolution_x = 64\ns.render.resolution_y = 48\n\
+             s.render.resolution_percentage = 100\ns.cycles.samples = 2\n\
+             bpy.ops.wm.save_as_mainfile(filepath={blend:?})\n\
+             img = bpy.data.images.new('secret', 8, 8)\nimg.filepath_raw = {secret:?}\n\
+             img.file_format = 'PNG'\nimg.save()\nbpy.data.images.remove(img)\n\
+             ext = bpy.data.images.load({secret:?})\next.filepath = {secret:?}\n\
+             ext.use_fake_user = True\ns.render.filepath = {out:?}\n\
+             bpy.ops.wm.save_mainfile()\n",
+            secret = secret.to_string_lossy(),
+            out = outside.join("render_").to_string_lossy(),
+            blend = blend.to_string_lossy(),
+        );
+        let status = std::process::Command::new("blender")
+            .args(["--background", "--factory-startup", "--python-expr", &expr])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success() && blend.exists() && secret.exists(), "could not build the test scene");
+        let size = std::fs::metadata(&blend).unwrap().len();
+        let p = parse_spec(&spec(json!({
+            "input_size": size, "input_pieces": vec![hash(); piece_count(size)],
+            "frame_start": 1, "frame_end": 1, "samples": 2, "device": "CPU",
+        })))
+        .unwrap();
+        let job = dir.path().join("job");
+        let frames = render(&blend, &p, &job).await.unwrap();
+        assert_eq!(frames.len(), 1);
+        let log = std::fs::read_to_string(job.join("blender.log")).unwrap();
+        assert!(log.contains("scene sanitised: 1 outside references cut"), "{log}");
+        // Nothing was written beside the file the scene pointed its output at.
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
     }
 
     /// Save the default scene (cube, camera, light) at 64x48 to `path`.

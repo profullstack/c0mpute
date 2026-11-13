@@ -2,11 +2,11 @@
 # c0mpute.com installer. Served at https://c0mpute.com/install.sh.
 #
 # Installs the c0mpute v1 stack idempotently:
-#   mise      — runtime version manager (skipped if present)
-#   bun       — JS runtime for TUI / JS-flavoured plugins (skipped if present)
-#   c0mpute   — this repo (https://github.com/profullstack/c0mpute)
-#   coinpay   — routed via https://c0mpute.com/plugins/coinpay/install.sh
-#   infernet  — routed via https://c0mpute.com/plugins/infernet/install.sh
+#   c0mpute   — this repo (https://github.com/profullstack/c0mpute), signed release
+#   coinpay   — plugins/coinpay/install.sh from the signed c0mpute-plugins.tar.gz
+#   infernet  — plugins/infernet/install.sh from the signed c0mpute-plugins.tar.gz
+#   tui       — c0mpute-tui from the signed c0mpute-tui.tar.gz
+#   bun       — pinned JS runtime for the TUI, checked by sha256 (skipped if present)
 #
 # Re-running upgrades in place. Each step skips when already installed
 # unless --force is passed.
@@ -50,12 +50,24 @@ C0MPUTE_VERSION="${C0MPUTE_VERSION:-latest}"
 C0MPUTE_HOME="${C0MPUTE_HOME:-$HOME/.c0mpute}"
 RELEASE_BASE="${C0MPUTE_RELEASE_BASE:-https://c0mpute.com/releases}"
 
-# Route plugin installs through c0mpute.com so each wrapper can do its
-# own error handling; the wrapper at https://c0mpute.com/plugins/<id>/install.sh
-# is the in-repo plugins/<id>/install.sh and chains to upstream itself.
+# Plugin installers (the in-repo plugins/<id>/install.sh, which chain to
+# upstream themselves) run from the release's signed c0mpute-plugins.tar.gz.
+# These URLs serve the same files unsigned and are only used for a release
+# from before that archive existed (see UNSIGNED_EXTRAS_UNTIL).
 COINPAY_INSTALL_URL="${COINPAY_INSTALL_URL:-https://c0mpute.com/plugins/coinpay/install.sh}"
 INFERNET_INSTALL_URL="${INFERNET_INSTALL_URL:-https://c0mpute.com/plugins/infernet/install.sh}"
 TRANSCODE_INSTALL_URL="${TRANSCODE_INSTALL_URL:-https://c0mpute.com/plugins/transcode/install.sh}"
+
+# Last release WITHOUT the signed extras (c0mpute-plugins.tar.gz,
+# c0mpute-tui.tar.gz, AppImage .minisig). Only a release this old may fall back
+# to the unverified downloads when an extra is absent; on anything newer a
+# missing extra is an error, so hiding the asset cannot force the fallback.
+UNSIGNED_EXTRAS_UNTIL="0.3.64"
+# The release everything in this run comes from (v<x.y.z>): the version in the
+# binary's signed comment, or the already-installed binary's. "" = unknown.
+RELEASE_TAG=""
+SIGNED_VERSION=""
+SCRATCH=""
 
 INSTALL_C0MPUTE=1
 INSTALL_COINPAY=1
@@ -74,8 +86,8 @@ warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 
-# Privilege escalation helper for system-wide steps (the /usr/local/bin
-# symlink + /etc/profile.d hook). Empty when already root or when sudo isn't
+# Privilege escalation helper for system-wide steps (the /etc/profile.d hook,
+# apt, a --system-service unit). Empty when already root or when sudo isn't
 # available; callers try a direct write first and fall back to $SUDO.
 if [ "$(id -u 2>/dev/null || echo 0)" != "0" ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
@@ -165,57 +177,105 @@ shell_rc_for() {
 }
 
 # ────────────────────────────────────────────────────────────────────────
-# Idempotent mise + bun install
+# bun (pinned)
 # ────────────────────────────────────────────────────────────────────────
 #
-# Some plugins are JS/TS-runtime-based (the Bun-built TUI, Node-based
-# infernet variants). mise gives us a single tool to manage the runtime
-# versions; bun is the JS runtime we standardise on. Both install
-# user-locally — no sudo, no system package manager.
-
-ensure_mise() {
-  if command -v mise >/dev/null 2>&1; then
-    return 0
-  fi
-  say "installing mise"
-  if ! command -v curl >/dev/null 2>&1; then
-    warn "curl missing; skipping mise install"
-    return 1
-  fi
-  curl -fsSL https://mise.run | sh >/dev/null 2>&1 || {
-    warn "mise install failed"
-    return 1
-  }
-  if [ -x "$HOME/.local/bin/mise" ]; then
-    PATH="$HOME/.local/bin:$PATH"
-    export PATH
-    ok "mise installed"
-  fi
+# The TUI (c0mpute-tui) is TypeScript run through bun; nothing else on an
+# installed node needs a JS runtime, so bun is only installed with the TUI.
+# We download the pinned upstream release zip for this OS/arch (not bun's
+# installer script) and check it against a hard-coded sha256 before anything
+# in it runs, the same way minisign is pinned below. User-local, no sudo.
+#
+# mise is NOT installed any more: it is the contributor toolchain manager
+# (.mise.toml, scripts/dev-setup.sh), not something a node needs at runtime.
+#
+# Hashes: upstream's SHASUMS256.txt for bun-v1.3.14
+# (github.com/oven-sh/bun/releases), each re-computed from the downloaded zip.
+# Bump the version and every hash together.
+BUN_PIN_VERSION="1.3.14"
+bun_pin_sha256() {
+  case "$1" in
+    linux-x64)               echo 951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f ;;
+    linux-x64-baseline)      echo a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7 ;;
+    linux-x64-musl)          echo 14bd9aedeebf1dba67e8def9531c89bc989ecfdf1de42e5bfcaf1b8cd9294719 ;;
+    linux-x64-musl-baseline) echo 56a7d6806cf155536c0178f0ea5fbd098e684fa509ebdb4fc0a7e19fb65382dc ;;
+    linux-aarch64)           echo a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b ;;
+    linux-aarch64-musl)      echo b98e0ad3625c5c00d1d5b5ff55605c7adddbfae151861e68ade57b2d3b8703bb ;;
+    darwin-x64)              echo 4183df3374623e5bab315c547cfa0974533cd457d86b73b639f7a87974cd6633 ;;
+    darwin-x64-baseline)     echo 3e35ad6f53971a9834bf9e6786e2adf72b5f1921cc9a9c5fde073d2972944076 ;;
+    darwin-aarch64)          echo d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620 ;;
+  esac
 }
 
-ensure_bun() {
+# The bun release build for platform $1 on this machine (prints nothing: none).
+bun_target() {
+  case "$1" in
+    linux-x86_64)   bt="linux-x64" ;;
+    linux-aarch64)  bt="linux-aarch64" ;;
+    darwin-aarch64) bt="darwin-aarch64" ;;
+    darwin-x86_64)
+      bt="darwin-x64"
+      # An x86_64 shell under Rosetta: the machine is Apple silicon.
+      if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then bt="darwin-aarch64"; fi
+      ;;
+    *) return 0 ;;
+  esac
+  case "$bt" in
+    linux-*)
+      # musl libc (Alpine) needs the musl build.
+      if [ -f /etc/alpine-release ] || { ldd --version 2>&1 || true; } | grep -qi musl; then
+        bt="$bt-musl"
+      fi
+      ;;
+  esac
+  # x64 CPUs without AVX2 need the baseline build (it runs on every x64).
+  case "$bt" in
+    linux-x64*) grep -qw avx2 /proc/cpuinfo 2>/dev/null || bt="$bt-baseline" ;;
+    darwin-x64) [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || true)" = "1" ] || bt="$bt-baseline" ;;
+  esac
+  printf '%s' "$bt"
+}
+
+ensure_bun() { # <platform>
   if command -v bun >/dev/null 2>&1; then
     return 0
   fi
-  if command -v mise >/dev/null 2>&1; then
-    say "installing bun via mise"
-    mise use --global bun@latest >/dev/null 2>&1 || mise install bun@latest >/dev/null 2>&1 || true
-    if [ -x "$HOME/.local/share/mise/installs/bun/latest/bin/bun" ] \
-       || command -v bun >/dev/null 2>&1; then
-      ok "bun installed (via mise)"
-      return 0
-    fi
-  fi
-  say "installing bun"
-  curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 || {
-    warn "bun install failed"
-    return 1
-  }
   if [ -x "$HOME/.bun/bin/bun" ]; then
     PATH="$HOME/.bun/bin:$PATH"
     export PATH
-    ok "bun installed"
+    return 0
   fi
+  bun_manual="install bun ${BUN_PIN_VERSION} yourself (https://bun.sh/docs/installation), then run: c0mpute tui"
+  bt=$(bun_target "$1")
+  bun_want=$(bun_pin_sha256 "$bt")
+  if [ -z "$bt" ] || [ -z "$bun_want" ]; then
+    warn "no pinned bun build for ${bt:-$1}; $bun_manual"
+    return 1
+  fi
+  if ! command -v unzip >/dev/null 2>&1; then
+    warn "unzip is needed to unpack bun: install unzip and re-run, or $bun_manual"
+    return 1
+  fi
+  say "installing bun ${BUN_PIN_VERSION} (${bt}, pinned by sha256)"
+  bun_dir="$SCRATCH/bun"
+  mkdir -p "$bun_dir"
+  curl -fsSL -o "$bun_dir/bun.zip" \
+    "${C0MPUTE_BUN_BASE:-https://github.com/oven-sh/bun/releases/download}/bun-v${BUN_PIN_VERSION}/bun-${bt}.zip" 2>/dev/null \
+    || { warn "could not download bun; $bun_manual"; return 1; }
+  bun_got=$(c0mpute_sha256 "$bun_dir/bun.zip") || { warn "no sha256 tool (sha256sum/shasum/openssl) to check bun"; return 1; }
+  if [ "$bun_got" != "$bun_want" ]; then
+    rm -f "$bun_dir/bun.zip"
+    warn "bun download has sha256 ${bun_got}, expected ${bun_want}; not installing it"
+    return 1
+  fi
+  unzip -q -o "$bun_dir/bun.zip" "bun-${bt}/bun" -d "$bun_dir" >/dev/null 2>&1 \
+    || { warn "could not unzip bun"; return 1; }
+  mkdir -p "$HOME/.bun/bin"
+  { mv -f "$bun_dir/bun-${bt}/bun" "$HOME/.bun/bin/bun" && chmod 755 "$HOME/.bun/bin/bun"; } \
+    || { warn "could not install bun into $HOME/.bun/bin"; return 1; }
+  PATH="$HOME/.bun/bin:$PATH"
+  export PATH
+  ok "bun ${BUN_PIN_VERSION} installed → $HOME/.bun/bin/bun"
 }
 
 # ────────────────────────────────────────────────────────────────────────
@@ -279,9 +339,117 @@ c0mpute_minisign() {
   printf '%s\n' "$2/minisign/$ms_member"
 }
 
+# True when dotted version $1 is lower than $2 (a leading v is ignored).
+version_lt() {
+  vl_a="${1#v}"; vl_b="${2#v}"
+  [ "$vl_a" != "$vl_b" ] || return 1
+  vl_low=$(printf '%s\n%s\n' "$vl_a" "$vl_b" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1)
+  [ "$vl_low" = "$vl_a" ]
+}
+
+# x.y.z of the c0mpute already on this machine ("" when none, or it won't run).
+installed_c0mpute_version() {
+  icv_bin="$C0MPUTE_HOME/bin/c0mpute"
+  [ -x "$icv_bin" ] || icv_bin=$(command -v c0mpute 2>/dev/null || true)
+  [ -n "$icv_bin" ] || return 0
+  "$icv_bin" --version 2>/dev/null \
+    | sed -n 's/^c0mpute  *v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# Verify a downloaded release asset against its minisign signature.
+#   $1 platform   $2 the file ($2.minisig next to it)   $3 its name on the release
+#   $4 the release tag the signature must be for ("" = any: the `latest` URL)
+# Fails closed: no verifier, a bad signature, or a valid signature for another
+# file or release all abort the install. Sets SIGNED_VERSION to the release tag
+# in the signed (trusted) comment, `timestamp:<unix> version:<tag> file:<name>`.
+c0mpute_verify() {
+  if [ -z "${MS_BIN:-}" ] || [ ! -x "$MS_BIN" ]; then
+    MS_BIN=$(c0mpute_minisign "$1" "$SCRATCH") \
+      || die "cannot verify the download: install minisign (brew install minisign / apt install minisign / https://jedisct1.github.io/minisign/) and re-run"
+  fi
+  ms_out=$("$MS_BIN" -V -P "$C0MPUTE_PUBKEY" -m "$2" -x "$2.minisig" 2>&1) \
+    || die "signature verification FAILED for $3; not installing it"
+  ms_comment=$(printf '%s\n' "$ms_out" | sed -n 's/^Trusted comment: //p' | head -n 1)
+  [ -n "$ms_comment" ] || ms_comment="$ms_out"
+  # The signed comment names the file and release, so a validly signed
+  # artifact for another platform or release can't be swapped in.
+  case " $ms_comment " in
+    *" file:$3 "*) ;;
+    *) die "signature for $3 is valid but signs a different file; not installing it" ;;
+  esac
+  if [ -n "$4" ]; then
+    case " $ms_comment " in
+      *" version:$4 "*) ;;
+      *) die "signature for $3 is valid but not for release $4; not installing it" ;;
+    esac
+  fi
+  SIGNED_VERSION=$(printf '%s\n' "$ms_comment" | tr ' ' '\n' | sed -n 's/^version://p' | head -n 1)
+  case "$SIGNED_VERSION" in
+    *[!A-Za-z0-9._-]*) die "signature for $3 carries a malformed release version; not installing it" ;;
+  esac
+}
+
+# True when the release being installed is from before the signed extras
+# existed, so an absent one is expected rather than suspicious. An unknown
+# release is not: only C0MPUTE_ALLOW_UNSIGNED=1 gets the old behaviour then.
+legacy_release() {
+  if [ -z "$RELEASE_TAG" ]; then
+    [ "${C0MPUTE_ALLOW_UNSIGNED:-0}" = "1" ]
+    return
+  fi
+  ! version_lt "$UNSIGNED_EXTRAS_UNTIL" "$RELEASE_TAG"
+}
+
+# Download release asset $2 for platform $1 from the same release as the
+# binary and verify it exactly like the binary. Sets ASSET_PATH. Returns
+#   0  downloaded and verified
+#   2  the release does not have it (HTTP 404) and predates signed extras: the
+#      only case where a caller may fall back to the old unverified download
+#   1  could not be fetched, or missing from a release that must have it
+# An asset that IS there with a missing or bad signature aborts the install.
+fetch_signed_asset() {
+  fa_url="${RELEASE_BASE}/${RELEASE_TAG:-latest}/$2"
+  mkdir -p "$SCRATCH/assets"
+  ASSET_PATH="$SCRATCH/assets/$2"
+  fa_code=$(curl -sSL -o "$ASSET_PATH" -w '%{http_code}' "$fa_url" 2>/dev/null || echo "000")
+  if [ "$fa_code" = "404" ]; then
+    rm -f "$ASSET_PATH"
+    if legacy_release; then return 2; fi
+    warn "$2 is missing from the ${RELEASE_TAG:-latest} release, which should carry it (${fa_url})"
+    return 1
+  fi
+  if [ "$fa_code" != "200" ]; then
+    rm -f "$ASSET_PATH"
+    warn "could not download ${fa_url} (HTTP ${fa_code})"
+    return 1
+  fi
+  fa_sig=$(curl -sSL -o "$ASSET_PATH.minisig" -w '%{http_code}' "${fa_url}.minisig" 2>/dev/null || echo "000")
+  if [ "$fa_sig" != "200" ]; then
+    rm -f "$ASSET_PATH.minisig"
+    if [ "${C0MPUTE_ALLOW_UNSIGNED:-0}" = "1" ]; then
+      warn "no signature at ${fa_url}.minisig (HTTP ${fa_sig}); using $2 UNVERIFIED because C0MPUTE_ALLOW_UNSIGNED=1"
+      return 0
+    fi
+    die "no signature at ${fa_url}.minisig (HTTP ${fa_sig}); refusing to use an unverified $2 (C0MPUTE_ALLOW_UNSIGNED=1 overrides)"
+  fi
+  say "verifying signature for $2"
+  c0mpute_verify "$1" "$ASSET_PATH" "$2" "$RELEASE_TAG"
+  ok "signature verified: $2 (${SIGNED_VERSION})"
+}
+
+# The checkout this script was run from, when it was run as a file from one
+# (sh scripts/install.sh). Empty under `curl | sh`: there $0 is the shell, and
+# a path relative to it would be whatever directory you happen to be in.
+repo_root() {
+  case "$0" in */install.sh) ;; *) return 0 ;; esac
+  rr=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || return 0
+  if [ -f "$rr/scripts/install.sh" ] && [ -d "$rr/plugins" ]; then printf '%s' "$rr"; fi
+}
+
 install_c0mpute() {
   platform="$1"
   target="$C0MPUTE_HOME/bin/c0mpute"
+  have_ver=$(installed_c0mpute_version)
   if [ -x "$target" ] && [ "$FORCE" -eq 0 ]; then
     # Verify the existing binary actually runs. v0.1.0's glibc-linked
     # build fails on systems with older glibc; v0.1.1+ uses musl. If
@@ -289,6 +457,8 @@ install_c0mpute() {
     # and force reinstall.
     if "$target" version >/dev/null 2>&1; then
       say "c0mpute already installed at $target (use --force to reinstall)"
+      # Plugins and the TUI come from the installed binary's own release.
+      if [ -n "$have_ver" ]; then RELEASE_TAG="v$have_ver"; fi
       return 0
     fi
     warn "existing $target appears broken (won't run); reinstalling"
@@ -297,7 +467,8 @@ install_c0mpute() {
   artifact="c0mpute-${platform}.tar.gz"
   url="${RELEASE_BASE}/${C0MPUTE_VERSION}/${artifact}"
   sig_url="${url}.minisig"
-  tmp=$(mktemp -d)
+  tmp="$SCRATCH/c0mpute"
+  mkdir -p "$tmp"
 
   say "downloading c0mpute ${C0MPUTE_VERSION}"
   http_code=$(curl -sSL -o "$tmp/$artifact" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
@@ -347,35 +518,29 @@ EOF
   if [ "$sig_code" != "200" ]; then
     if [ "${C0MPUTE_ALLOW_UNSIGNED:-0}" = "1" ]; then
       warn "no signature at ${sig_url} (HTTP ${sig_code}); installing UNVERIFIED because C0MPUTE_ALLOW_UNSIGNED=1"
+      case "$url" in */latest/*) ;; *) RELEASE_TAG="${url%/*}"; RELEASE_TAG="${RELEASE_TAG##*/}" ;; esac
     else
       rm -rf "$tmp"
       die "no signature at ${sig_url} (HTTP ${sig_code}); refusing to install an unverified binary (C0MPUTE_ALLOW_UNSIGNED=1 overrides)"
     fi
   else
     say "verifying signature for c0mpute"
-    if ! ms_bin=$(c0mpute_minisign "$platform" "$tmp"); then
-      rm -rf "$tmp"
-      die "cannot verify the download: install minisign (brew install minisign / apt install minisign / https://jedisct1.github.io/minisign/) and re-run"
-    fi
-    if ! ms_out=$("$ms_bin" -V -P "$C0MPUTE_PUBKEY" -m "$tmp/$artifact" -x "$tmp/$artifact.minisig" 2>&1); then
-      rm -rf "$tmp"
-      die "signature verification FAILED for ${artifact} from ${url}; not installing it"
-    fi
-    # The signed (trusted) comment names the file and release, so a validly
-    # signed artifact for another platform or release can't be swapped in.
+    # A pinned release (or one found by walking back) must be signed for that
+    # tag; through the `latest` URL any release's signature is accepted here
+    # and its signed version is checked below.
     ms_tag=""
     case "$url" in */latest/*) ;; *) ms_tag="${url%/*}"; ms_tag="${ms_tag##*/}" ;; esac
-    case "$ms_out" in
-      *"file:${artifact}"*) ;;
-      *) rm -rf "$tmp"; die "signature for ${artifact} is valid but signs a different file; not installing it" ;;
-    esac
-    if [ -n "$ms_tag" ]; then
-      case "$ms_out" in
-        *"version:${ms_tag} "*) ;;
-        *) rm -rf "$tmp"; die "signature for ${artifact} is valid but not for release ${ms_tag}; not installing it" ;;
-      esac
-    fi
+    c0mpute_verify "$platform" "$tmp/$artifact" "$artifact" "$ms_tag"
+    [ -n "$SIGNED_VERSION" ] || die "signature for ${artifact} names no release version; not installing it"
     ok "signature verified (minisign key $(printf '%s' "$C0MPUTE_PUBKEY" | cut -c1-12)…)"
+    # "latest" is whatever the release host answers. The signature proves this
+    # is a real release, not that it is the newest one, so `latest` never moves
+    # an existing install backwards. Pin C0MPUTE_VERSION to downgrade on purpose.
+    if [ "$C0MPUTE_VERSION" = "latest" ] && [ -n "$have_ver" ] && version_lt "$SIGNED_VERSION" "$have_ver"; then
+      die "the release offered as latest is ${SIGNED_VERSION}, older than the installed c0mpute ${have_ver}; refusing to downgrade (to install it on purpose: C0MPUTE_VERSION=${SIGNED_VERSION})"
+    fi
+    RELEASE_TAG="$SIGNED_VERSION"
+    say "installing c0mpute ${SIGNED_VERSION} (the version named in the signed release comment)"
   fi
 
   tar -xzf "$tmp/$artifact" -C "$C0MPUTE_HOME/bin"
@@ -390,22 +555,76 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────────────────
-# Chain to upstream installers for coinpay + infernet
+# Plugin installers (coinpay, infernet, transcode)
 # ────────────────────────────────────────────────────────────────────────
+
+# Unpack the release's signed c0mpute-plugins.tar.gz once. PLUGINS_STATE:
+#   ok      PLUGINS_SRC holds the verified plugins/<id>/install.sh files
+#   legacy  a release from before that archive: unverified URLs, with a warning
+#   failed  it should be there and could not be had: run nothing unverified
+PLUGINS_STATE=""
+PLUGINS_SRC=""
+fetch_plugins() {
+  [ -z "$PLUGINS_STATE" ] || return 0
+  PLUGINS_STATE=failed
+  fp_rc=0
+  fetch_signed_asset "$1" c0mpute-plugins.tar.gz || fp_rc=$?
+  case "$fp_rc" in
+    0)
+      mkdir -p "$SCRATCH/plugins-src"
+      if tar -xzf "$ASSET_PATH" -C "$SCRATCH/plugins-src" 2>/dev/null; then
+        PLUGINS_SRC="$SCRATCH/plugins-src/plugins"
+        PLUGINS_STATE=ok
+      else
+        warn "could not unpack c0mpute-plugins.tar.gz"
+      fi
+      ;;
+    2) PLUGINS_STATE=legacy ;;
+  esac
+}
+
+# Run plugin $1's installer: the copy in this checkout when run from one, else
+# the copy in the signed archive, else (old releases only) the unsigned $2.
+run_plugin_installer() {
+  if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/plugins/$1/install.sh" ]; then
+    say "running $1 plugin installer (local: $REPO_ROOT/plugins/$1/install.sh)"
+    sh "$REPO_ROOT/plugins/$1/install.sh" </dev/null
+    return
+  fi
+  fetch_plugins "$platform"
+  case "$PLUGINS_STATE" in
+    ok)
+      if [ ! -f "$PLUGINS_SRC/$1/install.sh" ]; then
+        warn "the signed plugins archive has no installer for $1"
+        return 1
+      fi
+      say "running $1 plugin installer (signed, c0mpute ${RELEASE_TAG:-latest})"
+      sh "$PLUGINS_SRC/$1/install.sh" </dev/null
+      ;;
+    legacy)
+      warn "c0mpute ${RELEASE_TAG:-(unknown release)} predates signed plugin installers; running $2 UNVERIFIED"
+      curl -fsSL "$2" | sh
+      ;;
+    *)
+      warn "no verified installer for $1; not running an unverified one"
+      return 1
+      ;;
+  esac
+}
 
 chain_install() {
   name="$1"
   url="$2"
 
-  # Always run the upstream installer so `curl | sh` upgrades plugins in place —
+  # Always run the plugin installer so `curl | sh` upgrades plugins in place —
   # the coinpay/infernet installers are idempotent and update an existing
   # install. (Previously we skipped when already on PATH, so plugins went stale.)
   if command -v "$name" >/dev/null 2>&1; then
-    say "upgrading $name (via $url)"
+    say "upgrading $name"
   else
-    say "installing $name (via $url)"
+    say "installing $name"
   fi
-  if ! curl -fsSL "$url" | sh; then
+  if ! run_plugin_installer "$name" "$url"; then
     warn "$name install/upgrade failed (continuing without it)"
     return 1
   fi
@@ -437,17 +656,9 @@ house_models_notice() {
 }
 
 # transcode is in-process (no separate binary), but it depends on
-# ffmpeg. Delegate to the plugin's own install.sh — local copy if
-# we're running in-repo, otherwise the published one.
+# ffmpeg. Delegate to the plugin's own install.sh (see run_plugin_installer).
 install_transcode_deps() {
-  local_path="$(dirname "$0")/../plugins/transcode/install.sh"
-  if [ -f "$local_path" ]; then
-    say "running transcode plugin installer (local: $local_path)"
-    sh "$local_path" || warn "transcode deps install reported a problem"
-    return 0
-  fi
-  say "running transcode plugin installer (via $TRANSCODE_INSTALL_URL)"
-  if ! curl -fsSL "$TRANSCODE_INSTALL_URL" | sh; then
+  if ! run_plugin_installer transcode "$TRANSCODE_INSTALL_URL"; then
     warn "transcode deps install failed (continuing without ffmpeg)"
     return 1
   fi
@@ -458,8 +669,11 @@ install_transcode_deps() {
 # ────────────────────────────────────────────────────────────────────────
 # The release carries a version-less AppImage per arch
 # (c0mpute-desktop-linux-<arch>.AppImage, see .github/workflows/release.yml),
-# checked here against its .sha256. The app updates itself from GitHub
-# releases afterwards. macOS and Windows builds are on the releases page.
+# signed like the binary (<asset>.minisig) and verified here. Only a release
+# from before desktop signatures falls back to its .sha256, which comes from
+# the same place as the file and so only catches a corrupt download. The app
+# updates itself from GitHub releases afterwards. macOS and Windows builds are
+# on the releases page.
 install_desktop() {
   plat=$(detect_platform)
   case "$plat" in
@@ -474,21 +688,40 @@ install_desktop() {
   dest="$bin_dir/c0mpute-desktop"
   mkdir -p "$bin_dir" "$HOME/.local/share/applications"
   say "installing the desktop app ($asset)"
-  if ! curl -fsSL -o "$dest.tmp" "${RELEASE_BASE}/${C0MPUTE_VERSION}/${asset}" \
-    || ! curl -fsSL -o "$dest.tmp.sha256" "${RELEASE_BASE}/${C0MPUTE_VERSION}/${asset}.sha256"; then
-    rm -f "$dest.tmp" "$dest.tmp.sha256"
-    warn "desktop app: $asset is not on the ${C0MPUTE_VERSION} release (yet); skipped"
+  rel="${RELEASE_TAG:-$C0MPUTE_VERSION}"
+  base="${RELEASE_BASE}/${rel}"
+  mkdir -p "$SCRATCH/assets"
+  dl="$SCRATCH/assets/$asset"
+  if ! curl -fsSL -o "$dl" "$base/$asset"; then
+    rm -f "$dl"
+    warn "desktop app: $asset is not on the ${rel} release (yet); skipped"
     return 0
   fi
-  want=$(cut -d' ' -f1 < "$dest.tmp.sha256")
-  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$dest.tmp" | cut -d' ' -f1)
-  else got=$(shasum -a 256 "$dest.tmp" | cut -d' ' -f1); fi
-  rm -f "$dest.tmp.sha256"
-  if [ "$want" != "$got" ]; then
-    rm -f "$dest.tmp"
-    warn "desktop app: checksum mismatch for $asset; not installed"
+  sig_code=$(curl -sSL -o "$dl.minisig" -w '%{http_code}' "$base/$asset.minisig" 2>/dev/null || echo "000")
+  if [ "$sig_code" = "200" ]; then
+    c0mpute_verify "$plat" "$dl" "$asset" "$RELEASE_TAG"
+    ok "desktop app: signature verified (${SIGNED_VERSION})"
+  elif [ "$sig_code" = "404" ] && legacy_release; then
+    warn "desktop app: c0mpute ${rel} predates signed desktop builds; checking only the .sha256 from the same release"
+    if ! curl -fsSL -o "$dl.sha256" "$base/$asset.sha256"; then
+      rm -f "$dl" "$dl.sha256"
+      warn "desktop app: no checksum for $asset on the ${rel} release; not installed"
+      return 0
+    fi
+    want=$(cut -d' ' -f1 < "$dl.sha256")
+    got=$(c0mpute_sha256 "$dl" || true)
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+      rm -f "$dl" "$dl.sha256"
+      warn "desktop app: checksum mismatch for $asset; not installed"
+      return 0
+    fi
+  else
+    # The desktop builds are signed a few minutes after a release goes public.
+    rm -f "$dl" "$dl.minisig"
+    warn "desktop app: no signature for $asset on the ${rel} release yet (HTTP ${sig_code}); not installed. Re-run with --desktop later."
     return 0
   fi
+  chmod 755 "$dl" && mv -f "$dl" "$dest"
   chmod 755 "$dest.tmp" && mv "$dest.tmp" "$dest"
   cat > "$HOME/.local/share/applications/c0mpute-desktop.desktop" <<DESKTOP
 [Desktop Entry]
@@ -508,11 +741,22 @@ DESKTOP
 #
 # `c0mpute tui` subprocess-launches a `c0mpute-tui` binary on PATH. We
 # install the TUI as SOURCE run through Bun, wrapped by a small launcher —
-# NOT a compiled binary — so a reinstall picks up the repo's copy without a
-# release cycle. Source comes from the in-repo copy when running in-tree,
-# otherwise the repo tarball on GitHub. Optional: any failure warns and
-# continues (the rest of c0mpute works without the TUI).
+# NOT a compiled binary. Source comes from the in-repo copy when running
+# in-tree, otherwise the release's signed c0mpute-tui.tar.gz (verified like
+# the binary). Its npm dependencies are still resolved by `bun install` at
+# install time. Optional: a download failure warns and continues (the rest of
+# c0mpute works without the TUI); a bad signature aborts.
 # ────────────────────────────────────────────────────────────────────────
+# Unverified: apps/tui out of the GitHub tarball of branch $1. Prints its path.
+fetch_tui_branch() {
+  say "fetching c0mpute-tui source" >&2
+  mkdir -p "$SCRATCH/tui-branch"
+  if curl -fsSL "https://github.com/profullstack/c0mpute/archive/refs/heads/$1.tar.gz" \
+      | tar -xz -C "$SCRATCH/tui-branch" 2>/dev/null; then
+    find "$SCRATCH/tui-branch" -type d -path '*/apps/tui' 2>/dev/null | head -1
+  fi
+}
+
 install_tui() {
   bun_bin="$(command -v bun || true)"
   [ -x "$HOME/.bun/bin/bun" ] && bun_bin="${bun_bin:-$HOME/.bun/bin/bun}"
@@ -537,26 +781,31 @@ install_tui() {
 
   dest="$C0MPUTE_HOME/tui"
 
-  # Locate the TUI source: in-repo copy first, else fetch the repo tarball.
-  local_tui="$(dirname "$0")/../apps/tui"
+  # Locate the TUI source: in-repo copy first, else the signed release archive.
   src=""
-  cleanup_tmp=""
-  if [ -d "$local_tui/src" ]; then
-    src="$local_tui"
+  if [ -n "$REPO_ROOT" ] && [ -d "$REPO_ROOT/apps/tui/src" ]; then
+    src="$REPO_ROOT/apps/tui"
+  elif [ -n "${C0MPUTE_TUI_REF:-}" ]; then
+    # An explicit branch is a developer override; nothing signs a branch.
+    warn "C0MPUTE_TUI_REF=${C0MPUTE_TUI_REF}: installing c0mpute-tui UNVERIFIED from that branch"
+    src=$(fetch_tui_branch "$C0MPUTE_TUI_REF")
   else
-    say "fetching c0mpute-tui source"
-    tmp=$(mktemp -d)
-    cleanup_tmp="$tmp"
-    ref="${C0MPUTE_TUI_REF:-master}"
-    tarball="https://github.com/profullstack/c0mpute/archive/refs/heads/${ref}.tar.gz"
-    if curl -fsSL "$tarball" | tar -xz -C "$tmp" 2>/dev/null; then
-      src=$(find "$tmp" -type d -path '*/apps/tui' 2>/dev/null | head -1)
-    fi
-    if [ -z "$src" ] || [ ! -d "$src/src" ]; then
-      warn "couldn't fetch c0mpute-tui source; skipping (run: c0mpute tui later to retry)"
-      [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
-      return 1
-    fi
+    tui_rc=0
+    fetch_signed_asset "$platform" c0mpute-tui.tar.gz || tui_rc=$?
+    case "$tui_rc" in
+      0)
+        mkdir -p "$SCRATCH/tui-src"
+        if tar -xzf "$ASSET_PATH" -C "$SCRATCH/tui-src" 2>/dev/null; then src="$SCRATCH/tui-src/tui"; fi
+        ;;
+      2)
+        warn "c0mpute ${RELEASE_TAG:-(unknown release)} predates the signed TUI archive; fetching c0mpute-tui source UNVERIFIED"
+        src=$(fetch_tui_branch master)
+        ;;
+    esac
+  fi
+  if [ -z "$src" ] || [ ! -d "$src/src" ]; then
+    warn "couldn't fetch c0mpute-tui source; skipping (run: c0mpute tui later to retry)"
+    return 1
   fi
 
   say "installing c0mpute-tui → $dest"
@@ -568,7 +817,6 @@ install_tui() {
   # copied node_modules would be dangling symlinks).
   if ! ( cd "$dest" && "$bun_bin" install --production --no-save >/dev/null 2>&1 ); then
     warn "c0mpute-tui dependency install failed; skipping"
-    [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
     return 1
   fi
 
@@ -579,7 +827,6 @@ BUN="\$(command -v bun || echo "\$HOME/.bun/bin/bun")"
 exec "\$BUN" run "$dest/src/index.ts" "\$@"
 EOF
   chmod +x "$wrapper"
-  [ -n "$cleanup_tmp" ] && rm -rf "$cleanup_tmp"
   ok "installed c0mpute-tui → $wrapper"
 }
 
@@ -587,33 +834,45 @@ EOF
 # PATH + diagnostics
 # ────────────────────────────────────────────────────────────────────────
 
-# Make `c0mpute` reachable no matter the shell config. Shell rc files
-# (ensure_path) only help NEW shells and silently do nothing when they're
-# root-owned (cloud GPU images) — that's how you get `c0mpute: command not
-# found` right after a "successful" install. Mirror infernet's installer:
-#   1. Symlink the binary into a system bin dir (already on every PATH), so it
-#      works in the CURRENT shell immediately.
-#   2. Write /etc/profile.d so future login shells also see ~/.c0mpute/bin —
-#      which is where the peer binaries (coinpay, infernet) and c0mpute-tui
-#      live; the single symlink only covers the main binary.
-# Both try a direct write first, then $SUDO. All best-effort.
+# `c0mpute` is reached through PATH, never through a root-owned directory:
+# ~/.c0mpute/bin holds files this user can rewrite, and a symlink to one in
+# /usr/local/bin would put a user-writable program on root's PATH (anything
+# that can write as this user would run as root the next time root, or sudo,
+# typed `c0mpute`). So:
+#   - as a normal user: PATH comes from the shell rc files (ensure_path) and,
+#     when sudo is there, the /etc/profile.d hook below. That hook only names
+#     $HOME, so for every account it points at that account's own directory.
+#   - as root (cloud GPU images): root owns the binary, so the symlink is safe
+#     and makes `c0mpute` work in the current shell at once.
+# All best-effort.
 link_system_bin() {
   target="$C0MPUTE_HOME/bin/c0mpute"
   [ -x "$target" ] || return 0  # nothing installed to link
 
-  linked=""
-  for sysbin in /usr/local/bin /usr/bin /opt/bin; do
-    [ -d "$sysbin" ] || continue
-    if ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
-      ln -sf "$target" "$sysbin/git-remote-c0mpute" 2>/dev/null || true
-      linked="$sysbin/c0mpute"; ok "symlinked $linked → $target"; break
-    fi
-    if [ -n "$SUDO" ] && $SUDO ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
-      $SUDO ln -sf "$target" "$sysbin/git-remote-c0mpute" 2>/dev/null || true
-      linked="$sysbin/c0mpute"; ok "symlinked $linked → $target (via sudo)"; break
-    fi
-  done
-  [ -n "$linked" ] || warn "no writable system bin dir — relying on shell rc / profile.d for PATH"
+  if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    for sysbin in /usr/local/bin /usr/bin /opt/bin; do
+      [ -d "$sysbin" ] || continue
+      if ln -sf "$target" "$sysbin/c0mpute" 2>/dev/null; then
+        ln -sf "$target" "$sysbin/git-remote-c0mpute" 2>/dev/null || true
+        ok "symlinked $sysbin/c0mpute → $target"; break
+      fi
+    done
+  else
+    # Earlier installers made that symlink with sudo. Removing it needs root,
+    # so say how instead of doing it behind a sudo prompt.
+    for sysbin in /usr/local/bin /usr/bin /opt/bin; do
+      for old in "$sysbin/c0mpute" "$sysbin/git-remote-c0mpute"; do
+        [ -L "$old" ] || continue
+        old_to=$(readlink "$old" 2>/dev/null || true)
+        case "$old_to" in
+          "$HOME"/*|/home/*|/Users/*)
+            warn "$old is a symlink into a home directory ($old_to), left by an earlier c0mpute installer."
+            warn "  It puts a user-writable program on root's PATH. Remove it:  sudo rm $old"
+            ;;
+        esac
+      done
+    done
+  fi
 
   if [ -d /etc/profile.d ]; then
     line='export PATH="$HOME/.c0mpute/bin:$HOME/.local/bin:$PATH"'
@@ -624,20 +883,27 @@ link_system_bin() {
       ok "wrote /etc/profile.d/c0mpute.sh (via sudo)"
     fi
   fi
-  unset target linked sysbin line
+  unset target sysbin line old old_to
 }
 
 ensure_path() {
-  # Bash / Zsh / sh-style profile. Each rc file gets the PATH line +
-  # the right `mise activate <shell>` invocation. Idempotent — won't
-  # duplicate lines on re-run.
+  # The rc file of the shell you actually use must exist, or a fresh account
+  # (zsh with no ~/.zshrc yet) would get no PATH line at all.
+  path_rc=$(shell_rc_for "$(detect_shell)")
+  case "$path_rc" in
+    */config.fish) ;;
+    *) [ -e "$path_rc" ] || touch "$path_rc" 2>/dev/null || true ;;
+  esac
+
+  # Bash / Zsh / sh-style profile. Each rc file gets the PATH line.
+  # Idempotent — won't duplicate lines on re-run.
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [ -f "$rc" ] || continue
     # Must be writable. An rc file created root-owned by a prior sudo install
     # (common on cloud GPU images) makes `>> "$rc"` fail with a raw shell-level
     # "cannot create ...: Permission denied" that 2>/dev/null can't suppress.
-    # Pre-check and skip — link_system_bin() already put c0mpute on PATH via
-    # the /usr/local/bin symlink + /etc/profile.d hook, so this is best-effort.
+    # Pre-check and skip — link_system_bin() covers that case through the
+    # /etc/profile.d hook, so this is best-effort.
     if [ ! -w "$rc" ]; then
       warn "$rc not writable (try: sudo chown \$USER:\$USER $rc) — skipping PATH append"
       continue
@@ -648,15 +914,6 @@ ensure_path() {
         printf '\n# Added by c0mpute installer\n'
         printf 'export PATH="$HOME/.c0mpute/bin:$HOME/.local/bin:$PATH"\n'
       } >> "$rc"
-    fi
-
-    # mise activation per shell. .profile is sh-only and mise's
-    # `activate sh` doesn't exist; we skip it there.
-    if command -v mise >/dev/null 2>&1 && ! grep -q 'mise activate' "$rc"; then
-      case "$rc" in
-        *.bashrc) printf 'eval "$(mise activate bash)"\n' >> "$rc" ;;
-        *.zshrc)  printf 'eval "$(mise activate zsh)"\n'  >> "$rc" ;;
-      esac
     fi
   done
 
@@ -671,9 +928,16 @@ ensure_path() {
         printf 'fish_add_path -p $HOME/.c0mpute/bin $HOME/.local/bin\n'
       } >> "$fish_rc"
     fi
-    if command -v mise >/dev/null 2>&1 && ! grep -q 'mise activate' "$fish_rc"; then
-      printf 'mise activate fish | source\n' >> "$fish_rc"
-    fi
+  fi
+
+  if grep -q '\.c0mpute/bin' "$path_rc" 2>/dev/null; then
+    case "$path_rc" in
+      */config.fish) ok "PATH: $path_rc has: fish_add_path -p \$HOME/.c0mpute/bin \$HOME/.local/bin" ;;
+      *) ok "PATH: $path_rc has: export PATH=\"\$HOME/.c0mpute/bin:\$HOME/.local/bin:\$PATH\"" ;;
+    esac
+  else
+    warn "could not add c0mpute to PATH in $path_rc; add this line yourself:"
+    warn "  export PATH=\"\$HOME/.c0mpute/bin:\$HOME/.local/bin:\$PATH\""
   fi
 }
 
@@ -1007,12 +1271,10 @@ main() {
 
   platform=$(detect_platform)
   mkdir -p "$C0MPUTE_HOME/bin"
-
-  # Install runtime tooling some plugins need (idempotent — skipped if
-  # already present). mise manages tool versions; bun runs the TUI and
-  # any future JS-flavoured plugins.
-  ensure_mise || true
-  ensure_bun || true
+  # Downloads land here and are verified here; gone when the script ends.
+  SCRATCH=$(mktemp -d)
+  trap 'rm -rf "$SCRATCH"' EXIT
+  REPO_ROOT=$(repo_root)
 
   if [ "$INSTALL_C0MPUTE" -eq 1 ]; then install_c0mpute "$platform"; fi
   if [ "$INSTALL_COINPAY" -eq 1 ];  then chain_install coinpay  "$COINPAY_INSTALL_URL"; fi
@@ -1030,8 +1292,8 @@ main() {
   # NO_STORAGE_RELOCATE=1. Same approach as infernet's installer.
   detect_storage_volume || true
 
-  # System-wide PATH (symlink + profile.d) FIRST — works even when the shell
-  # rc files below are root-owned/unwritable. Prevents `command not found`.
+  # profile.d hook FIRST — works even when the shell rc files below are
+  # root-owned/unwritable. Prevents `command not found`.
   link_system_bin
   ensure_path
 
@@ -1042,8 +1304,12 @@ main() {
   # exits the script, and the worker never started).
   if [ "$INSTALL_TRANSCODE" -eq 1 ]; then install_transcode_deps || true; fi
 
-  # c0mpute-tui: Bun + hqtui terminal UI launched by `c0mpute tui`.
-  if [ "$INSTALL_TUI" -eq 1 ]; then install_tui || true; fi
+  # c0mpute-tui: Bun + hqtui terminal UI launched by `c0mpute tui`. bun (a
+  # pinned, checksummed release) is only installed for it.
+  if [ "$INSTALL_TUI" -eq 1 ]; then
+    ensure_bun "$platform" || true
+    install_tui || true
+  fi
 
   # Desktop app (apps/desktop): opt-in, a node is usually headless.
   if [ "$INSTALL_DESKTOP" -eq 1 ]; then install_desktop || true; fi
@@ -1144,6 +1410,7 @@ EOF
 
   user_shell=$(detect_shell)
   shell_bin="${SHELL:-/bin/bash}"
+  rm -rf "$SCRATCH"  # exec never returns, so the EXIT trap would not run
   printf '\n\033[1;36m→\033[0m starting fresh %s shell with c0mpute on $PATH\n' "$user_shell"
   printf '  (type \033[1;36mexit\033[0m to return to your original shell)\n\n'
   case "$user_shell" in

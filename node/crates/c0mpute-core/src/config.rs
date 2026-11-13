@@ -107,6 +107,14 @@ pub struct Config {
     /// and pays bounties this node owes.
     #[serde(default)]
     pub swarm: crate::agent_swarm::SwarmConfig,
+    /// Blender renders (`render` role): whether Blender runs inside a
+    /// bubblewrap sandbox (`sandbox = "auto" | "off" | "require"`).
+    #[serde(default)]
+    pub render: crate::render::RenderConfig,
+    /// Text fine-tunes (`c0mpute infernet text serve`): the base models this
+    /// node downloads and runs for buyers, and the free disk it keeps.
+    #[serde(default)]
+    pub text: crate::text::TextConfig,
 }
 
 /// Adult mode on the buyer side. Every worker serves adult jobs and
@@ -208,6 +216,16 @@ pub struct AppsConfig {
     /// Run only apps signed by these owner keys (hex ed25519, as `c0mpute
     /// apps status` shows them). Empty = anyone's apps.
     pub owners: Vec<String>,
+    /// Keep app containers off private, loopback, link-local (metadata) and
+    /// CGNAT addresses and off this host, with the iptables guard
+    /// `container.run` uses (needs root; without it apps stay on docker's
+    /// default bridge and the node says so at start).
+    pub egress_guard: bool,
+    /// Run no apps at all unless that guard is in place.
+    pub require_egress_guard: bool,
+    /// Most disk one app may use, MiB: its state volume plus what it writes
+    /// inside its container. An app over it is stopped.
+    pub max_disk_mb: u64,
 }
 
 impl Default for AppsConfig {
@@ -216,6 +234,9 @@ impl Default for AppsConfig {
             max_apps: 4,
             max_memory_mb: 2048,
             owners: Vec::new(),
+            egress_guard: true,
+            require_egress_guard: false,
+            max_disk_mb: crate::apps::DEFAULT_MAX_DISK_MB,
         }
     }
 }
@@ -840,6 +861,8 @@ impl Default for Config {
             threatcrush: Default::default(),
             adult: Default::default(),
             swarm: Default::default(),
+            render: Default::default(),
+            text: Default::default(),
         }
     }
 }
@@ -941,6 +964,22 @@ pub struct GatewayConfig {
     /// (`gateway_announce`). Opt out: false, or `C0MPUTE_GATEWAY_AUTO=0`.
     #[serde(default = "default_true")]
     pub auto_announce: bool,
+    /// Give every hosted site its own web origin: with
+    /// `site_host_suffix = "sites.example.com"`, `<site_id>.sites.example.com`
+    /// serves that site at `/` and nothing else, and a browser opening
+    /// `/s/<site_id>/...` is sent there. Needs wildcard DNS and TLS for
+    /// `*.<suffix>` (docs/hosting.md). Unset (the default): sites are served
+    /// under `/s/` only. `C0MPUTE_SITE_HOST_SUFFIX` overrides it.
+    #[serde(default)]
+    pub site_host_suffix: Option<String>,
+    /// Pages served under the shared `/s/<site_id>/` path are sandboxed
+    /// (`Content-Security-Policy: sandbox ...`), so one site's scripts cannot
+    /// read another site's storage or call this gateway's APIs as the same
+    /// origin. Pages that need localStorage, cookies or a service worker
+    /// work on a custom domain or a per-site host instead. On by default;
+    /// `C0MPUTE_SANDBOX_SHARED_SITES=0` also turns it off.
+    #[serde(default = "default_true")]
+    pub sandbox_shared_sites: bool,
 }
 
 impl Default for GatewayConfig {
@@ -949,6 +988,8 @@ impl Default for GatewayConfig {
             bind: "0.0.0.0:7777".into(),
             announce: None,
             auto_announce: true,
+            site_host_suffix: None,
+            sandbox_shared_sites: true,
         }
     }
 }

@@ -675,8 +675,16 @@ impl Repairer {
                         warn!(peer = %peer_id, "served the wrong bytes during repair");
                         continue;
                     }
+                    // The index is the manifest's word: one past the
+                    // block's shards is an error, not a slot to write.
+                    let Some(slot) = received.get_mut(index as usize) else {
+                        bail!(
+                            "cannot repair block {}: shard index {index} is outside its {n} shards",
+                            plan.block
+                        );
+                    };
                     bytes_read += bytes.len() as u64;
-                    received[index as usize] = Some(Shard { index, bytes });
+                    *slot = Some(Shard { index, bytes });
                     sources.push(peer_id);
                     found += 1;
                     if found == k {

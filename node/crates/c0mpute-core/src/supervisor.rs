@@ -915,6 +915,11 @@ impl Supervisor {
                 dir: Some(self.config.storage.root.join("apps")),
                 hosting,
                 registry: Some(self.registry.clone()),
+                // From the config this node was started with, not the
+                // default path (a node run with --config elsewhere).
+                egress_guard: Some(cfg.egress_guard),
+                require_egress_guard: Some(cfg.require_egress_guard),
+                max_disk_mb: Some(cfg.max_disk_mb),
                 ..Default::default()
             },
         )

@@ -240,6 +240,27 @@ pub fn plan(
     widen: &dyn Fn(u32) -> usize,
     trim: &dyn Fn(u32) -> bool,
 ) -> Plan {
+    plan_counting(map, site_id, layout, me, i_host, target, max, widen, trim, &|_| true)
+}
+
+/// [`plan`], where an announced holder of a group fills one of its `target`
+/// copies only when `counts` says so (it proved a copy of the site, see
+/// `ReplicaMap::proven`), as in `replicas::decide_counting`. Releasing is
+/// unchanged: it is decided on every announced holder and then checked
+/// against proofs by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_counting(
+    map: &ReplicaMap,
+    site_id: &str,
+    layout: &Layout,
+    me: &str,
+    i_host: bool,
+    target: usize,
+    max: usize,
+    widen: &dyn Fn(u32) -> usize,
+    trim: &dyn Fn(u32) -> bool,
+    counts: &dyn Fn(&str) -> bool,
+) -> Plan {
     let holders = map.group_holders(site_id, layout.len(), true);
     let preferred = map.effective_preferred(site_id);
     let striping = map.striping_peers();
@@ -278,7 +299,8 @@ pub fn plan(
             wanted.push((0, score(&key, me), g));
             continue;
         }
-        if hs.len() >= target {
+        let counted = hs.iter().filter(|p| counts(p)).count();
+        if counted >= target {
             continue;
         }
         if hs.iter().any(|h| same_machine(&machines, h, me)) {
@@ -308,9 +330,9 @@ pub fn plan(
             }
             candidates.push(me.to_string());
         }
-        let n = target - hs.len() + widen(g);
+        let n = target - counted + widen(g);
         if chosen(&key, &candidates, n).iter().any(|p| p == me) {
-            wanted.push((1 + hs.len(), score(&key, me), g));
+            wanted.push((1 + counted, score(&key, me), g));
         }
     }
     // Paid groups, then groups with fewest copies, then a stable order.
@@ -467,6 +489,39 @@ mod tests {
         let machine = map.peers.get(p).and_then(|h| h.machine.clone());
         map.apply_holding_full(p, sites, g, Instant::now(), true, None, None, Some(u64::MAX), addrs);
         map.set_machine(p, machine);
+    }
+
+    #[test]
+    fn groups_whose_holders_only_announce_are_still_filled() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let m = manifest(64 * 8);
+        let rec = big_record(&kp, &m);
+        let layout = Layout::of(&m);
+        let n = layout.len() as u32;
+        let peers: Vec<String> = (0..9).map(|i| format!("peer{i}")).collect();
+        let mut map = map_with(&peers, &rec);
+        // Three keys announce every group.
+        for p in &peers[..3] {
+            hold_all(&mut map, &rec, p, 0..n);
+        }
+        let takers = |counts: &dyn Fn(&str) -> bool| -> Vec<usize> {
+            let mut t = vec![0usize; layout.len()];
+            for p in &peers[3..] {
+                let mine = |h: &str| h == p.as_str() || counts(h);
+                let plan = plan_counting(&map, &rec.site_id, &layout, p, true, 3, 5, &|_| 0, &|_| false, &mine);
+                assert!(plan.drop.is_empty());
+                for g in plan.fetch {
+                    t[g as usize] += 1;
+                }
+            }
+            t
+        };
+        // Taken at their word (or all proven) every group is full.
+        assert!(takers(&|_| true).iter().all(|t| *t == 0));
+        // Unproven, they fill nothing: each group gets three real takers.
+        assert!(takers(&|_| false).iter().all(|t| *t == 3));
+        // One of them proven: two more takers per group.
+        assert!(takers(&|h| h == "peer0").iter().all(|t| *t == 2));
     }
 
     #[test]

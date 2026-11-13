@@ -171,6 +171,12 @@ async fn apps_place_three_copies_serve_snapshot_and_fail_over() {
         hosts,
         dir: Some(dir.join("apps")),
         timing: fast(),
+        // Docker is a script here: no real network to guard (as root the
+        // guard would add iptables rules to the machine running the test),
+        // and nothing read from this machine's config file.
+        egress_guard: Some(false),
+        require_egress_guard: Some(false),
+        max_disk_mb: Some(c0mpute_core::apps::DEFAULT_MAX_DISK_MB),
         ..Default::default()
     };
     let d0 = tmp.path().join("n0");

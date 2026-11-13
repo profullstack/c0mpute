@@ -42,6 +42,41 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 | Healing | A site with fewer than 3 live copies: each hosting node ranks the candidates (rendezvous hashing on site id + peer id). The top-ranked ones fetch a copy. A node that stops announcing stops counting after ~200 s and another node takes over. Above 5 copies the lowest-ranked holder lets go. A publisher seeding its own site is a source, not a copy. |
 | Serving | Any gateway: local chunks when it holds them, otherwise fetched over libp2p from the fastest live holder (measured round-trip, round-robin among equally fast ones), failing over to the next and then to the DHT. Every chunk is checked against its hash. |
 
+### An announced copy counts once it is proven
+
+Announcing a copy is free: any key can gossip "I hold this site". So an announcement
+alone does not fill one of the three copies, and does not let anyone drop theirs.
+
+- **Filling.** A holder counts toward the three once the node deciding has seen it pass
+  a challenge (a random chunk, fetched straight from that peer and checked against its
+  hash) within the last 6 hours, or the site's owner or payer signed a passing receipt
+  for it in that time. Only the nodes next in line for the site ask (the same top three
+  on every node, by the rendezvous ranking), in the background, at most 32 challenges
+  per repair round, 4 per peer and 5 per site. While they ask, the announced holders
+  keep their slots for one holder TTL (200 s), so slow or briefly unreachable honest
+  holders are asked again each round and a healthy site gains no extra copy. After
+  that, holders that still have not proven anything stop counting and the next-ranked
+  nodes take real copies. Keys that only announce can delay a site's copies by those
+  200 s, once; new keys do not restart the clock. A node that has just started knows no
+  proofs: it works through its sites at the rate above and takes announced holders at
+  their word until a site's turn comes.
+- **Dropping.** A node lets a surplus copy go only when at least three other holders
+  prove their copy to it at that moment, and each of them has passed its challenges at
+  3 or more separate times over at least 6 hours. A surplus copy therefore stays for at
+  least 6 hours after it appears.
+- **Relays.** A peer with no copy can pass a challenge by fetching the chunk from a real
+  holder while it is being asked. If the holder it fetches from is the challenger, the
+  challenger sees the chunk being read from its own store during the challenge and does
+  not count the answer. A holder also has a rule ready that refuses chunk fetches from
+  a peer that announces the same site whole (such a peer has no reason to fetch it);
+  it takes effect once the node's chunk server passes the requesting peer to hosting.
+  What remains: a peer can relay from a holder other than the challenger, under a
+  second key. That costs it the bandwidth of every challenge, for as long as it wants
+  to be counted. It can thin a site's honest copies over hours, down to one honest
+  holder (which cannot be talked into dropping by peers that hold nothing), but not to
+  none. A peer that really stores the site for 6 hours and then deletes it is not a
+  relay and is not caught by any of this.
+
 ## Limits
 
 | | |
@@ -152,6 +187,65 @@ the rate (`--sequential` fetches the old way, one chunk at a time, to compare).
 `--roles` without `hosting` means the node holds no copies; a gateway still serves
 sites by proxying.
 
+## Site origins
+
+A browser treats everything under one scheme, host and port as one origin. Served at
+`<gateway>/s/<site_id>/`, every site would share the gateway's origin with every other
+site and with the gateway's own APIs: one site's script could read another site's
+localStorage and call those APIs as the same origin. Two settings keep sites apart:
+
+```toml
+# ~/.config/c0mpute/config.toml
+[gateway]
+sandbox_shared_sites = true            # the default
+site_host_suffix = "sites.example.com" # unset by default
+```
+
+**`sandbox_shared_sites`** (default `true`, `C0MPUTE_SANDBOX_SHARED_SITES=0` to turn off).
+Pages (HTML, SVG, XML) under `/s/<site_id>/` are sent with
+
+```
+Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation
+Referrer-Policy: no-referrer
+```
+
+so each page runs in an origin of its own. Scripts, forms and downloads work.
+**localStorage, sessionStorage, IndexedDB, cookies and service workers do not** under
+`/s/`, and a page's `fetch()` of its own files is a cross-origin request, which is why
+every `/s/` response also carries `Access-Control-Allow-Origin: *` and
+`Cross-Origin-Resource-Policy: cross-origin` (everything under `/s/` is public and
+served without credentials). A site that needs storage or a service worker works on a
+custom domain or a per-site host, where none of these headers are sent. Turning the
+setting off restores the old behaviour, shared origin included.
+
+**`site_host_suffix`** (unset by default, `C0MPUTE_SITE_HOST_SUFFIX` overrides). With
+`site_host_suffix = "sites.example.com"`:
+
+- `https://<site_id>.sites.example.com/` serves that site at `/`, as an ordinary page
+  with its own origin.
+- On such a host nothing else is served: every other gateway route (storage API, git,
+  swarm, `/p/`, `/hosting/v1/...`, another site's `/s/...`) is not reachable there, and
+  anything but GET or HEAD answers 404.
+- A browser opening `https://<gateway>/s/<site_id>/<path>?<query>` is redirected (307,
+  cacheable for 5 minutes) to `https://<site_id>.sites.example.com/<path>?<query>`.
+  Requests that are not page navigations (podcast apps, feed readers, `curl`, the CLI,
+  the `/p/` loader reading its ciphertext) are answered under `/s/` as before, with the
+  sandbox headers above.
+
+The operator has to provide, before setting it:
+
+1. **Wildcard DNS**: `*.sites.example.com` (A/AAAA or CNAME) pointing at the gateway.
+   Site ids are 20 hex characters, one DNS label.
+2. **Wildcard TLS**: a certificate for `*.sites.example.com` on the proxy in front of
+   `:7777` (a DNS-01 ACME challenge; HTTP-01 cannot issue wildcards). The redirect
+   always goes to `https://`.
+3. **The Host header** passed through by that proxy unchanged (the same requirement as
+   custom domains).
+
+Use a suffix that serves nothing else, ideally a separate registrable domain from the
+gateway's own name (as with user content elsewhere), so that cookies set for the
+gateway's domain are never sent to site hosts.
+
 ## Custom domains
 
 1. Publish with `--domain blog.example.org` (repeatable; part of the signed record).
@@ -254,7 +348,9 @@ cannot demote anybody. The site's copies are kept up by the normal fill meanwhil
 
 This proves the peer returned the right bytes for a chunk it could not predict, within the
 timeout. It does not prove the peer keeps its own copy rather than relaying from another
-holder.
+holder; see "An announced copy counts once it is proven" above for what is done about
+relays and what is not. A challenger that sees the challenged chunk read from its own
+store while it waits for the answer signs no receipt for that challenge.
 
 ### Pricing and settlement
 

@@ -34,16 +34,79 @@ open an issue; this page is meant to be checkable against the code.
   Container workloads (video, game servers) start only pinned, well-known images, and only
   when Docker or Podman already works on the box.
 - Jobs run as child processes of the worker with CPU-thread and GPU limits.
-  **This is not a sandbox.** A job runs with your user's permissions, so a
-  bug in a workload runtime could read files your user can read. If that is
-  not acceptable for your main machine, run the node in a VM, a container or
-  on a spare box. It earns the same there.
+  **This is not a sandbox** (Blender renders are the exception, below). A job
+  runs with your user's permissions, so a bug in a workload runtime could read
+  files your user can read. If that is not acceptable for your main machine,
+  run the node in a VM, a container or on a spare box. It earns the same there.
 - The node keeps itself up to date (`C0MPUTE_NO_AUTO_UPDATE=1` turns that
   off). From v0.2.91 on, updates are verified against the same minisign key before
   the binary is swapped; a node on an older version checks only the sha256 until it
   is on v0.2.91 or later.
 - `c0mpute plugin install` still runs the plugin's own install script without a
   signature check. Only install plugins you trust.
+
+## Blender renders
+
+`render` is a default role on any machine with `blender` installed. A buyer
+sends a `.blend` scene, and a scene is more than pixels: it names files by
+path (textures, movie clips, fonts, linked libraries, caches) and can ask
+Blender to write files. The node does two things about that
+(source: [`render.rs`](../node/crates/c0mpute-core/src/render.rs)).
+
+**Scene sanitisation, always, on every OS.** Blender starts with
+`--disable-autoexec`, so no Python in the scene runs. After the file loads and
+before the render, the node runs its own fixed script (`SANITIZE_EXPR`; nothing
+from the job is written into it) that:
+
+- empties every file path that is absolute or leaves the job directory: images,
+  movie clips, sounds, fonts, volumes, Alembic/USD cache files, sequencer
+  strips and their proxies, point caches, shader nodes that read a file;
+- deletes everything that came from a linked library outside the job directory;
+- removes compositor File Output nodes, turns Open Shading Language off (a
+  compiled shader can open any image by name), and points fluid caches and
+  every scene's output at the job directory;
+- turns off the render stamps that would write this machine's hostname or the
+  scene's path on your disk into the image.
+
+Data **packed** into the `.blend` is untouched, and an honest scene renders the
+same pixels as before. A scene that needed a file it did not pack renders with
+Blender's pink "missing" texture (or the built-in font, or without that strip):
+buyers must pack their assets. If the script cannot finish, the frame is not
+rendered at all.
+
+**A sandbox, on Linux, where bubblewrap works.** At start the node tries to run
+Blender inside [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`)
+and, if that works, renders that way: no network, its own process and hostname
+namespaces, a read-only view of the system directories and of Blender's own
+install directory, an empty private `/tmp` and home directory, and the job
+directory as the only thing it can write. GPU device nodes (`/dev/dri`,
+`/dev/nvidia*`) and driver libraries stay visible so GPU renders keep working;
+a GPU job the sandbox cannot serve (the probe checks) runs outside it.
+`c0mpute` logs which one it is at start. Install it with
+`sudo apt install bubblewrap`.
+
+| | sanitisation only | with bubblewrap |
+|---|---|---|
+| Read a file the scene names by path into a frame | blocked by the script, for every kind of path listed above | blocked twice (the file is not there) |
+| Write outside the job directory when rendering | blocked by the script, for the ways listed above (output path, File Output nodes, fluid caches) | not possible |
+| What Blender does while **opening** the file, before the script runs: open a linked library by path (its data is deleted before rendering), create an empty cache directory where the scene says | **not confined** | confined |
+| A bug in Blender's file readers turned into code execution | **not confined**: runs as your user | no network, no home directory, read-only system; it can still read world-readable system files and use the GPU |
+| CPU, RAM and disk the render uses | thread limit and timeout only | the same |
+| macOS, Windows | this column | not available |
+
+The sandbox is not used when `bwrap` is missing, when unprivileged user
+namespaces are switched off (Ubuntu 24.04 does this with AppArmor unless
+bubblewrap's profile is installed), or when Blender is a snap or sits behind a
+wrapper script the sandbox cannot follow. Choose with:
+
+```toml
+[render]
+sandbox = "auto"     # default: bubblewrap when it works, else sanitisation only
+# sandbox = "require"  # serve no render (and advertise none) without the sandbox
+# sandbox = "off"      # never use bubblewrap
+```
+
+`C0MPUTE_RENDER_SANDBOX` overrides the file.
 
 ## Models it serves
 
@@ -53,6 +116,24 @@ open an issue; this page is meant to be checkable against the code.
   `infernet house-models off`, or `--no-house-models` at install.
 - **Uncensored house models are off unless you opt in** (`--uncensored-models`
   at install, or `infernet house-models uncensored on`).
+- **Text fine-tunes** (`c0mpute infernet text serve`, opt-in) download the
+  buyer's base model from Hugging Face and load it. A worker does that only
+  for the models you list; a job naming another gets no bid:
+
+  ```toml
+  [text]
+  # The default: the two small models c0mpute's own commands and docs use.
+  base_models = ["HuggingFaceTB/SmolLM2-135M-Instruct", "Qwen/Qwen2.5-0.5B-Instruct"]
+  # "org/*" allows every model of one organisation, "*" any model.
+  min_free_gb = 0      # free disk kept; 0 = the smaller of 20 GiB and 10% of the disk
+  ```
+
+  A job config may set only the keys c0mpute's clients send (`name`, `kind`,
+  `base_model`, `system_prompt`, `limits.timeout_s` and the hyperparameters
+  `lr`, `batch_size`, `epochs`, `seq_len`, `lora_r`, `max_steps`, `seed`, each
+  within a fixed range); anything else is refused before the trainer sees it.
+  The downloaded models live in Infernet's Hugging Face cache, which c0mpute
+  does not size or clean.
 
 ## Content policy (images and video)
 

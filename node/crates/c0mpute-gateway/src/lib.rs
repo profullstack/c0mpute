@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod host_guard;
+pub mod site_host;
 pub mod storage_api;
 
 use std::net::SocketAddr;
@@ -59,6 +60,9 @@ pub async fn serve_with_storage(
 pub async fn serve_router(app: Router, addr: SocketAddr) -> Result<()> {
     info!(%addr, "gateway listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // On a per-site host nothing but that site is reachable, whatever
+    // routes were merged into `app` (a no-op until a suffix is configured).
+    let app = site_host::isolate(app);
     // Peer addresses reach handlers as ConnectInfo<SocketAddr> (access log).
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())

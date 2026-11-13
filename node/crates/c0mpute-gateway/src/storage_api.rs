@@ -29,7 +29,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use c0mpute_proto::Hash;
 use c0mpute_store::{ObjectManifest, Storage, Tier};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -430,23 +430,38 @@ async fn get_object(
             )
                 .into_response());
         };
-        let bytes = state
-            .storage
-            .get_range_with(&manifest, offset, len)
-            .await
-            .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
-        let end = offset.saturating_add(bytes.len() as u64).saturating_sub(1);
+        // The length and the range are promised in the headers before the
+        // body is read, so the blocks must add up the way the manifest says.
+        if !manifest.tiles() {
+            return Err(ApiError::Internal(format!(
+                "manifest of {object_hash} does not describe {total} bytes block by block"
+            )));
+        }
+        // Streamed block by block, like a whole object: `bytes=0-` on a
+        // multi-GiB object used to be assembled in memory first. Only the
+        // first block is read before answering, so an object that cannot be
+        // read is an error rather than a 206 that stops short.
+        let mut stream = state.storage.read_range_stream(manifest, offset, len);
+        let first = match stream.next().await {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(e)) => return Err(ApiError::Internal(format!("{e:#}"))),
+            None => return Err(ApiError::Internal(format!("no block of {object_hash} covers the range"))),
+        };
+        // `parse_range` never returns an empty range, so `len - 1` is safe.
+        let end = offset.saturating_add(len.saturating_sub(1));
+        let body = futures::stream::once(async move { Ok(first) }).chain(stream);
         return Ok((
             StatusCode::PARTIAL_CONTENT,
             [
                 (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                (header::CONTENT_LENGTH, len.to_string()),
                 (
                     header::CONTENT_RANGE,
                     format!("bytes {offset}-{end}/{total}"),
                 ),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
             ],
-            bytes,
+            Body::from_stream(body),
         )
             .into_response());
     }
@@ -651,6 +666,113 @@ mod tests {
         assert_eq!(parse_range("bytes=-0", 1000), None);
         assert_eq!(parse_range("bytes=-5", 0), None);
         assert_eq!(parse_range("bytes=0-", 0), None);
+    }
+
+    async fn api() -> (Router, Storage) {
+        let dir = std::env::temp_dir().join(format!(
+            "c0mpute-storage-api-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::new(c0mpute_store::ChunkStore::open(&dir).await.unwrap().with_min_free_bytes(0));
+        (router(StorageApiState::local(storage.clone())), storage)
+    }
+
+    async fn get_with_range(app: &Router, hash: &Hash, range: Option<&str>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder().uri(format!("/storage/v1/objects/{}", hash.to_hex()));
+        if let Some(r) = range {
+            req = req.header(header::RANGE, r);
+        }
+        let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, headers, body.to_vec())
+    }
+
+    fn varied(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state & 0xff) as u8
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_ranged_read_streams_the_right_bytes_with_its_length_and_range() {
+        let (app, storage) = api().await;
+        // Two blocks and a bit.
+        let bs = c0mpute_store::DEFAULT_BLOCK_SIZE as usize;
+        let data = varied(bs * 2 + 321);
+        let m = storage.put(&data).await.unwrap();
+        let total = data.len();
+        let h = |headers: &HeaderMap, name: header::HeaderName| {
+            headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+        };
+        // Across a block boundary.
+        let (from, to) = (bs - 10, bs + 9);
+        let (status, headers, body) = get_with_range(&app, &m.object_hash, Some(&format!("bytes={from}-{to}"))).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body, &data[from..=to]);
+        assert_eq!(h(&headers, header::CONTENT_LENGTH), "20");
+        assert_eq!(h(&headers, header::CONTENT_RANGE), format!("bytes {from}-{to}/{total}"));
+        // `bytes=0-`: the whole object as a range, block by block.
+        let (status, headers, body) = get_with_range(&app, &m.object_hash, Some("bytes=0-")).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body, data);
+        assert_eq!(h(&headers, header::CONTENT_LENGTH), total.to_string());
+        assert_eq!(h(&headers, header::CONTENT_RANGE), format!("bytes 0-{}/{total}", total - 1));
+        // A suffix, and an end past the object (clamped).
+        let (_, headers, body) = get_with_range(&app, &m.object_hash, Some("bytes=-5")).await;
+        assert_eq!(body, &data[total - 5..]);
+        assert_eq!(h(&headers, header::CONTENT_RANGE), format!("bytes {}-{}/{total}", total - 5, total - 1));
+        let (_, headers, body) = get_with_range(&app, &m.object_hash, Some(&format!("bytes={}-99999999", total - 3))).await;
+        assert_eq!(body, &data[total - 3..]);
+        assert_eq!(h(&headers, header::CONTENT_LENGTH), "3");
+        // Past the end: 416 with the size.
+        let (status, headers, _) = get_with_range(&app, &m.object_hash, Some(&format!("bytes={total}-"))).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(h(&headers, header::CONTENT_RANGE), format!("bytes */{total}"));
+        // No Range: 200 with everything.
+        let (status, headers, body) = get_with_range(&app, &m.object_hash, None).await;
+        assert_eq!((status, body.len()), (StatusCode::OK, total));
+        assert_eq!(h(&headers, header::CONTENT_LENGTH), total.to_string());
+    }
+
+    #[tokio::test]
+    async fn a_range_of_an_empty_object_is_unsatisfiable_and_the_object_itself_is_an_empty_200() {
+        let (app, storage) = api().await;
+        let m = storage.put(b"").await.unwrap();
+        // No byte of it exists, so no range of it does (RFC 9110, 14.1.2):
+        // 416, not a range whose last byte would be offset minus one.
+        for range in ["bytes=-5", "bytes=0-", "bytes=0-0", "bytes=-0"] {
+            let (status, headers, body) = get_with_range(&app, &m.object_hash, Some(range)).await;
+            assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+            assert_eq!(headers.get(header::CONTENT_RANGE).unwrap(), "bytes */0", "{range}");
+            assert!(body.is_empty());
+        }
+        let (status, headers, body) = get_with_range(&app, &m.object_hash, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "0");
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_range_of_a_manifest_whose_blocks_do_not_add_up_is_refused_before_any_header() {
+        let (app, storage) = api().await;
+        let mut m = storage.put(&varied(5000)).await.unwrap();
+        // Claims more bytes than its blocks hold.
+        m.original_len = 9000;
+        storage.write_manifest(&m).await.unwrap();
+        let (status, _, _) = get_with_range(&app, &m.object_hash, Some("bytes=6000-6999")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
