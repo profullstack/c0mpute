@@ -843,8 +843,29 @@ impl Supervisor {
                 app = app.layer(axum::middleware::from_fn_with_state(log, crate::threatcrush::log));
             }
             tokio::spawn(async move {
-                if let Err(e) = c0mpute_gateway::serve_router(app, bind).await {
-                    tracing::error!(err = %e, "gateway server exited");
+                // A listener failure used to log one line and leave a
+                // healthy-looking worker with no HTTP for days (the port still
+                // held by the process being replaced, a stray instance). Keep
+                // retrying so the gateway comes back as soon as the port is
+                // free. The worker is not exited over it: a node sharing a
+                // box with another gateway would otherwise take its own job
+                // runners down every few minutes.
+                let mut failures = 0u32;
+                loop {
+                    let started = std::time::Instant::now();
+                    let result = c0mpute_gateway::serve_router(app.clone(), bind).await;
+                    if started.elapsed() >= GATEWAY_HEALTHY_AFTER {
+                        failures = 0;
+                    }
+                    let err = result.err().map(|e| format!("{e:#}")).unwrap_or_else(|| "server stopped".into());
+                    let delay = gateway_retry_delay(failures);
+                    if failures < GATEWAY_LOUD_AFTER {
+                        tracing::warn!(%bind, err = %err, retry_secs = delay.as_secs(), "gateway listener failed; retrying");
+                    } else {
+                        tracing::error!(%bind, err = %err, retry_secs = delay.as_secs(), "gateway still cannot listen; this node serves no HTTP until the port is free");
+                    }
+                    tokio::time::sleep(delay).await;
+                    failures = failures.saturating_add(1);
                 }
             });
         }
@@ -964,40 +985,70 @@ impl Supervisor {
         let ledger = std::sync::Arc::new(crate::payments::Ledger::open(dir.join("ledger.json")));
         let cursor_path = dir.join("settled-until");
         tokio::spawn(async move {
+            use crate::hosting::settle;
+            /// Most windows settled per wake (catching up after downtime).
+            const MAX_WINDOWS: usize = 32;
+            let save = |until: u64| crate::config::write_atomic(&cursor_path, until.to_string().as_bytes());
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(every)).await;
+                // Windows are fixed periods of `every` (see settle::windows),
+                // so waking more often than that only shortens the wait
+                // between a period ending and its settlement.
+                tokio::time::sleep(std::time::Duration::from_secs(every.min(15 * 60))).await;
                 let now = crate::payments::now_secs();
-                let from = std::fs::read_to_string(&cursor_path)
+                let cursor = std::fs::read_to_string(&cursor_path)
                     .ok()
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .filter(|f| *f < now)
-                    .unwrap_or(now.saturating_sub(every));
-                match &rail {
-                    Some(rail) => {
-                        let (dues, outcomes) = hosting
-                            .settle_round(rail.as_ref(), &ledger, from, now, payments.round_cap())
-                            .await;
-                        for (t, o) in &outcomes {
-                            tracing::info!(key = %t.key, amount = %crate::payments::format_usd(t.amount), wallet = %t.payee.wallet, outcome = ?o, "hosting settlement");
-                        }
-                        tracing::debug!(dues = dues.len(), "hosting settlement round");
-                        // Always move on: windows never overlap, so a key is
-                        // never paid twice. A failed transfer is logged above
-                        // and not retried (an underpayment, never a double one).
-                        let _ = std::fs::write(&cursor_path, now.to_string());
+                    .and_then(|s| s.trim().parse::<u64>().ok());
+                let start = settle::window_start(cursor, now, every);
+                if cursor != Some(start) {
+                    // First run (or a cursor from the future): the starting
+                    // point has to be on disk before anything is settled
+                    // from it, or the next wake would compute another one.
+                    if let Err(e) = save(start) {
+                        tracing::error!(err = %e, file = %cursor_path.display(), "hosting settlement: cannot write the cursor; nothing settled this round");
+                        continue;
                     }
-                    None => {
-                        for d in hosting.dues(from, now).await.into_iter().filter(|d| d.amount > 0) {
-                            tracing::info!(
-                                site = %d.site_id,
-                                holder = %d.holder,
-                                amount = %crate::payments::format_usd(d.amount),
-                                passed = d.passed,
-                                challenged = d.challenged,
-                                "hosting settlement (dry run: [payments] is off, nothing paid)"
-                            );
+                }
+                let mut budget = payments.round_cap();
+                for (from, to) in settle::windows(start, now, every, MAX_WINDOWS) {
+                    match &rail {
+                        Some(rail) => {
+                            let (dues, outcomes) = hosting.settle_round(rail.as_ref(), &ledger, from, to, budget).await;
+                            for (t, o) in &outcomes {
+                                tracing::info!(key = %t.key, amount = %crate::payments::format_usd(t.amount), wallet = %t.payee.wallet, outcome = ?o, "hosting settlement");
+                                if matches!(o, crate::payments::Outcome::Paid(_)) {
+                                    budget = budget.saturating_sub(t.amount);
+                                }
+                            }
+                            tracing::debug!(dues = dues.len(), from, to, "hosting settlement round");
+                            if ledger.usable().is_err() || ledger.stalled() {
+                                // The ledger could not vouch for this window:
+                                // leave the cursor, the same window (same
+                                // keys) is settled again once it can.
+                                tracing::error!(from, to, "hosting settlement: payments ledger unusable; window not settled, will retry");
+                                break;
+                            }
                         }
-                        let _ = std::fs::write(&cursor_path, now.to_string());
+                        None => {
+                            for d in hosting.dues(from, to).await.into_iter().filter(|d| d.amount > 0) {
+                                tracing::info!(
+                                    site = %d.site_id,
+                                    holder = %d.holder,
+                                    amount = %crate::payments::format_usd(d.amount),
+                                    passed = d.passed,
+                                    challenged = d.challenged,
+                                    "hosting settlement (dry run: [payments] is off, nothing paid)"
+                                );
+                            }
+                        }
+                    }
+                    // Move on past this window. Its keys are in the ledger,
+                    // so a crash before this line pays nothing twice: the
+                    // retry builds the same window and the same keys. A
+                    // transfer the rail refused is logged above and not
+                    // retried (an underpayment, never a double one).
+                    if let Err(e) = save(to) {
+                        tracing::error!(err = %e, file = %cursor_path.display(), "hosting settlement: cannot write the cursor; stopping this round");
+                        break;
                     }
                 }
             }
@@ -1163,9 +1214,29 @@ pub(crate) fn with_workload_tags(mut tags: Vec<String>, workload: &[&str]) -> Ve
     tags
 }
 
+/// A listener that served this long was healthy: a later failure starts the
+/// retry count over.
+const GATEWAY_HEALTHY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// After this many failures in a row the retry log line becomes an error.
+const GATEWAY_LOUD_AFTER: u32 = 6;
+
+/// How long to wait before listener attempt `failures + 1`: 1, 2, 4, 8, 16,
+/// 32 s, then every 60 s for as long as it takes.
+fn gateway_retry_delay(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << failures.min(6)).min(60))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_listener_retries_with_backoff_and_never_gives_up() {
+        let delays: Vec<u64> = (0..8).map(|n| gateway_retry_delay(n).as_secs()).collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(gateway_retry_delay(u32::MAX).as_secs(), 60);
+    }
 
     #[test]
     fn workload_tags_are_added_once() {

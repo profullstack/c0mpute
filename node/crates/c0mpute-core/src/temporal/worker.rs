@@ -80,7 +80,8 @@ impl ModelStore {
 // ── training ────────────────────────────────────────────────────────────
 
 async fn download(url: &str, dst: &Path) -> Result<()> {
-    let resp = reqwest::get(url).await?.error_for_status()?;
+    let (client, url) = crate::net_guard::job_client(url, None).await?;
+    let resp = client.get(url).send().await?.error_for_status()?;
     if resp.content_length().is_some_and(|n| n > MAX_DATASET) {
         bail!("dataset larger than {} MiB", MAX_DATASET >> 20);
     }
@@ -132,13 +133,13 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TrainSpec) -> Res
 }
 
 async fn upload(base: &str, model_dir: &Path) -> Result<()> {
-    let c = reqwest::Client::new();
     for f in ARTIFACTS {
         let p = model_dir.join(f);
         if !p.exists() {
             continue;
         }
-        c.put(format!("{base}/{f}")).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
+        let (c, url) = crate::net_guard::job_client(&format!("{base}/{f}"), None).await?;
+        c.put(url).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
     }
     Ok(())
 }
@@ -170,7 +171,7 @@ pub fn spawn_train_runner(
                 let (dir, hash) = match done.get(&key) {
                     Some(hit) => hit.clone(),
                     None => {
-                        let job_dir = cache_root.join("temporal").join("jobs").join(&accept.job_id);
+                        let job_dir = crate::runner::job_subdir(&cache_root.join("temporal").join("jobs"), &accept.job_id)?;
                         let r = run_train(&infernet, &job_dir, &spec).await?;
                         done.insert(key, r.clone());
                         r

@@ -47,6 +47,16 @@ use crate::runner::{AcceptedJob, WorkerLoad};
 /// Reject job offers older than this — replay protection + freshness
 /// guard.
 pub const MAX_OFFER_AGE: Duration = Duration::from_secs(5 * 60);
+/// How far ahead of our clock a peer's timestamp may be. Past this it is not
+/// skew: a far-future time would never go stale.
+pub const MAX_CLOCK_SKEW: Duration = Duration::from_secs(2 * 60);
+
+/// Whether an offer published at `published_at_ms` (the buyer's clock) is
+/// neither too old nor dated in the future.
+pub(crate) fn offer_is_fresh(published_at_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(published_at_ms) <= MAX_OFFER_AGE.as_millis() as u64
+        && published_at_ms.saturating_sub(now_ms) <= MAX_CLOCK_SKEW.as_millis() as u64
+}
 
 /// Open bids remembered for learning the clearing price; reset when full
 /// (auctions that never accept would otherwise pile up).
@@ -190,6 +200,12 @@ pub fn run_worker_subscriber_with_load(
                 if offer.workload_type != workload_type {
                     continue;
                 }
+                // A job id is a UUID, as every buyer mints it. Runners build
+                // paths and container names from it, so nothing else gets a bid.
+                if !crate::runner::valid_job_id(&offer.job_id) {
+                    debug!(buyer = %offer.buyer_peer_id, "dispatch: offer's job id is not a UUID, not bidding");
+                    continue;
+                }
                 // Plaintext offers are served for one release more (DIP-0032).
                 if offer.e2e.is_none() && !crate::job_e2e::serves_plaintext_offers() {
                     debug!(job_id = %offer.job_id, "dispatch: plaintext offer refused (e2e only)");
@@ -308,6 +324,9 @@ pub fn run_worker_subscriber_with_load(
                 if accept.workload_type != workload_type {
                     continue;
                 }
+                if !crate::runner::valid_job_id(&accept.job_id) {
+                    continue;
+                }
                 // Only the buyer that published the offer may accept it.
                 // Gossipsub runs Signed + Strict, so `msg.source` is the
                 // authenticated publisher and cannot be spoofed.
@@ -351,6 +370,10 @@ pub fn run_worker_subscriber_with_load(
                         winner = %accept.winning_bidder_peer_id,
                         "dispatch: accept for someone else"
                     );
+                    continue;
+                }
+                if !bid.pays(&accept) {
+                    warn!(job_id = %accept.job_id, bid = bid.price, agreed = accept.agreed_price_usd, "dispatch: discarding accept that pays less than our bid");
                     continue;
                 }
                 let Some(bid) = open_bids.remove(&accept.job_id) else { continue };
@@ -454,6 +477,12 @@ impl OpenBid {
             return Err("agreed price outside the offer cap");
         }
         Ok(())
+    }
+
+    /// Whether an accept that names us pays what we asked. A buyer may pay
+    /// more than the bid, never less: the bid is the price we agreed to.
+    pub(crate) fn pays(&self, accept: &JobAccept) -> bool {
+        accept.agreed_price_usd + 1e-9 >= self.price
     }
 }
 
@@ -561,8 +590,9 @@ pub(crate) fn reserve_until(offer: &JobOffer, now_ms: u64, expires_at_ms: u64) -
         .unwrap_or(DEFAULT_OFFER_WINDOW_MS)
         .min(BID_TTL.as_millis() as u64);
     // The window runs from when the buyer published, not from when we saw it.
-    let window_end = offer.published_at_ms.max(now_ms.saturating_sub(window)) + window;
-    (window_end + RESERVE_GRACE_MS).min(expires_at_ms.saturating_add(ACCEPT_GRACE_MS))
+    // A publish time ahead of our clock (the buyer's word) never stretches it.
+    let window_end = offer.published_at_ms.min(now_ms).max(now_ms.saturating_sub(window)).saturating_add(window);
+    window_end.saturating_add(RESERVE_GRACE_MS).min(expires_at_ms.saturating_add(ACCEPT_GRACE_MS))
 }
 
 /// Send a bid to the buyer over both paths, in the background so the offer
@@ -657,8 +687,8 @@ async fn handle_offer(
     bid_load: f32,
 ) -> Option<(f64, u64, Vec<u8>, Option<crate::job_e2e::WorkerSession>)> {
     let now_ms = unix_ms();
-    if now_ms.saturating_sub(offer.published_at_ms) > MAX_OFFER_AGE.as_millis() as u64 {
-        debug!(job_id = %offer.job_id, "dispatch: ignoring stale offer");
+    if !offer_is_fresh(offer.published_at_ms, now_ms) {
+        debug!(job_id = %offer.job_id, "dispatch: ignoring stale or future-dated offer");
         return None;
     }
     if offer.deadline_unix_ms < now_ms {
@@ -898,6 +928,19 @@ mod tests {
     }
 
     #[test]
+    fn accept_below_our_bid_does_not_pay() {
+        let mut a = accept();
+        assert!(bid().pays(&a));
+        a.agreed_price_usd = 0.9;
+        assert!(bid().pays(&a), "more than the bid is fine");
+        a.agreed_price_usd = 0.0;
+        assert!(bid().matches(&a, NOW).is_ok(), "within the cap");
+        assert!(!bid().pays(&a));
+        a.agreed_price_usd = 0.59;
+        assert!(!bid().pays(&a));
+    }
+
+    #[test]
     fn accept_from_another_buyer_is_rejected() {
         let mut a = accept();
         a.buyer_peer_id = "mallory".into();
@@ -978,6 +1021,23 @@ mod tests {
         assert!(b.matches(&accept(), b.reserve_until_ms + 1).is_ok());
     }
 
+    #[test]
+    fn a_future_dated_offer_is_not_fresh_and_cannot_stretch_the_reserve() {
+        let skew = MAX_CLOCK_SKEW.as_millis() as u64;
+        assert!(offer_is_fresh(NOW, NOW));
+        assert!(offer_is_fresh(NOW + skew, NOW), "honest skew");
+        assert!(!offer_is_fresh(NOW + skew + 1, NOW));
+        assert!(!offer_is_fresh(u64::MAX, NOW));
+        assert!(!offer_is_fresh(0, NOW + MAX_OFFER_AGE.as_millis() as u64 + 1));
+        // No overflow, and the reserve ends where an offer published now would.
+        let honest = reserve_until(&offer_at(NOW, None), NOW, NOW + 60_000);
+        assert_eq!(reserve_until(&offer_at(u64::MAX, None), NOW, NOW + 60_000), honest);
+        assert_eq!(
+            reserve_until(&offer_at(NOW, Some(u64::MAX)), NOW, u64::MAX),
+            reserve_until(&offer_at(NOW, Some(BID_TTL.as_millis() as u64)), NOW, u64::MAX)
+        );
+    }
+
     fn offer_at(published_at_ms: u64, window: Option<u64>) -> JobOffer {
         JobOffer {
             job_id: "j".into(),
@@ -1049,15 +1109,16 @@ mod tests {
             reserve_until(&offer_at(NOW, None), NOW, expires),
             NOW + DEFAULT_OFFER_WINDOW_MS + RESERVE_GRACE_MS
         );
-        // An absurd window or a future publish time never reserves past the
-        // bid's own honour period.
+        // An absurd window never reserves past the bid's own honour period.
         assert_eq!(
             reserve_until(&offer_at(NOW, Some(u64::MAX)), NOW, expires),
             expires + ACCEPT_GRACE_MS
         );
+        // A future publish time counts as published now: the buyer's clock
+        // does not stretch the window.
         assert_eq!(
             reserve_until(&offer_at(u64::MAX / 2, Some(4_000)), NOW, expires),
-            expires + ACCEPT_GRACE_MS
+            NOW + 4_000 + RESERVE_GRACE_MS
         );
     }
 

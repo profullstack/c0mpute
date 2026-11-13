@@ -12,6 +12,7 @@ import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
 import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
 import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
+import { createMediaStore, type MediaKind, type MediaStore } from "./media-owners";
 
 // ── store ────────────────────────────────────────────────────────────────────
 let client: Database | null = null;
@@ -19,6 +20,16 @@ function db(): Database {
   const url = env("SQLITE_CLOUD_URL");
   if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
   return (client ??= new Database(url));
+}
+/**
+ * Whether running a statement a second time is harmless. A plain INSERT is
+ * not: if the first try reached the database before the socket died, the
+ * retry is a duplicate row or a primary-key error for a write that worked.
+ */
+export function safeToRetry(q: string): boolean {
+  const s = q.trimStart().slice(0, 40).toUpperCase();
+  if (!s.startsWith("INSERT")) return true;
+  return /^INSERT\s+OR\s+(REPLACE|IGNORE)\b/.test(s) || /\bON\s+CONFLICT\b/i.test(q);
 }
 async function query(q: string, params: unknown[] = []) {
   try {
@@ -29,6 +40,7 @@ async function query(q: string, params: unknown[] = []) {
       (client as Database & { close?: () => void })?.close?.();
     } catch {}
     client = null;
+    if (!safeToRetry(q)) throw e;
     return await db().sql({ query: q, parameters: params as never[] });
   }
 }
@@ -65,6 +77,40 @@ export const convoStore = () =>
 export const modelRouter = () =>
   sharedRouter({ pool: modelPool(infernet), store: sqlStatsStore(cloudSql), call: infernetCall(infernet) });
 
+let _mediaStore: MediaStore | null = null;
+/**
+ * Which account started which image/video/song/album/promo job. Jobs older
+ * than this record stay reachable unless C0MPUTE_MEDIA_STRICT_OWNERS=1.
+ */
+export const mediaStore = () => (_mediaStore ??= createMediaStore(cloudSql, { strict: env("C0MPUTE_MEDIA_STRICT_OWNERS") === "1" }));
+
+// Ids this process already recorded: an album poll names its tracks every few
+// seconds, and each needs writing only once.
+const recordedJobs = new Set<string>();
+
+/** Remember who started a job. Never fails the request that started it. */
+export async function recordJob(userId: string, kind: MediaKind, jobId: unknown): Promise<void> {
+  if (typeof jobId !== "string" || recordedJobs.has(jobId)) return;
+  try {
+    await mediaStore().record(userId, kind, jobId);
+    if (recordedJobs.size >= 20_000) recordedJobs.clear();
+    recordedJobs.add(jobId);
+  } catch (e) {
+    console.error(`media owner record failed (${kind})`, e);
+  }
+}
+
+/** May this account read the job's result? A job recorded for someone else: never. */
+export async function ownsJob(userId: string, jobId: string): Promise<boolean> {
+  try {
+    return await mediaStore().allowed(userId, jobId);
+  } catch (e) {
+    // The owner could not be read: refuse rather than serve someone else's result.
+    console.error("media owner lookup failed", e);
+    return false;
+  }
+}
+
 let _pluginStore: PluginStoreDb | null = null;
 /** Chat plugins (remote MCP servers) per account, tokens sealed with C0MPUTE_PLUGIN_KEY. */
 export const pluginStore = () => (_pluginStore ??= createPluginStore(cloudSql, { key: pluginKey(env("C0MPUTE_PLUGIN_KEY")) }));
@@ -86,15 +132,27 @@ function cookie(req: Request, name: string): string | null {
   return null;
 }
 
-/** API key (Authorization: Bearer c0k_...) or the browser session cookie. */
-export async function currentUser(req: Request): Promise<(User & { token_kind: string }) | null> {
+/**
+ * API key (Authorization: Bearer c0k_...) or the browser session cookie.
+ *
+ * A key an MCP client got through OAuth (token_kind "oauth") carries the "mcp"
+ * scope only: it signs in nowhere but /api/mcp, which passes `{ oauth: true }`.
+ * Every other route sees it as signed out, so this is the one place the scope
+ * is enforced.
+ */
+export async function currentUser(req: Request, opts: { oauth?: boolean } = {}): Promise<(User & { token_kind: string }) | null> {
   const token = bearer(req) ?? cookie(req, SESSION_COOKIE);
   try {
-    return await store().userForToken(token);
+    return scopedUser(await store().userForToken(token), opts);
   } catch (e) {
     console.error("chat auth lookup failed", e);
     return null;
   }
+}
+
+/** The "mcp" scope: an OAuth-issued key is a user only where `oauth` is allowed. */
+export function scopedUser<T extends { token_kind: string }>(user: T | null, opts: { oauth?: boolean } = {}): T | null {
+  return user?.token_kind === "oauth" && !opts.oauth ? null : user;
 }
 
 export function sessionToken(req: Request) {
@@ -106,7 +164,17 @@ export function sameOrigin(req: Request): boolean {
   if (bearer(req)) return true;
   const origin = req.headers.get("origin");
   if (!origin) return req.headers.get("sec-fetch-site") === "same-origin";
-  return origin === siteUrl() || origin === new URL(req.url).origin;
+  return ownOrigin(req);
+}
+
+/** The request's Origin header is this site (a form or fetch from our own pages). */
+export function ownOrigin(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return false;
+  if (origin === siteUrl()) return true;
+  // Behind the proxy `req.url` can be an internal origin (http://localhost:3000),
+  // which is not ours to trust in production; it is what a local dev server is.
+  return env("NODE_ENV") !== "production" && origin === new URL(req.url).origin;
 }
 
 export const siteUrl = () => (env("C0MPUTE_SITE_URL") || "https://c0mpute.com").replace(/\/$/, "");
@@ -210,6 +278,18 @@ export async function infernet(path: string, init: RequestInit = {}, opts: { sub
 }
 
 /**
+ * A timeout on the wait for a response's headers only. `AbortSignal.timeout`
+ * stays attached to the body, so it cuts a large download (an album zip, a
+ * video to a slow client) mid-transfer; call `clear()` once the headers are in.
+ */
+export function headerTimeout(ms: number) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(new DOMException("timed out waiting for the network", "TimeoutError")), ms);
+  (t as { unref?: () => void }).unref?.();
+  return { signal: c.signal, clear: () => clearTimeout(t) };
+}
+
+/**
  * An upstream bound to one signed-in person: every call it makes is billed to
  * that person's compute balance (topped up, or what their nodes earned).
  *
@@ -275,12 +355,30 @@ export async function balanceFor(subject: string | null | undefined) {
 
 // ── per-user rate limit (one container, so memory is the source of truth) ────
 const windows = new Map<string, { start: number; n: number }>();
-export function rateLimit(userId: string, perHour?: number): { ok: boolean; retryAfter: number } {
+/** Keys held at once; past it the expired ones go, then the oldest. */
+export const RATE_WINDOWS_MAX = 50_000;
+let lastSweep = 0;
+function sweepWindows(t: number, hour: number) {
+  if (windows.size < RATE_WINDOWS_MAX && t - lastSweep < 10 * 60_000) return;
+  lastSweep = t;
+  for (const [k, w] of windows) if (t - w.start >= hour) windows.delete(k);
+  // Still full of live windows (someone rotating addresses): drop the oldest.
+  // A Map iterates in insertion order, and a window is re-inserted when it restarts.
+  for (const k of windows.keys()) {
+    if (windows.size < RATE_WINDOWS_MAX) break;
+    windows.delete(k);
+  }
+}
+/** Tests: how many windows are held. */
+export const rateWindows = () => windows.size;
+export function rateLimit(userId: string, perHour?: number, at = Date.now()): { ok: boolean; retryAfter: number } {
   const max = perHour ?? (Number(env("C0MPUTE_CHAT_RPH")) > 0 ? Number(env("C0MPUTE_CHAT_RPH")) : 120);
   const hour = 3_600_000;
-  const t = Date.now();
+  const t = at;
+  sweepWindows(t, hour);
   const w = windows.get(userId);
   if (!w || t - w.start >= hour) {
+    windows.delete(userId);
     windows.set(userId, { start: t, n: 1 });
     return { ok: true, retryAfter: 0 };
   }
@@ -289,7 +387,21 @@ export function rateLimit(userId: string, perHour?: number): { ok: boolean; retr
   return { ok: true, retryAfter: 0 };
 }
 
-/** Client IP as nginx on dev2 forwards it. */
+/**
+ * Client IP as nginx on dev2 forwards it, as a rate-limit bucket: an IPv6
+ * address is cut to its /64, since one subscriber holds the whole /64 and
+ * could otherwise use a fresh address per request.
+ */
 export function clientIp(req: Request): string {
-  return req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for")?.split(",").pop()?.trim() || "unknown";
+  return ipBucket(req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for")?.split(",").pop()?.trim() || "unknown");
+}
+
+export function ipBucket(ip: string): string {
+  if (!ip.includes(":") || ip.includes(".")) return ip; // IPv4, IPv4-mapped, or not an address
+  const [head, tail = ""] = ip.toLowerCase().split("%")[0].split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  const full = ip.includes("::") ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t] : h;
+  if (full.length !== 8) return ip;
+  return `${full.slice(0, 4).map((x) => x.replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }

@@ -905,7 +905,7 @@ fn payload_key(job_id: &str, winner: &PeerId) -> String {
 }
 
 /// Removes a job's sealed spec when the auction ends.
-pub struct PayloadGuard(String);
+pub struct PayloadGuard(String, #[allow(dead_code)] crate::pieces::PushSender);
 
 impl Drop for PayloadGuard {
     fn drop(&mut self) {
@@ -923,8 +923,10 @@ pub fn hold_payload(
     sealed: Vec<u8>,
 ) -> PayloadGuard {
     net.register_rpc(PAYLOAD_SERVICE, Arc::new(PayloadHandler));
-    // The winner may not be dialable; let it push its result back.
+    // The winner may not be dialable; let it (and only it) push its result
+    // back, for as long as this award is held.
     crate::pieces::serve_result_push(net);
+    let pusher = crate::pieces::expect_result_push(winner);
     if let Ok(mut p) = payloads().lock() {
         let now = Instant::now();
         p.retain(|_, v| v.until > now);
@@ -937,7 +939,7 @@ pub fn hold_payload(
             },
         );
     }
-    PayloadGuard(payload_key(job_id, &winner))
+    PayloadGuard(payload_key(job_id, &winner), pusher)
 }
 
 /// Serves sealed specs, each only to the peer that won it. The caller's peer

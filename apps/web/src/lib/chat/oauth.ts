@@ -9,7 +9,7 @@
 // can see and revoke it with their other keys.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { Sql } from "./store";
+import { CLAIMS_SCHEMA, claimOnce, type Sql } from "./store";
 
 export const CLIENT_PREFIX = "c0c_";
 export const CODE_PREFIX = "c0a_";
@@ -33,6 +33,7 @@ const SCHEMA = [
      scope        TEXT,
      expires_at   TEXT NOT NULL
    )`,
+  CLAIMS_SCHEMA,
 ];
 
 export type OAuthClient = { client_id: string; name: string; redirect_uris: string[]; created_at: string };
@@ -161,15 +162,16 @@ export function createOAuthStore(sql: Sql) {
     },
 
     /**
-     * Redeem a code once. It is deleted before any check, so a replayed or
-     * mismatched code can never be tried twice.
+     * Redeem a code once. It is claimed (atomically) and deleted before any
+     * check, so a replayed or mismatched code can never be tried twice, and
+     * two exchanges racing each other cannot both mint a key.
      */
     async redeemCode(code: unknown, p: { client_id: unknown; redirect_uri: unknown; code_verifier: unknown }) {
       if (typeof code !== "string" || !code.startsWith(CODE_PREFIX)) throw new OAuthError("invalid_grant", "unknown code");
       await init();
       const h = sha256hex(code);
       const r = (await sql.all(`SELECT * FROM oauth_codes WHERE code_hash = ?`, [h]))[0];
-      if (!r) throw new OAuthError("invalid_grant", "unknown or used code");
+      if (!r || !(await claimOnce(sql, `oauth_code:${h}`))) throw new OAuthError("invalid_grant", "unknown or used code");
       await sql.run(`DELETE FROM oauth_codes WHERE code_hash = ?`, [h]);
       if (String(r.expires_at) < now()) throw new OAuthError("invalid_grant", "code expired");
       if (p.client_id !== r.client_id) throw new OAuthError("invalid_grant", "code was issued to another client");

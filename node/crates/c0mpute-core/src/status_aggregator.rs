@@ -184,6 +184,11 @@ struct Completed {
     latency_s: Option<f64>,
 }
 
+/// Jobs tracked at once. Accepts and receipts come from any peer on the
+/// topic, so both tables are bounded.
+const MAX_IN_FLIGHT: usize = 20_000;
+const MAX_COMPLETED: usize = 200_000;
+
 /// In-memory job state, correlated by `job_id`.
 #[derive(Default)]
 struct JobState {
@@ -194,11 +199,18 @@ struct JobState {
 impl JobState {
     /// A buyer awarded a job — start tracking it as in-flight.
     async fn on_accept(&self, a: JobAccept) {
-        self.in_flight.write().await.insert(
+        let mut in_flight = self.in_flight.write().await;
+        // Anyone can gossip an accept: a full table takes no new jobs until
+        // eviction makes room.
+        if in_flight.len() >= MAX_IN_FLIGHT && !in_flight.contains_key(&a.job_id) {
+            return;
+        }
+        in_flight.insert(
             a.job_id,
             InFlight {
                 workload_type: a.workload_type,
-                accepted_at_ms: a.published_at_ms,
+                // Never ahead of our clock, or it would never age out.
+                accepted_at_ms: a.published_at_ms.min(now_ms()),
             },
         );
     }
@@ -219,15 +231,22 @@ impl JobState {
         // can't attribute a latency or an exact workload type.
         let latency_s = started.as_ref().and_then(|inf| {
             r.completed_at_ms
+                .min(now_ms())
                 .checked_sub(inf.accepted_at_ms)
                 .map(|d| d as f64 / 1000.0)
         });
         let workload_type = started
             .map(|inf| inf.workload_type)
             .unwrap_or_else(|| "unknown".to_string());
-        self.completed.write().await.push_back(Completed {
+        let mut completed = self.completed.write().await;
+        if completed.len() >= MAX_COMPLETED {
+            completed.pop_front();
+        }
+        completed.push_back(Completed {
             workload_type,
-            completed_at_ms: r.completed_at_ms,
+            // Filed in arrival order at no later than now: a far-future time
+            // at the front would block eviction of everything behind it.
+            completed_at_ms: r.completed_at_ms.min(now_ms()),
             latency_s,
         });
     }
@@ -1144,6 +1163,55 @@ mod tests {
         })
         .await;
         assert_eq!(jobs.in_flight.read().await.len(), 0);
+        assert_eq!(jobs.completed.read().await.len(), 0);
+    }
+
+    fn accept_for(job: &str, workload: &str) -> JobAccept {
+        JobAccept {
+            job_id: job.into(),
+            buyer_peer_id: "buyer".into(),
+            winning_bidder_peer_id: "worker".into(),
+            agreed_price_usd: 1.0,
+            workload_type: workload.into(),
+            spec_inline: None,
+            published_at_ms: now_ms(),
+            external_ref: None,
+            buyer_addrs: Vec::new(),
+            e2e: None,
+            sealed_spec: None,
+            result_key: None,
+            winning_instance: None,
+        }
+    }
+
+    fn receipt_for(job: &str, completed_at_ms: u64) -> JobReceipt {
+        JobReceipt {
+            job_id: job.into(),
+            worker_peer_id: "worker".into(),
+            worker_did: None,
+            buyer_peer_id: "buyer".into(),
+            output_hash: Some("abc".into()),
+            status: JobStatus::Completed,
+            completed_at_ms,
+            signature: None,
+            external_ref: None,
+            instance: None,
+            fault: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn future_dated_jobs_still_age_out() {
+        let jobs = JobState::default();
+        let now = now_ms();
+        let mut a = accept_for("far", "ffmpeg.transcode");
+        a.published_at_ms = u64::MAX;
+        jobs.on_accept(a).await;
+        assert!(jobs.in_flight.read().await["far"].accepted_at_ms <= now_ms());
+        jobs.on_receipt(receipt_for("far", u64::MAX)).await;
+        jobs.on_receipt(receipt_for("other", now)).await;
+        assert!(jobs.completed.read().await.iter().all(|c| c.completed_at_ms <= now_ms()));
+        jobs.evict(now_ms() + COMPLETED_WINDOW.as_millis() as u64 + 1).await;
         assert_eq!(jobs.completed.read().await.len(), 0);
     }
 

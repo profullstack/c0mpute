@@ -1,6 +1,6 @@
 import { gateGeneration } from "@/lib/chat/adult";
 import { parseImageRequest } from "@/lib/chat/images";
-import { balanceFor, currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { balanceFor, currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -45,5 +45,6 @@ export async function POST(req: Request) {
     const message = typeof body?.error === "string" ? body.error : `image could not start (upstream HTTP ${upstream.status})`;
     return err(upstream.status >= 400 ? upstream.status : 502, message);
   }
+  await recordJob(user.id, "image", body.id);
   return json({ id: body.id, status: "pending", poll: `/api/v1/images/${body.id}` }, 202, { "cache-control": "no-store" });
 }

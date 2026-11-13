@@ -58,6 +58,12 @@ pub struct Holding {
     pub machine: Option<String>,
 }
 
+/// Site records and receipt lists a node keeps. Both come signed, but keys
+/// are free, so neither table is open-ended: past the cap, entries for sites
+/// nobody announces go first, and then new ones are refused.
+pub const MAX_RECORDS: usize = 200_000;
+pub const MAX_RECEIPT_LISTS: usize = 200_000;
+
 #[derive(Debug, Default)]
 pub struct ReplicaMap {
     /// Latest verified record per site id.
@@ -74,12 +80,34 @@ impl ReplicaMap {
     /// Keep a record if it verifies and is newer than what we have. Returns
     /// true when it changed the map.
     pub fn apply_record(&mut self, rec: SiteRecord) -> bool {
+        self.apply_record_capped(rec, MAX_RECORDS)
+    }
+
+    /// [`Self::apply_record`] with the table's cap given (tests use a small one).
+    pub(crate) fn apply_record_capped(&mut self, rec: SiteRecord, max: usize) -> bool {
         if !rec.verify() {
             return false;
         }
         match self.records.get(&rec.site_id) {
             Some(cur) if cur.seq >= rec.seq => false,
-            _ => {
+            Some(_) => {
+                self.records.insert(rec.site_id.clone(), rec);
+                true
+            }
+            None => {
+                if self.records.len() >= max {
+                    // Make room from the sites no live peer announces.
+                    let announced: std::collections::HashSet<&String> =
+                        self.peers.values().flat_map(|h| h.sites.keys()).collect();
+                    let unheld: Vec<String> =
+                        self.records.keys().filter(|s| !announced.contains(s)).cloned().collect();
+                    for s in unheld {
+                        self.records.remove(&s);
+                    }
+                    if self.records.len() >= max {
+                        return false;
+                    }
+                }
                 self.records.insert(rec.site_id.clone(), rec);
                 true
             }
@@ -245,7 +273,16 @@ impl ReplicaMap {
         if !r.verify() {
             return false;
         }
-        let list = self.receipts.entry((r.site_id.clone(), r.holder.clone())).or_default();
+        let key = (r.site_id.clone(), r.holder.clone());
+        if !self.receipts.contains_key(&key) && self.receipts.len() >= MAX_RECEIPT_LISTS {
+            // Make room from the sites we have no record of.
+            let records = &self.records;
+            self.receipts.retain(|(site, _), _| records.contains_key(site));
+            if self.receipts.len() >= MAX_RECEIPT_LISTS {
+                return false;
+            }
+        }
+        let list = self.receipts.entry(key).or_default();
         if list.iter().any(|x| x.sig == r.sig) {
             return false;
         }
@@ -669,6 +706,30 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_record_table_is_capped_and_sheds_unannounced_sites_first() {
+        let key = || c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let mut m = ReplicaMap::default();
+        let (a, b, c) = (rec(&key(), 1), rec(&key(), 1), rec(&key(), 1));
+        assert!(m.apply_record_capped(a.clone(), 2));
+        assert!(m.apply_record_capped(b.clone(), 2));
+        // `a` is announced by a live peer, `b` by nobody.
+        let held: HashMap<String, (String, u64)> = [(a.site_id.clone(), (a.manifest.clone(), a.seq))].into();
+        m.apply_holding_meta("h1", held, Instant::now(), true, None, None);
+        assert!(m.apply_record_capped(c.clone(), 2), "room is made from the unannounced site");
+        assert!(m.records.contains_key(&a.site_id) && m.records.contains_key(&c.site_id));
+        assert!(!m.records.contains_key(&b.site_id));
+        // Everything left is announced or new: with no room, a new site is refused.
+        let held: HashMap<String, (String, u64)> = [
+            (a.site_id.clone(), (a.manifest.clone(), a.seq)),
+            (c.site_id.clone(), (c.manifest.clone(), c.seq)),
+        ]
+        .into();
+        m.apply_holding_meta("h1", held, Instant::now(), true, None, None);
+        assert!(!m.apply_record_capped(rec(&key(), 1), 2));
+        assert_eq!(m.records.len(), 2);
+    }
 
     #[test]
     fn a_full_peer_that_ranks_first_does_not_hold_the_slot() {

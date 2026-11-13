@@ -27,6 +27,9 @@ pub const UNDERCUT: f64 = 0.02;
 /// After a win, close this fraction of the gap to the cap (price discovery
 /// upward, so the market does not only ratchet down).
 pub const WIN_PROBE: f64 = 0.05;
+/// The furthest one lost auction can pull the learned share down, as a
+/// fraction of where it stood.
+pub const MAX_LOSS_STEP: f64 = 0.5;
 
 /// New nodes start at a one-tenth-cent minimum bid per job.
 pub const DEFAULT_MINIMUM_USD: f64 = 0.001;
@@ -58,7 +61,10 @@ impl MarketLearner {
         if won {
             self.share = (self.share + (1.0 - self.share) * WIN_PROBE).min(1.0);
         } else if agreed < our_bid {
-            self.share = ((agreed / cap) * (1.0 - UNDERCUT)).clamp(0.0, 1.0);
+            // The clearing price is the buyer's word and costs it nothing to
+            // understate, so one loss moves us at most halfway down.
+            let target = ((agreed / cap) * (1.0 - UNDERCUT)).clamp(0.0, 1.0);
+            self.share = target.max(self.share * MAX_LOSS_STEP);
         }
     }
 }
@@ -230,6 +236,15 @@ mod tests {
         let mut m = MarketLearner::default();
         m.observe(1.0, 0.6, 0.1, false);
         assert_eq!(p.quote_in_market(1.0, 0.0, &m), Some(0.3));
+    }
+
+    #[test]
+    fn one_reported_price_of_zero_does_not_floor_the_quote() {
+        let mut m = MarketLearner::default();
+        m.observe(1.0, 0.6, 0.0, false);
+        assert!((m.share - 0.3).abs() < 1e-9, "at most halfway down per loss");
+        m.observe(1.0, 0.3, 0.0, false);
+        assert!((m.share - 0.15).abs() < 1e-9);
     }
 
     #[test]

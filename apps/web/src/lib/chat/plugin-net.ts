@@ -71,6 +71,10 @@ function v6Blocked(ip: string): boolean {
   if (allZeroUntil(5) && (p[5] === 0xffff || p[5] === 0)) {
     return v4Blocked(`${p[6] >> 8}.${p[6] & 255}.${p[7] >> 8}.${p[7] & 255}`);
   }
+  // Local-use NAT64 64:ff9b:1::/48 reaches whatever the local translator maps.
+  if (p[0] === 0x64 && p[1] === 0xff9b && p[2] === 1) return true;
+  // Teredo 2001::/32 tunnels to an embedded IPv4 endpoint.
+  if (p[0] === 0x2001 && p[1] === 0) return true;
   // NAT64 64:ff9b::/96 carries an IPv4 address too.
   if (p[0] === 0x64 && p[1] === 0xff9b && p.slice(2, 6).every((x) => x === 0)) {
     return v4Blocked(`${p[6] >> 8}.${p[6] & 255}.${p[7] >> 8}.${p[7] & 255}`);
@@ -81,7 +85,7 @@ function v6Blocked(ip: string): boolean {
   if ((p[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   if (p[0] === 0x2001 && p[1] === 0x0db8) return true; // documentation
   if (p[0] === 0x2002) return true; // 6to4 can embed private v4
-  if (p[0] === 0x0100 && allZeroUntil(4)) return false;
+  if (p[0] === 0x0100 && p[1] === 0 && p[2] === 0 && p[3] === 0) return true; // 100::/64 discard-only
   return false;
 }
 
@@ -95,6 +99,20 @@ export function isBlockedAddress(ip: string): boolean {
 
 const BLOCKED_HOSTS = /(^|\.)(localhost|local|internal|localdomain|home\.arpa|metadata\.google\.internal)$/i;
 
+/**
+ * Whether a URL's hostname may name a public host (no DNS): not an
+ * internal-looking name (localhost, *.local, *.internal, single-label) and
+ * not a private, loopback, link-local, CGNAT or reserved IP literal. A
+ * trailing dot is the same name ("localhost." is localhost), so it is
+ * stripped before the checks.
+ */
+export function isPublicHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (!host) return false;
+  if (isIP(host)) return !isBlockedAddress(host);
+  return !BLOCKED_HOSTS.test(host) && host.includes(".");
+}
+
 /** Parse and check the shape of a plugin URL (no DNS). Returns the normalized URL. */
 export function checkPluginUrl(raw: unknown): URL {
   if (typeof raw !== "string" || !raw.trim() || raw.length > 2000) throw new PluginUrlError("a plugin URL is required");
@@ -107,9 +125,9 @@ export function checkPluginUrl(raw: unknown): URL {
   if (u.protocol !== "https:") throw new PluginUrlError("plugin URLs must be https://");
   if (u.username || u.password) throw new PluginUrlError("no credentials in plugin URLs");
   u.hash = "";
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (BLOCKED_HOSTS.test(host) || !host.includes(".") && !isIP(host)) throw new PluginUrlError(`${host} is not a public host`);
+  const host = u.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "");
   if (isIP(host) && isBlockedAddress(host)) throw new PluginUrlError(`${host} is not a public address`);
+  if (!isPublicHostname(host)) throw new PluginUrlError(`${host} is not a public host`);
   return u;
 }
 

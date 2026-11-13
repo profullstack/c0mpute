@@ -143,6 +143,23 @@ export function verifyTicket(ticket: string, slug: string, at = Date.now()): str
   return t && t.s === slug && t.e * 1000 >= at ? t.u : null;
 }
 
+/**
+ * A ticket link names the account that will receive the plugin's tokens. If
+ * this browser is signed in to c0mpute as someone else, the link was made by
+ * another account: connecting would hand that account this person's sign-in
+ * at the provider, so it is refused.
+ */
+export function ticketForOtherAccount(ticketUserId: string, sessionUserId: string | null | undefined): boolean {
+  return !!sessionUserId && sessionUserId !== ticketUserId;
+}
+
+/** Use a ticket up: true once, false for every later try (and for a bad ticket). */
+export async function consumeTicket(ticket: string, slug: string, store: Pick<PluginStoreDb, "claimTicket"> = pluginStore()): Promise<string | null> {
+  const userId = verifyTicket(ticket, slug);
+  if (!userId) return null;
+  return (await store.claimTicket(ticket)) ? userId : null;
+}
+
 export const connectLink = (userId: string, slug: string) =>
   `${siteUrl()}/api/v1/chat/plugins/${encodeURIComponent(slug)}/connect?t=${makeTicket(userId, slug)}`;
 

@@ -105,15 +105,36 @@ pub fn existing_peer_id(dir: &Path) -> Option<libp2p::PeerId> {
 fn write_locked_down(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let mut f = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("create {}", path.display()))?;
     use std::io::Write;
-    f.write_all(bytes)?;
-    Ok(())
+
+    // The secret is written whole to a sibling file first and only then given
+    // its name. Writing in place left a 0-byte key behind when the write
+    // failed (a full disk), and every later start then died on "must hold 32
+    // bytes" until someone deleted it.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let staged = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
+    // A hard link fails when the name is taken, so an existing key is never
+    // overwritten (the `create_new` guarantee), and the name only ever shows
+    // the complete file.
+    let placed = match std::fs::hard_link(&tmp, path) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists && !path.exists() => {
+            // A filesystem without hard links: rename is the next best thing.
+            std::fs::rename(&tmp, path)
+        }
+        other => other,
+    };
+    let _ = std::fs::remove_file(&tmp);
+    placed.with_context(|| format!("create {}", path.display()))
 }
 
 #[cfg(not(unix))]
@@ -153,6 +174,29 @@ pub fn verify_peer_signature(peer: &libp2p::PeerId, msg: &[u8], sig: &[u8]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_is_written_whole_private_and_never_over_an_existing_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("c0-identity-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.key");
+        write_locked_down(&path, b"first secret").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first secret");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // An existing key is refused and left as it was.
+        assert!(write_locked_down(&path, b"second secret").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first secret");
+        // No scratch file is left beside it either way.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        // A write that cannot happen leaves no file at all (not an empty key).
+        let gone = dir.join("missing").join("identity.key");
+        assert!(write_locked_down(&gone, b"x").is_err());
+        assert!(!gone.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn peer_signatures_verify_only_for_the_signer() {

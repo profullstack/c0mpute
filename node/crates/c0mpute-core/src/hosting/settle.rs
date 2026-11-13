@@ -41,6 +41,44 @@ pub fn owed(price: Micros, size: u64, secs: u64, passed: u64, challenged: u64) -
     earned.min(u64::MAX as u128) as Micros
 }
 
+/// Where settlement resumes: the saved cursor, or (none yet, or one from the
+/// future) the start of the period `now` falls in.
+pub fn window_start(cursor: Option<u64>, now: u64, every: u64) -> u64 {
+    let every = every.max(1);
+    match cursor {
+        Some(c) if c <= now => c,
+        _ => now / every * every,
+    }
+}
+
+/// The finished windows to settle, oldest first, at most `max`: from `start`
+/// to the next multiple of `every` (unix seconds), then whole periods, each
+/// ending at or before `now`.
+///
+/// The bounds depend only on the saved cursor and the configured period,
+/// never on when the round happens to run, so a window's idempotency key
+/// ([`Due::key`]) is the same on every attempt. Windows used to end at "now":
+/// a crash, or a failed cursor write, after paying meant the next round paid
+/// the same time again under new keys the ledger had never seen.
+///
+/// A cursor that is not on a boundary (written by an older version, or the
+/// period was reconfigured) gets one short first window up to the next
+/// boundary, so no time is paid twice and none is skipped.
+pub fn windows(start: u64, now: u64, every: u64, max: usize) -> Vec<(u64, u64)> {
+    let every = every.max(1);
+    let mut out = Vec::new();
+    let mut from = start;
+    while out.len() < max {
+        let Some(to) = (from / every).checked_add(1).and_then(|n| n.checked_mul(every)) else { break };
+        if to > now {
+            break;
+        }
+        out.push((from, to));
+        from = to;
+    }
+    out
+}
+
 /// One holder's due for one site and window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Due {
@@ -165,6 +203,48 @@ mod tests {
     use c0mpute_proto::Hash;
 
     const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn windows_are_fixed_periods_whatever_time_the_round_runs() {
+        const DAY: u64 = 24 * 60 * 60;
+        let day0 = 20_000 * DAY;
+        // No cursor: settlement starts with the period we are in; nothing is
+        // finished yet.
+        assert_eq!(window_start(None, day0 + 5, DAY), day0);
+        assert!(windows(day0, day0 + 5, DAY, 10).is_empty());
+        assert!(windows(day0, day0 + DAY - 1, DAY, 10).is_empty());
+        // The same window comes out whether the round runs right at the
+        // boundary or hours later: same bounds, same idempotency key.
+        assert_eq!(windows(day0, day0 + DAY, DAY, 10), vec![(day0, day0 + DAY)]);
+        assert_eq!(windows(day0, day0 + DAY + 7_000, DAY, 10), vec![(day0, day0 + DAY)]);
+        // Catching up after downtime: whole periods, oldest first, capped.
+        assert_eq!(
+            windows(day0, day0 + 3 * DAY + 1, DAY, 10),
+            vec![(day0, day0 + DAY), (day0 + DAY, day0 + 2 * DAY), (day0 + 2 * DAY, day0 + 3 * DAY)]
+        );
+        assert_eq!(windows(day0, day0 + 3 * DAY + 1, DAY, 2).len(), 2);
+        // A cursor from the future (clock stepped back) starts over.
+        assert_eq!(window_start(Some(day0 + 10 * DAY), day0 + 5, DAY), day0);
+        // No overflow at the end of time, no division by a zero period.
+        assert!(windows(u64::MAX - 5, u64::MAX, DAY, 3).is_empty());
+        assert_eq!(windows(10, 12, 0, 5), vec![(10, 11), (11, 12)]);
+    }
+
+    #[test]
+    fn an_unaligned_cursor_from_an_older_version_is_neither_repaid_nor_skipped() {
+        const DAY: u64 = 24 * 60 * 60;
+        let day0 = 20_000 * DAY;
+        // 0.3.63 wrote "now" as the cursor: everything before it is paid.
+        let old_cursor = day0 + 37_123;
+        let start = window_start(Some(old_cursor), day0 + 40_000, DAY);
+        assert_eq!(start, old_cursor, "nothing before the old cursor is settled again");
+        assert!(windows(start, day0 + 40_000, DAY, 10).is_empty());
+        // One short window up to the boundary, then whole days: contiguous.
+        let w = windows(start, day0 + 2 * DAY + 60, DAY, 10);
+        assert_eq!(w, vec![(old_cursor, day0 + DAY), (day0 + DAY, day0 + 2 * DAY)]);
+        // Retried after a crash (the cursor did not move): identical bounds.
+        assert_eq!(windows(start, day0 + 2 * DAY + 9_999, DAY, 10), w);
+    }
 
     #[test]
     fn owed_follows_price_size_time_and_passes() {

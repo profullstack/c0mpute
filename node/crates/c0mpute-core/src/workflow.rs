@@ -68,6 +68,10 @@ pub const MAX_EXPRESSION_DEPTH: usize = 64;
 pub const MAX_EXPRESSION_OPERATORS: usize = 512;
 /// Wall-clock budget for one transform.
 pub const TRANSFORM_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bytes a transform may turn its input into, at worst, while it runs (see
+/// [`growth_bound`]). The timeout only stops the wait: the thread runs on, so
+/// what it can allocate is bounded before it starts.
+pub const MAX_TRANSFORM_WORK_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_HTTP_TIMEOUT_MS: u64 = 15_000;
 pub const MAX_HTTP_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_REDIRECTS: usize = 5;
@@ -227,6 +231,140 @@ fn check_expression(expression: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// An upper bound on how many times over a JMESPath expression can copy its
+/// input, read off its bracket structure: the elements of a list, hash or
+/// argument list add up, and what follows in a chain multiplies. So
+/// `[@, @] | [@, @]` is 4 and `{a: [x, y], b: z}` is 3.
+///
+/// `join` and `to_string` build new strings rather than share their input:
+/// `join` counts once more per byte of its glue (the whole input when the
+/// glue is not a literal), `to_string` six times over (JSON escaping).
+///
+/// The output cap alone does not bound a transform: `[@, @] | []` doubles
+/// the pointers held at every stage, and `join('', [@, @])` the bytes, long
+/// before anything is serialized.
+fn growth_bound(expression: &str, input_len: u64) -> u64 {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Call {
+        Join,
+        ToString,
+        Other,
+    }
+    struct Frame {
+        call: Call,
+        /// Sum of the finished elements, and the product of the current one.
+        sum: u64,
+        cur: u64,
+        first: bool,
+        /// The current element so far is exactly one literal of this length.
+        literal: Option<u64>,
+        other: bool,
+        /// For `join`: its glue's length, when the glue is a literal.
+        glue: Option<u64>,
+    }
+    fn frame(call: Call) -> Frame {
+        Frame { call, sum: 0, cur: 1, first: true, literal: None, other: false, glue: None }
+    }
+    fn close(f: &Frame, input_len: u64) -> u64 {
+        let v = f.sum.saturating_add(f.cur);
+        match f.call {
+            Call::Join => v.saturating_mul(f.glue.map(|g| g + 1).unwrap_or(input_len.max(1))),
+            Call::ToString => v.saturating_mul(6),
+            Call::Other => v,
+        }
+    }
+    let mut stack = vec![frame(Call::Other)];
+    let mut ident = String::new();
+    let mut chars = expression.chars();
+    while let Some(c) = chars.next() {
+        let top = stack.len() - 1;
+        match c {
+            '\'' | '"' | '`' => {
+                let mut escaped = false;
+                let mut len = 0u64;
+                for d in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if d == '\\' {
+                        escaped = true;
+                    } else if d == c {
+                        break;
+                    }
+                    len += d.len_utf8() as u64;
+                }
+                let f = &mut stack[top];
+                if f.literal.is_none() && !f.other {
+                    f.literal = Some(len);
+                } else {
+                    f.other = true;
+                }
+                ident.clear();
+            }
+            '(' | '[' | '{' => {
+                stack[top].other = true;
+                let call = match (c, ident.as_str()) {
+                    ('(', "join") => Call::Join,
+                    ('(', "to_string") => Call::ToString,
+                    _ => Call::Other,
+                };
+                stack.push(frame(call));
+                ident.clear();
+            }
+            ')' | ']' | '}' => {
+                if top > 0 {
+                    let f = stack.pop().expect("a frame above the root");
+                    let v = close(&f, input_len);
+                    let parent = stack.len() - 1;
+                    stack[parent].cur = stack[parent].cur.saturating_mul(v.max(1));
+                }
+                ident.clear();
+            }
+            ',' => {
+                let f = &mut stack[top];
+                if f.first && !f.other {
+                    f.glue = f.literal;
+                }
+                f.sum = f.sum.saturating_add(f.cur);
+                f.cur = 1;
+                f.first = false;
+                f.literal = None;
+                f.other = false;
+                ident.clear();
+            }
+            c if c.is_whitespace() => {}
+            c => {
+                stack[top].other = true;
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    ident.push(c);
+                } else {
+                    ident.clear();
+                }
+            }
+        }
+    }
+    // Unclosed brackets (the parser refuses those) still count.
+    while stack.len() > 1 {
+        let f = stack.pop().expect("a frame above the root");
+        let v = close(&f, input_len);
+        let parent = stack.len() - 1;
+        stack[parent].cur = stack[parent].cur.saturating_mul(v.max(1));
+    }
+    close(&stack[0], input_len)
+}
+
+/// Refuse a transform whose expression could grow `input_len` bytes of input
+/// past [`MAX_TRANSFORM_WORK_BYTES`].
+fn check_growth(expression: &str, input_len: u64) -> std::result::Result<(), String> {
+    let worst = growth_bound(expression, input_len).saturating_mul(input_len.max(1));
+    if worst > MAX_TRANSFORM_WORK_BYTES {
+        return Err(format!(
+            "transform could grow its input past the {MAX_TRANSFORM_WORK_BYTES}-byte work limit (it copies the input up to {} times over)",
+            growth_bound(expression, input_len)
+        ));
+    }
+    Ok(())
+}
+
 /// Run a spec end to end and return the result blob.
 pub async fn execute(spec: &Value) -> Value {
     execute_with(spec, net_guard::is_public_ip).await
@@ -264,6 +402,8 @@ pub async fn execute_with(spec: &Value, allow: fn(IpAddr) -> bool) -> Value {
 /// serialized through a capped writer so a fan-out expression cannot
 /// allocate without bound.
 pub async fn transform(expression: String, input: Value) -> std::result::Result<Value, String> {
+    let input_len = serde_json::to_vec(&input).map(|b| b.len() as u64).unwrap_or(u64::MAX);
+    check_growth(&expression, input_len)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("workflow-transform".into())
@@ -714,6 +854,39 @@ mod tests {
         assert_eq!(transform(nested, json!({"a": 1})).await.unwrap(), json!(1));
         // Brackets and dots inside literals do not count.
         assert!(check_expression(&format!("`{}`", "[".repeat(200))).is_ok());
+    }
+
+    #[test]
+    fn growth_is_read_off_the_bracket_structure() {
+        assert_eq!(growth_bound("a.b[0].c", 100), 1);
+        assert_eq!(growth_bound("[@, @]", 100), 2);
+        assert_eq!(growth_bound("[@, @] | [@, @] | []", 100), 4);
+        assert_eq!(growth_bound("{a: [x, y], b: z}", 100), 3);
+        assert_eq!(growth_bound("items[?kind == 'a,b'].name", 100), 1);
+        assert_eq!(growth_bound("join(', ', names)", 100), 6, "two elements, a two-byte literal glue");
+        assert_eq!(growth_bound("join(sep, names)", 100), 200, "glue from the input");
+        assert_eq!(growth_bound("to_string(@)", 100), 6);
+        assert_eq!(growth_bound("length(@)", 100), 1);
+        assert!(check_growth("{id: id, tags: join(',', tags), pair: [a, b]}", 64 * 1024).is_ok());
+    }
+
+    #[tokio::test]
+    async fn copying_transforms_are_refused_before_they_run() {
+        // Each stage doubles real bytes (join) or held pointers (flatten):
+        // neither is caught by the output cap, both by the growth bound.
+        for stage in ["join('', [@, @])", "[@, @] | []", "to_string([@, @])"] {
+            let expr = std::iter::once("@".to_string())
+                .chain(std::iter::repeat_n(stage.to_string(), 40))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let started = Instant::now();
+            let r = transform(expr, json!("x".repeat(64))).await;
+            assert!(r.unwrap_err().contains("limit"), "{stage}");
+            assert!(started.elapsed() < Duration::from_secs(2), "{stage}");
+        }
+        // An ordinary reshaping transform still runs.
+        let r = transform("{n: name, all: join('-', parts), both: [a, b]}".into(), json!({"name": "x", "parts": ["p", "q"], "a": 1, "b": 2})).await;
+        assert_eq!(r.unwrap(), json!({"n": "x", "all": "p-q", "both": [1, 2]}));
     }
 
     #[tokio::test]

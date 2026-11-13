@@ -1,5 +1,5 @@
 import { isVideoJobId } from "@/lib/chat/videos";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +12,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!user) return unauthorized();
   const { id } = await params;
   if (!isVideoJobId(id)) return json({ error: { message: "unknown video job", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown video job", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/video/${id}`, { signal: AbortSignal.timeout(20_000) });

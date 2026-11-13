@@ -1081,14 +1081,76 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
-        Ok(())
+        write_atomic(path, text.as_bytes()).with_context(|| format!("write config {}", path.display()))
     }
+}
+
+/// Replace `path` with `bytes` in one step: write a sibling temp file, flush
+/// it to disk, rename it over the target. A plain `fs::write` truncates first,
+/// so a full disk left a 0-byte file; for the config that loads cleanly as
+/// all-defaults (private mode off, default roles, no storage cap).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    // Write through a symlinked config to the file it names.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = target.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        // Keep the mode the operator gave the file (a 0600 config stays 0600).
+        if let Ok(meta) = std::fs::metadata(&target) {
+            let _ = f.set_permissions(meta.permissions());
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_replaces_the_config_whole_and_keeps_the_old_one_when_it_cannot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.save(&path).unwrap();
+        cfg.pricing.min_usd = 0.25;
+        cfg.save(&path).unwrap();
+        let saved: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.pricing.min_usd, 0.25);
+        // Nothing but the config is left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        // A write that fails part-way must not touch the file already there:
+        // the temp file cannot be created where a directory holds its name.
+        let before = std::fs::read(&path).unwrap();
+        std::fs::create_dir(dir.path().join(format!(".config.toml.tmp-{}", std::process::id()))).unwrap();
+        assert!(write_atomic(&path, b"roles = []\n").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before, "old config intact, not truncated");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_keeps_a_private_mode_and_writes_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        std::fs::write(&real, "roles = []\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"roles = [\"gateway\"]\n").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link survives");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "roles = [\"gateway\"]\n");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 
     #[test]
     fn a_new_partial_config_gets_the_default_pricing_floor() {

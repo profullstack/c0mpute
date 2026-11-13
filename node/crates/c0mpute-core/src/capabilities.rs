@@ -538,6 +538,19 @@ pub fn with_instance(mut hardware: serde_json::Value, instance: &str) -> serde_j
     hardware
 }
 
+/// The time to file an ad under, given the `published_at_ms` it claims: `None`
+/// when it is older than [`MAX_AD_AGE`] or further ahead of our clock than
+/// skew explains, else the claim, capped at now.
+pub(crate) fn ad_stamp(published_at_ms: u64, now_ms: u64) -> Option<u64> {
+    if now_ms.saturating_sub(published_at_ms) > MAX_AD_AGE.as_millis() as u64 {
+        return None;
+    }
+    if published_at_ms.saturating_sub(now_ms) > crate::dispatch::MAX_CLOCK_SKEW.as_millis() as u64 {
+        return None;
+    }
+    Some(published_at_ms.min(now_ms))
+}
+
 /// Instances in `last_ad` (instance id -> its latest ad's `published_at_ms`)
 /// that advertised since `cutoff` and were not replaced. An instance whose
 /// last ad predates a newer instance's start (the start time is in the id)
@@ -601,7 +614,7 @@ impl Registry {
                 if msg.topic != CAPABILITY_TOPIC {
                     continue;
                 }
-                let ad: CapabilityAd = match serde_json::from_slice(&msg.data) {
+                let mut ad: CapabilityAd = match serde_json::from_slice(&msg.data) {
                     Ok(a) => a,
                     Err(e) => {
                         debug!(err = %e, "registry: discard malformed ad");
@@ -612,10 +625,13 @@ impl Registry {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                if now_ms.saturating_sub(ad.published_at_ms) > MAX_AD_AGE.as_millis() as u64 {
-                    debug!(peer = %ad.peer_id, "registry: discard stale ad");
+                // The sender's clock: kept only if it is recent, and never
+                // ahead of ours, or the ad would outlive every eviction.
+                let Some(stamp) = ad_stamp(ad.published_at_ms, now_ms) else {
+                    debug!(peer = %ad.peer_id, "registry: discard stale or future-dated ad");
                     continue;
-                }
+                };
+                ad.published_at_ms = stamp;
                 let Some(source) = msg.source else {
                     debug!("registry: discard ad with unknown source peer");
                     continue;
@@ -714,6 +730,17 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ad_dated_in_the_future_is_refused_or_filed_at_now() {
+        let now = 10_000_000u64;
+        let age = MAX_AD_AGE.as_millis() as u64;
+        assert_eq!(ad_stamp(now - 1_000, now), Some(now - 1_000));
+        assert_eq!(ad_stamp(now - age - 1, now), None);
+        assert_eq!(ad_stamp(now + 30_000, now), Some(now), "skew: filed at now, so it still expires");
+        assert_eq!(ad_stamp(now + crate::dispatch::MAX_CLOCK_SKEW.as_millis() as u64 + 1, now), None);
+        assert_eq!(ad_stamp(u64::MAX, now), None);
+    }
 
     #[test]
     fn a_restarted_worker_is_not_a_duplicate() {

@@ -1,7 +1,9 @@
 import { isJobId } from "@/lib/chat/images";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
+
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 /** GET /api/v1/images/<id>: 202 while a worker draws, then image/png once. */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -9,19 +11,23 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!user) return unauthorized();
   const { id } = await params;
   if (!isJobId(id)) return json({ error: { message: "unknown image job", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown image job", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/image/${id}`, { signal: AbortSignal.timeout(20_000) });
   } catch (e) {
     return json({ error: { message: `network unreachable: ${e instanceof Error ? e.message : e}`, code: 502 } }, 502);
   }
-  const type = upstream.headers.get("content-type") ?? "";
-  if (upstream.status === 200 && type.startsWith("image/")) {
+  const type = (upstream.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  // Raster images only: an SVG served from this origin is a script.
+  if (upstream.status === 200 && IMAGE_TYPES.includes(type)) {
     return new Response(upstream.body, {
       status: 200,
       headers: {
         "content-type": type,
         "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
         ...(upstream.headers.get("x-c0mpute-worker-peer-id")
           ? { "x-c0mpute-worker-peer-id": upstream.headers.get("x-c0mpute-worker-peer-id")! }
           : {}),

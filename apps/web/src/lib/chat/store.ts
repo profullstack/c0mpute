@@ -20,7 +20,13 @@ export type User = {
   /** When this person attested they are 18 or older (adult mode), or null. */
   adult_verified_at?: string | null;
 };
-export type TokenKind = "session" | "key";
+/**
+ * "oauth": a key an MCP client got through the OAuth flow. It carries the
+ * "mcp" scope only: valid on /api/mcp, refused on the REST API (keys, device
+ * approval, account settings), so consenting to an MCP client never hands it
+ * the whole account.
+ */
+export type TokenKind = "session" | "key" | "oauth";
 export type Token = {
   token_hash: string;
   user_id: string;
@@ -30,6 +36,12 @@ export type Token = {
   expires_at: string | null;
   last_used_at: string | null;
 };
+
+/** One-shot claims (see claimOnce): the primary key is what makes "once" atomic. */
+export const CLAIMS_SCHEMA = `CREATE TABLE IF NOT EXISTS chat_claims (
+     id TEXT PRIMARY KEY,
+     at TEXT NOT NULL
+   )`;
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS chat_users (
@@ -58,6 +70,7 @@ const SCHEMA = [
      label       TEXT,
      expires_at  TEXT NOT NULL
    )`,
+  CLAIMS_SCHEMA,
 ];
 
 // Columns added after a table first shipped. SQLite has no ADD COLUMN IF NOT
@@ -80,6 +93,25 @@ export const hashToken = (t: string) => createHash("sha256").update(t).digest("h
 const newSecret = (prefix: string) => prefix + randomBytes(24).toString("base64url");
 const now = () => new Date().toISOString();
 const plus = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+/**
+ * Claim a one-shot secret (an authorization code, a device code, a sign-in
+ * state, a ticket). True for exactly one caller per id: the row's primary key
+ * settles a race that a SELECT followed by a DELETE cannot, and it needs no
+ * RETURNING or affected-row count from the driver. The table must exist
+ * (CLAIMS_SCHEMA).
+ */
+export async function claimOnce(sql: Sql, id: string): Promise<boolean> {
+  try {
+    await sql.run(`INSERT INTO chat_claims (id, at) VALUES (?, ?)`, [id, now()]);
+  } catch (e) {
+    if (/unique|constraint|primary key/i.test(String((e as Error)?.message ?? e))) return false;
+    throw e;
+  }
+  // Claims only matter while the secret they guard is alive (minutes).
+  sql.run(`DELETE FROM chat_claims WHERE at < ?`, [new Date(Date.now() - 86_400_000).toISOString()]).catch(() => {});
+  return true;
+}
 
 /** A DID as CoinPay issues it: `did:<method>:<id>`. */
 export function isValidDid(did: unknown): did is string {
@@ -169,11 +201,18 @@ export function createStore(sql: Sql) {
       return at;
     },
 
+    /** One account by id (what a page shows of it: its name and DID). */
+    userById: (userId: string) => one<User>(`SELECT * FROM chat_users WHERE id = ?`, [userId]),
+
     createSession: (userId: string) =>
       init().then(() => issue(userId, "session", "browser", SESSION_PREFIX, SESSION_DAYS * 86_400_000)),
 
     createKey: (userId: string, label: string) =>
       init().then(() => issue(userId, "key", label.slice(0, 80) || "key", KEY_PREFIX, null)),
+
+    /** A key for an MCP client that signed in through OAuth: scope "mcp" only. */
+    createOAuthKey: (userId: string, label: string) =>
+      init().then(() => issue(userId, "oauth", label.slice(0, 80) || "MCP client (OAuth)", KEY_PREFIX, null)),
 
     /** The user behind a session cookie or API key, or null. Touches last_used_at. */
     async userForToken(token: string | null | undefined): Promise<(User & { token_kind: TokenKind }) | null> {
@@ -205,7 +244,7 @@ export function createStore(sql: Sql) {
       await init();
       const rows = await sql.all(
         `SELECT token_hash, label, prefix, created_at, last_used_at FROM chat_tokens
-          WHERE user_id = ? AND kind = 'key' ORDER BY created_at DESC`,
+          WHERE user_id = ? AND kind IN ('key', 'oauth') ORDER BY created_at DESC`,
         [userId],
       );
       // The hash is the key's public id: revoking needs it, using it does not.
@@ -222,7 +261,7 @@ export function createStore(sql: Sql) {
       await init();
       if (!/^[0-9a-f]{16}$/.test(id)) return false;
       const rows = await sql.all(
-        `SELECT token_hash FROM chat_tokens WHERE user_id = ? AND kind = 'key' AND substr(token_hash, 1, 16) = ?`,
+        `SELECT token_hash FROM chat_tokens WHERE user_id = ? AND kind IN ('key', 'oauth') AND substr(token_hash, 1, 16) = ?`,
         [userId, id],
       );
       for (const r of rows) await sql.run(`DELETE FROM chat_tokens WHERE token_hash = ?`, [r.token_hash]);
@@ -250,8 +289,10 @@ export function createStore(sql: Sql) {
         [code],
       );
       if (!row || row.expires_at < now() || row.user_id) return false;
-      await sql.run(`UPDATE chat_device_codes SET user_id = ? WHERE device_hash = ?`, [userId, row.device_hash]);
-      return true;
+      // Conditional, then re-read: of two people approving at once, one wins.
+      await sql.run(`UPDATE chat_device_codes SET user_id = ? WHERE device_hash = ? AND user_id IS NULL`, [userId, row.device_hash]);
+      const after = await one<{ user_id: string | null }>(`SELECT user_id FROM chat_device_codes WHERE device_hash = ?`, [row.device_hash]);
+      return after?.user_id === userId;
     },
 
     async deviceLabel(userCodeRaw: string) {
@@ -273,6 +314,8 @@ export function createStore(sql: Sql) {
       );
       if (!row || row.expires_at < now()) return { status: "expired" };
       if (!row.user_id) return { status: "pending" };
+      // Two polls racing the approval: only one is handed the key.
+      if (!(await claimOnce(sql, `device:${h}`))) return { status: "expired" };
       await sql.run(`DELETE FROM chat_device_codes WHERE device_hash = ?`, [h]);
       const key = await issue(row.user_id, "key", row.label, KEY_PREFIX, null);
       return { status: "ok", key };

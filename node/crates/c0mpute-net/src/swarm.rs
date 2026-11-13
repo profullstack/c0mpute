@@ -221,6 +221,14 @@ pub fn external_from_env(raw: Option<&str>) -> Vec<Multiaddr> {
         .collect()
 }
 
+/// Whether any of a node's external addresses reaches it directly. A circuit
+/// address (`.../p2p-circuit`, confirmed when our own relay reservation is
+/// accepted) does not count: a firewalled node holding only that would open
+/// its relay to reservations nobody can dial.
+pub fn has_direct_external<'a>(addrs: impl IntoIterator<Item = &'a Multiaddr>) -> bool {
+    addrs.into_iter().any(|a| !a.iter().any(|p| p == Protocol::P2pCircuit))
+}
+
 /// The circuit listen address that reserves a slot on `relay` at `relay_addr`.
 pub fn circuit_listen_addr(relay_addr: &Multiaddr, relay: PeerId) -> Multiaddr {
     relay_addr.clone().with(Protocol::P2p(relay)).with(Protocol::P2pCircuit)
@@ -1401,7 +1409,7 @@ impl SwarmTask {
                 Err(e) => debug!(peer = %ev.remote_peer_id, err = %e, "dcutr: hole punch failed; staying relayed"),
             },
             SwarmEvent::ExternalAddrConfirmed { .. } | SwarmEvent::ExternalAddrExpired { .. } => {
-                let has = self.swarm.lock().await.external_addresses().next().is_some();
+                let has = has_direct_external(self.swarm.lock().await.external_addresses());
                 let was = self.relay_ready.swap(has, std::sync::atomic::Ordering::Relaxed);
                 if has != was {
                     info!(relaying = has, "relay server: {}", if has { "external address confirmed; accepting reservations" } else { "no external address; refusing reservations" });
@@ -2046,6 +2054,17 @@ mod tests {
         assert!(!ours.try_next(PeerId::random(), &addr, std::time::Instant::now()));
         ready.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(ours.try_next(PeerId::random(), &addr, std::time::Instant::now()));
+
+        // What flips `ready`: a direct external address, never our own slot
+        // on someone else's relay.
+        let relay = PeerId::random();
+        let circuit: Multiaddr = format!("/ip4/8.8.8.8/tcp/4001/p2p/{relay}/p2p-circuit").parse().unwrap();
+        let quic: Multiaddr = "/ip4/9.9.9.9/udp/4001/quic-v1".parse().unwrap();
+        let none: [Multiaddr; 0] = [];
+        assert!(!has_direct_external(&none));
+        assert!(!has_direct_external(&[circuit.clone()]), "a circuit address alone is not reachable");
+        assert!(has_direct_external(&[addr.clone()]));
+        assert!(has_direct_external(&[circuit, quic]));
     }
 
     #[test]

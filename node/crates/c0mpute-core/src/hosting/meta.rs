@@ -118,7 +118,9 @@ pub fn absolutize(html: &str, page_url: &url::Url) -> Option<String> {
     let mut copied = 0;
     let mut changed = false;
     let mut from = 0;
-    while let Some(i) = lower[from..limit].find("<meta") {
+    // `from` can pass `limit`: a tag that opens before `<body` may close
+    // after it (`<meta x="<body">`), so the range is checked, not sliced.
+    while let Some(i) = lower.get(from..limit).and_then(|head| head.find("<meta")) {
         let start = from + i;
         let Some(len) = lower[start..].find('>') else {
             break;
@@ -162,6 +164,18 @@ mod tests {
 
     fn page(u: &str) -> url::Url {
         url::Url::parse(u).unwrap()
+    }
+
+    #[test]
+    fn a_body_tag_inside_a_meta_attribute_does_not_panic() {
+        let p = page("https://gw.example/s/abc/");
+        assert_eq!(absolutize(r#"<meta x="<body">"#, &p), None);
+        assert_eq!(absolutize(r#"<meta x="<body"><meta property="og:image" content="a.png">"#, &p), None);
+        // A URL tag that straddles the limit is still rewritten.
+        let out = absolutize(r#"<meta property="og:image" content="a.png" x="<body">"#, &p).unwrap();
+        assert!(out.contains(r#"content="https://gw.example/s/abc/a.png""#), "{out}");
+        assert_eq!(absolutize("<meta", &p), None);
+        assert_eq!(absolutize("<body><meta property=\"og:image\" content=\"a.png\">", &p), None);
     }
 
     #[test]

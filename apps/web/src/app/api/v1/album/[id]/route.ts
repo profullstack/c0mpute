@@ -1,6 +1,6 @@
 import { isJobId } from "@/lib/chat/images";
 import { sanitizeAlbum } from "@/lib/chat/album";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, recordJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +13,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!user) return unauthorized();
   const { id } = await params;
   if (!isJobId(id)) return json({ error: { message: "unknown album", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown album", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/album/${id}`, { signal: AbortSignal.timeout(30_000) });
@@ -28,6 +30,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return json({ error: { message: typeof body.error === "string" ? body.error : "album failed", code: upstream.status } }, upstream.status >= 400 ? upstream.status : 502);
   }
   const album = sanitizeAlbum(body);
+  // Each track is a song job of its own (played from /api/v1/music/<id>): it
+  // belongs to whoever owns the album.
+  await Promise.all(album.tracks.map((t) => (t.id ? recordJob(user.id, "music", t.id) : null)));
   const done = upstream.status === 200;
   return json(
     {

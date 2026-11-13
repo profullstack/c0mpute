@@ -1,7 +1,7 @@
 import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
 import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
-import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, pluginStore, pushStore, rateLimit, siteUrl } from "@/lib/chat/server";
+import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -16,11 +16,15 @@ export const maxDuration = 300;
  */
 export async function POST(req: Request) {
   if (!/^Bearer\s/i.test(req.headers.get("authorization") ?? "")) return mcpUnauthorized();
-  const user = await currentUser(req);
+  const user = await currentUser(req, { oauth: true });
   if (!user) return mcpUnauthorized();
   const body = await req.json().catch(() => null);
   if (!body) return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, 400);
   const batch = Array.isArray(body) ? body : [body];
+  // A message must be an object; anything else is an invalid request, not a crash.
+  if (batch.length === 0 || batch.some((m) => !m || typeof m !== "object" || Array.isArray(m))) {
+    return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } }, 400);
+  }
   const calls = batch.filter((m) => m?.method === "tools/call").length;
   for (let i = 0; i < calls; i++) {
     if (!rateLimit(user.id).ok) {
@@ -38,7 +42,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore() })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob } })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }

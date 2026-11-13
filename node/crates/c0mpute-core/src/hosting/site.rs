@@ -94,7 +94,8 @@ pub struct SiteManifest {
 
 impl SiteManifest {
     pub fn total_bytes(&self) -> u64 {
-        self.files.values().map(|f| f.size).sum()
+        // Sizes are the publisher's word: never a sum that can overflow.
+        self.files.values().fold(0u64, |a, f| a.saturating_add(f.size))
     }
 
     /// Every chunk hash the site needs, manifest excluded.
@@ -192,7 +193,7 @@ impl ManifestPart {
         if p.files.keys().next().map(String::as_str) != Some(r.first.as_str()) {
             bail!("manifest part starts at the wrong path");
         }
-        if p.files.values().map(|f| f.size).sum::<u64>() != r.bytes {
+        if p.files.values().fold(0u64, |a, f| a.saturating_add(f.size)) != r.bytes {
             bail!("manifest part size does not match the root");
         }
         check_entries(p.files.iter())?;
@@ -229,8 +230,8 @@ impl Manifest {
                 if r.parts.len() > MAX_PARTS {
                     bail!("site manifest has too many parts");
                 }
-                if r.parts.iter().map(|p| p.files as u64).sum::<u64>() != r.files
-                    || r.parts.iter().map(|p| p.bytes).sum::<u64>() != r.bytes
+                if r.parts.iter().fold(0u64, |a, p| a.saturating_add(p.files as u64)) != r.files
+                    || r.parts.iter().fold(0u64, |a, p| a.saturating_add(p.bytes)) != r.bytes
                 {
                     bail!("site manifest parts do not add up");
                 }

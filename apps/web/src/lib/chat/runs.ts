@@ -30,6 +30,8 @@ export const RUN_MAX_ACTIVE = 6;
 export const RUN_MAX_MS = 20 * 60_000;
 /** A run whose owner has not written for this long is taken over. */
 export const RUN_STALE_MS = 20_000;
+/** A turn whose upstream has not answered (headers) within this is failed. */
+export const RUN_OPEN_MS = 5 * 60_000;
 /** How many times a run is continued after its server died. */
 export const RUN_MAX_ATTEMPTS = 3;
 
@@ -85,6 +87,9 @@ export class Run {
   abort = new AbortController();
   /** chunks[0..flushed) are in the database. */
   flushed = 0;
+  /** chunks[0..decoded) went through `decoder`; their text not yet written is `pending`. */
+  decoded = 0;
+  pending = "";
   /** seq of the next chunk row. */
   seq = 0;
   /** The status in the database differs from this one. */
@@ -158,6 +163,8 @@ export function createRunManager(opts: {
   owner?: string;
   now?: () => number;
   flushMs?: number;
+  /** How long the upstream may take to answer before the turn is failed. */
+  openMs?: number;
   /** Start the flush/recovery timers (off in tests, which call tick()). */
   timers?: boolean;
 }) {
@@ -217,12 +224,22 @@ export function createRunManager(opts: {
 
   async function open(run: Run, cont?: { partial: string }) {
     if (!run.request) return;
+    // An upstream that never answers would hold the turn (and the request
+    // that started it) until the 20-minute cap: fail it instead.
+    const slow = setTimeout(() => {
+      run.push(enc.encode(errorEvent("the c0mpute network did not answer in time; try again in a minute", 504) + "data: [DONE]\n\n"));
+      run.end("failed", now());
+      run.abort.abort();
+    }, opts.openMs ?? RUN_OPEN_MS);
+    (slow as { unref?: () => void }).unref?.();
     const body = await opts.opener(run.request, run.abort.signal, cont).catch((e) => {
       run.push(enc.encode(errorEvent(e instanceof Error ? e.message : String(e)) + "data: [DONE]\n\n"));
       run.end(run.abort.signal.aborted ? "cancelled" : "failed", now());
       return null;
     });
-    if (body) void pump(run, body);
+    clearTimeout(slow);
+    if (body && run.status !== "running") void body.cancel().catch(() => {});
+    else if (body) void pump(run, body);
     else if (run.status === "running") run.end("failed", now());
   }
 
@@ -251,14 +268,26 @@ export function createRunManager(opts: {
               r.push(enc.encode("data: [DONE]\n\n"));
               r.end("cancelled", t);
             }
-            const fresh = r.chunks.slice(r.flushed);
-            for (const c of fresh) {
-              const text = r.decoder.decode(c, { stream: true });
-              if (text) await db.run(`INSERT INTO chat_run_chunks (run_id, seq, data) VALUES (?, ?, ?)`, [r.id, r.seq++, text]);
+            // Everything new since the last tick goes in as ONE row (a round
+            // trip per stream chunk made a tick outlast the heartbeat), and
+            // each chunk passes the streaming decoder exactly once. `flushed`
+            // and `seq` only move once the row is in: a failed write leaves
+            // `pending` to go out next tick under the same seq, and OR REPLACE
+            // makes a write that landed but reported an error harmless (the
+            // retry holds the same text, plus whatever came since).
+            const upTo = r.chunks.length;
+            for (; r.decoded < upTo; r.decoded++) r.pending += r.decoder.decode(r.chunks[r.decoded]!, { stream: true });
+            if (r.pending) {
+              await db.run(`INSERT OR REPLACE INTO chat_run_chunks (run_id, seq, data) VALUES (?, ?, ?)`, [r.id, r.seq, r.pending]);
+              r.seq++;
+              r.pending = "";
             }
-            r.flushed += fresh.length;
-            await db.run(`UPDATE chat_runs SET status = ?, heartbeat = ?, finished = ? WHERE id = ? AND owner = ?`, [r.status, t, r.finished, r.id, owner]);
-            r.dirty = false;
+            r.flushed = upTo;
+            // Never write over a cancel another server recorded between the
+            // read above and here: the next tick sees it and stops the run.
+            const status = r.status;
+            await db.run(`UPDATE chat_runs SET status = ?, heartbeat = ?, finished = ? WHERE id = ? AND owner = ? AND status <> 'cancelled'`, [status, t, r.finished, r.id, owner]);
+            if (r.status === status) r.dirty = false;
           }
         }
       } catch (e) {
@@ -316,7 +345,7 @@ export function createRunManager(opts: {
         run.chunks.push(b);
         run.bytes += b.byteLength;
       }
-      run.flushed = run.chunks.length;
+      run.flushed = run.decoded = run.chunks.length;
       runs.set(id, run);
       taken.push(id);
       if (giveUp) {
@@ -333,7 +362,11 @@ export function createRunManager(opts: {
 
   let timers: ReturnType<typeof setInterval>[] = [];
   if (opts.timers !== false && db) {
-    const t1 = setInterval(() => void flush(), opts.flushMs ?? 1000);
+    const t1 = setInterval(() => {
+      // The 20-minute cap must not wait for someone to call start/get/list.
+      sweepMemory();
+      void flush();
+    }, opts.flushMs ?? 1000);
     const t2 = setInterval(() => void recover().catch((e) => console.error("chat runs: recover failed", e)), 15_000);
     t1.unref?.();
     t2.unref?.();
@@ -359,8 +392,8 @@ export function createRunManager(opts: {
       if (active >= RUN_MAX_ACTIVE) throw new RunLimitError(`at most ${RUN_MAX_ACTIVE} answers running at once on one account`);
       const id = `run_${randomUUID().replace(/-/g, "")}`;
       const run = new Run(id, req.userId, t, req);
-      runs.set(id, run);
-      run.push(enc.encode(sse({ object: "c0mpute.run", id })));
+      // The row first: if it cannot be written the turn never existed (no
+      // phantom "running" run counting against the account, no orphan chunks).
       if (db && key) {
         await db.run(`INSERT INTO chat_runs (id, user_id, status, owner, heartbeat, started, attempts, request) VALUES (?, ?, 'running', ?, ?, ?, 0, ?)`, [
           id,
@@ -371,7 +404,16 @@ export function createRunManager(opts: {
           seal(key, JSON.stringify(req), aad(req.userId, id)),
         ]);
       }
-      await open(run);
+      runs.set(id, run);
+      run.push(enc.encode(sse({ object: "c0mpute.run", id })));
+      try {
+        await open(run);
+      } catch (e) {
+        // open() reports upstream errors into the run; anything else must not
+        // leave it "running" forever.
+        run.push(enc.encode(errorEvent(e instanceof Error ? e.message : String(e)) + "data: [DONE]\n\n"));
+        run.end("failed", now());
+      }
       return run;
     },
 

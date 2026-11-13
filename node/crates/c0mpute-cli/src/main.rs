@@ -1561,11 +1561,17 @@ fn maybe_self_update(cli: &Cli) {
         return;
     };
     let current = env!("CARGO_PKG_VERSION");
-    if let Ok(c0mpute_update::UpgradeOutcome::Upgraded { .. }) = rt.block_on(
-        c0mpute_update::upgrade_now(current, c0mpute_update::DEFAULT_RELEASE_FEED),
-    ) {
+    // Resolved before the swap: afterwards current_exe() names the unlinked
+    // file ("... (deleted)"), the exec fails and the old image keeps running.
+    let exe = c0mpute_update::current_exe_path().unwrap_or_else(|| PathBuf::from("c0mpute"));
+    // The new binary's benchmark runs detached with its output discarded, so
+    // this command neither waits on it nor gets its table on stdout.
+    if let Ok(c0mpute_update::UpgradeOutcome::Upgraded { .. }) = rt.block_on(c0mpute_update::upgrade_with(
+        current,
+        c0mpute_update::DEFAULT_RELEASE_FEED,
+        c0mpute_update::PostBench::Detached,
+    )) {
         use std::os::unix::process::CommandExt;
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("c0mpute"));
         let args: Vec<String> = std::env::args().skip(1).collect();
         // exec only returns on failure; if it fails, fall through and run the
         // requested command on the current (pre-swap) image.
@@ -2087,9 +2093,13 @@ fn install_worker_unit(system: bool, no_start: bool) -> Result<()> {
         "[Unit]\nDescription=c0mpute worker\nAfter=network-online.target\nWants=network-online.target\n\n\
          [Service]\nType=simple\n{user_line}Environment=HOME={home}\n\
          Environment=PATH={bin_dir}:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin\n\
-         ExecStart={exe} worker start\nRestart=on-failure\nRestartSec=5\n\
+         ExecStart={exe} worker start\n\
+         # always, not on-failure: a worker that exits cleanly (status 0, SIGPIPE) without\n\
+         # being told to stop must come back.\n\
+         Restart=always\nRestartSec=5\n\
          # 90: replaced by a newer start of this identity; 91: a duplicate that stood down.\n\
-         RestartPreventExitStatus={}\nTimeoutStopSec=30\n\n[Install]\nWantedBy={}\n",
+         # SIGTERM: `c0mpute worker stop` (and systemctl stop) mean stop.\n\
+         RestartPreventExitStatus={} SIGTERM\nTimeoutStopSec=30\n\n[Install]\nWantedBy={}\n",
         instance::RESTART_PREVENT_EXIT_STATUS,
         if system { "multi-user.target" } else { "default.target" }
     );
@@ -2988,9 +2998,112 @@ fn pid_alive(_pid: i32) -> bool {
     false
 }
 
+/// Create `dir` new and owner-only; an existing path (even an empty directory)
+/// is an error, so nobody else can have prepared it.
+fn private_new_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+#[cfg(test)]
+mod worker_stop_tests {
+    use super::*;
+
+    #[test]
+    fn plugin_targets_cannot_carry_a_command() {
+        assert_eq!(resolve_plugin_target("tts").unwrap(), "https://c0mpute.com/plugins/tts/install.sh");
+        assert_eq!(resolve_plugin_target("https://example.com/p/install.sh").unwrap(), "https://example.com/p/install.sh");
+        for bad in ["x; rm -rf ~", "../x", "-o/tmp/x", "a b", "", "https://", "https://e.com/x; id", "https://e.com/$(id)", "https://e.com/x | sh"] {
+            assert!(resolve_plugin_target(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn rpc_sharding_is_off_unless_asked_for() {
+        assert!(!rpc_sharding_opted_in(None));
+        assert!(!rpc_sharding_opted_in(Some("")));
+        assert!(!rpc_sharding_opted_in(Some("0")));
+        assert!(rpc_sharding_opted_in(Some("1")));
+        assert!(rpc_sharding_opted_in(Some(" true ")));
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn only_a_c0mpute_worker_command_line_is_a_worker() {
+        assert!(argv_is_worker(&argv(&["/home/me/.c0mpute/bin/c0mpute", "worker", "start"])));
+        assert!(argv_is_worker(&argv(&["c0mpute", "--config", "/etc/c.toml", "worker", "start", "-d"])));
+        // After an in-place update the image is the unlinked old file.
+        assert!(argv_is_worker(&argv(&["/usr/local/bin/c0mpute (deleted)", "worker", "start"])));
+        // A reused PID: some other program, or c0mpute doing something else.
+        assert!(!argv_is_worker(&argv(&["/usr/bin/postgres", "-D", "/var/lib/postgresql"])));
+        assert!(!argv_is_worker(&argv(&["sleep", "worker", "start"])));
+        assert!(!argv_is_worker(&argv(&["c0mpute", "status"])));
+        assert!(!argv_is_worker(&[]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_test_process_is_not_a_worker() {
+        assert_eq!(pid_is_worker(std::process::id() as i32), Some(false));
+    }
+
+    #[test]
+    fn a_private_dir_must_be_new() {
+        let dir = std::env::temp_dir().join(format!("c0mpute-private-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        private_new_dir(&dir).unwrap();
+        assert!(private_new_dir(&dir).is_err(), "an existing directory is refused");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Whether `argv` is a c0mpute worker's command line (`c0mpute ... worker
+/// start ...`). A PID file outlives its process (a container restart with the
+/// file on a persistent volume), and the number is then somebody else's.
+fn argv_is_worker(argv: &[String]) -> bool {
+    argv.first().is_some_and(|exe| {
+        std::path::Path::new(exe.trim_end_matches(" (deleted)"))
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("c0mpute"))
+    }) && node_status::worker_flags(argv).is_some()
+}
+
+/// `Some(false)` when `pid` is certainly not a c0mpute worker; `None` where
+/// the platform gives no way to tell (no /proc).
+#[cfg(unix)]
+fn pid_is_worker(pid: i32) -> Option<bool> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv: Vec<String> = raw
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    Some(argv_is_worker(&argv))
+}
+
 #[cfg(unix)]
 fn stop_worker() -> Result<()> {
     match read_worker_pid() {
+        Some(pid) if pid_alive(pid) && pid_is_worker(pid) == Some(false) => {
+            // The PID was reused by another program: never signal it.
+            let (pid_file, _) = worker_runtime_paths();
+            let _ = std::fs::remove_file(pid_file);
+            println!("no running worker (pid {pid} now belongs to another program; cleared the stale pid file)");
+            Ok(())
+        }
         Some(pid) if pid_alive(pid) => {
             if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
                 println!("sent SIGTERM to worker (pid {pid})");
@@ -3313,6 +3426,9 @@ async fn run_video(cmd: VideoCmd) -> Result<()> {
             if selftest && local {
                 println!("running the runner selftest locally");
                 let dir = std::env::temp_dir().join(format!("c0mpute-video-selftest-{}", std::process::id()));
+                // Made here, private and new: a directory someone else left
+                // under this guessable name is refused, not written into.
+                private_new_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
                 let status = tokio::process::Command::new(video::local_python())
                     .arg(video::local_runner_py())
                     .args(["selftest", "--job"])
@@ -5172,27 +5288,54 @@ fn preset_to_spec(preset: &str) -> Result<c0mpute_proto::TranscodeSpec> {
 /// Both flows pipe `curl -fsSL <url>` into `sh`. Future: minisign
 /// signature verification before execution (per DIP-0006).
 fn install_plugin(target: &str) -> Result<()> {
-    let url = resolve_plugin_target(target);
+    let url = resolve_plugin_target(target)?;
     println!("→ installing plugin via {url}");
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("curl -fsSL {url} | sh"))
-        .status()?;
+    // No shell string: the URL is one curl argument, and curl's output is
+    // sh's stdin, so nothing in the target can add a command.
+    let mut curl = std::process::Command::new("curl")
+        .args(["-fsSL", "--", url.as_str()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let script = curl.stdout.take().context("curl has no stdout")?;
+    let status = std::process::Command::new("sh").stdin(script).status()?;
+    let fetched = curl.wait()?;
+    if !fetched.success() {
+        anyhow::bail!("plugin download failed ({fetched})");
+    }
     if !status.success() {
         anyhow::bail!("plugin install failed (exit {status})");
     }
     Ok(())
 }
 
-fn resolve_plugin_target(target: &str) -> String {
+/// Whether `C0MPUTE_RPC_SHARDING` asks for the llama.cpp RPC slice.
+fn rpc_sharding_opted_in(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "yes" | "on"))
+}
+
+/// A plugin id is lowercase letters, digits and dashes; anything else must be
+/// an http(s) URL with no whitespace, quotes or shell metacharacters.
+fn resolve_plugin_target(target: &str) -> Result<String> {
     let t = target.trim();
     if t.starts_with("http://") || t.starts_with("https://") {
-        return t.to_string();
+        let rest = t.split_once("://").map(|(_, r)| r).unwrap_or("");
+        let bad = |c: char| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '`' | '$' | ';' | '|' | '<' | '>' | '\\');
+        if rest.is_empty() || rest.starts_with('/') || t.chars().any(bad) {
+            anyhow::bail!("not a plugin URL: {t}");
+        }
+        return Ok(t.to_string());
+    }
+    let id_ok = !t.is_empty()
+        && t.len() <= 64
+        && !t.starts_with('-')
+        && t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !id_ok {
+        anyhow::bail!("plugin id must be lowercase letters, digits and dashes (or a full https URL): {t}");
     }
     // Treat anything else as a plugin id and resolve through the
     // c0mpute marketplace. The route at c0mpute.com/plugins/<id>/install.sh
     // serves the manifest-checked-in install script for that plugin.
-    format!("https://c0mpute.com/plugins/{t}/install.sh")
+    Ok(format!("https://c0mpute.com/plugins/{t}/install.sh"))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -5556,7 +5699,10 @@ fn install_tui() -> Result<()> {
 
     let tui_dir = home.join(".c0mpute/tui");
     let wrapper = home.join(".c0mpute/bin/c0mpute-tui");
-    let tmp = std::env::temp_dir().join("c0mpute-tui-install");
+    // Scratch under the user's own ~/.c0mpute, not a fixed name in the shared
+    // /tmp: there another local user could pre-create the directory and plant
+    // an `apps/tui` that this script would install and run.
+    let tmp = home.join(format!(".c0mpute/tui-install-{}", std::process::id()));
     // This release's tag, so the TUI matches the CLI; master if the tag is
     // not there (a dev build). C0MPUTE_TUI_REF picks a branch instead.
     let archive = match std::env::var("C0MPUTE_TUI_REF") {
@@ -6302,6 +6448,15 @@ fn rpc_slice_active_models() -> std::collections::HashSet<String> {
 /// models already serving) so the 5-min loop is safe. `infernet inference serve`
 /// stays foreground supervising rpc-server, so it's spawned detached.
 fn bootstrap_infernet_rpc() {
+    // Opt-in. A slice is llama.cpp's `rpc-server`, which has no authentication
+    // and which upstream says must never face an open network; infernet binds
+    // it on every interface so other nodes can reach it. Until 0.3.64 every
+    // gateway node holding an oversized model started one unasked. Operators
+    // who run it behind a firewall or on a private network turn it on with
+    // C0MPUTE_RPC_SHARDING=1.
+    if !rpc_sharding_opted_in(std::env::var("C0MPUTE_RPC_SHARDING").ok().as_deref()) {
+        return;
+    }
     if which_on_path("infernet").is_none() || !infernet_initialized() {
         return;
     }
