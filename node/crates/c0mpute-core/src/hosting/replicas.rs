@@ -97,6 +97,11 @@ pub struct ReplicaMap {
     pub receipts: HashMap<(String, String), Vec<Receipt>>,
     /// Challenges this node saw pass, per (site id, holder).
     pub proofs: HashMap<(String, String), Proof>,
+    /// Count a holder on its announcement alone, as every version up to
+    /// 0.3.64 did (`[hosting] require_proofs` off, the default). With it
+    /// false a holder counts only once proven ([`Self::proven`]) and may only
+    /// be relied on for a drop once it has standing ([`Self::has_standing`]).
+    pub count_claims: bool,
 }
 
 impl ReplicaMap {
@@ -423,6 +428,9 @@ impl ReplicaMap {
     /// or payer (the keys [`proof::demoted`] trusts) is a pass no older than
     /// `ttl`. `now_secs` is the wall clock receipts are dated with.
     pub fn proven(&self, site_id: &str, holder: &str, now: Instant, now_secs: u64, ttl: Duration) -> bool {
+        if self.count_claims {
+            return true;
+        }
         let Some(rec) = self.records.get(site_id) else {
             return false;
         };
@@ -450,6 +458,9 @@ impl ReplicaMap {
     /// with no gap of `span` between passes since. Receipts from other keys
     /// do not count here: only what this node asked for itself.
     pub fn has_standing(&self, site_id: &str, holder: &str, now: Instant, passes: u32, span: Duration) -> bool {
+        if self.count_claims {
+            return true;
+        }
         let Some(rec) = self.records.get(site_id) else {
             return false;
         };

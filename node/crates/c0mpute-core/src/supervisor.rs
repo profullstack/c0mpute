@@ -946,6 +946,7 @@ impl Supervisor {
             crate::hosting::Options {
                 hosts,
                 max_bytes: cfg.max_bytes,
+                require_proofs: cfg.require_proofs,
                 catalog_path,
                 challenger,
                 challenge,

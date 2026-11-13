@@ -374,6 +374,13 @@ pub struct Options {
     pub catalog_path: Option<PathBuf>,
     pub timing: Timing,
     pub dns: dns::Verifier,
+    /// `[hosting] require_proofs`: count a holder toward a site's copies only
+    /// after this node saw it pass a challenge, and rely on it for a drop
+    /// only once it has standing. Off by default: announcements count, as
+    /// before 0.3.65, until the stricter rule has been run on real networks
+    /// (while a small site is still being copied its chunks are read
+    /// constantly, challenges are voided, and every host takes a copy).
+    pub require_proofs: bool,
     /// Key that signs proof-of-storage receipts; no challenges without it.
     pub challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
     pub challenge: ChallengeScope,
@@ -404,6 +411,7 @@ impl Default for Options {
             catalog_path: None,
             timing: Timing::default(),
             dns: dns::Verifier::default(),
+            require_proofs: false,
             challenger: None,
             challenge: ChallengeScope::Own,
             challenge_every: Duration::from_secs(600),
@@ -476,7 +484,10 @@ impl Hosting {
             hosts: opts.hosts,
             max_bytes: opts.max_bytes,
             timing: opts.timing,
-            map: RwLock::new(ReplicaMap::default()),
+            map: RwLock::new(ReplicaMap {
+                count_claims: !(opts.require_proofs || std::env::var("C0MPUTE_HOSTING_REQUIRE_PROOFS").is_ok_and(|v| v == "1")),
+                ..Default::default()
+            }),
             catalog: RwLock::new(Catalog::default()),
             catalog_path: opts.catalog_path,
             records_path,

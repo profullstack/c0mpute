@@ -44,8 +44,15 @@ Git repositories ride on the same machinery: see [git hosting](git-hosting.md).
 
 ### An announced copy counts once it is proven
 
-Announcing a copy is free: any key can gossip "I hold this site". So an announcement
-alone does not fill one of the three copies, and does not let anyone drop theirs.
+Announcing a copy is free: any key can gossip "I hold this site". A node never drops
+its own copy on announcements: it first fetches a random chunk from three other holders.
+
+The stricter rules below (an announcement does not fill a slot either, and a drop
+needs holders with standing) are **off by default** and turned on with
+`[hosting] require_proofs = true` (or `C0MPUTE_HOSTING_REQUIRE_PROOFS=1`). With them
+on, while a small site is still being copied its chunks are read constantly, which
+voids challenges, so extra hosts can take a copy and keep it for hours. Until that is
+settled, the default counts announcements for filling, as every version before did.
 
 - **Filling.** A holder counts toward the three once the node deciding has seen it pass
   a challenge (a random chunk, fetched straight from that peer and checked against its

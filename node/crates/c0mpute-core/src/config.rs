@@ -270,6 +270,13 @@ pub struct HostingConfig {
     /// space above the free-disk floor (see `hosting::auto_budget`).
     #[serde(default = "default_hosting_max_bytes")]
     pub max_bytes: u64,
+    /// Count another node's copy of a site only after it has answered a
+    /// storage challenge, and rely on it before giving a copy up only once
+    /// it has answered several over hours. Off by default: an announcement
+    /// counts, as before 0.3.65 (`C0MPUTE_HOSTING_REQUIRE_PROOFS=1` also
+    /// turns it on).
+    #[serde(default)]
+    pub require_proofs: bool,
     /// What this node asks to be a preferred (paid) host, USD per GiB-month.
     /// Published in the OpenDisk descriptor and in hosting gossip; a site
     /// offering less does not count this node as preferred.
@@ -309,6 +316,7 @@ impl Default for HostingConfig {
         Self {
             enabled: true,
             max_bytes: default_hosting_max_bytes(),
+            require_proofs: false,
             price_usd_per_gib_month: default_hosting_price(),
             payout_wallet: None,
             payout_coin: crate::payments::default_coin(),
