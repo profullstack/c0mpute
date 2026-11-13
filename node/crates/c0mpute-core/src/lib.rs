@@ -50,6 +50,7 @@ pub mod pricing;
 pub mod reachability;
 pub mod render;
 pub mod inference;
+pub mod inference_auto;
 #[cfg(unix)]
 pub mod instance;
 #[cfg(not(unix))]

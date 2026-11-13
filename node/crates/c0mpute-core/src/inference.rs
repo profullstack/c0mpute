@@ -17,6 +17,10 @@
 //! buyer cannot point a worker at another address. `C0MPUTE_INFERENCE_URL=off`
 //! turns the role off.
 //!
+//! A node with no runtime of its own gets one: see `inference_auto`, which
+//! installs a prebuilt llama.cpp `llama-server` and a small Qwen model and
+//! serves it on `127.0.0.1:11439` (`C0MPUTE_INFERENCE_AUTO=0` opts out).
+//!
 //! Answers are one-shot (no token streaming across the network yet).
 
 use std::sync::{Arc, RwLock};
@@ -241,7 +245,8 @@ pub fn worker_load() -> WorkerLoad {
 pub fn offer_filter() -> crate::dispatch::OfferFilter {
     Arc::new(|offer| {
         let ready = ready_models();
-        if ready.is_empty() {
+        // The house runtime yields to songs, images and a busy box.
+        if ready.is_empty() || !crate::inference_auto::can_take_job() {
             return false;
         }
         match crate::job_e2e::bid_spec(offer) {
