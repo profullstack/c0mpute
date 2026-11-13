@@ -34,6 +34,12 @@ fn net(dir: &std::path::Path, bootstrap: Vec<String>) -> NetOptions {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn train_then_serve_a_sticky_session() {
+    // The buyer serves its files from loopback here; a worker only fetches a
+    // job URL on a private address when its operator allows it.
+    // SAFETY: set before any node starts; the test owns its process env.
+    unsafe {
+        std::env::set_var("C0MPUTE_ALLOW_PRIVATE_JOB_URLS", "1");
+    }
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
     let tmp = tempdir().unwrap();
 

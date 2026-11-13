@@ -58,6 +58,12 @@ fn dataset() -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trains_peer_to_peer_with_pieces_and_conversations() {
+    // The buyer serves its files from loopback here; a worker only fetches a
+    // job URL on a private address when its operator allows it.
+    // SAFETY: set before any node starts; the test owns its process env.
+    unsafe {
+        std::env::set_var("C0MPUTE_ALLOW_PRIVATE_JOB_URLS", "1");
+    }
     if !python3() {
         eprintln!("skipping: python3 is not installed (the fake infernet is a python script)");
         return;
