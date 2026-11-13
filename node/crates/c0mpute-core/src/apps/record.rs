@@ -148,6 +148,8 @@ pub fn valid_pinned_ref(r: &str) -> bool {
     };
     !name.is_empty()
         && name.len() <= 255
+        // Never something the container CLI could read as an option.
+        && !name.starts_with('-')
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "./-_:".contains(c))
@@ -160,6 +162,7 @@ pub fn valid_pinned_ref(r: &str) -> bool {
 fn valid_tag(t: &str) -> bool {
     !t.is_empty()
         && t.len() <= 200
+        && !t.starts_with('-')
         && t.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "./-_:".contains(c))
 }
@@ -389,6 +392,17 @@ impl AppRecord {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn image_names_cannot_look_like_an_option() {
+        let digest = "a".repeat(64);
+        assert!(valid_pinned_ref(&format!("ghcr.io/profullstack/demo@sha256:{digest}")));
+        assert!(!valid_pinned_ref(&format!("--privileged@sha256:{digest}")));
+        assert!(!valid_pinned_ref(&format!("-v@sha256:{digest}")));
+        assert!(valid_tag("demo:1.2-rc"));
+        assert!(!valid_tag("--network=host"));
+        assert!(!valid_tag("-t"));
+    }
 
     pub fn spec(name: &str) -> AppSpec {
         AppSpec {

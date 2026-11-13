@@ -1,6 +1,6 @@
 import { isJobId } from "@/lib/chat/images";
 import { AUDIO_TYPES, sanitizeNodeProgress } from "@/lib/chat/music";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +10,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (!user) return unauthorized();
   const { id } = await params;
   if (!isJobId(id)) return json({ error: { message: "unknown music job", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown music job", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/music/${id}`, { signal: AbortSignal.timeout(30_000) });

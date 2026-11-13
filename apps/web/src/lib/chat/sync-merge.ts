@@ -43,6 +43,15 @@ export function adopt<C extends SyncConvo>(local: C | undefined, server: SyncCon
   return { ...(local ?? {}), ...server, messages } as C;
 }
 
+/**
+ * Whether a pulled server copy should replace the local one. Pulls are fetched
+ * one at a time after the plan is made, so the local copy may have moved on
+ * since; adopting an older server copy then would throw away the newer turn.
+ */
+export function serverIsNewer(local: { updated: number } | undefined, server: { updated: number }): boolean {
+  return !local || server.updated >= local.updated;
+}
+
 /** What one sync pass does, from the local list and the server's (since=1: every row, tombstones included). */
 export function syncPlan(local: { id: string; updated: number }[], server: ServerSummary[]): { pull: string[]; push: string[]; drop: string[] } {
   const byId = new Map(server.map((s) => [s.id, s]));

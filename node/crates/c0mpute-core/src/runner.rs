@@ -414,8 +414,22 @@ async fn run_stt_job(
 }
 
 pub(crate) fn safe_job_dir(cache_root: &std::path::Path, job_id: &str) -> Result<PathBuf> {
+    job_subdir(&cache_root.join("jobs"), job_id)
+}
+
+/// `parent/<job id>`, for a job id that is a UUID. The id is the buyer's
+/// word: joined raw, an absolute one replaces the whole path and `..` climbs
+/// out of it, and runners remove their job directory when they finish.
+pub(crate) fn job_subdir(parent: &std::path::Path, job_id: &str) -> Result<PathBuf> {
     let uuid = uuid::Uuid::parse_str(job_id).context("job id must be a UUID")?;
-    Ok(cache_root.join("jobs").join(uuid.to_string()))
+    Ok(parent.join(uuid.to_string()))
+}
+
+/// Whether `job_id` is what every buyer mints: a UUID in its canonical
+/// (lowercase, hyphenated) form. Checked once where offers and accepts come
+/// in, so no runner ever sees anything else.
+pub(crate) fn valid_job_id(job_id: &str) -> bool {
+    uuid::Uuid::parse_str(job_id).is_ok_and(|u| u.to_string() == job_id)
 }
 
 /// Spawn the transcode runner. Returns the sender; clone + give to the
@@ -806,6 +820,20 @@ mod tests {
         let root = std::path::Path::new("/cache");
         assert!(safe_job_dir(root, "../../home/op/.ssh").is_err());
         assert!(safe_job_dir(root, "6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11").is_ok());
+        // The text and temporal runners keep their own layout under the same rule.
+        let text = root.join("text").join("jobs");
+        assert!(job_subdir(&text, "/home/op").is_err());
+        assert!(job_subdir(&text, "../../../..").is_err());
+        assert_eq!(
+            job_subdir(&text, "6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11").unwrap(),
+            text.join("6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11")
+        );
+        // Offers and accepts carry the canonical form only.
+        assert!(valid_job_id("6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11"));
+        assert!(valid_job_id(&uuid::Uuid::new_v4().to_string()));
+        for bad in ["", "j", "/home/op", "../x", "6F1C3E2A-8A39-4A0E-9A59-2C3B1F0E7D11", "6f1c3e2a8a394a0e9a592c3b1f0e7d11", "{6f1c3e2a-8a39-4a0e-9a59-2c3b1f0e7d11}"] {
+            assert!(!valid_job_id(bad), "{bad}");
+        }
     }
 
     #[test]

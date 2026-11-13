@@ -289,6 +289,11 @@ fn parse_range(raw: &str, total: u64) -> Option<(u64, u64)> {
         // `bytes=-N` — the final N bytes.
         let n: u64 = end_s.parse().ok()?;
         let n = n.min(total);
+        // No bytes to give (`bytes=-0`, or an empty object): unsatisfiable,
+        // not a zero-length range whose last byte would be offset - 1.
+        if n == 0 {
+            return None;
+        }
         return Some((total.saturating_sub(n), n));
     }
     let start: u64 = start_s.parse().ok()?;
@@ -430,7 +435,7 @@ async fn get_object(
             .get_range_with(&manifest, offset, len)
             .await
             .map_err(|e| ApiError::Internal(format!("{e:#}")))?;
-        let end = offset + bytes.len() as u64 - 1;
+        let end = offset.saturating_add(bytes.len() as u64).saturating_sub(1);
         return Ok((
             StatusCode::PARTIAL_CONTENT,
             [
@@ -642,6 +647,10 @@ mod tests {
         assert_eq!(parse_range("bytes=50-10", 1000), None);
         assert_eq!(parse_range("bytes=0-10,20-30", 1000), None);
         assert_eq!(parse_range("items=0-10", 1000), None);
+        // Nothing to give: unsatisfiable rather than a range ending at -1.
+        assert_eq!(parse_range("bytes=-0", 1000), None);
+        assert_eq!(parse_range("bytes=-5", 0), None);
+        assert_eq!(parse_range("bytes=0-", 0), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { gateGeneration } from "@/lib/chat/adult";
 import { isVideoJobId, parseVideoRequest, preferWait } from "@/lib/chat/videos";
-import { balanceFor, currentUser, env, infernet, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { balanceFor, currentUser, env, headerTimeout, infernet, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 // A held request (Prefer: wait=N) can stay open up to 2 h.
@@ -60,6 +60,7 @@ export async function POST(req: Request) {
     return err(upstream.status >= 400 ? upstream.status : 502, message);
   }
   const id = body.id;
+  await recordJob(user.id, "video", body.id);
   const accepted = (extra: Record<string, unknown> = {}) =>
     json({ id, status: "pending", model: parsed.model, poll: `/api/v1/videos/${id}`, video: `/api/v1/videos/${id}/video`, ...extra }, 202, {
       "cache-control": "no-store",
@@ -86,7 +87,11 @@ export async function POST(req: Request) {
     if (poll.status !== 200) {
       return err(poll.status >= 400 ? poll.status : 502, typeof p.error === "string" ? p.error : "video failed");
     }
-    const mp4 = await infernet(`/api/chat/video/${id}/video`, { signal: AbortSignal.timeout(120_000) }).catch(() => null);
+    // Headers only: the clip itself may take longer to send than any fixed limit.
+    const mp4Wait = headerTimeout(120_000);
+    const mp4 = await infernet(`/api/chat/video/${id}/video`, { signal: mp4Wait.signal })
+      .catch(() => null)
+      .finally(() => mp4Wait.clear());
     if (!mp4 || mp4.status !== 200) break;
     return new Response(mp4.body, {
       status: 200,

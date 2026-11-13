@@ -269,16 +269,66 @@ pub async fn snapshot_state(app_id: &str, state_path: &str) -> Result<Vec<u8>> {
     )
     .await
     .is_ok();
-    let out = docker(
+    // Read through a cap: the app decides how much it writes to its state
+    // path, and the whole tar used to be buffered before anyone looked at
+    // its size (a 50 GiB state directory was 50 GiB of node memory).
+    let out = docker_capped(
         &["cp".into(), format!("{name}:{state_path}"), "-".into()],
-        None,
         Duration::from_secs(300),
+        super::snapshot::MAX_STATE_BYTES,
     )
     .await;
     if paused {
         let _ = docker(&["unpause".into(), name], None, Duration::from_secs(30)).await;
     }
     out
+}
+
+/// Everything `reader` yields, or an error as soon as it has yielded more
+/// than `max` bytes (never holding more than `max` plus one read buffer).
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R, max: usize) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(out);
+        }
+        if out.len() + n > max {
+            bail!("output is over the {max} byte limit");
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+/// [`docker`] for output of a size the caller does not control: stdout is
+/// read through [`read_capped`] and the command is killed when it runs over.
+async fn docker_capped(args: &[String], timeout: Duration, max: usize) -> Result<Vec<u8>> {
+    let what = args.first().map(String::as_str).unwrap_or("").to_string();
+    let mut cmd = crate::container::command();
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("run the container CLI")?;
+    let stdout = child.stdout.take().context("container CLI stdout")?;
+    let run = async {
+        let bytes = read_capped(stdout, max).await;
+        if bytes.is_err() {
+            let _ = child.kill().await;
+        }
+        let status = child.wait().await?;
+        let bytes = bytes.with_context(|| format!("docker {what}"))?;
+        if !status.success() {
+            bail!("docker {what} exited with {status}");
+        }
+        Ok(bytes)
+    };
+    tokio::time::timeout(timeout, run)
+        .await
+        .with_context(|| format!("docker {what} timed out"))?
 }
 
 /// The image that unpacks a snapshot into an app's state volume: busybox
@@ -393,6 +443,17 @@ pub async fn healthy(host_port: u16, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::apps::record::{AppRecord, tests::spec};
+
+    #[tokio::test]
+    async fn capped_read_stops_at_the_limit_instead_of_buffering_everything() {
+        let small = read_capped(&b"state tar"[..], 1024).await.unwrap();
+        assert_eq!(small, b"state tar");
+        assert_eq!(read_capped(&[7u8; 1024][..], 1024).await.unwrap().len(), 1024, "exactly the limit is fine");
+        // An endless stream is refused after `max` bytes, not read to the end.
+        let endless = tokio::io::repeat(0u8);
+        let err = read_capped(endless, 256 * 1024).await.unwrap_err();
+        assert!(err.to_string().contains("over the 262144 byte limit"), "{err}");
+    }
 
     #[test]
     fn create_args_are_locked_down() {

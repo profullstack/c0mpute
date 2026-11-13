@@ -1,6 +1,6 @@
 import { gateGeneration } from "@/lib/chat/adult";
-import { parsePromoRequest } from "@/lib/chat/promo";
-import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { parsePublicPromoRequest } from "@/lib/chat/promo-guard";
+import { currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   if (!sameOrigin(req)) return err(403, "cross-site request refused");
   const rl = rateLimit(`promo:${user.id}`, 6);
   if (!rl.ok) return err(429, "rate limit: too many promos this hour", { "retry-after": String(rl.retryAfter) });
-  const parsed = parsePromoRequest(await req.json().catch(() => null));
+  const parsed = parsePublicPromoRequest(await req.json().catch(() => null));
   if (typeof parsed === "string") return err(400, parsed);
   // Promos are always SFW (never adult mode): the brief steers the
   // storyboard, so it passes the same content policy as an image prompt.
@@ -44,5 +44,6 @@ export async function POST(req: Request) {
     const message = typeof body?.error === "string" ? body.error : `promo could not start (upstream HTTP ${upstream.status})`;
     return err(upstream.status >= 400 ? upstream.status : 502, message);
   }
+  await recordJob(user.id, "promo", body.id);
   return json({ id: body.id, status: "pending", poll: `/api/v1/promo/${body.id}` }, 202, { "cache-control": "no-store" });
 }

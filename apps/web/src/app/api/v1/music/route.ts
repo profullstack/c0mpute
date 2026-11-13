@@ -1,5 +1,6 @@
-import { parseMusicRequest } from "@/lib/chat/music";
-import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { gateGeneration } from "@/lib/chat/adult";
+import { musicPolicyRequest, parseMusicRequest } from "@/lib/chat/music";
+import { currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +23,10 @@ export async function POST(req: Request) {
   if (!rl.ok) return err(429, "rate limit: too many songs this hour", { "retry-after": String(rl.retryAfter) });
   const parsed = parseMusicRequest(await req.json().catch(() => null));
   if (typeof parsed === "string") return err(400, parsed);
+  // Same content policy as an image prompt: the prompt steers the cover art
+  // and the lyrics are written out, so both are checked. Never adult mode.
+  const gate = gateGeneration(user, musicPolicyRequest(parsed));
+  if (!gate.ok) return json({ error: { message: gate.message, type: "content_policy", code: gate.code } }, gate.status);
 
   let upstream: Response;
   try {
@@ -39,5 +44,6 @@ export async function POST(req: Request) {
     const message = typeof body?.error === "string" ? body.error : `song could not start (upstream HTTP ${upstream.status})`;
     return err(upstream.status >= 400 ? upstream.status : 502, message);
   }
+  await recordJob(user.id, "music", body.id);
   return json({ id: body.id, status: "pending", poll: `/api/v1/music/${body.id}` }, 202, { "cache-control": "no-store" });
 }

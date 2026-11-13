@@ -224,7 +224,18 @@ jobs:
               echo "$have" | grep -qx "$f" || { echo "missing asset $f on $TAG; not publishing" >&2; exit 1; }
             done
           done
-          gh release edit "$TAG" --draft=false --latest
+          # Latest only when this tag is the highest release. Re-running the
+          # workflow on an old tag (workflow_dispatch) used to move
+          # releases/latest, and with it every install and self-update, back
+          # to that old version.
+          highest=$( { gh release list --limit 300 --json tagName -q '.[].tagName' || true; echo "$TAG"; } \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 )
+          if [ "$highest" = "$TAG" ]; then
+            gh release edit "$TAG" --draft=false --latest
+          else
+            echo "::warning::$TAG is not the highest release ($highest); publishing it without moving Latest"
+            gh release edit "$TAG" --draft=false --latest=false
+          fi
           # The public download URL must now serve every platform.
           for a in $want; do
             for f in "$a" "$a.minisig"; do

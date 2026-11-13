@@ -28,7 +28,18 @@ jobs:
         id: rev
         env:
           REF: ${{ inputs.ref || github.sha }}
-        run: echo "sha=$REF" >> "$GITHUB_OUTPUT"
+        # The ref ends up on the box's command line: ssh joins its arguments
+        # and the remote shell parses them again, so anything but a commit
+        # id or a release tag is refused here (`x; curl ... | sh` was a shell
+        # on dev2 for anyone who could dispatch this workflow).
+        shell: bash
+        run: |
+          # A bash match, not grep: it tests the whole value, newlines included.
+          if ! [[ "$REF" =~ ^([0-9a-f]{7,40}|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::ref must be a commit id (7-40 hex) or a release tag (vX.Y.Z)" >&2
+            exit 1
+          fi
+          echo "sha=$REF" >> "$GITHUB_OUTPUT"
 
       - name: Set up ssh
         env:

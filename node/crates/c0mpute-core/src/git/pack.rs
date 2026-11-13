@@ -14,7 +14,10 @@ use anyhow::{Context, Result, bail};
 /// Largest single object we inflate (a guard against zip bombs in a pack).
 pub const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 /// Longest delta chain we follow (git's own default depth is 50).
-const MAX_DELTA_DEPTH: usize = 4096;
+/// git itself stops at 50 (250 with `gc --aggressive`).
+const MAX_DELTA_DEPTH: usize = 512;
+/// Inflated delta bytes one object's chain may hold before it is resolved.
+const MAX_DELTA_CHAIN_BYTES: usize = 2 * MAX_OBJECT_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -147,11 +150,26 @@ impl PackSet {
     fn read(&self, pi: usize, off: u64) -> Result<(Kind, Vec<u8>)> {
         let mut deltas: Vec<Vec<u8>> = Vec::new();
         let (mut pi, mut off) = (pi, off);
+        // Every delta of the chain is held until its base is reached, so the
+        // chain is bounded in length and bytes, and may not loop (a ref-delta
+        // can name itself, or two can name each other).
+        let mut seen = std::collections::HashSet::new();
+        let mut held = 0usize;
         let (kind, mut data) = loop {
             if deltas.len() > MAX_DELTA_DEPTH {
                 bail!("delta chain too deep");
             }
-            match entry_at(&self.packs[pi].pack, off)? {
+            if !seen.insert((pi, off)) {
+                bail!("delta chain loops");
+            }
+            let entry = entry_at(&self.packs[pi].pack, off)?;
+            if let Entry::OfsDelta(_, d) | Entry::RefDelta(_, d) = &entry {
+                held = held.saturating_add(d.len());
+                if held > MAX_DELTA_CHAIN_BYTES {
+                    bail!("delta chain is too large to show");
+                }
+            }
+            match entry {
                 Entry::Full(k, d) => break (k, d),
                 Entry::OfsDelta(base, d) => {
                     deltas.push(d);
@@ -220,6 +238,9 @@ fn entry_at(pack: &[u8], off: u64) -> Result<Entry> {
             while c & 0x80 != 0 {
                 c = *pack.get(p).context("truncated delta offset")?;
                 p += 1;
+                if rel > u64::MAX >> 8 {
+                    bail!("delta offset overflows");
+                }
                 rel = ((rel + 1) << 7) | (c & 0x7f) as u64;
             }
             let base = off
@@ -537,6 +558,37 @@ pub fn log(packs: &PackSet, start: &str, limit: usize) -> Result<Vec<(String, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pack and index holding one object: a ref-delta at offset 12.
+    fn one_ref_delta(oid: [u8; 20], base: [u8; 20], delta: &[u8]) -> PackSet {
+        use std::io::Write;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(delta).unwrap();
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\x01".to_vec();
+        assert!(delta.len() < 16);
+        pack.push(0x70 | delta.len() as u8);
+        pack.extend_from_slice(&base);
+        pack.extend_from_slice(&z.finish().unwrap());
+        let mut idx = b"\xfftOc\0\0\0\x02".to_vec();
+        for bucket in 0..256usize {
+            idx.extend_from_slice(&u32::from(bucket >= oid[0] as usize).to_be_bytes());
+        }
+        idx.extend_from_slice(&oid);
+        idx.extend_from_slice(&[0; 4]);
+        idx.extend_from_slice(&12u32.to_be_bytes());
+        PackSet::new(vec![(pack, idx)]).unwrap()
+    }
+
+    #[test]
+    fn a_delta_that_names_itself_is_refused_not_followed() {
+        let oid = [0x5a; 20];
+        let set = one_ref_delta(oid, oid, &[1, 1, 1, b'x']);
+        let err = set.object(&hex::encode(oid)).unwrap_err();
+        assert!(format!("{err:#}").contains("loops"), "{err:#}");
+        // A base that is not in the repo is the ordinary error.
+        let set = one_ref_delta(oid, [0x11; 20], &[1, 1, 1, b'x']);
+        assert!(set.object(&hex::encode(oid)).is_err());
+    }
 
     #[test]
     fn delta_copy_and_insert() {

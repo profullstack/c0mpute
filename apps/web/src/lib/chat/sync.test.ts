@@ -386,3 +386,167 @@ describe("MCP conversations", () => {
     expect((await convos.get("u", "mcp-new-1"))?.title).toBe("start fresh");
   });
 });
+
+describe("resumable runs: what reaches the database", () => {
+  /** One server on a database whose chunk writes can be made to fail. */
+  function server(opts: { openMs?: number } = {}) {
+    const { sql, db } = memSql();
+    const state = { failChunkWrites: 0, failRunInsert: false, chunkWrites: 0 };
+    const flaky: Sql = {
+      all: sql.all,
+      run: async (q, p) => {
+        if (/INTO chat_run_chunks/.test(q)) {
+          state.chunkWrites++;
+          if (state.failChunkWrites > 0) {
+            state.failChunkWrites--;
+            throw new Error("socket closed");
+          }
+        }
+        if (state.failRunInsert && /INSERT INTO chat_runs/.test(q)) throw new Error("database is down");
+        return sql.run(q, p);
+      },
+    };
+    let t = 1_000_000;
+    const ups: ReturnType<typeof fakeUpstream>[] = [];
+    const m = createRunManager({
+      sql: flaky,
+      key: KEY,
+      owner: "a",
+      now: () => t,
+      timers: false,
+      openMs: opts.openMs,
+      opener: (async (_r, signal) => {
+        const u = fakeUpstream();
+        ups.push(u);
+        return u.body(signal);
+      }) as RunOpener,
+    });
+    const rows = (id: string) => db.query(`SELECT seq, data FROM chat_run_chunks WHERE run_id = ? ORDER BY seq`).all(id) as { seq: number; data: string }[];
+    return { m, db, sql, state, ups, rows, advance: (ms: number) => (t += ms) };
+  }
+
+  test("everything new since the last tick is one row, not one per stream chunk", async () => {
+    const s = server();
+    const run = await s.m.start(req());
+    for (const w of ["a", "b", "c", "d", "e"]) s.ups[0]!.push(delta(w));
+    await tick();
+    await s.m.flush();
+    expect(s.state.chunkWrites).toBe(1);
+    expect(s.rows(run.id)).toHaveLength(1);
+    s.ups[0]!.push(delta("f"));
+    await tick();
+    await s.m.flush();
+    expect(s.rows(run.id).map((r) => r.seq)).toEqual([0, 1]);
+    expect(answerText(s.rows(run.id).map((r) => r.data).join(""))).toBe("abcdef");
+  });
+
+  test("a write that fails is sent again once, with nothing repeated and nothing lost", async () => {
+    const s = server();
+    const run = await s.m.start(req());
+    s.ups[0]!.push(delta("Once "));
+    await tick();
+    s.state.failChunkWrites = 1;
+    await s.m.flush(); // fails: nothing stored, nothing skipped
+    expect(s.rows(run.id)).toHaveLength(0);
+    s.ups[0]!.push(delta("upon "));
+    await tick();
+    await s.m.flush();
+    s.ups[0]!.push(delta("a time"));
+    await tick();
+    await s.m.flush();
+    const stored = s.rows(run.id);
+    expect(stored.map((r) => r.seq)).toEqual([0, 1]);
+    expect(answerText(stored.map((r) => r.data).join(""))).toBe("Once upon a time");
+    // What another server would replay is byte for byte what this one streamed.
+    const local = Buffer.concat(s.m.local(run.id)!.chunks).toString();
+    expect(stored.map((r) => r.data).join("")).toBe(local);
+  });
+
+  test("a write that landed but reported an error is not stored twice", async () => {
+    const s = server();
+    const run = await s.m.start(req());
+    s.ups[0]!.push(delta("hello"));
+    await tick();
+    // The row goes in, then the driver throws (the reply was lost).
+    const real = s.sql.run;
+    let lied = false;
+    s.sql.run = async (q, p) => {
+      await real(q, p);
+      if (!lied && /INTO chat_run_chunks/.test(q)) {
+        lied = true;
+        throw new Error("socket closed after commit");
+      }
+    };
+    await s.m.flush();
+    await s.m.flush();
+    expect(s.rows(run.id)).toHaveLength(1);
+    expect(answerText(s.rows(run.id)[0]!.data)).toBe("hello");
+  });
+
+  test("rows written one per chunk by an older server are continued without a gap", async () => {
+    const c = server();
+    const run = await c.m.start(req());
+    c.ups[0]!.push(delta("old "));
+    await tick();
+    await c.m.flush();
+    // An older build wrote the next chunk as its own row.
+    c.db.query(`INSERT INTO chat_run_chunks (run_id, seq, data) VALUES (?, ?, ?)`).run(run.id, 1, delta("rows "));
+    c.m.crash();
+    const b = createRunManager({ sql: c.sql, key: KEY, owner: "b", now: () => 1_000_000 + RUN_STALE_MS + 1, timers: false, opener: (async (_r, signal) => fakeUpstream().body(signal)) as RunOpener });
+    expect(await b.recover()).toEqual([run.id]);
+    expect(b.local(run.id)!.seq).toBe(2);
+    expect(answerText(Buffer.concat(b.local(run.id)!.chunks).toString())).toBe("old rows ");
+  });
+
+  test("a cancel recorded by another server is not written over by the owner's heartbeat", async () => {
+    const s = server();
+    const run = await s.m.start(req());
+    await s.m.flush();
+    // Another container handles DELETE /chat/runs/<id> between the owner's read and its write.
+    const real = s.sql.run;
+    let raced = false;
+    s.sql.run = async (q, p) => {
+      if (!raced && /^UPDATE chat_runs SET status = \?, heartbeat/.test(q)) {
+        raced = true;
+        await real(`UPDATE chat_runs SET status = 'cancelled', finished = ? WHERE id = ?`, [1, run.id]);
+      }
+      return real(q, p);
+    };
+    s.ups[0]!.push(delta("x"));
+    await tick();
+    await s.m.flush();
+    expect((s.db.query(`SELECT status FROM chat_runs WHERE id = ?`).get(run.id) as { status: string }).status).toBe("cancelled");
+    // The next tick sees it and stops the turn.
+    await s.m.flush();
+    expect(run.status).toBe("cancelled");
+    expect(s.ups[0]!.aborted()).toBe(true);
+  });
+
+  test("a turn whose row cannot be written never existed", async () => {
+    const s = server();
+    s.state.failRunInsert = true;
+    await expect(s.m.start(req())).rejects.toThrow(/database is down/);
+    expect(await s.m.list("u")).toEqual([]);
+    expect(s.ups).toHaveLength(0);
+    expect((s.db.query(`SELECT COUNT(*) AS n FROM chat_run_chunks`).get() as { n: number }).n).toBe(0);
+    // And it does not count against the account's running turns.
+    s.state.failRunInsert = false;
+    for (let i = 0; i < 6; i++) await s.m.start(req());
+  });
+
+  test("an upstream that never answers is failed, not left running", async () => {
+    let signal: AbortSignal | null = null;
+    const m = createRunManager({
+      timers: false,
+      openMs: 20,
+      opener: ((_r, sig) => {
+        signal = sig;
+        return new Promise((_res, rej) => sig.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError"))));
+      }) as RunOpener,
+    });
+    const run = await m.start(req());
+    expect(run.status).toBe("failed");
+    expect(signal!.aborted).toBe(true);
+    expect(await text(m.stream(run.id))).toContain("did not answer in time");
+  });
+});

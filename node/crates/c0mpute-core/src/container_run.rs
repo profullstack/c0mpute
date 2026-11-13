@@ -1227,6 +1227,7 @@ pub fn build_args(
     a.push(format!("--iidfile={}", iidfile.display()));
     a.push(format!("--file={}", b.dockerfile));
     a.push(format!("--label=c0mpute.job={job_id}"));
+    a.push(owner_label());
     a.push(format!(
         "--network={}",
         if network { "default" } else { "none" }
@@ -1253,6 +1254,7 @@ pub fn create_args(
     let mut a = s(&["create"]);
     a.push(format!("--name={name}"));
     a.push(format!("--label=c0mpute.job={job_id}"));
+    a.push(owner_label());
     a.push(format!("--network={network}"));
     a.push(format!("--cpus={}", p.cpus));
     a.push(format!("--memory={}m", p.memory_mb));
@@ -1425,6 +1427,7 @@ pub fn spawn_container_runner(
     net.register_rpc(LOG_SERVICE, Arc::new(LogHandler));
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
+        sweep_orphans().await;
         while let Some(job) = rx.recv().await {
             let Ok(slot) = load.compute_slots().acquire_owned().await else {
                 return;
@@ -1480,12 +1483,89 @@ fn short_id(job_id: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// The whole job id, reduced to what docker allows in a container name and
+/// an image repository (lowercase letters and digits). Twelve characters of it
+/// used to name both, and job ids are public: a second job sharing that
+/// prefix removed the first job's container, or retagged its image between
+/// build and create.
+fn docker_id(job_id: &str) -> String {
+    job_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(64)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 fn job_tag(job_id: &str) -> String {
-    format!("c0mpute-job/{}:build", short_id(job_id))
+    format!("c0mpute-job/{}:build", docker_id(job_id))
 }
 
 fn container_name(job_id: &str) -> String {
-    format!("c0mpute-job-{}", short_id(job_id))
+    format!("c0mpute-job-{}", docker_id(job_id))
+}
+
+/// Label naming the worker process that created a job's container or image.
+const OWNER_LABEL: &str = "c0mpute.owner";
+
+fn owner_label() -> String {
+    format!("--label={OWNER_LABEL}={}", std::process::id())
+}
+
+/// Whether a job container or image labelled with `owner` has nobody left to
+/// stop it. Its job's timeout and cancel lived in the process that made it:
+/// when that process is gone, or is this one starting again in the same PID
+/// (a self-update re-exec), nothing else will ever remove it. Other live
+/// workers sharing the docker daemon keep theirs, and so does anything
+/// without the label (made by an older version, owner unknown).
+fn is_orphan(owner: &str, me: u32, alive: impl Fn(u32) -> bool) -> bool {
+    match owner.trim().parse::<u32>() {
+        Ok(pid) => pid == me || !alive(pid),
+        Err(_) => false,
+    }
+}
+
+/// Whether `pid` is a live process. Without /proc the answer is "yes": then
+/// nothing is ever swept by mistake.
+fn pid_alive(pid: u32) -> bool {
+    if !Path::new("/proc/self").exists() {
+        return true;
+    }
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Remove job containers and built images a previous worker process left
+/// behind (a crash or restart mid-job): the container kept its CPU and memory
+/// forever, since the timeout that would have killed it died with the
+/// process. Once per process, before the first job.
+async fn sweep_orphans() {
+    static SWEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SWEPT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let me = std::process::id();
+    let t = Duration::from_secs(60);
+    let format = format!("{{{{.ID}}}} {{{{.Label \"{OWNER_LABEL}\"}}}}");
+    let Ok(listing) = docker_out(&s(&["ps", "--all", "--filter", "label=c0mpute.job", "--format", &format]), t).await else {
+        return;
+    };
+    for (id, owner) in listing.lines().filter_map(|l| l.split_once(' ')) {
+        if is_orphan(owner, me, pid_alive) {
+            warn!(container = id, owner, "container runner: removing a job container left by a previous worker process");
+            let _ = docker_out(&s(&["rm", "-f", "-v", id]), t).await;
+        }
+    }
+    let Ok(images) = docker_out(&s(&["image", "ls", "--quiet", "--filter", "label=c0mpute.job"]), t).await else {
+        return;
+    };
+    let inspect = format!("{{{{index .Config.Labels \"{OWNER_LABEL}\"}}}}");
+    for id in images.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let owner = docker_out(&s(&["image", "inspect", "--format", &inspect, id]), t).await.unwrap_or_default();
+        if is_orphan(&owner, me, pid_alive) {
+            warn!(image = id, owner = owner.trim(), "container runner: removing a job image left by a previous worker process");
+            let _ = docker_out(&s(&["image", "rm", "-f", id]), t).await;
+        }
+    }
 }
 
 /// Remove whatever a job left in docker (container, built image). Runs after
@@ -2593,6 +2673,39 @@ mod tests {
         assert!(!valid_pinned_image(&format!("-x@sha256:{d}")));
         assert!(!valid_pinned_image(&format!("Busybox@sha256:{d}")));
         assert!(!valid_pinned_image("busybox@sha256:abc"));
+    }
+
+    #[test]
+    fn docker_names_carry_the_whole_job_id() {
+        let a = "3f2c9a1e-7b44-4c0d-9e21-aaaaaaaaaaaa";
+        let b = "3f2c9a1e-7b44-4c0d-9e21-bbbbbbbbbbbb";
+        // Same first twelve characters, different jobs: different names.
+        assert_eq!(short_id(a), short_id(b));
+        assert_ne!(container_name(a), container_name(b));
+        assert_ne!(job_tag(a), job_tag(b));
+        assert_eq!(container_name(a), "c0mpute-job-3f2c9a1e7b444c0d9e21aaaaaaaaaaaa");
+        assert_eq!(job_tag(a), "c0mpute-job/3f2c9a1e7b444c0d9e21aaaaaaaaaaaa:build");
+        // Only what docker accepts in a name and a repository, whatever comes in.
+        let odd = container_name("AB/../cd:ef gh");
+        assert_eq!(odd, "c0mpute-job-abcdefgh");
+        assert!(container_name(&"x".repeat(500)).len() <= 12 + 64);
+    }
+
+    #[test]
+    fn only_containers_whose_worker_is_gone_are_swept() {
+        let alive = |pid: u32| pid == 4242;
+        assert!(is_orphan("100", 7, alive), "its worker is dead");
+        assert!(is_orphan("7\n", 7, alive), "left by this PID before a re-exec");
+        assert!(!is_orphan("4242", 7, alive), "another live worker on this docker host");
+        assert!(!is_orphan("", 7, alive), "no owner label: not ours to judge");
+        assert!(!is_orphan("<no value>", 7, alive));
+        // Every job container and build carries the label.
+        let digest = "a".repeat(64);
+        let p = parse_spec(&json!({"v":1,"mode":"run","image":format!("busybox@sha256:{digest}"),"cmd":["x"]})).unwrap();
+        let label = format!("--label=c0mpute.owner={}", std::process::id());
+        assert!(create_args(&p, "n", "img", JOBS_NETWORK, "job").contains(&label));
+        let b = BuildSpec { dockerfile: "Dockerfile".into(), build_args: Default::default(), target: None };
+        assert!(build_args(&b, "t", Path::new("/w/iid"), false, "job").contains(&label));
     }
 
     #[test]

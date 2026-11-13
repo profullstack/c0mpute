@@ -158,8 +158,11 @@ fn url_unescape(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            // From the bytes: a `str` slice here panics when a multi-byte
+            // character follows the `%`.
+            let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(hi << 4 | lo);
                 i += 3;
                 continue;
             }
@@ -670,6 +673,17 @@ pub(crate) mod tests {
     pub fn ev(k: &Keypair, swarm: &str, lamport: u64, ts: u64, body: Body) -> Event {
         let p = k.public().to_peer_id();
         Event::sign(swarm, &p, lamport, ts, &body, |m| Ok(k.sign(m)?)).unwrap()
+    }
+
+    #[test]
+    fn a_link_with_a_multibyte_character_after_a_percent_does_not_panic() {
+        let key = SwarmKey::lobby().hex();
+        for name in ["%a\u{20ac}", "%\u{20ac}\u{20ac}", "a%\u{e9}", "%", "%4", "%zz", "ok%2Dname"] {
+            let (_, got) = SwarmKey::parse_link(&format!("c0swarm:{key}?name={name}")).unwrap();
+            assert!(got.is_empty() || valid_name(&got), "{name} -> {got}");
+        }
+        assert_eq!(url_unescape("a%2Db"), "a-b");
+        assert_eq!(url_unescape("a%2db%"), "a-b%");
     }
 
     #[test]

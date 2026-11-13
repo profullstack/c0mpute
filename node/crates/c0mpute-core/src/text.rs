@@ -284,7 +284,8 @@ pub fn worker_tags(runtime: &Value, ram_mb: u64) -> Vec<String> {
 }
 
 async fn download(url: &str, dst: &Path, want: &str) -> Result<()> {
-    let resp = reqwest::get(url).await?.error_for_status()?;
+    let (client, url) = crate::net_guard::job_client(url, None).await?;
+    let resp = client.get(url).send().await?.error_for_status()?;
     if resp.content_length().is_some_and(|n| n > MAX_DATASET) {
         bail!("dataset larger than {} MiB", MAX_DATASET >> 20);
     }
@@ -364,7 +365,17 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, ne
     let relay = relaying.then(|| {
         let (url, run_id, net) = (spec.events_url.clone(), spec.run_id.clone(), net.clone());
         tokio::spawn(async move {
-            let c = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+            // The hook is the buyer's URL: vetted and pinned once, or not used.
+            let hook = match &url {
+                Some(u) => match crate::net_guard::job_client(u, Some(Duration::from_secs(10))).await {
+                    Ok(hook) => Some(hook),
+                    Err(e) => {
+                        warn!(err = %format!("{e:#}"), "text: events URL refused; training events are not relayed there");
+                        None
+                    }
+                },
+                None => None,
+            };
             let topic = c0mpute_net::topics::job_topic(TRAIN_WORKLOAD);
             let mut last_step: Option<std::time::Instant> = None;
             while let Some(ev) = ev_rx.recv().await {
@@ -382,8 +393,8 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, ne
                         }
                     }
                 }
-                if let Some(url) = &url
-                    && let Err(e) = c.post(url).json(&ev).send().await
+                if let Some((c, url)) = &hook
+                    && let Err(e) = c.post(url.clone()).json(&ev).send().await
                 {
                     warn!(err = %e, "text: could not relay a training event");
                 }
@@ -449,11 +460,11 @@ pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, ne
 }
 
 async fn upload(base: &str, dir: &Path) -> Result<()> {
-    let c = reqwest::Client::new();
     for f in ARTIFACTS {
         let p = dir.join(f);
         if p.exists() {
-            c.put(format!("{base}/{f}")).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
+            let (c, url) = crate::net_guard::job_client(&format!("{base}/{f}"), None).await?;
+            c.put(url).body(tokio::fs::read(&p).await?).send().await?.error_for_status()?;
         }
     }
     Ok(())
@@ -531,8 +542,12 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
         while let Some(job) = rx.recv().await {
             let Ok(_slot) = slots.clone().acquire_owned().await else { return };
             let accept = job.accept.clone();
+            // Never a raw job id in a path (the directory is removed below).
+            let Ok(job_dir) = crate::runner::job_subdir(&cache_root.join("text").join("jobs"), &accept.job_id) else {
+                warn!(job_id = %accept.job_id, "text: job id is not a UUID; not running it");
+                continue;
+            };
             busy.store(true, Ordering::Relaxed);
-            let job_dir = cache_root.join("text").join("jobs").join(&accept.job_id);
             let run_id = accept.spec_inline.as_ref().and_then(|v| v["run_id"].as_str()).map(String::from);
             in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(accept.job_id.clone(), (job.clone(), run_id));
             let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
@@ -703,7 +718,8 @@ pub fn adapter_bundle(dir: &Path) -> Result<(Vec<u8>, String, Value)> {
 /// Fetch, verify and unpack an adapter bundle into `dir` (a cache entry).
 async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
     use base64::Engine;
-    let resp = reqwest::get(url).await?.error_for_status()?;
+    let (client, url) = crate::net_guard::job_client(url, None).await?;
+    let resp = client.get(url).send().await?.error_for_status()?;
     if resp.content_length().is_some_and(|n| n > MAX_BUNDLE) {
         bail!("adapter bundle larger than {} MiB", MAX_BUNDLE >> 20);
     }
@@ -739,7 +755,7 @@ pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &
     let input_key = spec.adapter_key.as_deref().map(crate::job_e2e::key_from_hex).transpose()?;
     let (adapter, _private_adapter) = match &input_key {
         Some(_) => {
-            let d = cache_root.join("text").join("infer-adapters").join(job_id);
+            let d = crate::runner::job_subdir(&cache_root.join("text").join("infer-adapters"), job_id)?;
             (d.clone(), Some(RemoveDirOnDrop(d)))
         }
         None => (cache_root.join("text").join("adapters").join(spec.adapter_hash.trim_start_matches("sha256:")), None),
@@ -758,7 +774,7 @@ pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &
             None => fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?,
         }
     }
-    let dir = cache_root.join("text").join("infer").join(job_id);
+    let dir = crate::runner::job_subdir(&cache_root.join("text").join("infer"), job_id)?;
     tokio::fs::create_dir_all(&dir).await?;
     // The request holds the prompt: removed on every exit, timeouts included.
     let _job_dir = RemoveDirOnDrop(dir.clone());
@@ -797,7 +813,8 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
                     net.announce(&hash).await.context("announce answer")?;
                     return Ok(hash.to_hex());
                 }
-                reqwest::Client::new().put(format!("{}/answer.json", spec.answer_upload_url)).body(answer.clone()).send().await?.error_for_status()?;
+                let (c, url) = crate::net_guard::job_client(&format!("{}/answer.json", spec.answer_upload_url), None).await?;
+                c.put(url).body(answer.clone()).send().await?.error_for_status()?;
                 Ok(sha256_hex(&answer))
             })
             .await;

@@ -45,6 +45,14 @@ export function parseMusicRequest(
   return { prompt, lyrics, duration };
 }
 
+/**
+ * What the content policy reads of a song or album request: the prompt (it
+ * steers the cover art too) and any lyrics, which are sung as written.
+ */
+export function musicPolicyRequest(r: { prompt: string; lyrics?: string }): { prompt: string; extra: string[] } {
+  return { prompt: r.prompt, extra: r.lyrics ? [r.lyrics] : [] };
+}
+
 /** What the c0mpute node doing a song reports, relayed by Infernet. */
 export type NodeProgress = {
   stage: string;

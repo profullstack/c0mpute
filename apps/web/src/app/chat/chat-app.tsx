@@ -10,7 +10,7 @@ import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCo
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
-import { adopt, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
+import { adopt, serverIsNewer, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
 import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
 const PUSH_NODE = "c0_push_node";
@@ -451,6 +451,10 @@ export function ChatApp({ error }: { error: string | null }) {
             const i = next.findIndex((c) => c.id === sc.id);
             // Never overwrite a conversation that is streaming right now.
             if (i >= 0 && next[i].messages.some((m) => m.run)) continue;
+            // Nor one that changed here while the pull was in flight (a turn
+            // that finished, an /image): the server copy is the older one now,
+            // and the next pass pushes ours.
+            if (i >= 0 && !serverIsNewer(next[i], sc)) continue;
             const merged = adopt(i >= 0 ? next[i] : undefined, sc) as Convo;
             next = i >= 0 ? next.map((c, k) => (k === i ? merged : c)) : [...next, merged];
           }

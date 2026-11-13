@@ -1,15 +1,17 @@
 import { isJobId } from "@/lib/chat/images";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/v1/promo/<id>/frame/<n>: storyboard keyframe n (PNG) once it is drawn. */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string; n: string }> }) {
-  const user = await currentUser(req);
+  const user = await currentUser(req, { oauth: true });
   if (!user) return unauthorized();
   const { id, n } = await params;
   const i = Number(n);
   if (!isJobId(id) || !Number.isInteger(i) || i < 0 || i > 15) return json({ error: { message: "unknown frame", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown frame", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/promo/${id}/frame/${i}`, { signal: AbortSignal.timeout(20_000) });

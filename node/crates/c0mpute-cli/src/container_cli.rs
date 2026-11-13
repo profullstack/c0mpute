@@ -388,20 +388,12 @@ pub async fn run_run(args: RunArgs, config_path: &Path) -> Result<()> {
     print_tail_if_failed(&outcome);
     std::fs::create_dir_all(&args.dest)?;
     for (path, file) in &outcome.outputs {
-        let status = std::process::Command::new("tar")
-            .args([
-                "-xzf",
-                &file.display().to_string(),
-                "-C",
-                &args.dest.display().to_string(),
-            ])
-            .status()
-            .context("run tar")?;
-        if status.success() {
-            eprintln!("output {path} -> {}", args.dest.display());
-            let _ = std::fs::remove_file(file);
-        } else {
-            eprintln!("could not unpack output {path}; kept {}", file.display());
+        match unpack_output(file, &args.dest, path) {
+            Ok(()) => {
+                eprintln!("output {path} -> {}", args.dest.display());
+                let _ = std::fs::remove_file(file);
+            }
+            Err(e) => eprintln!("could not unpack output {path}: {e:#}; kept {}", file.display()),
         }
     }
     if let Some(missing) = outcome.result["outputs"].as_array() {
@@ -765,15 +757,7 @@ pub async fn mcp_run(a: &serde_json::Value) -> Result<serde_json::Value> {
     std::fs::create_dir_all(&dest)?;
     let mut unpacked = Vec::new();
     for (path, file) in &outcome.outputs {
-        let ok = std::process::Command::new("tar")
-            .args([
-                "-xzf",
-                &file.display().to_string(),
-                "-C",
-                &dest.display().to_string(),
-            ])
-            .status()
-            .is_ok_and(|s| s.success());
+        let ok = unpack_output(file, &dest, path).is_ok();
         if ok {
             let _ = std::fs::remove_file(file);
         }
@@ -789,4 +773,80 @@ pub async fn mcp_run(a: &serde_json::Value) -> Result<serde_json::Value> {
         "outputs": unpacked,
         "dest": dest,
     }))
+}
+
+/// The one top-level name an output archive may hold: the last component of
+/// the path that was asked for (`/work/dist` unpacks as `dist/...`).
+fn output_root(path: &str) -> Option<&str> {
+    let name = path.trim_end_matches('/').rsplit('/').next()?;
+    (!name.is_empty() && name != "." && name != "..").then_some(name)
+}
+
+/// Whether an archive member belongs to the output that was asked for. The
+/// archive comes from the worker, which is not trusted: without this a builder
+/// could add `.git/hooks/pre-commit` or a `Makefile` next to the output and
+/// have it run on the buyer's machine later.
+///
+/// `root` is `None` when the buyer asked for a whole directory's contents
+/// (`.`): then any relative member is theirs, and only escapes are refused.
+fn member_allowed(member: &str, root: Option<&str>) -> bool {
+    let m = member.strip_prefix("./").unwrap_or(member);
+    if m.starts_with('/') || m.split('/').any(|part| part == "..") {
+        return false;
+    }
+    root.is_none_or(|root| m.split('/').next().unwrap_or("") == root)
+}
+
+/// Unpack one output archive into `dest`, refusing it whole if any member
+/// falls outside the requested output.
+fn unpack_output(file: &Path, dest: &Path, path: &str) -> Result<()> {
+    let root = output_root(path);
+    let listing = std::process::Command::new("tar")
+        .arg("-tzf")
+        .arg(file)
+        .output()
+        .context("run tar")?;
+    if !listing.status.success() {
+        bail!("the archive cannot be read");
+    }
+    for member in String::from_utf8_lossy(&listing.stdout).lines() {
+        if !member_allowed(member, root) {
+            bail!("the archive holds {member:?}, which is outside the requested output {path:?}");
+        }
+    }
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(file)
+        .arg("-C")
+        .arg(dest)
+        .arg("--no-same-owner")
+        .status()
+        .context("run tar")?;
+    if !status.success() {
+        bail!("tar exited with {status}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod output_unpack_tests {
+    use super::*;
+
+    #[test]
+    fn only_members_of_the_requested_output_are_unpacked() {
+        assert_eq!(output_root("/work/dist"), Some("dist"));
+        assert_eq!(output_root("dist/"), Some("dist"));
+        assert_eq!(output_root("/"), None);
+        assert_eq!(output_root(".."), None);
+        assert_eq!(output_root("."), None);
+        assert!(member_allowed("dist/", Some("dist")));
+        assert!(member_allowed("./dist/app.js", Some("dist")));
+        for bad in [".git/hooks/pre-commit", "Makefile", "/etc/cron.d/x", "dist/../../x", "../dist/x", "distx/a"] {
+            assert!(!member_allowed(bad, Some("dist")), "{bad}");
+        }
+        // Asked for a directory's contents: anything relative, nothing that escapes.
+        assert!(member_allowed("./report.xml", None));
+        assert!(!member_allowed("../x", None));
+        assert!(!member_allowed("/etc/x", None));
+    }
 }

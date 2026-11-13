@@ -750,7 +750,16 @@ fn hold_pushed_chunk(bytes: Vec<u8>) -> Hash {
     hash
 }
 
-type PartialPushes = std::sync::Mutex<std::collections::HashMap<Hash, (Vec<u8>, usize, std::time::Instant)>>;
+/// One chunk being reassembled from pushed fragments.
+struct PartialPush {
+    buf: Vec<u8>,
+    /// Which [`RESULT_PUSH_FRAGMENT`] slots have arrived.
+    got: Vec<bool>,
+    have: usize,
+    at: std::time::Instant,
+}
+
+type PartialPushes = std::sync::Mutex<std::collections::HashMap<Hash, PartialPush>>;
 
 fn partial_pushes() -> &'static PartialPushes {
     static PARTIAL: std::sync::OnceLock<PartialPushes> = std::sync::OnceLock::new();
@@ -759,42 +768,137 @@ fn partial_pushes() -> &'static PartialPushes {
 
 /// Bytes of a chunk sent per push request (well under the 1 MiB RPC cap).
 const RESULT_PUSH_FRAGMENT: usize = 256 * 1024;
+/// Memory half-received pushes may hold, and how many of them; the oldest
+/// goes first. A push is only taken from an awarded worker, so this bounds
+/// what a misbehaving winner can make us hold.
+const RESULT_PUSH_PARTIAL_BYTES: usize = 128 * 1024 * 1024;
+const RESULT_PUSH_PARTIAL_MAX: usize = 1024;
+
+/// Peers we have awarded a job to and not yet heard the end of: the only
+/// ones whose pushes are taken. Counted, since one worker can hold several
+/// awards at once.
+fn push_senders() -> &'static std::sync::Mutex<std::collections::HashMap<PeerId, usize>> {
+    static SENDERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PeerId, usize>>> = std::sync::OnceLock::new();
+    SENDERS.get_or_init(Default::default)
+}
+
+/// Held while `peer` may push a result to us (award to receipt or timeout).
+pub struct PushSender(PeerId);
+
+impl Drop for PushSender {
+    fn drop(&mut self) {
+        if let Ok(mut m) = push_senders().lock() {
+            if let Some(n) = m.get_mut(&self.0) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.0);
+                }
+            }
+        }
+    }
+}
+
+/// Take result pushes from `peer` until the guard drops.
+pub fn expect_result_push(peer: PeerId) -> PushSender {
+    if let Ok(mut m) = push_senders().lock() {
+        *m.entry(peer).or_insert(0) += 1;
+    }
+    PushSender(peer)
+}
+
+fn is_push_sender(peer: &PeerId) -> bool {
+    push_senders().lock().map(|m| m.contains_key(peer)).unwrap_or(false)
+}
+
+/// Fold one pushed fragment into `partial`. `Ok(Some(chunk))` once every
+/// fragment of a chunk has arrived (its hash is not checked here).
+///
+/// A fragment: 32-byte chunk hash, total length, offset (u64 BE), data.
+/// Fragments keep each request under the RPC's 1 MiB cap, which a whole
+/// result chunk plus framing exceeds (2026-11-12: "IO error on outbound
+/// stream" on every long line). Every length here is the sender's word, so
+/// nothing is added or indexed before it is checked.
+fn take_fragment(
+    partial: &mut std::collections::HashMap<Hash, PartialPush>,
+    body: &[u8],
+    max_bytes: usize,
+    max_entries: usize,
+) -> std::result::Result<Option<Vec<u8>>, String> {
+    if body.len() < 48 {
+        return Err("pushed fragment is too short".into());
+    }
+    let hash = Hash(body[..32].try_into().map_err(|_| "bad hash")?);
+    let total = usize::try_from(u64::from_be_bytes(body[32..40].try_into().map_err(|_| "bad length")?)).map_err(|_| "bad length")?;
+    let offset = usize::try_from(u64::from_be_bytes(body[40..48].try_into().map_err(|_| "bad offset")?)).map_err(|_| "bad offset")?;
+    let data = &body[48..];
+    if total == 0 || total > RESULT_PIECE_BYTES.max(MAX_MANIFEST_BYTES) + 64 * 1024 {
+        return Err("pushed fragment is out of range".into());
+    }
+    // The sender cuts a chunk into whole RESULT_PUSH_FRAGMENT slots (the last
+    // one short), so a fragment names exactly one slot.
+    let end = match offset.checked_add(data.len()) {
+        Some(end) if !data.is_empty() && end <= total => end,
+        _ => return Err("pushed fragment is out of range".into()),
+    };
+    if offset % RESULT_PUSH_FRAGMENT != 0 || (end != total && data.len() != RESULT_PUSH_FRAGMENT) {
+        return Err("pushed fragment is not a whole slot".into());
+    }
+    let slot = offset / RESULT_PUSH_FRAGMENT;
+    partial.retain(|_, p| p.at.elapsed() < RESULT_PUSH_TTL);
+    if !partial.contains_key(&hash) {
+        let mut held: usize = partial.values().map(|p| p.buf.len()).sum();
+        while held + total > max_bytes || partial.len() >= max_entries {
+            let Some(oldest) = partial.iter().min_by_key(|(_, p)| p.at).map(|(h, _)| *h) else {
+                break;
+            };
+            if let Some(p) = partial.remove(&oldest) {
+                held -= p.buf.len();
+            }
+        }
+        partial.insert(
+            hash,
+            PartialPush {
+                buf: vec![0u8; total],
+                got: vec![false; total.div_ceil(RESULT_PUSH_FRAGMENT)],
+                have: 0,
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+    let Some(entry) = partial.get_mut(&hash) else {
+        return Err("pushed fragment could not be held".into());
+    };
+    if entry.buf.len() != total {
+        return Err("pushed fragment disagrees on length".into());
+    }
+    // A fragment sent again (its answer was lost) changes nothing.
+    if !entry.got[slot] {
+        entry.buf[offset..end].copy_from_slice(data);
+        entry.got[slot] = true;
+        entry.have += 1;
+    }
+    if entry.have == entry.got.len() {
+        return Ok(partial.remove(&hash).map(|p| p.buf));
+    }
+    Ok(None)
+}
 
 struct ResultPushHandler;
 
 #[async_trait::async_trait]
 impl c0mpute_net::RpcHandler for ResultPushHandler {
-    async fn handle(&self, _peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
-        // A fragment: 32-byte chunk hash, total length, offset (u64 BE), data.
-        // Fragments keep each request under the RPC's 1 MiB cap, which a
-        // whole result chunk plus framing exceeds (2026-11-12: "IO error on
-        // outbound stream" on every long line).
-        if body.len() < 48 {
-            return Err("pushed fragment is too short".into());
-        }
-        let hash = Hash(body[..32].try_into().map_err(|_| "bad hash")?);
-        let total = u64::from_be_bytes(body[32..40].try_into().map_err(|_| "bad length")?) as usize;
-        let offset = u64::from_be_bytes(body[40..48].try_into().map_err(|_| "bad offset")?) as usize;
-        let data = &body[48..];
-        if total == 0 || total > RESULT_PIECE_BYTES.max(MAX_MANIFEST_BYTES) + 64 * 1024 || offset + data.len() > total {
-            return Err("pushed fragment is out of range".into());
+    async fn handle(&self, peer: PeerId, body: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+        // Only a worker we awarded pushes to us (its peer id comes from the
+        // noise handshake); anyone else would be filling our memory.
+        if !is_push_sender(&peer) {
+            return Err("no result expected from this peer".into());
         }
         let done = {
             let mut partial = partial_pushes().lock().map_err(|_| "lock")?;
-            partial.retain(|_, (_, _, at)| at.elapsed() < RESULT_PUSH_TTL);
-            let entry = partial.entry(hash).or_insert_with(|| (vec![0u8; total], 0usize, std::time::Instant::now()));
-            if entry.0.len() != total {
-                return Err("pushed fragment disagrees on length".into());
-            }
-            entry.0[offset..offset + data.len()].copy_from_slice(data);
-            entry.1 += data.len();
-            if entry.1 >= total {
-                partial.remove(&hash).map(|(buf, _, _)| buf)
-            } else {
-                None
-            }
+            take_fragment(&mut partial, &body, RESULT_PUSH_PARTIAL_BYTES, RESULT_PUSH_PARTIAL_MAX)?
         };
         if let Some(buf) = done {
+            let hash = Hash(body[..32].try_into().map_err(|_| "bad hash")?);
             if Hash::of(&buf) != hash {
                 return Err("pushed chunk does not match its hash".into());
             }
@@ -1127,5 +1231,95 @@ mod tests {
         let f = two.spec_fields("audio");
         assert_eq!(f["audio_size"], 2);
         assert_eq!(f["audio_pieces"].as_array().unwrap().len(), 2);
+    }
+
+    fn fragment(hash: &Hash, total: u64, offset: u64, data: &[u8]) -> Vec<u8> {
+        let mut body = hash.0.to_vec();
+        body.extend_from_slice(&total.to_be_bytes());
+        body.extend_from_slice(&offset.to_be_bytes());
+        body.extend_from_slice(data);
+        body
+    }
+
+    #[test]
+    fn a_pushed_fragment_with_a_wrapping_offset_is_refused() {
+        let mut partial = std::collections::HashMap::new();
+        let h = Hash::of(b"x");
+        // offset + len wraps to a small number: refused, not sliced.
+        for offset in [u64::MAX, u64::MAX - 3, u64::MAX - RESULT_PUSH_FRAGMENT as u64 + 1] {
+            assert!(take_fragment(&mut partial, &fragment(&h, 8, offset, &[1u8; 8]), 1 << 20, 8).is_err());
+        }
+        assert!(take_fragment(&mut partial, &fragment(&h, 1, u64::MAX, &[1]), 1 << 20, 8).is_err());
+        // No data, past the end, off a slot boundary, a short middle slot.
+        assert!(take_fragment(&mut partial, &fragment(&h, 8, 0, &[]), 1 << 20, 8).is_err());
+        assert!(take_fragment(&mut partial, &fragment(&h, 8, 4, &[1u8; 8]), 1 << 20, 8).is_err());
+        assert!(take_fragment(&mut partial, &fragment(&h, 8, 1, &[1u8; 7]), 1 << 20, 8).is_err());
+        let big = (RESULT_PUSH_FRAGMENT * 2) as u64;
+        assert!(take_fragment(&mut partial, &fragment(&h, big, 0, &[1u8; 16]), 1 << 20, 8).is_err());
+        assert!(take_fragment(&mut partial, &fragment(&h, u64::MAX, 0, &[1u8; 16]), 1 << 20, 8).is_err());
+        assert!(partial.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_fragment_does_not_finish_a_push_early() {
+        let chunk: Vec<u8> = (0..RESULT_PUSH_FRAGMENT * 3 + 17).map(|i| (i % 251) as u8).collect();
+        let h = Hash::of(&chunk);
+        let frags: Vec<Vec<u8>> = chunk
+            .chunks(RESULT_PUSH_FRAGMENT)
+            .enumerate()
+            .map(|(i, d)| fragment(&h, chunk.len() as u64, (i * RESULT_PUSH_FRAGMENT) as u64, d))
+            .collect();
+        let mut partial = std::collections::HashMap::new();
+        let cap = 64 << 20;
+        assert_eq!(take_fragment(&mut partial, &frags[0], cap, 8).unwrap(), None);
+        assert_eq!(take_fragment(&mut partial, &frags[1], cap, 8).unwrap(), None);
+        // The answer to fragment 1 was lost: the worker sends it again, twice.
+        assert_eq!(take_fragment(&mut partial, &frags[1], cap, 8).unwrap(), None);
+        assert_eq!(take_fragment(&mut partial, &frags[1], cap, 8).unwrap(), None);
+        // Out of order is fine too.
+        assert_eq!(take_fragment(&mut partial, &frags[3], cap, 8).unwrap(), None);
+        let done = take_fragment(&mut partial, &frags[2], cap, 8).unwrap().expect("complete");
+        assert_eq!(done, chunk);
+        assert!(partial.is_empty());
+        // A different length for a chunk in flight is refused.
+        assert_eq!(take_fragment(&mut partial, &frags[0], cap, 8).unwrap(), None);
+        assert!(take_fragment(&mut partial, &fragment(&h, 5, 0, &[0u8; 5]), cap, 8).is_err());
+    }
+
+    #[test]
+    fn half_received_pushes_are_capped_oldest_first() {
+        let mut partial = std::collections::HashMap::new();
+        let total = (RESULT_PUSH_FRAGMENT * 2) as u64;
+        let data = vec![7u8; RESULT_PUSH_FRAGMENT];
+        let hashes: Vec<Hash> = (0u8..5).map(|i| Hash::of(&[i])).collect();
+        // Room for two half-received chunks by bytes.
+        let cap = RESULT_PUSH_FRAGMENT * 4;
+        for h in &hashes {
+            assert_eq!(take_fragment(&mut partial, &fragment(h, total, 0, &data), cap, 64).unwrap(), None);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(partial.len(), 2);
+        assert!(partial.contains_key(&hashes[3]) && partial.contains_key(&hashes[4]));
+        // And by count.
+        let mut partial = std::collections::HashMap::new();
+        for h in &hashes {
+            take_fragment(&mut partial, &fragment(h, total, 0, &data), usize::MAX / 2, 3).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(partial.len(), 3);
+        assert!(!partial.contains_key(&hashes[0]));
+    }
+
+    #[test]
+    fn only_an_awarded_peer_may_push() {
+        let peer = PeerId::random();
+        assert!(!is_push_sender(&peer));
+        let a = expect_result_push(peer);
+        let b = expect_result_push(peer);
+        assert!(is_push_sender(&peer));
+        drop(a);
+        assert!(is_push_sender(&peer));
+        drop(b);
+        assert!(!is_push_sender(&peer));
     }
 }

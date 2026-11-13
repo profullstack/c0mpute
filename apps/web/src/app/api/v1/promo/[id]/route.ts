@@ -1,6 +1,6 @@
 import { isJobId } from "@/lib/chat/images";
 import { sanitizePromoProgress } from "@/lib/chat/promo";
-import { currentUser, infernet, json, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -9,10 +9,12 @@ export const dynamic = "force-dynamic";
  * { video, captions, duration } when done, or the error.
  */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const user = await currentUser(req);
+  const user = await currentUser(req, { oauth: true });
   if (!user) return unauthorized();
   const { id } = await params;
   if (!isJobId(id)) return json({ error: { message: "unknown promo job", code: 404 } }, 404);
+  // Only the account that started a job reads its result.
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown promo job", code: 404 } }, 404);
   let upstream: Response;
   try {
     upstream = await infernet(`/api/chat/promo/${id}`, { signal: AbortSignal.timeout(20_000) });

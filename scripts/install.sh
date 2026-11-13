@@ -868,11 +868,14 @@ ${2:-}
 Environment=HOME=$HOME
 Environment=PATH=$C0MPUTE_HOME/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$C0MPUTE_HOME/bin/c0mpute worker start
-Restart=on-failure
+# always, not on-failure: a worker that exits "cleanly" (status 0, SIGPIPE)
+# for any reason other than being told to stop must come back.
+Restart=always
 RestartSec=5
 # 90: replaced by a newer worker start of this identity; 91: a duplicate that
 # stood down. Restarting either would fight the worker that replaced it.
-RestartPreventExitStatus=90 91
+# SIGTERM: \`c0mpute worker stop\` (and systemctl stop) mean stop.
+RestartPreventExitStatus=90 91 SIGTERM
 
 [Install]
 WantedBy=$1

@@ -42,6 +42,9 @@ export async function POST(req: NextRequest) {
   const envelope = body as Record<string, unknown>;
   const dataField = envelope?.data as Record<string, unknown> | undefined;
   const post = dataField?.post ?? dataField ?? body;
+  if (!post || typeof post !== "object" || Array.isArray(post)) {
+    return NextResponse.json({ error: "Missing required fields: id, slug, title, html" }, { status: 422 });
+  }
   const p = post as Record<string, unknown>;
 
   const source_id  = p.id    as string | undefined;
@@ -49,7 +52,9 @@ export async function POST(req: NextRequest) {
   const title      = p.title as string | undefined;
   const html       = p.html  as string | undefined;
 
-  if (!source_id || !slug || !title || !html) {
+  const strings = [source_id, slug, title, html].every((v) => typeof v === "string" && v);
+  // The slug becomes a URL path and a revalidation key: one plain segment only.
+  if (!strings || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(slug as string)) {
     return NextResponse.json(
       { error: "Missing required fields: id, slug, title, html" },
       { status: 422 },

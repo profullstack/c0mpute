@@ -113,8 +113,9 @@ async fn chunk_handler(
                 )
                     .into_response();
             }
-            // Best-effort cache; ignore errors so we still serve.
-            let _ = state.store.put(&bytes).await;
+            // Served, not kept: this route takes any hash from anyone, and a
+            // chunk stored here is charged to no budget and owned by nothing
+            // that would ever remove it.
             chunk_response(bytes).into_response()
         }
         Err(e) => {

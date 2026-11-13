@@ -1,5 +1,7 @@
+import { gateGeneration } from "@/lib/chat/adult";
 import { parseAlbumRequest } from "@/lib/chat/album";
-import { currentUser, infernetFor, json, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { musicPolicyRequest } from "@/lib/chat/music";
+import { currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +25,10 @@ export async function POST(req: Request) {
   if (!rl.ok) return err(429, "rate limit: too many albums this hour", { "retry-after": String(rl.retryAfter) });
   const parsed = parseAlbumRequest(await req.json().catch(() => null));
   if (typeof parsed === "string") return err(400, parsed);
+  // Same content policy as an image prompt (the brief steers the cover art,
+  // the band, the titles and the lyrics). Never adult mode.
+  const gate = gateGeneration(user, musicPolicyRequest(parsed));
+  if (!gate.ok) return json({ error: { message: gate.message, type: "content_policy", code: gate.code } }, gate.status);
 
   let upstream: Response;
   try {
@@ -41,6 +47,7 @@ export async function POST(req: Request) {
     const message = typeof body?.error === "string" ? body.error : `album could not start (upstream HTTP ${upstream.status})`;
     return err(upstream.status >= 400 ? upstream.status : 502, message);
   }
+  await recordJob(user.id, "album", body.id);
   return json(
     { id: body.id, status: "pending", tracks: body.tracks ?? null, limited: body.limited === true, poll: `/api/v1/album/${body.id}` },
     202,

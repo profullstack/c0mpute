@@ -129,9 +129,62 @@ pub async fn vet_parsed(url: url::Url, allow: fn(IpAddr) -> bool) -> Result<Vett
     })
 }
 
+/// Whether the operator allows job URLs on private addresses
+/// (`C0MPUTE_ALLOW_PRIVATE_JOB_URLS=1`: a buyer and worker on one LAN, tests).
+fn private_job_urls_allowed(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "yes" | "on"))
+}
+
+fn any_ip(_: IpAddr) -> bool {
+    true
+}
+
+/// Unit tests serve their fixtures from loopback.
+#[cfg(test)]
+fn public_or_loopback(ip: IpAddr) -> bool {
+    ip.is_loopback() || is_public_ip(ip)
+}
+
+/// A client for one URL a buyer put in a job spec (a dataset, an upload
+/// target, an events hook), plus the parsed URL to request. The host is
+/// resolved once, every address must be public, the connection is pinned to
+/// those addresses and redirects are off, so the job cannot make this node
+/// talk to its own loopback services, the LAN or a cloud metadata endpoint.
+pub async fn job_client(raw: &str, timeout: Option<std::time::Duration>) -> Result<(reqwest::Client, url::Url)> {
+    #[cfg(not(test))]
+    let strict: fn(IpAddr) -> bool = is_public_ip;
+    #[cfg(test)]
+    let strict: fn(IpAddr) -> bool = public_or_loopback;
+    let allow = if private_job_urls_allowed(std::env::var("C0MPUTE_ALLOW_PRIVATE_JOB_URLS").ok().as_deref()) { any_ip } else { strict };
+    job_client_with(raw, timeout, allow).await
+}
+
+async fn job_client_with(raw: &str, timeout: Option<std::time::Duration>, allow: fn(IpAddr) -> bool) -> Result<(reqwest::Client, url::Url)> {
+    let target = vet_url(raw, allow).await.with_context(|| format!("job URL {raw} refused"))?;
+    let mut builder = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).connect_timeout(std::time::Duration::from_secs(10));
+    if let Some(t) = timeout {
+        builder = builder.timeout(t);
+    }
+    if let Some(host) = &target.pin_host {
+        builder = builder.resolve_to_addrs(host, &target.addrs);
+    }
+    Ok((builder.build().context("build http client")?, target.url))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_job_url_on_a_private_address_gets_no_client() {
+        for url in ["http://127.0.0.1:8080/x", "http://169.254.169.254/latest/meta-data/", "http://10.0.0.5/x", "http://localhost./x", "file:///etc/passwd"] {
+            assert!(job_client_with(url, None, is_public_ip).await.is_err(), "{url}");
+        }
+        assert!(job_client_with("http://93.184.216.34/x", None, is_public_ip).await.is_ok());
+        assert!(!private_job_urls_allowed(None));
+        assert!(!private_job_urls_allowed(Some("0")));
+        assert!(private_job_urls_allowed(Some("1")));
+    }
 
     #[test]
     fn non_public_addresses_are_refused() {

@@ -1,8 +1,17 @@
 import { SRC } from "@/lib/chat/push";
 import { bad, pushErr } from "@/lib/chat/push-http";
-import { currentUser, env, pushStore, unauthorized } from "@/lib/chat/server";
+import { currentUser, env, headerTimeout, pushStore, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
+
+// These are someone's site files (HTML and scripts included), served from the
+// app's own origin for a node to download. A browser must never run them here:
+// save, do not render; no sniffing; and no scripts if it is rendered anyway.
+const INERT = {
+  "content-disposition": "attachment",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "sandbox; default-src 'none'",
+};
 
 /**
  * GET /api/v1/hosting/pushes/<id>/files/<n>: one file of a push, for the node
@@ -24,18 +33,22 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   }
   if (!/^\d{1,3}$/.test(n) || !file) return bad("no such file", 404);
   if (file.text !== undefined) {
-    return new Response(file.text, { headers: { "content-type": `${file.type}; charset=utf-8`, "cache-control": "no-store" } });
+    return new Response(file.text, { headers: { "content-type": `${file.type}; charset=utf-8`, "cache-control": "no-store", ...INERT } });
   }
   if (!file.src || !SRC.test(file.src)) return bad("no such file", 404);
   const self = `http://127.0.0.1:${env("PORT") || "3000"}${file.src}`;
   let upstream: Response;
+  // Headers only: a large media file may take longer to send than any fixed limit.
+  const wait = headerTimeout(120_000);
   try {
     upstream = await fetch(self, {
       headers: { authorization: req.headers.get("authorization") ?? "", cookie: req.headers.get("cookie") ?? "" },
-      signal: AbortSignal.timeout(120_000),
+      signal: wait.signal,
     });
   } catch (e) {
     return bad(`could not read ${file.path}: ${e instanceof Error ? e.message : e}`, 502);
+  } finally {
+    wait.clear();
   }
   const type = (upstream.headers.get("content-type") ?? "").split(";")[0].trim();
   if (upstream.status !== 200 || type.includes("json")) {
@@ -45,6 +58,6 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   }
   const len = upstream.headers.get("content-length");
   return new Response(upstream.body, {
-    headers: { "content-type": type || file.type, "cache-control": "no-store", ...(len ? { "content-length": len } : {}) },
+    headers: { "content-type": type || file.type, "cache-control": "no-store", ...INERT, ...(len ? { "content-length": len } : {}) },
   });
 }

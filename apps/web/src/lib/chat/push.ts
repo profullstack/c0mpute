@@ -498,6 +498,10 @@ export function createPushStore(sql: Sql, opts: { cloudNodeId?: string } = {}) {
     ): Promise<Push | "deleted"> {
       const p = await store.pushForCaller(userId, pid);
       if (!p || p.node_id !== nodeId) throw new PushError("no such push on this node", 404);
+      // Only the account that runs the node reports for it. Without this the
+      // owner of a push on the shared cloud node (whose id is not a secret)
+      // could report its own delete or publish as done.
+      if (!(await store.node(userId, nodeId))) throw new PushError("no such push on this node", 404);
       if (Number(r.rev) !== p.rev) throw new PushError(`stale report: push is at rev ${p.rev}`, 409);
       const t = now();
       // A progress line only: keep the job alive (claimed_at) and show it.

@@ -8,7 +8,7 @@
 // state, bound to the account that started it.
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import type { Row, Sql } from "./store";
+import { CLAIMS_SCHEMA, claimOnce, type Row, type Sql } from "./store";
 
 export const PLUGIN_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS chat_plugins (
@@ -39,6 +39,7 @@ export const PLUGIN_SCHEMA = [
      pending    TEXT NOT NULL,
      expires_at TEXT NOT NULL
    )`,
+  CLAIMS_SCHEMA,
 ];
 
 export const MAX_PLUGINS = 20;
@@ -339,13 +340,19 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
       ]);
     },
 
+    /** One-shot claim for a sign-in ticket (the connect link): true once per ticket. */
+    async claimTicket(ticket: string): Promise<boolean> {
+      await init();
+      return claimOnce(sql, `plugin_ticket:${sha(ticket)}`);
+    },
+
     /** One-shot: the pending sign-in for this state (deleted as it is read), or null. */
     async takePending(state: string): Promise<{ user_id: string; slug: string; pending: unknown } | null> {
       await init();
       const key = needKey();
       const h = sha(state);
       const r = (await sql.all(`SELECT * FROM chat_plugin_pending WHERE state_hash = ?`, [h]))[0];
-      if (!r) return null;
+      if (!r || !(await claimOnce(sql, `plugin_pending:${h}`))) return null;
       await sql.run(`DELETE FROM chat_plugin_pending WHERE state_hash = ?`, [h]);
       if (String(r.expires_at) < now()) return null;
       const plain = unseal(key, String(r.pending), `pending|${h}|${String(r.user_id)}`);

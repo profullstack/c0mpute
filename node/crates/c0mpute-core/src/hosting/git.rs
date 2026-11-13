@@ -119,6 +119,14 @@ impl Hosting {
         }
         let (header, sent) = git::decode_push(body).map_err(Refused::bad)?;
         let rec = header.record;
+        // Before anything is sized from it: the record's size is the
+        // pusher's word (any key signs one).
+        if rec.size > git::MAX_REPO_BYTES {
+            return Err(Refused(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("repos are limited to {} MiB", git::MAX_REPO_BYTES >> 20),
+            ));
+        }
         if !rec.verify() {
             return Err(Refused(
                 StatusCode::FORBIDDEN,
@@ -303,6 +311,9 @@ impl Hosting {
     }
 }
 
+/// Largest ref map ([`git::DOC_PATH`]) a push may carry.
+const MAX_PUSHED_DOC_BYTES: u64 = 4 * 1024 * 1024;
+
 /// A file of a pushed manifest, from the pushed chunks or the local store.
 async fn file_bytes(
     m: &SiteManifest,
@@ -311,7 +322,13 @@ async fn file_bytes(
     h: &Hosting,
 ) -> Result<Vec<u8>> {
     let entry = m.files.get(path).with_context(|| format!("no {path}"))?;
-    let mut out = Vec::with_capacity(entry.size as usize);
+    // The ref map is small; its stated size and chunk list are the pusher's
+    // word (one chunk may be listed any number of times), so neither sizes
+    // an allocation and the file is cut off the moment it runs over.
+    if entry.size > MAX_PUSHED_DOC_BYTES {
+        bail!("{path} is {} bytes, over the {MAX_PUSHED_DOC_BYTES} allowed", entry.size);
+    }
+    let mut out = Vec::new();
     for c in &entry.chunks {
         match sent.get(c) {
             Some(b) => out.extend_from_slice(b),
@@ -319,6 +336,9 @@ async fn file_bytes(
                 let hash = Hash::from_hex(c).map_err(|_| anyhow!("bad hash"))?;
                 out.extend_from_slice(&h.0.store.get(&hash).await.context("chunk not sent")?);
             }
+        }
+        if out.len() as u64 > entry.size {
+            bail!("{path} has the wrong size");
         }
     }
     if out.len() as u64 != entry.size {

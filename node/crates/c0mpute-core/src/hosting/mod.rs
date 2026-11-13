@@ -83,6 +83,18 @@ pub const MAX_BYTES_PER_OWNER: u64 = 16 * GIB_BYTES;
 /// Sites per holding message, so one message stays well under gossipsub's
 /// 64 KiB limit.
 const SITES_PER_MESSAGE: usize = 200;
+/// Other holders asked for a chunk before this node lets a surplus copy go.
+const DROP_PROBES: usize = 12;
+/// Unfinished multi-part holding lists kept at once, and for how long. Each
+/// is a peer's word, so neither the number nor the size is open-ended.
+const MAX_PARTIAL_HOLDINGS: usize = 1024;
+const PARTIAL_HOLDING_TTL: Duration = Duration::from_secs(120);
+
+/// Whether part `part` of a `parts`-part holding list may be added to one
+/// that has `got` parts so far.
+fn holding_part_fits(part: u32, parts: u32, got: u32) -> bool {
+    part < parts && got < parts
+}
 /// Bytes of site entries per holding message (group bitmaps make entries of
 /// striped sites larger than the rest).
 const HOLDING_MESSAGE_BYTES: usize = 40 * 1024;
@@ -226,6 +238,11 @@ struct Inner {
     turn: AtomicUsize,
     stopped: std::sync::atomic::AtomicBool,
     fetch_slots: Semaphore,
+    /// Bytes of copies being fetched right now: admitted by [`Hosting::check_room`]
+    /// but not in the catalog yet, so the next admission must count them.
+    reserving: std::sync::atomic::AtomicU64,
+    /// Serializes admission (check, then reserve).
+    admit: tokio::sync::Mutex<()>,
     /// Per-peer speed and load for multi-source fetching.
     stats: fetch::Stats,
     /// Group layouts of striped manifests, by manifest hash.
@@ -398,6 +415,8 @@ impl Hosting {
             turn: AtomicUsize::new(0),
             stopped: std::sync::atomic::AtomicBool::new(false),
             fetch_slots: Semaphore::new(128),
+            reserving: std::sync::atomic::AtomicU64::new(0),
+            admit: tokio::sync::Mutex::new(()),
             stats: fetch::Stats::default(),
             layouts: RwLock::new(HashMap::new()),
             short_since: std::sync::Mutex::new(HashMap::new()),
@@ -478,6 +497,8 @@ impl Hosting {
             // Partial holding lists from multi-part announcements.
             type Part = (u32, HashMap<String, (String, u64)>, HashMap<String, BTreeSet<u32>>);
             let mut partial: HashMap<String, Part> = HashMap::new();
+            // When each unfinished list began: one that never completes goes.
+            let mut partial_at: HashMap<String, Instant> = HashMap::new();
             loop {
                 let msg: GossipMessage = match rx.recv().await {
                     Ok(m) => m,
@@ -522,12 +543,27 @@ impl Hosting {
                             }
                         }
                         let parts = parts.clamp(1, 1000);
+                        partial_at.retain(|_, at| at.elapsed() < PARTIAL_HOLDING_TTL);
+                        partial.retain(|s, _| partial_at.contains_key(s));
+                        let got = if part == 0 { 0 } else { partial.get(&source).map(|e| e.0).unwrap_or(0) };
+                        // A part past the count it states, more parts than it
+                        // states, or one more unfinished list than we keep:
+                        // the list so far is dropped, not grown.
+                        if !holding_part_fits(part, parts, got)
+                            || (!partial.contains_key(&source) && partial.len() >= MAX_PARTIAL_HOLDINGS)
+                        {
+                            partial.remove(&source);
+                            partial_at.remove(&source);
+                            continue;
+                        }
                         let entry = partial
                             .entry(source.clone())
                             .or_insert((0, HashMap::new(), HashMap::new()));
                         if part == 0 {
                             *entry = (0, HashMap::new(), HashMap::new());
+                            partial_at.insert(source.clone(), Instant::now());
                         }
+                        partial_at.entry(source.clone()).or_insert_with(Instant::now);
                         for s in sites.into_iter().take(SITES_PER_MESSAGE) {
                             if let Some(g) = &s.groups {
                                 // An unreadable bitmap: skip the entry rather
@@ -542,6 +578,7 @@ impl Hosting {
                         entry.0 += 1;
                         if part + 1 >= parts {
                             let (_, all, groups) = partial.remove(&source).unwrap_or_default();
+                            partial_at.remove(&source);
                             let price = price.as_deref().and_then(|p| crate::payments::parse_usd(p).ok());
                             let payout = payout.filter(|p| p.valid());
                             let addrs: Vec<String> = addrs.into_iter().take(8).collect();
@@ -951,6 +988,13 @@ impl Hosting {
             match action {
                 Action::Replicate => self.spawn_replicate(rec),
                 Action::Drop => {
+                    // The surplus is counted from announcements, which any
+                    // key can make. Our copy goes only once enough of the
+                    // others have handed over a chunk we picked.
+                    if !self.others_prove_whole(&rec, TARGET_REPLICAS).await {
+                        debug!(site = %rec.site_id, "hosting: keeping a surplus copy, too few other holders proved theirs");
+                        continue;
+                    }
                     if let Err(e) = self.drop_site(&rec.site_id).await {
                         warn!(site = %rec.site_id, err = %e, "hosting: drop failed");
                     }
@@ -1039,7 +1083,15 @@ impl Hosting {
         };
         let stale = held.as_ref().is_some_and(|h| h.seq < rec.seq);
         if !plan.drop.is_empty() && !stale {
-            self.drop_groups(&rec.site_id, &plan.drop).await;
+            // As for a whole site: a group goes only when enough of the
+            // other holders counted for it proved they have it.
+            let proven = self.groups_others_prove(&rec, &plan.drop, TARGET_REPLICAS).await;
+            if proven.len() < plan.drop.len() {
+                debug!(site = %rec.site_id, kept = plan.drop.len() - proven.len(), "hosting: keeping surplus groups, too few other holders proved theirs");
+            }
+            if !proven.is_empty() {
+                self.drop_groups(&rec.site_id, &proven).await;
+            }
         }
         let mine: BTreeSet<u32> = self
             .0
@@ -1153,7 +1205,10 @@ impl Hosting {
     /// free-disk floor, and (free copies only) the per-owner limit. The error
     /// says which limit.
     async fn check_room(&self, rec: &SiteRecord, extra: u64, this_site_held: u64) -> Result<()> {
-        let held = self.held_bytes().await;
+        // Copies still being fetched count: several sites admitted at once
+        // each saw the same `held` and together went past the budget.
+        let reserving = self.0.reserving.load(Ordering::Relaxed);
+        let held = self.held_bytes().await.saturating_add(reserving);
         let budget = self.budget_with(held);
         if held + extra > budget {
             bail!(
@@ -1163,7 +1218,7 @@ impl Hosting {
             );
         }
         let (disk_free, disk_total) = self.disk();
-        if !leaves_free_floor(disk_free, disk_total, extra) {
+        if !leaves_free_floor(disk_free, disk_total, extra.saturating_add(reserving)) {
             bail!(
                 "disk nearly full: {} GiB free, a copy must leave at least {} GiB",
                 disk_free / GIB_BYTES,
@@ -1186,12 +1241,20 @@ impl Hosting {
         Ok(())
     }
 
+    /// [`Self::check_room`], then hold `extra` bytes as spoken for until the
+    /// returned guard drops (when the copy is in the catalog, or failed).
+    async fn admit(&self, rec: &SiteRecord, extra: u64, this_site_held: u64) -> Result<Reserved> {
+        let _turn = self.0.admit.lock().await;
+        self.check_room(rec, extra, this_site_held).await?;
+        self.0.reserving.fetch_add(extra, Ordering::Relaxed);
+        Ok(Reserved(self.clone(), extra))
+    }
+
     /// Fetch every chunk of `rec` and start holding it.
     pub async fn replicate(&self, rec: &SiteRecord) -> Result<()> {
         let previous = self.0.catalog.read().await.sites.get(&rec.site_id).cloned();
         let already = previous.as_ref().map(|p| p.size).unwrap_or(0);
-        self.check_room(rec, rec.size.saturating_sub(already), 0)
-            .await?;
+        let _reserved = self.admit(rec, rec.size.saturating_sub(already), 0).await?;
         let manifest = self.manifest(rec).await?;
         if manifest.total_bytes() != rec.size || manifest.name() != rec.name {
             bail!("manifest does not match its record");
@@ -1283,6 +1346,12 @@ impl Hosting {
                 futures::stream::iter(todo.into_iter())
                     .map(|(h, src)| async move {
                         let r = match self.fetch_chunk(&h, &src).await {
+                            // A site's bytes are budgeted by the sizes its
+                            // manifest states, a chunk per FILE_CHUNK_BYTES:
+                            // a longer one is bytes nobody accounted for.
+                            Ok(bytes) if bytes.len() > site::FILE_CHUNK_BYTES => {
+                                Err(anyhow::anyhow!("chunk {} is {} bytes, over the {} a site chunk may be", h.to_hex(), bytes.len(), site::FILE_CHUNK_BYTES))
+                            }
                             Ok(bytes) => self.0.store.put(&bytes).await.map(|_| bytes.len()),
                             Err(e) => Err(e),
                         };
@@ -1387,13 +1456,13 @@ impl Hosting {
                             return (g, Err(anyhow::anyhow!("stopped")));
                         }
                         let need = layout.bytes(g);
-                        if let Err(e) = self
-                            .check_room(rec, need, this_site.load(Ordering::Relaxed))
-                            .await
-                        {
-                            full.store(true, Ordering::Relaxed);
-                            return (g, Err(e));
-                        }
+                        let _reserved = match self.admit(rec, need, this_site.load(Ordering::Relaxed)).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                full.store(true, Ordering::Relaxed);
+                                return (g, Err(e));
+                            }
+                        };
                         this_site.fetch_add(need, Ordering::Relaxed);
                         let sources = self.0.map.read().await.group_sources(&rec.site_id, g);
                         let wanted: Vec<(Hash, Vec<String>)> = layout
@@ -1988,13 +2057,10 @@ impl Hosting {
         out
     }
 
-    /// Challenge one holder of one site and record the signed receipt.
-    pub async fn challenge_one(
-        &self,
-        kp: &c0mpute_net::libp2p::identity::Keypair,
-        rec: &SiteRecord,
-        holder: &str,
-    ) -> Result<Receipt> {
+    /// A chunk of `rec` nobody could predict, to ask `holder` for: of a
+    /// striped site, one from a group it says it holds (among `only`, when
+    /// given).
+    async fn challenge_chunk(&self, rec: &SiteRecord, holder: &str, only: Option<&[u32]>) -> Result<String> {
         let manifest = self.manifest(rec).await?;
         let nonce: [u8; 32] = rand::random();
         let striped_pick = if stripe::is_striped(rec.size) {
@@ -2006,6 +2072,7 @@ impl Hosting {
                     .iter()
                     .enumerate()
                     .filter(|(_, hs)| hs.iter().any(|p| p == holder))
+                    .filter(|(g, _)| only.is_none_or(|o| o.contains(&(*g as u32))))
                     .map(|(g, _)| g as u32)
                     .collect()
             };
@@ -2029,6 +2096,94 @@ impl Hosting {
             }
         }
         .context("site has no chunks")?;
+        Ok(chunk)
+    }
+
+    /// Whether `holder` hands over a random chunk of `rec` right now, asked
+    /// directly. A holding announcement is only a claim (any key can gossip
+    /// one); this is the check a node makes before it lets its own copy go.
+    async fn holds_now(&self, rec: &SiteRecord, holder: &str, only: Option<&[u32]>) -> bool {
+        let Ok(chunk) = self.challenge_chunk(rec, holder, only).await else {
+            return false;
+        };
+        let (Ok(hash), Ok(pid)) = (Hash::from_hex(&chunk), holder.parse::<c0mpute_net::PeerId>()) else {
+            return false;
+        };
+        let req = ChunkRequest {
+            chunk_hash: hash,
+            shard_index: None,
+        };
+        let got = tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await;
+        matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash)
+    }
+
+    /// Whether at least `need` other announced holders of `rec` prove their
+    /// copy (see [`Self::holds_now`]). At most [`DROP_PROBES`] are asked.
+    async fn others_prove_whole(&self, rec: &SiteRecord, need: usize) -> bool {
+        let mut others: Vec<String> = self.0.map.read().await.holders(&rec.site_id);
+        others.retain(|p| *p != self.0.me);
+        {
+            use rand::seq::SliceRandom;
+            others.shuffle(&mut rand::thread_rng());
+        }
+        let mut proven = 0;
+        for holder in others.iter().take(DROP_PROBES) {
+            if self.holds_now(rec, holder, None).await {
+                proven += 1;
+                if proven >= need {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Of `groups` (ones this node is about to let go), those that at least
+    /// `need` other announced holders prove they hold. Each holder is asked
+    /// once, for a chunk of one of the groups in question that it claims.
+    async fn groups_others_prove(&self, rec: &SiteRecord, groups: &[u32], need: usize) -> Vec<u32> {
+        let Ok(layout) = self.layout(rec).await else {
+            return Vec::new();
+        };
+        let by_group: Vec<Vec<String>> = self.0.map.read().await.group_holders(&rec.site_id, layout.len(), true);
+        let mut claimants: Vec<String> = groups
+            .iter()
+            .filter_map(|g| by_group.get(*g as usize))
+            .flatten()
+            .filter(|p| **p != self.0.me)
+            .cloned()
+            .collect();
+        claimants.sort();
+        claimants.dedup();
+        {
+            use rand::seq::SliceRandom;
+            claimants.shuffle(&mut rand::thread_rng());
+        }
+        let mut proven: HashSet<String> = HashSet::new();
+        for holder in claimants.iter().take(DROP_PROBES) {
+            if self.holds_now(rec, holder, Some(groups)).await {
+                proven.insert(holder.clone());
+            }
+        }
+        groups
+            .iter()
+            .copied()
+            .filter(|g| {
+                by_group
+                    .get(*g as usize)
+                    .is_some_and(|hs| hs.iter().filter(|p| proven.contains(*p)).count() >= need)
+            })
+            .collect()
+    }
+
+    /// Challenge one holder of one site and record the signed receipt.
+    pub async fn challenge_one(
+        &self,
+        kp: &c0mpute_net::libp2p::identity::Keypair,
+        rec: &SiteRecord,
+        holder: &str,
+    ) -> Result<Receipt> {
+        let chunk = self.challenge_chunk(rec, holder, None).await?;
         let hash = Hash::from_hex(&chunk).context("bad chunk hash")?;
         let pid: c0mpute_net::PeerId = holder.parse().context("holder is not a peer id")?;
         let req = ChunkRequest {
@@ -2436,6 +2591,12 @@ impl Hosting {
     }
 
     async fn read_entry(&self, rec: &SiteRecord, entry: &site::FileEntry) -> Result<Vec<u8>> {
+        // The size is the publisher's word and the whole file lands in
+        // memory: nothing read this way (ref maps, packs, sealed objects,
+        // ad creatives) is bigger than a repo may be.
+        if entry.size > MAX_READ_FILE_BYTES {
+            bail!("file is {} bytes, over the {} read whole", entry.size, MAX_READ_FILE_BYTES);
+        }
         let sources = self.chunk_sources(rec).await;
         let wanted: Vec<(u64, Hash)> = entry
             .chunks
@@ -2607,7 +2768,11 @@ impl Hosting {
             .collect();
         // Small bodies are read whole first, so a missing chunk is a clean 502.
         let small = wanted.len() <= fetch::READ_AHEAD;
-        let body = if small || html {
+        // A page small enough to have its meta tags rewritten is read whole;
+        // a bigger one streams like any other file (its size is the
+        // publisher's word, and one chunk may be listed any number of times).
+        let whole_html = html && entry.size <= MAX_META_REWRITE_BYTES as u64;
+        let body = if small || whole_html {
             match self
                 .read_range(rec, &sources, &wanted, start, end_incl)
                 .await
@@ -3047,6 +3212,8 @@ async fn serve_site(h: &Hosting, site: &str, path: &str, query: Option<&str>, he
 
 /// Largest HTML page whose social meta tags get rewritten.
 const MAX_META_REWRITE_BYTES: usize = 8 * 1024 * 1024;
+/// Largest file [`Hosting::read_file`] reads into memory.
+const MAX_READ_FILE_BYTES: u64 = crate::git::MAX_REPO_BYTES;
 
 /// Rewrite relative `og:image` / `twitter:image` / `og:url` tags of an HTML
 /// response to absolute URLs (see [`meta`]); anything else passes through.
@@ -3066,6 +3233,16 @@ async fn with_absolute_meta(resp: Response, page_url: Option<&str>) -> Response 
     if !html {
         return resp;
     }
+    // Only a page of a known, small size is buffered; a bigger one (it was
+    // streamed) passes through as it is.
+    let len = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if len.is_some_and(|n| n > MAX_META_REWRITE_BYTES as u64) {
+        return resp;
+    }
     let (mut parts, body) = resp.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_META_REWRITE_BYTES).await else {
         return (StatusCode::BAD_GATEWAY, "site is unavailable right now").into_response();
@@ -3079,6 +3256,15 @@ async fn with_absolute_meta(resp: Response, page_url: Option<&str>) -> Response 
             Response::from_parts(parts, Body::from(text))
         }
         None => Response::from_parts(parts, Body::from(bytes)),
+    }
+}
+
+/// Bytes admitted for a copy that is still being fetched (see [`Hosting::admit`]).
+struct Reserved(Hosting, u64);
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.0.0.reserving.fetch_sub(self.1, Ordering::Relaxed);
     }
 }
 
@@ -3142,6 +3328,17 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_holding_part_past_its_own_count_does_not_grow_the_list() {
+        assert!(holding_part_fits(0, 1, 0));
+        assert!(holding_part_fits(2, 3, 2));
+        assert!(!holding_part_fits(3, 3, 0), "part index past the count it states");
+        assert!(!holding_part_fits(1, 1000, 1000), "more parts than it states");
+        // The repeat-forever shape: part 1 of 3, again and again.
+        assert!(holding_part_fits(1, 3, 2));
+        assert!(!holding_part_fits(1, 3, 3));
+    }
 
     #[test]
     fn dial_addr_names_the_peer_it_dials() {

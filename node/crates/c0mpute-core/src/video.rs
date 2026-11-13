@@ -1104,9 +1104,14 @@ async fn run_container(run: &ContainerRun) -> Result<()> {
         .kill_on_drop(true)
         .spawn()
         .context("could not start docker")?;
+    // A cancelled job drops this future. kill_on_drop then reaps `docker
+    // run`, but the container is the daemon's child and kept the GPU busy
+    // until its own timeout: kill it by name on every exit but a clean one.
+    let mut guard = KillContainerOnDrop(Some(run.container_name.clone()));
 
     match tokio::time::timeout(JOB_TIMEOUT, child.wait()).await {
         Ok(status) => {
+            guard.0 = None;
             let status = status.context("waiting for the runner container")?;
             if !status.success() {
                 bail!("runner exited with {status}");
@@ -1116,6 +1121,7 @@ async fn run_container(run: &ContainerRun) -> Result<()> {
         Err(_) => {
             // kill_on_drop reaps `docker run`, but the container it started is
             // a child of the daemon and would keep the GPU busy.
+            guard.0 = None;
             let _ = crate::container::command()
                 .args(["kill", &run.container_name])
                 .output()
@@ -1128,9 +1134,45 @@ async fn run_container(run: &ContainerRun) -> Result<()> {
     }
 }
 
+/// Kills the named container when dropped while still armed (`Some`).
+struct KillContainerOnDrop(Option<String>);
+
+impl KillContainerOnDrop {
+    /// The `docker` arguments that stop this container, when still armed.
+    fn argv(&self) -> Option<[&str; 2]> {
+        self.0.as_deref().map(|name| ["kill", name])
+    }
+}
+
+impl Drop for KillContainerOnDrop {
+    fn drop(&mut self) {
+        let Some(argv) = self.argv() else { return };
+        // Drop cannot await: start the kill and reap it off-thread.
+        let spawned = crate::container::command_sync()
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = spawned {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_container_job_is_killed_by_name_and_a_finished_one_is_not() {
+        let mut guard = KillContainerOnDrop(Some("c0mpute-video-abc".into()));
+        assert_eq!(guard.argv(), Some(["kill", "c0mpute-video-abc"]));
+        guard.0 = None;
+        assert_eq!(guard.argv(), None, "disarmed once the container exited");
+    }
 
     fn job() -> VideoJobInline {
         VideoJobInline {

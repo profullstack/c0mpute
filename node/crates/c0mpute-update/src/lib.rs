@@ -54,6 +54,35 @@ pub fn auto_update_enabled(configured: bool) -> bool {
         && !std::env::var("C0MPUTE_NO_AUTO_UPDATE")
             .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false)
+        && !running_dev_build()
+}
+
+/// True when `exe` is a cargo build output (some directory on its path is
+/// named `target`). Such a binary must never replace itself with the published
+/// release: a freshly built branch reports an older version than the feed and
+/// would silently become the release mid-test. `c0mpute update` still works.
+pub fn is_dev_build_path(exe: &std::path::Path) -> bool {
+    exe.parent()
+        .is_some_and(|dir| dir.components().any(|c| c.as_os_str() == "target"))
+}
+
+fn running_dev_build() -> bool {
+    current_exe_path().is_some_and(|exe| is_dev_build_path(&exe))
+}
+
+/// Linux reports a replaced (unlinked) executable as `<path> (deleted)`. That
+/// name neither execs nor is where the next binary belongs, so strip it.
+pub fn strip_deleted_suffix(exe: std::path::PathBuf) -> std::path::PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(clean) => std::path::PathBuf::from(clean),
+        None => exe,
+    }
+}
+
+/// The path this binary was installed at, usable after a swap: resolve it
+/// before replacing the file and keep the value, or call this at any time.
+pub fn current_exe_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().map(strip_deleted_suffix)
 }
 
 /// Check if `manifest.version` is newer than `current` using simple semver
@@ -120,43 +149,90 @@ pub async fn try_upgrade(current_version: &str, release_feed_url: &str) -> Resul
     })
 }
 
+/// What to do with the new binary's benchmark once an update is installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostBench {
+    /// Run it and wait (bounded by [`POST_BENCH_TIMEOUT`]), output shown: the
+    /// worker's poller and `c0mpute update`.
+    Wait,
+    /// Start it and return at once with its output discarded: a CLI command
+    /// that updated in passing must not wait on it or print its table into
+    /// that command's stdout (`c0mpute status --json | jq`).
+    Detached,
+}
+
+/// Longest an update waits for the new binary's benchmark.
+pub const POST_BENCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// Check, then actually apply the upgrade: download the platform artifact,
 /// verify its sha256, and atomically swap the running binary in place. Returns
 /// `AlreadyLatest` when nothing to do, `Upgraded` on success; errors bubble up
 /// so the caller can fall back to a manual reinstall.
 pub async fn upgrade_now(current_version: &str, release_feed_url: &str) -> Result<UpgradeOutcome> {
+    upgrade_with(current_version, release_feed_url, PostBench::Wait).await
+}
+
+/// [`upgrade_now`] with a choice of how the post-update benchmark runs.
+pub async fn upgrade_with(current_version: &str, release_feed_url: &str, bench: PostBench) -> Result<UpgradeOutcome> {
     let manifest = fetch_latest(release_feed_url).await?;
     if !should_upgrade(current_version, &manifest)? {
         return Ok(UpgradeOutcome::AlreadyLatest {
             current: current_version.to_string(),
         });
     }
-    // Save the executable path before replacing its on-disk inode. After the
-    // swap, launch the new binary's full benchmark under this node's identity
-    // so its refreshed report is what the worker advertises on restart.
-    let new_exe = std::env::current_exe().ok();
-    perform_upgrade(&manifest).await?;
-    if let Some(exe) = new_exe {
-        if let Err(error) = run_post_update_benchmark(exe).await {
-            warn!(err = %error, "post-update benchmark failed; continuing with the updated binary");
-        }
-    } else {
-        warn!("could not locate updated executable to run the post-update benchmark");
+    install(current_version, &manifest, bench).await
+}
+
+/// Install `manifest`'s release over the running binary (the caller checked it
+/// is newer).
+async fn install(current_version: &str, manifest: &ReleaseManifest, bench: PostBench) -> Result<UpgradeOutcome> {
+    // Resolve the executable path before replacing its on-disk inode: after
+    // the swap `current_exe()` names the unlinked file ("... (deleted)").
+    // The same path is where the new binary goes and what the benchmark runs.
+    let exe = current_exe_path().context("locate current executable")?;
+    perform_upgrade(manifest, &exe).await?;
+    // Launch the new binary's full benchmark under this node's identity so
+    // its refreshed report is what the worker advertises on restart.
+    if let Err(error) = run_post_update_benchmark(exe, bench).await {
+        warn!(err = %error, "post-update benchmark failed; continuing with the updated binary");
     }
     Ok(UpgradeOutcome::Upgraded {
         from: current_version.to_string(),
-        to: manifest.version,
+        to: manifest.version.clone(),
     })
 }
 
-async fn run_post_update_benchmark(exe: std::path::PathBuf) -> Result<()> {
-    let status = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(exe)
-            .arg("benchmark")
-            // The child already is the newly installed version; avoid another
-            // release-feed request before it starts measuring this machine.
-            .env("C0MPUTE_NO_AUTO_UPDATE", "1")
-            .status()
+async fn run_post_update_benchmark(exe: std::path::PathBuf, bench: PostBench) -> Result<()> {
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("benchmark")
+        // The child already is the newly installed version; avoid another
+        // release-feed request before it starts measuring this machine.
+        .env("C0MPUTE_NO_AUTO_UPDATE", "1")
+        .stdin(std::process::Stdio::null());
+    if bench == PostBench::Detached {
+        command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let mut child = command.spawn().context("start post-update benchmark")?;
+        // Reap it whenever it ends; nobody waits on the result.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return Ok(());
+    }
+    let status = tokio::task::spawn_blocking(move || -> Result<std::process::ExitStatus> {
+        let mut child = command.spawn().context("start post-update benchmark")?;
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if started.elapsed() >= POST_BENCH_TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("`c0mpute benchmark` ran over {}s; stopped", POST_BENCH_TIMEOUT.as_secs());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
     })
     .await
     .context("join post-update benchmark")??;
@@ -164,6 +240,14 @@ async fn run_post_update_benchmark(exe: std::path::PathBuf) -> Result<()> {
         anyhow::bail!("`c0mpute benchmark` exited with {status}");
     }
     Ok(())
+}
+
+/// The release artifact for a platform, exactly as
+/// `.github/workflows/release.yml` names it: a zip on Windows, a tarball
+/// everywhere else.
+pub fn artifact_name(os: &str, arch: &str) -> String {
+    let ext = if os == "windows" { "zip" } else { "tar.gz" };
+    format!("c0mpute-{os}-{arch}.{ext}")
 }
 
 /// Map the compile-time target to the release artifact's os/arch tokens
@@ -189,7 +273,7 @@ fn target_os_arch() -> Result<(&'static str, &'static str)> {
 /// stable pinned-version URL and its companion `.sha256`.
 async fn resolve_artifact(manifest: &ReleaseManifest) -> Result<(String, String, String, String)> {
     let (os, arch) = target_os_arch()?;
-    let artifact = format!("c0mpute-{os}-{arch}.tar.gz");
+    let artifact = artifact_name(os, arch);
 
     if let Some(a) = manifest
         .artifacts
@@ -282,7 +366,7 @@ fn http_client() -> Result<reqwest::Client> {
 }
 
 /// Download the artifact, verify its checksum, and swap it into place.
-async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
+async fn perform_upgrade(manifest: &ReleaseManifest, exe: &std::path::Path) -> Result<()> {
     let (url, expected_sha, sig_url, artifact) = resolve_artifact(manifest).await?;
 
     info!(%url, "downloading update");
@@ -324,57 +408,100 @@ async fn perform_upgrade(manifest: &ReleaseManifest) -> Result<()> {
     info!("checksum + signature verified; swapping binary");
 
     // Extraction + filesystem swap is blocking work — keep it off the reactor.
-    let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || extract_and_swap(&bytes, &artifact))
+    let exe = exe.to_path_buf();
+    tokio::task::spawn_blocking(move || extract_and_swap(&bytes, &artifact, &exe))
         .await
         .context("join extract/swap task")??;
     Ok(())
 }
 
-/// Extract `c0mpute` from the tarball and atomically rename it over the running
-/// binary. Renaming over a running executable is safe on Unix — the live
-/// process keeps the old inode; the next launch gets the new one.
-fn extract_and_swap(tarball: &[u8], artifact: &str) -> Result<()> {
-    let current = std::env::current_exe().context("locate current executable")?;
+/// Name stem of every scratch file an update leaves next to the binary.
+const SCRATCH_PREFIX: &str = ".c0mpute-update-";
+
+/// A scratch name no other process shares. The worker's poller and CLI
+/// commands all update within the same minute of a release; with fixed names
+/// each run deleted the other's half-written files.
+fn scratch_tag() -> String {
+    format!("{}-{:08x}", std::process::id(), stagger_secs(u32::MAX as u64))
+}
+
+/// Remove scratch left by an update that died mid-way (a crash, a full disk).
+/// Only entries older than an hour, so a concurrent update keeps its files.
+fn sweep_stale_scratch(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(SCRATCH_PREFIX) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(60 * 60));
+        if old {
+            let path = entry.path();
+            if std::fs::remove_dir_all(&path).is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Removes an update's scratch directory on every exit path.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The binary's file name inside a release archive.
+fn archived_binary(artifact: &str) -> &'static str {
+    if artifact.ends_with(".zip") {
+        "c0mpute.exe"
+    } else {
+        "c0mpute"
+    }
+}
+
+/// Extract the binary from the archive and atomically rename it over
+/// `current`, the path resolved before anything was replaced. Renaming over a
+/// running executable is safe on Unix: the live process keeps the old inode;
+/// the next launch gets the new one.
+fn extract_and_swap(archive: &[u8], artifact: &str, current: &std::path::Path) -> Result<()> {
     let dir = current
         .parent()
         .context("current executable has no parent directory")?;
+    sweep_stale_scratch(dir);
 
-    let tmp_tar = dir.join(format!(".{artifact}.download"));
-    let extract_dir = dir.join(".c0mpute-update-extract");
-    let staged = dir.join(".c0mpute.new");
+    // Everything lives in one per-process directory beside the binary (same
+    // filesystem, so the final rename is atomic).
+    let scratch = Scratch(dir.join(format!("{SCRATCH_PREFIX}{}", scratch_tag())));
+    std::fs::create_dir_all(&scratch.0).context("create update scratch dir")?;
+    let tmp_archive = scratch.0.join(artifact);
+    let extract_dir = scratch.0.join("extract");
+    let staged = scratch.0.join("c0mpute.new");
 
-    // Best-effort cleanup of any prior interrupted run.
-    let _ = std::fs::remove_file(&tmp_tar);
-    let _ = std::fs::remove_dir_all(&extract_dir);
-    let _ = std::fs::remove_file(&staged);
-
-    let cleanup = |extra: Option<&std::path::Path>| {
-        let _ = std::fs::remove_file(&tmp_tar);
-        let _ = std::fs::remove_dir_all(&extract_dir);
-        if let Some(p) = extra {
-            let _ = std::fs::remove_file(p);
-        }
-    };
-
-    std::fs::write(&tmp_tar, tarball).context("write downloaded archive")?;
+    std::fs::write(&tmp_archive, archive).context("write downloaded archive")?;
     std::fs::create_dir_all(&extract_dir).context("create extract dir")?;
 
+    // bsdtar (what Windows 10+ ships as tar.exe) reads zip archives too.
+    let flags = if artifact.ends_with(".zip") { "-xf" } else { "-xzf" };
     let status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&tmp_tar)
+        .arg(flags)
+        .arg(&tmp_archive)
         .arg("-C")
         .arg(&extract_dir)
         .status()
         .context("run tar (is it installed?)")?;
     if !status.success() {
-        cleanup(None);
         anyhow::bail!("tar extraction failed for {artifact}");
     }
 
-    let new_bin = extract_dir.join("c0mpute");
+    let new_bin = extract_dir.join(archived_binary(artifact));
     if !new_bin.exists() {
-        cleanup(None);
         anyhow::bail!("archive did not contain a c0mpute binary");
     }
 
@@ -385,16 +512,27 @@ fn extract_and_swap(tarball: &[u8], artifact: &str) -> Result<()> {
             .context("chmod new binary")?;
     }
 
-    // Move into the target dir (same filesystem → rename is atomic), then swap.
-    std::fs::rename(&new_bin, &staged)
-        .or_else(|_| std::fs::copy(&new_bin, &staged).map(|_| ()))
-        .context("stage new binary")?;
-    if let Err(e) = std::fs::rename(&staged, &current) {
-        cleanup(Some(&staged));
-        return Err(e).context(format!("swap new binary into {}", current.display()));
-    }
+    std::fs::rename(&new_bin, &staged).context("stage new binary")?;
+    swap_into_place(&staged, current).with_context(|| format!("swap new binary into {}", current.display()))
+}
 
-    cleanup(None);
+#[cfg(not(windows))]
+fn swap_into_place(staged: &std::path::Path, current: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(staged, current)
+}
+
+/// Windows refuses to overwrite a running executable but lets it be renamed:
+/// move it aside, put the new one in its place, and put the old one back if
+/// that fails. The moved-aside file is removed by a later update's sweep.
+#[cfg(windows)]
+fn swap_into_place(staged: &std::path::Path, current: &std::path::Path) -> std::io::Result<()> {
+    let dir = current.parent().unwrap_or(std::path::Path::new("."));
+    let aside = dir.join(format!("{SCRATCH_PREFIX}old-{}.exe", scratch_tag()));
+    std::fs::rename(current, &aside)?;
+    if let Err(e) = std::fs::rename(staged, current) {
+        let _ = std::fs::rename(&aside, current);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -487,15 +625,48 @@ pub async fn drain(max: Duration, every: Duration) -> usize {
     }
 }
 
+/// Longest wait between polls after repeated failures.
+pub const MAX_POLL_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How long to wait after failed polls. Doubles per consecutive failure of the
+/// same thing (a release version that will not install, or the feed itself),
+/// from the normal interval up to [`MAX_POLL_BACKOFF`]. A release that cannot
+/// be installed here (full disk, read-only binary directory, missing artifact)
+/// used to be downloaded in full again every minute, forever.
+#[derive(Debug, Default)]
+pub struct PollBackoff {
+    key: Option<String>,
+    failures: u32,
+}
+
+impl PollBackoff {
+    /// Record a failure of `key`; returns the wait before the next poll.
+    pub fn failed(&mut self, key: &str, interval: Duration) -> Duration {
+        if self.key.as_deref() != Some(key) {
+            self.key = Some(key.to_string());
+            self.failures = 0;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let factor = 1u32.checked_shl(self.failures.min(31)).unwrap_or(u32::MAX);
+        interval.saturating_mul(factor).min(MAX_POLL_BACKOFF).max(interval)
+    }
+
+    /// A poll went through: the next failure starts from the interval again.
+    pub fn succeeded(&mut self) {
+        self.key = None;
+        self.failures = 0;
+    }
+}
+
 /// Long-running background poller. Every `interval` it checks the feed and, if
 /// a newer release exists, downloads + verifies + swaps the binary, then
 /// re-executes into it so the update applies without an operator restart.
-/// Failures are logged, never propagated — a flaky feed must not take down the
-/// worker.
+/// Failures are logged, never propagated: a flaky feed must not take down the
+/// worker. Repeated failures back off (see [`PollBackoff`]).
 pub async fn poll_loop(current_version: String, release_feed_url: String, interval: Duration) {
-    // Path to re-exec captured up front — after a swap, current_exe() reports
-    // the now-unlinked inode ("… (deleted)"), which won't exec.
-    let exe = std::env::current_exe().ok();
+    // Path to re-exec captured up front: after a swap, current_exe() reports
+    // the now-unlinked inode ("... (deleted)"), which won't exec.
+    let exe = current_exe_path();
 
     // Small initial jitter (0–60s) so 1000 nodes don't all hit at once.
     let jitter = fastish_jitter_secs();
@@ -505,13 +676,33 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
     );
     tokio::time::sleep(Duration::from_secs(jitter)).await;
 
-    let mut ticker = tokio::time::interval(interval);
+    let mut backoff = PollBackoff::default();
+    let mut wait = Duration::ZERO;
     loop {
-        ticker.tick().await;
-        match upgrade_now(&current_version, &release_feed_url).await {
-            Ok(UpgradeOutcome::AlreadyLatest { current }) => {
-                tracing::debug!(version = %current, "auto-upgrade: already latest");
+        tokio::time::sleep(wait).await;
+        wait = interval;
+        let manifest = match fetch_latest(&release_feed_url).await {
+            Ok(m) => m,
+            Err(e) => {
+                wait = backoff.failed("feed", interval);
+                warn!(err = %e, retry_secs = wait.as_secs(), "auto-upgrade: poll failed");
+                continue;
             }
+        };
+        match should_upgrade(&current_version, &manifest) {
+            Ok(true) => {}
+            Ok(false) => {
+                backoff.succeeded();
+                tracing::debug!(version = %current_version, "auto-upgrade: already latest");
+                continue;
+            }
+            Err(e) => {
+                wait = backoff.failed("feed", interval);
+                warn!(err = %e, retry_secs = wait.as_secs(), "auto-upgrade: poll failed");
+                continue;
+            }
+        }
+        match install(&current_version, &manifest, PostBench::Wait).await {
             Ok(UpgradeOutcome::Upgraded { from, to }) => {
                 info!(%from, %to, "auto-upgrade: installed new binary");
                 #[cfg(unix)]
@@ -537,11 +728,10 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
                 // failed re-exec leaves us on the old process.
                 return;
             }
-            Ok(UpgradeOutcome::Available { .. }) => {
-                unreachable!("upgrade_now installs or errors")
-            }
+            Ok(_) => unreachable!("install installs or errors"),
             Err(e) => {
-                warn!(err = %e, "auto-upgrade: poll failed");
+                wait = backoff.failed(&manifest.version, interval);
+                warn!(err = %format!("{e:#}"), version = %manifest.version, retry_secs = wait.as_secs(), "auto-upgrade: install failed");
             }
         }
     }
@@ -710,5 +900,83 @@ Blqf7m00l6vWH+cZyF7MfEWS3yzPB72bD9SD4FKBHNxraBa9P0juzgFm7uK6VFEpq3Fn0wr21tqB4o9l
         for _ in 0..50 {
             assert!(fastish_jitter_secs() < 60);
         }
+    }
+
+    #[test]
+    fn backoff_doubles_per_failure_caps_and_resets() {
+        let minute = Duration::from_secs(60);
+        let mut b = PollBackoff::default();
+        assert_eq!(b.failed("0.4.0", minute), Duration::from_secs(120));
+        assert_eq!(b.failed("0.4.0", minute), Duration::from_secs(240));
+        assert_eq!(b.failed("0.4.0", minute), Duration::from_secs(480));
+        for _ in 0..40 {
+            assert!(b.failed("0.4.0", minute) <= MAX_POLL_BACKOFF);
+        }
+        assert_eq!(b.failed("0.4.0", minute), MAX_POLL_BACKOFF, "capped");
+        // A different release starts over: it may install where the last did not.
+        assert_eq!(b.failed("0.4.1", minute), Duration::from_secs(120));
+        b.succeeded();
+        assert_eq!(b.failed("0.4.1", minute), Duration::from_secs(120));
+        // Never shorter than the poll interval, even past the cap.
+        let day = Duration::from_secs(24 * 60 * 60);
+        assert_eq!(PollBackoff::default().failed("feed", day), day);
+    }
+
+    #[test]
+    fn deleted_suffix_is_stripped_from_the_exe_path() {
+        use std::path::PathBuf;
+        assert_eq!(strip_deleted_suffix(PathBuf::from("/usr/local/bin/c0mpute (deleted)")), PathBuf::from("/usr/local/bin/c0mpute"));
+        assert_eq!(strip_deleted_suffix(PathBuf::from("/usr/local/bin/c0mpute")), PathBuf::from("/usr/local/bin/c0mpute"));
+        assert_eq!(strip_deleted_suffix(PathBuf::from("/opt/x (deleted)/c0mpute")), PathBuf::from("/opt/x (deleted)/c0mpute"));
+    }
+
+    #[test]
+    fn cargo_build_output_is_a_dev_build() {
+        use std::path::Path;
+        assert!(is_dev_build_path(Path::new("/home/me/src/c0mpute/target/release/c0mpute")));
+        assert!(is_dev_build_path(Path::new("/home/me/src/c0mpute/target/debug/deps/c0mpute-1a2b")));
+        assert!(!is_dev_build_path(Path::new("/home/me/.c0mpute/bin/c0mpute")));
+        assert!(!is_dev_build_path(Path::new("/usr/local/bin/c0mpute")));
+        // Only a directory named exactly `target`, and not the binary's own name.
+        assert!(!is_dev_build_path(Path::new("/opt/targets/c0mpute")));
+        assert!(!is_dev_build_path(Path::new("/usr/local/bin/target")));
+    }
+
+    #[test]
+    fn artifact_names_match_the_release_workflow() {
+        assert_eq!(artifact_name("linux", "x86_64"), "c0mpute-linux-x86_64.tar.gz");
+        assert_eq!(artifact_name("darwin", "aarch64"), "c0mpute-darwin-aarch64.tar.gz");
+        assert_eq!(artifact_name("windows", "x86_64"), "c0mpute-windows-x86_64.zip");
+        assert_eq!(archived_binary("c0mpute-windows-x86_64.zip"), "c0mpute.exe");
+        assert_eq!(archived_binary("c0mpute-linux-x86_64.tar.gz"), "c0mpute");
+        // Every name the release workflow publishes is one this function makes.
+        let workflow = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../.github/workflows/release.yml")).expect("read release.yml");
+        for (os, arch) in [("linux", "x86_64"), ("linux", "aarch64"), ("darwin", "x86_64"), ("darwin", "aarch64"), ("windows", "x86_64")] {
+            assert!(workflow.contains(&artifact_name(os, arch)), "{os}-{arch}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_replaces_the_binary_at_the_given_path_and_leaves_no_scratch() {
+        let dir = std::env::temp_dir().join(format!("c0-update-swap-{}", scratch_tag()));
+        std::fs::create_dir_all(dir.join("pack")).unwrap();
+        std::fs::write(dir.join("pack/c0mpute"), b"new binary").unwrap();
+        let tar = dir.join("a.tar.gz");
+        assert!(std::process::Command::new("tar").arg("-czf").arg(&tar).arg("-C").arg(dir.join("pack")).arg("c0mpute").status().unwrap().success());
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("c0mpute");
+        std::fs::write(&exe, b"old binary").unwrap();
+        // The path is taken as given: never re-derived from current_exe().
+        extract_and_swap(&std::fs::read(&tar).unwrap(), "c0mpute-linux-x86_64.tar.gz", &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
+        let left: Vec<_> = std::fs::read_dir(&bin_dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("c0mpute")], "scratch removed");
+        // A broken archive fails and still cleans up, leaving the binary alone.
+        assert!(extract_and_swap(b"not an archive", "c0mpute-linux-x86_64.tar.gz", &exe).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new binary");
+        assert_eq!(std::fs::read_dir(&bin_dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,7 +2,8 @@
 // Tools: chat, list_models, whoami, promo_video, promo_status. Auth is the same
 // c0k_ API key as the REST API.
 import { chatText, listModels, parseChatRequest, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
-import { describePromoProgress, parsePromoRequest, sanitizePromoProgress, PROMO_STYLES } from "./promo";
+import { describePromoProgress, sanitizePromoProgress, PROMO_STYLES } from "./promo";
+import { parsePublicPromoRequest } from "./promo-guard";
 import { HOSTING_TOOL_NAMES, HOSTING_TOOLS, hostingTool } from "./push-mcp";
 import { CONVO_ID, type ConvoStore } from "./convo-store";
 import type { PushStore } from "./push";
@@ -96,6 +97,8 @@ export type McpCtx = {
   signal?: AbortSignal;
   /** The account's synced conversations (convo-store.ts), when wired. */
   convos?: ConvoStore;
+  /** Who started which generation job (media-owners.ts), when wired. */
+  jobs?: { record: (userId: string, kind: "promo", jobId: unknown) => Promise<void>; owns: (userId: string, jobId: string) => Promise<boolean> };
 };
 
 export const CONVO_TOOLS = [
@@ -133,6 +136,7 @@ const text = (t: string, isError = false) => ({ content: [{ type: "text", text: 
 
 /** One JSON-RPC message in, one response out (null for notifications). */
 export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return fail(null, -32600, "invalid request");
   const { id, method, params = {} } = msg;
   const isNotification = id === undefined;
   switch (method) {
@@ -188,7 +192,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         if (name === "whoami") return ok(id, text(JSON.stringify({ did: ctx.user.did, name: ctx.user.name })));
         if (name === "list_models") return ok(id, text((await listModels(ctx.upstream)).join("\n") || "(no models online)"));
         if (name === "promo_video") {
-          const req = parsePromoRequest(args);
+          const req = parsePublicPromoRequest(args);
           if (typeof req === "string") return ok(id, text(req, true));
           const res = await ctx.upstream("/api/chat/promo", {
             method: "POST",
@@ -198,11 +202,13 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
           });
           const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
           if (res.status !== 202 || typeof body.id !== "string") return ok(id, text(typeof body.error === "string" ? body.error : `promo could not start (HTTP ${res.status})`, true));
+          await ctx.jobs?.record(ctx.user.id, "promo", body.id);
           return ok(id, text(JSON.stringify({ id: body.id, status: "pending", poll: `${site()}/api/v1/promo/${body.id}`, next: "call promo_status with this id every 30-60 s" })));
         }
         if (name === "promo_status") {
           const jobId = typeof args.id === "string" ? args.id : "";
           if (!UUID.test(jobId)) return ok(id, text("promo_status needs the id promo_video returned", true));
+          if (ctx.jobs && !(await ctx.jobs.owns(ctx.user.id, jobId))) return ok(id, text("unknown promo job", true));
           const res = await ctx.upstream(`/api/chat/promo/${jobId}`, { signal: AbortSignal.timeout(20_000) });
           const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
           if (res.status === 404) return ok(id, text(typeof body.error === "string" ? body.error : "unknown promo job", true));

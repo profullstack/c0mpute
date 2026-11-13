@@ -380,17 +380,19 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                             }
                             continue;
                         }
+                        // Only a key the bidder signed for this job (and, for
+                        // confidential work, attested) may receive the spec.
+                        // Checked before a bid is kept at all: a benched
+                        // worker's bid can still win when nobody else bids.
+                        if let Err(e) = session.check_bid(&job_id, &auction.workload_type, &offer.buyer_peer_id, &bid) {
+                            debug!(%job_id, bidder = %bid.bidder_peer_id, err = %e, "buyer: bid without a usable e2e key ignored");
+                            continue;
+                        }
                         if auction.fallback_bidders.contains(&bid.bidder_peer_id)
                             || identity_faulty(&bid.bidder_peer_id)
                         {
                             debug!(%job_id, bidder = %bid.bidder_peer_id, "buyer: bid from a benched worker kept as a fallback");
                             fallback.push(bid);
-                            continue;
-                        }
-                        // Only a key the bidder signed for this job (and, for
-                        // confidential work, attested) may receive the spec.
-                        if let Err(e) = session.check_bid(&job_id, &auction.workload_type, &offer.buyer_peer_id, &bid) {
-                            debug!(%job_id, bidder = %bid.bidder_peer_id, err = %e, "buyer: bid without a usable e2e key ignored");
                             continue;
                         }
                         debug!(

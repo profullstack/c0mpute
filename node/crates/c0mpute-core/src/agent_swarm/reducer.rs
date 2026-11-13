@@ -507,6 +507,17 @@ impl State {
                     .is_some_and(|t| live.contains(t.job.as_str()) && !self.task_done(&t.id))
             })
             .filter(|s| !self.owner_votes(s).1)
+            // Never auto-review a paid job I own: an owner's accept is what
+            // makes a submission payable, and the reviewer here is a model
+            // reading text the submitter wrote ("first line: ACCEPT"). The
+            // owner accepts by hand; other nodes still review it.
+            .filter(|s| {
+                !self
+                    .tasks
+                    .get(&s.task)
+                    .and_then(|t| self.jobs.get(&t.job))
+                    .is_some_and(|j| j.bounty > 0 && j.owners.iter().any(|o| o == me))
+            })
             .collect();
         reviews.sort_by_key(|s| (s.reviews.len(), spread(&s.id)));
         if let Some(s) = reviews.first() {
@@ -649,6 +660,8 @@ mod tests {
         assert_eq!(s.tasks[&a].submissions, vec![sub_a.id.clone()]);
         assert!(!s.task_done(&a), "needs a review");
         assert_eq!(s.next_for(&me2, 105, |_| true), Next::Review { submission: sub_a.id.clone() });
+        // The owner of a paid job never auto-reviews it: its accept pays.
+        assert!(!matches!(s.next_for(&pp.to_string(), 105, |_| true), Next::Review { .. }));
         assert_eq!(s.next_for(&me1, 105, |_| true), Next::Idle, "own submission is not mine to review");
 
         // Self-review has no effect; w2 endorses.

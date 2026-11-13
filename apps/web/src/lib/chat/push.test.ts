@@ -252,6 +252,11 @@ describe("cloud node", () => {
     // The house node claims every account's work, and reports on it.
     const jobs = await s.claimJobs("house", house.id);
     expect(jobs.map((j) => j.id)).toEqual([p.id]);
+    // The push's owner does not run the cloud node, so it cannot report for it
+    // (publish done, or its own delete done) even though it knows the node id.
+    await expect(s.report("u1", house.id, p.id, { rev: 1, ok: true, site_id: "abcdef0123456789abcd" })).rejects.toThrow(/no such push on this node/);
+    await expect(s.report("u1", house.id, p.id, { rev: 1, progress: "forged" })).rejects.toThrow(/no such push on this node/);
+    expect((await s.push("u1", "hosting", "blog"))?.status).toBe("publishing");
     const live = await s.report("house", house.id, p.id, { rev: 1, ok: true, site_id: "abcdef0123456789abcd", url: "https://gateway.c0mpute.com/s/abcdef0123456789abcd/", copies: 3 });
     expect(live !== "deleted" && live.status).toBe("live");
     expect((await s.push("u1", "hosting", "blog"))?.status).toBe("live");
