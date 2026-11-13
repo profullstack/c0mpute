@@ -25,6 +25,7 @@ pub use storage::{
 pub use tier::Tier;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,35 @@ pub struct ChunkStore {
     probe: FreeSpaceProbe,
     /// Last reading: when, and bytes free then minus what was written since.
     free_cache: Arc<Mutex<Option<(Instant, u64, u64)>>>,
+    /// Chunks whose reads are being watched (see [`ChunkStore::watch_reads`]).
+    watches: Arc<Mutex<Vec<(Hash, Arc<AtomicBool>)>>>,
+    /// How many watches are open, so a read with none pays one atomic load.
+    watching: Arc<AtomicUsize>,
+}
+
+/// An open watch on reads of one chunk (see [`ChunkStore::watch_reads`]).
+/// Dropping it ends the watch.
+pub struct ReadWatch {
+    seen: Arc<AtomicBool>,
+    watches: Arc<Mutex<Vec<(Hash, Arc<AtomicBool>)>>>,
+    watching: Arc<AtomicUsize>,
+}
+
+impl ReadWatch {
+    /// Whether the chunk was read from this store since the watch opened.
+    pub fn seen(&self) -> bool {
+        self.seen.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for ReadWatch {
+    fn drop(&mut self) {
+        let mut w = self.watches.lock().unwrap();
+        if let Some(i) = w.iter().position(|(_, s)| Arc::ptr_eq(s, &self.seen)) {
+            w.swap_remove(i);
+            self.watching.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl std::fmt::Debug for ChunkStore {
@@ -107,7 +137,36 @@ impl ChunkStore {
             min_free: min_free_from_env(),
             probe: Arc::new(free_space_at),
             free_cache: Arc::new(Mutex::new(None)),
+            watches: Arc::new(Mutex::new(Vec::new())),
+            watching: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Watch reads of `hash` through this store (every clone of it) until
+    /// the returned watch is dropped. Hosting opens one around a storage
+    /// challenge: a peer that answers the challenge by fetching the same
+    /// chunk from this node while it is being asked shows up as a read.
+    pub fn watch_reads(&self, hash: &Hash) -> ReadWatch {
+        let seen = Arc::new(AtomicBool::new(false));
+        self.watches.lock().unwrap().push((*hash, seen.clone()));
+        self.watching.fetch_add(1, Ordering::Relaxed);
+        ReadWatch {
+            seen,
+            watches: self.watches.clone(),
+            watching: self.watching.clone(),
+        }
+    }
+
+    /// Tell open watches that `hash` is being read (found or not).
+    fn note_read(&self, hash: &Hash) {
+        if self.watching.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        for (h, seen) in self.watches.lock().unwrap().iter() {
+            if h == hash {
+                seen.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Set the free-disk floor in bytes (0 = none).
@@ -264,6 +323,7 @@ impl ChunkStore {
     }
 
     pub async fn read_unchecked(&self, hash: &Hash) -> Result<Vec<u8>> {
+        self.note_read(hash);
         let path = self.chunk_path(hash);
         fs::read(&path)
             .await
@@ -299,6 +359,29 @@ mod tests {
         assert!(store.has(&h).await);
         let bytes = store.get(&h).await.unwrap();
         assert_eq!(bytes, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn a_read_watch_sees_reads_of_its_chunk_through_any_clone() {
+        let dir = tempdir();
+        let store = ChunkStore::open(&dir).await.unwrap();
+        let a = store.put(b"watched").await.unwrap();
+        let b = store.put(b"other").await.unwrap();
+        let watch = store.watch_reads(&a);
+        store.get(&b).await.unwrap();
+        assert!(store.has(&a).await);
+        assert!(!watch.seen(), "another chunk, or a presence check, is not a read");
+        store.clone().get(&a).await.unwrap();
+        assert!(watch.seen());
+        // A read of a chunk that is not here counts too: the asker wanted it.
+        let missing = Hash::of(b"missing");
+        let w2 = store.watch_reads(&missing);
+        assert!(store.get(&missing).await.is_err());
+        assert!(w2.seen());
+        drop(watch);
+        drop(w2);
+        assert_eq!(store.watching.load(Ordering::Relaxed), 0);
+        assert!(store.watches.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

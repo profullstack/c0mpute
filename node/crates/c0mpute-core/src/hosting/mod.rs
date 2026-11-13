@@ -26,7 +26,9 @@ pub mod git;
 mod git_browse;
 pub mod market;
 pub mod meta;
+pub mod origin;
 pub mod proof;
+pub mod relay;
 pub mod replicas;
 pub mod seed;
 pub mod settle;
@@ -85,6 +87,32 @@ pub const MAX_BYTES_PER_OWNER: u64 = 16 * GIB_BYTES;
 const SITES_PER_MESSAGE: usize = 200;
 /// Other holders asked for a chunk before this node lets a surplus copy go.
 const DROP_PROBES: usize = 12;
+/// How long a passed challenge keeps a holder counted toward the copies a
+/// site needs, in holder TTLs: 108 x 200 s = 6 h. Long enough that the nodes
+/// next in line for a site re-ask each holder a few times a day, not every
+/// repair round; short enough that a holder that deleted its copy and kept
+/// announcing stops counting the same day.
+const PROOF_TTL_HOLDER_TTLS: u32 = 108;
+/// Background challenges a repair round may start: in all, of one peer, and
+/// for one site. A node that just started knows no proofs and may be next in
+/// line for thousands of sites; it works through them at this rate, and until
+/// a site's turn comes its announced holders are taken at their word.
+const PROOF_ASKS_PER_ROUND: usize = 32;
+const PROOF_ASKS_PER_PEER: usize = 4;
+const PROOF_ASKS_PER_SITE: usize = MAX_REPLICAS;
+/// Background challenges in flight at once.
+const PROOF_SLOTS: usize = 8;
+/// Before this node gives up a copy because other holders have the site, it
+/// must have seen at least [`TARGET_REPLICAS`] of them pass its challenges at
+/// this many separate times, over at least this long. Filling asks for one
+/// recent pass only, so a new site still settles in minutes; letting go of
+/// data is the step that cannot be undone. Keys that only announce and relay
+/// then have to stay up and relay for hours before any honest holder trims,
+/// and since a relay through the challenger itself is seen (see
+/// [`Hosting::holds_now`]), the last honest holder is never talked into
+/// dropping by peers that hold nothing.
+pub const DROP_STANDING_PASSES: u32 = 3;
+pub const DROP_STANDING_SPAN: Duration = Duration::from_secs(6 * 3600);
 /// Unfinished multi-part holding lists kept at once, and for how long. Each
 /// is a peer's word, so neither the number nor the size is open-ended.
 const MAX_PARTIAL_HOLDINGS: usize = 1024;
@@ -252,7 +280,23 @@ struct Inner {
     /// When each site ([`WHOLE`]) or group was first seen over the target,
     /// for trimming (see [`Hosting::trim_due`]).
     over_since: std::sync::Mutex<HashMap<(String, u32), Instant>>,
+    /// When this node first asked the announced holders of a site to prove
+    /// their copies because it would otherwise take one itself (see
+    /// [`Hosting::fill_due`]).
+    unproven_since: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Background challenges in flight, as (site id, holder).
+    proving: std::sync::Mutex<HashSet<(String, String)>>,
+    prove_slots: Semaphore,
+    /// Which held sites use a chunk (see [`relay`]). Filled only once
+    /// [`Hosting::refuses_fetch`] is in use.
+    chunk_index: std::sync::Mutex<relay::ChunkIndex>,
+    guards_fetches: std::sync::atomic::AtomicBool,
     dns: dns::Verifier,
+    /// `[gateway] site_host_suffix`, normalized: `<site_id>.<suffix>` is
+    /// that site's own origin (see [`origin`]).
+    site_host_suffix: Option<String>,
+    /// `[gateway] sandbox_shared_sites`: pages under `/s/` are sandboxed.
+    sandbox_shared: bool,
     /// Optional handler for requests with a query string (podcast ad
     /// insertion installs one); it may decline and let the plain serve run.
     hook: std::sync::OnceLock<Arc<dyn ServeHook>>,
@@ -330,6 +374,13 @@ pub struct Options {
     pub catalog_path: Option<PathBuf>,
     pub timing: Timing,
     pub dns: dns::Verifier,
+    /// `[hosting] require_proofs`: count a holder toward a site's copies only
+    /// after this node saw it pass a challenge, and rely on it for a drop
+    /// only once it has standing. Off by default: announcements count, as
+    /// before 0.3.65, until the stricter rule has been run on real networks
+    /// (while a small site is still being copied its chunks are read
+    /// constantly, challenges are voided, and every host takes a copy).
+    pub require_proofs: bool,
     /// Key that signs proof-of-storage receipts; no challenges without it.
     pub challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
     pub challenge: ChallengeScope,
@@ -343,6 +394,13 @@ pub struct Options {
     /// Pretend the disk has (free, total) bytes instead of asking the OS.
     /// For tests on machines whose disk is below the free-disk floor.
     pub disk_override: Option<(u64, u64)>,
+    /// `[gateway] site_host_suffix`: serve each site on its own host under
+    /// this suffix. `None`: as this machine is configured
+    /// ([`origin::configured`]); `Some("")`: off whatever is configured.
+    pub site_host_suffix: Option<String>,
+    /// `[gateway] sandbox_shared_sites`. `None`: as this machine is
+    /// configured (on unless turned off).
+    pub sandbox_shared_sites: Option<bool>,
 }
 
 impl Default for Options {
@@ -353,6 +411,7 @@ impl Default for Options {
             catalog_path: None,
             timing: Timing::default(),
             dns: dns::Verifier::default(),
+            require_proofs: false,
             challenger: None,
             challenge: ChallengeScope::Own,
             challenge_every: Duration::from_secs(600),
@@ -360,6 +419,8 @@ impl Default for Options {
             payout: None,
             receipts_path: None,
             disk_override: None,
+            site_host_suffix: None,
+            sandbox_shared_sites: None,
         }
     }
 }
@@ -392,6 +453,25 @@ impl Hosting {
             .unwrap_or_default();
         let challenger_hex = opts.challenger.as_ref().and_then(site::owner_hex);
         let records_path = opts.catalog_path.as_ref().map(|p| p.with_file_name("records.json"));
+        // Read the machine's configuration only for what the caller left open.
+        let (site_host_suffix, sandbox_shared) = match (opts.site_host_suffix, opts.sandbox_shared_sites) {
+            (Some(suffix), Some(sandbox)) => origin::resolve(Some(suffix), sandbox, None, None),
+            (suffix, sandbox) => {
+                let (cfg_suffix, cfg_sandbox) = origin::configured();
+                (
+                    match suffix {
+                        Some(s) => origin::resolve(Some(s), true, None, None).0,
+                        None => cfg_suffix,
+                    },
+                    sandbox.unwrap_or(cfg_sandbox),
+                )
+            }
+        };
+        if let Some(suffix) = &site_host_suffix {
+            // The gateway's listener keeps every other route off those hosts.
+            c0mpute_gateway::site_host::configure(suffix);
+            info!(%suffix, "hosting: each site is served on its own host, <site_id>.<suffix>");
+        }
         let known: Vec<SiteRecord> = records_path
             .as_ref()
             .and_then(|p| std::fs::read(p).ok())
@@ -404,7 +484,10 @@ impl Hosting {
             hosts: opts.hosts,
             max_bytes: opts.max_bytes,
             timing: opts.timing,
-            map: RwLock::new(ReplicaMap::default()),
+            map: RwLock::new(ReplicaMap {
+                count_claims: !(opts.require_proofs || std::env::var("C0MPUTE_HOSTING_REQUIRE_PROOFS").is_ok_and(|v| v == "1")),
+                ..Default::default()
+            }),
             catalog: RwLock::new(Catalog::default()),
             catalog_path: opts.catalog_path,
             records_path,
@@ -421,7 +504,14 @@ impl Hosting {
             layouts: RwLock::new(HashMap::new()),
             short_since: std::sync::Mutex::new(HashMap::new()),
             over_since: std::sync::Mutex::new(HashMap::new()),
+            unproven_since: std::sync::Mutex::new(HashMap::new()),
+            proving: std::sync::Mutex::new(HashSet::new()),
+            prove_slots: Semaphore::new(PROOF_SLOTS),
+            chunk_index: std::sync::Mutex::new(relay::ChunkIndex::default()),
+            guards_fetches: std::sync::atomic::AtomicBool::new(false),
             dns: opts.dns,
+            site_host_suffix,
+            sandbox_shared,
             hook: std::sync::OnceLock::new(),
             host_hook: std::sync::OnceLock::new(),
             challenger: opts.challenger,
@@ -913,6 +1003,7 @@ impl Hosting {
                     return;
                 }
                 h.announce_holding().await;
+                h.refresh_chunk_index().await;
                 h.connect_hosts().await;
                 if last_records.elapsed() >= h.0.timing.records_every {
                     h.announce_records().await;
@@ -945,24 +1036,42 @@ impl Hosting {
         // A full node does not put itself forward for new copies (it would be
         // chosen, fail, and hold the slot from the next ranked node).
         let can_take = self.0.hosts && !self.is_full().await;
+        let mut asks = Asks::new(self.0.proving.lock().expect("proving").clone());
         let (whole, striped): (Vec<(SiteRecord, Action)>, Vec<SiteRecord>) = {
             let mut map = self.0.map.write().await;
             let now = Instant::now();
+            let now_secs = crate::payments::now_secs();
+            let ttl = self.proof_ttl();
+            let gap = self.standing_gap();
             map.prune(now, self.0.timing.holder_ttl);
+            map.prune_proofs(now, ttl.max(self.standing_span()));
             self.0
                 .over_since
                 .lock()
                 .expect("over_since")
                 .retain(|(s, _), _| map.records.contains_key(s));
-            let mut whole = Vec::new();
+            self.0
+                .unproven_since
+                .lock()
+                .expect("unproven_since")
+                .retain(|s, _| map.records.contains_key(s));
+            let mut whole: Vec<(SiteRecord, Action)> = Vec::new();
             let mut striped = Vec::new();
+            // Sites (by place in `whole`) whose unproven holders are to be
+            // asked, and sites this node is building standing for.
+            let mut doubted: Vec<(usize, Vec<String>)> = Vec::new();
+            let mut standing: Vec<(SiteRecord, Vec<String>)> = Vec::new();
             for r in map.records.values() {
                 if stripe::is_striped(r.size) {
                     striped.push(r.clone());
                     continue;
                 }
-                let trim = self.trim_due(&r.site_id, WHOLE, map.holders(&r.site_id).len(), now);
-                let a = replicas::decide(
+                let holders = map.holders(&r.site_id);
+                let trim = self.trim_due(&r.site_id, WHOLE, holders.len(), now);
+                // An announced holder fills a slot once it has proven its
+                // copy; announcing alone is free.
+                let proven = |p: &str| p == self.0.me || map.proven(&r.site_id, p, now, now_secs, ttl);
+                let a = replicas::decide_counting(
                     &map,
                     &r.site_id,
                     &self.0.me,
@@ -970,11 +1079,63 @@ impl Hosting {
                     TARGET_REPLICAS,
                     MAX_REPLICAS,
                     trim,
+                    &proven,
                 );
+                let short_on_claims = || {
+                    replicas::decide(&map, &r.site_id, &self.0.me, can_take, TARGET_REPLICAS, MAX_REPLICAS, trim)
+                        == Action::Replicate
+                };
+                if a == Action::Replicate && !short_on_claims() {
+                    // Only unproven announcements stand between this node
+                    // and a copy: they are asked below, and the copy waits
+                    // out the grace.
+                    let unproven: Vec<String> = holders.iter().filter(|p| !proven(p)).cloned().collect();
+                    doubted.push((whole.len(), unproven));
+                } else {
+                    self.0.unproven_since.lock().expect("unproven_since").remove(&r.site_id);
+                }
+                // A free copy of a site that is over the target may be let
+                // go later, and that takes standing (see
+                // [`DROP_STANDING_SPAN`]): start counting the others' passes
+                // now, whichever holder ends up being the one to let go.
+                if a == Action::Nothing
+                    && holders.len() > TARGET_REPLICAS
+                    && holders.iter().any(|p| *p == self.0.me)
+                    && !map.effective_preferred(&r.site_id).contains(&self.0.me)
+                {
+                    let due: Vec<String> = holders
+                        .iter()
+                        .filter(|p| **p != self.0.me && map.pass_due(&r.site_id, p, now, gap))
+                        .cloned()
+                        .collect();
+                    standing.push((r.clone(), due));
+                }
                 whole.push((r.clone(), a));
+            }
+            // The round's challenges go first to sites already waiting on
+            // their holders (longest first), so a holder that was slow once
+            // is asked again before its site's grace runs out; then to
+            // sites not asked yet; and last to building standing.
+            {
+                let since = self.0.unproven_since.lock().expect("unproven_since");
+                doubted.sort_by_key(|(i, _)| match since.get(&whole[*i].0.site_id) {
+                    Some(t) => (0, Some(*t)),
+                    None => (1, None),
+                });
+            }
+            for (i, unproven) in doubted {
+                let most = unproven.len().min(PROOF_ASKS_PER_SITE);
+                let asked = asks.take(&whole[i].0, unproven, most);
+                if !self.fill_due(&whole[i].0.site_id, asked >= most, now) {
+                    whole[i].1 = Action::Nothing;
+                }
+            }
+            for (rec, due) in standing {
+                asks.take(&rec, due, PROOF_ASKS_PER_SITE);
             }
             (whole, striped)
         };
+        self.spawn_proofs(std::mem::take(&mut asks.list));
         for (rec, action) in whole {
             // A site we hold whose record moved on: fetch the new version.
             let stale = self
@@ -1069,17 +1230,41 @@ impl Hosting {
                 .map(|(g, hs)| self.trim_due(&rec.site_id, g as u32, hs.len(), now))
                 .collect();
             let trim = |g: u32| trims.get(g as usize).copied().unwrap_or(false);
-            stripe::plan(
-                &map,
-                &rec.site_id,
-                &layout,
-                &self.0.me,
-                self.0.hosts,
-                TARGET_REPLICAS,
-                MAX_REPLICAS,
-                &widen,
-                &trim,
-            )
+            // As for a whole site: a holder fills a group's slot once it
+            // has proven a copy, and while only unproven announcements
+            // stand between this node and a group they are asked first.
+            let now_secs = crate::payments::now_secs();
+            let ttl = self.proof_ttl();
+            let proven = |p: &str| p == self.0.me || map.proven(&rec.site_id, p, now, now_secs, ttl);
+            let plan_with = |counts: &dyn Fn(&str) -> bool| {
+                stripe::plan_counting(
+                    &map,
+                    &rec.site_id,
+                    &layout,
+                    &self.0.me,
+                    self.0.hosts,
+                    TARGET_REPLICAS,
+                    MAX_REPLICAS,
+                    &widen,
+                    &trim,
+                    counts,
+                )
+            };
+            let strict = plan_with(&proven);
+            let lenient = plan_with(&|_| true);
+            if strict.fetch == lenient.fetch {
+                self.0.unproven_since.lock().expect("unproven_since").remove(&rec.site_id);
+                strict
+            } else {
+                let mut unproven: Vec<String> = raw.iter().flatten().filter(|p| !proven(p)).cloned().collect();
+                unproven.sort();
+                unproven.dedup();
+                let mut asks = Asks::new(self.0.proving.lock().expect("proving").clone());
+                let most = unproven.len().min(PROOF_ASKS_PER_SITE);
+                let asked = asks.take(&rec, unproven, most);
+                self.spawn_proofs(asks.list);
+                if self.fill_due(&rec.site_id, asked >= most, now) { strict } else { lenient }
+            }
         };
         let stale = held.as_ref().is_some_and(|h| h.seq < rec.seq);
         if !plan.drop.is_empty() && !stale {
@@ -1125,6 +1310,79 @@ impl Hosting {
         }
         let since = *over.entry(key).or_insert(now);
         now.duration_since(since) >= self.0.timing.holder_ttl
+    }
+
+    /// How long a passed challenge keeps a holder counted (see
+    /// [`PROOF_TTL_HOLDER_TTLS`]).
+    fn proof_ttl(&self) -> Duration {
+        self.0.timing.holder_ttl * PROOF_TTL_HOLDER_TTLS
+    }
+
+    /// [`DROP_STANDING_SPAN`] on a node with the normal timing. Tests shrink
+    /// [`Timing`] to seconds and cannot wait six hours for a surplus copy to
+    /// go; there the span shrinks with the holder TTL.
+    fn standing_span(&self) -> Duration {
+        if self.0.timing.holder_ttl >= Timing::default().holder_ttl {
+            DROP_STANDING_SPAN
+        } else {
+            self.0.timing.holder_ttl * 2
+        }
+    }
+
+    /// The least time between two passes that both count toward standing.
+    fn standing_gap(&self) -> Duration {
+        self.standing_span() / DROP_STANDING_PASSES
+    }
+
+    /// Whether this node may now take a copy of a site whose announced
+    /// holders it has not seen prove theirs. `asked`: a challenge of each of
+    /// them (of [`PROOF_ASKS_PER_SITE`] of them, when there are more) was
+    /// queued this round or is already running.
+    ///
+    /// Not before they have had the grace ([`Self::proof_grace`], one holder
+    /// TTL) to answer, counted from the first round they were asked: honest holders that are slow or
+    /// unreachable for a moment are asked again every round meanwhile, so a
+    /// healthy site does not gain a copy it then has to trim. The clock is
+    /// the site's, not the holders': announcing under new keys does not
+    /// restart it, and it only stops when the site has its proven copies (or
+    /// the unproven announcements go away, which lets the fill run at once).
+    /// A site whose turn to be asked has not come (the round's challenges
+    /// were used up) has no clock yet and is left as it is.
+    fn fill_due(&self, site_id: &str, asked: bool, now: Instant) -> bool {
+        let mut since = self.0.unproven_since.lock().expect("unproven_since");
+        fill_clock(&mut since, site_id, asked, now, self.proof_grace())
+    }
+
+    /// How long announced holders have to prove their copies before a node
+    /// next in line takes one anyway: one holder TTL (what the network
+    /// already waits before it replaces a holder that went quiet), and
+    /// never less than two challenges at their slowest, so an answer that
+    /// is still on its way is not read as no answer (tests set the TTL
+    /// below the fetch timeout).
+    fn proof_grace(&self) -> Duration {
+        self.0.timing.holder_ttl.max(self.0.timing.fetch_timeout * 2)
+    }
+
+    /// Challenge each (site, holder) in the background, a few at a time.
+    /// Passes land in the map ([`Self::holds_now`]); the next repair round
+    /// reads them.
+    fn spawn_proofs(&self, list: Vec<(SiteRecord, String)>) {
+        for (rec, holder) in list {
+            let key = (rec.site_id.clone(), holder.clone());
+            if !self.0.proving.lock().expect("proving").insert(key.clone()) {
+                continue;
+            }
+            let h = self.clone();
+            tokio::spawn(async move {
+                if let Ok(_slot) = h.0.prove_slots.acquire().await
+                    && !h.is_stopped()
+                {
+                    let ok = h.holds_now(&rec, &holder, None).await;
+                    debug!(site = %rec.site_id, %holder, ok, "hosting: asked a holder to prove its copy");
+                }
+                h.0.proving.lock().expect("proving").remove(&key);
+            });
+        }
     }
 
     fn spawn_replicate(&self, rec: SiteRecord) {
@@ -2101,7 +2359,16 @@ impl Hosting {
 
     /// Whether `holder` hands over a random chunk of `rec` right now, asked
     /// directly. A holding announcement is only a claim (any key can gossip
-    /// one); this is the check a node makes before it lets its own copy go.
+    /// one); this is the check a node makes before it counts the copy or
+    /// lets its own go. A pass is remembered ([`ReplicaMap::note_pass`]).
+    ///
+    /// A peer with no copy can still pass by fetching the chunk from a real
+    /// holder while it is being asked. When the real holder it asks is this
+    /// node, that shows: the chunk is read from this node's store between
+    /// the question and the answer. Such an answer is not a pass. The read
+    /// is matched by chunk, not by peer (a relay would ask under another
+    /// key), so now and then an unrelated read of the same chunk voids an
+    /// honest answer; the holder is simply asked again later.
     async fn holds_now(&self, rec: &SiteRecord, holder: &str, only: Option<&[u32]>) -> bool {
         let Ok(chunk) = self.challenge_chunk(rec, holder, only).await else {
             return false;
@@ -2113,12 +2380,85 @@ impl Hosting {
             chunk_hash: hash,
             shard_index: None,
         };
+        let watch = self.0.store.watch_reads(&hash);
         let got = tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await;
-        matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash)
+        let ok = answer_passes(matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash), watch.seen());
+        if ok {
+            self.note_pass(rec, holder).await;
+        }
+        ok
+    }
+
+    /// The announced holders of `rec` whose copy this node has seen proven,
+    /// after asking those it has not (at most [`DROP_PROBES`] of them, at
+    /// once). What a publisher counts before it stops seeding: three keys
+    /// that only announce would otherwise read as three copies, the
+    /// publisher would leave, and the site would have no source left.
+    pub async fn verified_holders(&self, rec: &SiteRecord) -> Vec<String> {
+        let (now_secs, ttl) = (crate::payments::now_secs(), self.proof_ttl());
+        let holders = self.0.map.read().await.holders(&rec.site_id);
+        let unproven: Vec<String> = {
+            let map = self.0.map.read().await;
+            let now = Instant::now();
+            holders
+                .iter()
+                .filter(|p| **p != self.0.me && !map.proven(&rec.site_id, p, now, now_secs, ttl))
+                .take(DROP_PROBES)
+                .cloned()
+                .collect()
+        };
+        futures::future::join_all(unproven.iter().map(|p| self.holds_now(rec, p, None))).await;
+        let map = self.0.map.read().await;
+        let now = Instant::now();
+        holders
+            .into_iter()
+            .filter(|p| *p == self.0.me || map.proven(&rec.site_id, p, now, now_secs, ttl))
+            .collect()
+    }
+
+    /// Remember that `holder` just passed a challenge for `rec`.
+    async fn note_pass(&self, rec: &SiteRecord, holder: &str) {
+        self.0.map.write().await.note_pass(
+            &rec.site_id,
+            holder,
+            &rec.manifest,
+            Instant::now(),
+            self.standing_gap(),
+            self.standing_span(),
+        );
+    }
+
+    /// The holders among `others` worth asking before a copy is let go:
+    /// those that would have standing with a pass now, and those whose pass
+    /// would add to their count. Asking the rest proves nothing new.
+    async fn drop_asks(&self, rec: &SiteRecord, others: Vec<String>) -> Vec<String> {
+        let (now, gap, span) = (Instant::now(), self.standing_gap(), self.standing_span());
+        let map = self.0.map.read().await;
+        others
+            .into_iter()
+            .filter(|p| {
+                map.has_standing(&rec.site_id, p, now, DROP_STANDING_PASSES, span)
+                    || map.pass_due(&rec.site_id, p, now, gap)
+            })
+            .take(DROP_PROBES)
+            .collect()
+    }
+
+    /// Whether `holder` (which just passed) has the standing a drop needs.
+    async fn has_standing(&self, rec: &SiteRecord, holder: &str) -> bool {
+        self.0.map.read().await.has_standing(
+            &rec.site_id,
+            holder,
+            Instant::now(),
+            DROP_STANDING_PASSES,
+            self.standing_span(),
+        )
     }
 
     /// Whether at least `need` other announced holders of `rec` prove their
-    /// copy (see [`Self::holds_now`]). At most [`DROP_PROBES`] are asked.
+    /// copy now (see [`Self::holds_now`]) and have proven it before, often
+    /// and long enough to have standing (see [`DROP_STANDING_SPAN`]). At
+    /// most [`DROP_PROBES`] are asked.
     async fn others_prove_whole(&self, rec: &SiteRecord, need: usize) -> bool {
         let mut others: Vec<String> = self.0.map.read().await.holders(&rec.site_id);
         others.retain(|p| *p != self.0.me);
@@ -2126,9 +2466,10 @@ impl Hosting {
             use rand::seq::SliceRandom;
             others.shuffle(&mut rand::thread_rng());
         }
+        let others = self.drop_asks(rec, others).await;
         let mut proven = 0;
-        for holder in others.iter().take(DROP_PROBES) {
-            if self.holds_now(rec, holder, None).await {
+        for holder in others.iter() {
+            if self.holds_now(rec, holder, None).await && self.has_standing(rec, holder).await {
                 proven += 1;
                 if proven >= need {
                     return true;
@@ -2139,8 +2480,10 @@ impl Hosting {
     }
 
     /// Of `groups` (ones this node is about to let go), those that at least
-    /// `need` other announced holders prove they hold. Each holder is asked
-    /// once, for a chunk of one of the groups in question that it claims.
+    /// `need` other announced holders prove they hold, with the standing a
+    /// whole site asks for ([`Self::others_prove_whole`]). Each holder is
+    /// asked once, for a chunk of one of the groups in question that it
+    /// claims.
     async fn groups_others_prove(&self, rec: &SiteRecord, groups: &[u32], need: usize) -> Vec<u32> {
         let Ok(layout) = self.layout(rec).await else {
             return Vec::new();
@@ -2159,9 +2502,10 @@ impl Hosting {
             use rand::seq::SliceRandom;
             claimants.shuffle(&mut rand::thread_rng());
         }
+        let claimants = self.drop_asks(rec, claimants).await;
         let mut proven: HashSet<String> = HashSet::new();
-        for holder in claimants.iter().take(DROP_PROBES) {
-            if self.holds_now(rec, holder, Some(groups)).await {
+        for holder in claimants.iter() {
+            if self.holds_now(rec, holder, Some(groups)).await && self.has_standing(rec, holder).await {
                 proven.insert(holder.clone());
             }
         }
@@ -2191,8 +2535,19 @@ impl Hosting {
             shard_index: None,
         };
         let started = Instant::now();
+        let watch = self.0.store.watch_reads(&hash);
         let got = tokio::time::timeout(self.0.timing.fetch_timeout, self.0.net.fetch_from_peer(pid, &req)).await;
-        let ok = matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash);
+        let right = matches!(&got, Ok(Ok(bytes)) if Hash::of(bytes) == hash);
+        if right && watch.seen() {
+            // The chunk was read from this node while the holder was being
+            // asked for it (see [`Self::holds_now`]): neither a pass nor,
+            // since the read may have been someone else's, a signed failure.
+            bail!("{holder} answered while chunk {chunk} was being read from this node");
+        }
+        let ok = right;
+        if ok {
+            self.note_pass(rec, holder).await;
+        }
         if !ok && !self.0.map.read().await.holders(&rec.site_id).iter().any(|p| p == holder) {
             // The holder announced it let the copy go while we were asking:
             // not a failed proof, just a stale target. No receipt.
@@ -2349,6 +2704,65 @@ impl Hosting {
         let transfers = settle::transfers(&dues, &payer);
         let outcomes = crate::payments::pay_all(rail, ledger, &transfers, cap).await;
         (dues, outcomes)
+    }
+
+    // ── relay guard ──────────────────────────────────────────────────────
+
+    /// Whether a chunk fetch from `peer` should be answered as if the chunk
+    /// were not here: `peer` announces, whole, every site held here that
+    /// uses the chunk (see [`relay`]). For whatever serves libp2p chunk
+    /// fetches; gateway HTTP reads never come this way.
+    ///
+    /// The first call turns the chunk index on. Until the next announce
+    /// round has filled it, and for chunks of sites too big for it, the
+    /// answer is false (serve).
+    pub async fn refuses_fetch(&self, peer: &str, chunk: &Hash) -> bool {
+        self.0.guards_fetches.store(true, Ordering::Relaxed);
+        let map = self.0.map.read().await;
+        let index = self.0.chunk_index.lock().expect("chunk_index");
+        relay::refuses(&map, &index, peer, chunk)
+    }
+
+    /// Bring the chunk index in line with the catalog: sites let go are
+    /// forgotten, new or changed ones (another version, other groups)
+    /// indexed. Runs with the announcer, so it is at most one round behind;
+    /// behind means a fetch is served that could have been refused, or (a
+    /// site just let go) refused to a peer that claims the site anyway.
+    async fn refresh_chunk_index(&self) {
+        if !self.0.guards_fetches.load(Ordering::Relaxed) {
+            return;
+        }
+        let (held, stripes): (Vec<SiteRecord>, HashMap<String, BTreeSet<u32>>) = {
+            let cat = self.0.catalog.read().await;
+            (cat.sites.values().cloned().collect(), cat.stripes.clone())
+        };
+        let ids: HashSet<&str> = held.iter().map(|r| r.site_id.as_str()).collect();
+        self.0
+            .chunk_index
+            .lock()
+            .expect("chunk_index")
+            .retain_sites(&|s| ids.contains(s));
+        for r in &held {
+            let groups = stripes.get(&r.site_id);
+            let stamp = format!("{}:{}", r.manifest, groups.map(stripe::encode_groups).unwrap_or_default());
+            let room = {
+                let index = self.0.chunk_index.lock().expect("chunk_index");
+                if index.stamp(&r.site_id) == Some(stamp.as_str()) {
+                    continue;
+                }
+                index.room()
+            };
+            // A site plainly too big is not listed chunk by chunk to find
+            // that out (a whole one; a striped one is judged by its groups).
+            if groups.is_none() && r.size / site::FILE_CHUNK_BYTES as u64 > room as u64 {
+                self.0.chunk_index.lock().expect("chunk_index").skip(&r.site_id, &stamp);
+                continue;
+            }
+            let mut live = HashSet::new();
+            self.live_chunks_of(r, groups, &mut live).await;
+            let chunks: Vec<Hash> = live.iter().filter_map(|h| Hash::from_hex(h).ok()).collect();
+            self.0.chunk_index.lock().expect("chunk_index").set(&r.site_id, &stamp, chunks);
+        }
     }
 
     // ── fetching ─────────────────────────────────────────────────────────
@@ -2897,6 +3311,8 @@ impl Hosting {
             .route("/p/{site}/", get(private_loader))
             .merge(git::router())
             .fallback(serve_by_host)
+            // Last, so it is in front of every route above and the fallback.
+            .layer(axum::middleware::from_fn_with_state(self.clone(), serve_site_host))
             .with_state(self.clone())
     }
 }
@@ -2966,6 +3382,79 @@ fn site_root_redirect(site: &str, query: Option<&str>) -> Response {
             resp
         }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Whether an answer to a challenge is a pass: the right bytes came back,
+/// and the chunk was not read from this node while the holder was being
+/// asked (see [`Hosting::holds_now`]).
+fn answer_passes(right_bytes: bool, read_from_us_meanwhile: bool) -> bool {
+    right_bytes && !read_from_us_meanwhile
+}
+
+/// [`Hosting::fill_due`] on its table of clocks: true once `site_id`'s clock
+/// has run for `grace`. The clock starts the first round the site's unproven
+/// holders were all asked (`asked`): a site only some of whose holders could
+/// be asked has not had its chance yet.
+fn fill_clock(since: &mut HashMap<String, Instant>, site_id: &str, asked: bool, now: Instant, grace: Duration) -> bool {
+    match since.get(site_id) {
+        Some(t) => now.duration_since(*t) >= grace,
+        None => {
+            if asked {
+                since.insert(site_id.to_string(), now);
+            }
+            false
+        }
+    }
+}
+
+/// The background challenges one repair round starts, within its limits
+/// ([`PROOF_ASKS_PER_ROUND`], [`PROOF_ASKS_PER_PEER`]).
+struct Asks {
+    /// Challenges already running, as (site id, holder).
+    busy: HashSet<(String, String)>,
+    left: usize,
+    per_peer: HashMap<String, usize>,
+    list: Vec<(SiteRecord, String)>,
+}
+
+impl Asks {
+    fn new(busy: HashSet<(String, String)>) -> Self {
+        Self {
+            busy,
+            left: PROOF_ASKS_PER_ROUND,
+            per_peer: HashMap::new(),
+            list: Vec::new(),
+        }
+    }
+
+    /// Queue challenges of up to `most` of `holders` of `rec`, picked at
+    /// random (so which of many announcers are asked cannot be arranged),
+    /// as far as the round's limits allow. Returns how many are queued or
+    /// already running.
+    fn take(&mut self, rec: &SiteRecord, mut holders: Vec<String>, most: usize) -> usize {
+        use rand::seq::SliceRandom;
+        holders.shuffle(&mut rand::thread_rng());
+        let mut n = 0;
+        for holder in holders {
+            if n >= most {
+                break;
+            }
+            if self.busy.contains(&(rec.site_id.clone(), holder.clone())) {
+                n += 1;
+                continue;
+            }
+            let of_peer = self.per_peer.entry(holder.clone()).or_insert(0);
+            if self.left == 0 || *of_peer >= PROOF_ASKS_PER_PEER {
+                continue;
+            }
+            self.left -= 1;
+            *of_peer += 1;
+            self.busy.insert((rec.site_id.clone(), holder.clone()));
+            self.list.push((rec.clone(), holder));
+            n += 1;
+        }
+        n
     }
 }
 
@@ -3187,7 +3676,7 @@ async fn serve_root(
         };
         return axum::response::Redirect::permanent(&to).into_response();
     }
-    serve_site(&h, &site, "", uri.query(), &headers).await
+    serve_site(&h, &site, "", Some(""), uri.query(), &headers).await
 }
 
 async fn serve_path(
@@ -3196,18 +3685,92 @@ async fn serve_path(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    serve_site(&h, &site, &path, uri.query(), &headers).await
+    // The path as it was sent (still percent-encoded), for a redirect.
+    let prefix = format!("/s/{site}/");
+    serve_site(&h, &site, &path, uri.path().strip_prefix(&prefix), uri.query(), &headers).await
 }
 
-async fn serve_site(h: &Hosting, site: &str, path: &str, query: Option<&str>, headers: &HeaderMap) -> Response {
-    match h.record_for(site).await {
+/// Serve `path` of a site under the shared `/s/<site>/` path. `rest`: the
+/// path after `/s/<site>/` as the visitor sent it, when it could be told.
+async fn serve_site(
+    h: &Hosting,
+    site: &str,
+    path: &str,
+    rest: Option<&str>,
+    query: Option<&str>,
+    headers: &HeaderMap,
+) -> Response {
+    // With per-site hosts on, a browser opening a page here is sent to the
+    // site's own host, where the page has an origin of its own. Fetches
+    // that are not navigations (podcast apps, feed readers, the CLI, the
+    // `/p/` loader reading its ciphertext from this same origin) are
+    // answered here as before: they run no page on this origin, and a
+    // redirect to another host would break the ones that cannot follow it.
+    if let (Some(suffix), Some(rest)) = (h.0.site_host_suffix.as_deref(), rest)
+        && origin::wants_document(headers)
+        && let Some(url) = c0mpute_gateway::site_host::site_url(site, suffix, rest, query)
+    {
+        return origin::redirect_to_site_host(&url);
+    }
+    let mut resp = match h.record_for(site).await {
         Some(rec) => {
             let resp = h.serve_with_hook(&rec, path, query, headers).await;
             let page = meta::public_origin(headers).map(|o| format!("{o}/s/{site}/{path}"));
             with_absolute_meta(resp, page.as_deref()).await
         }
         None => (StatusCode::NOT_FOUND, "no such site on the network (yet)").into_response(),
+    };
+    origin::apply(resp.headers_mut(), origin::Served::Shared, h.0.sandbox_shared);
+    if h.0.site_host_suffix.is_some() {
+        origin::vary_on_navigation(resp.headers_mut());
     }
+    resp
+}
+
+/// In front of every hosting route: a request on a per-site host
+/// (`<site_id>.<suffix>`) is that site and nothing else, so it never reaches
+/// the routes behind (`/hosting/v1/...`, `/p/`, git, another site's `/s/`).
+/// Any other request passes through.
+///
+/// The gateway's listener rewrites such a request to `/s/<site><path>` and
+/// marks it before routing (`c0mpute_gateway::site_host::isolate`), which is
+/// what keeps the other services' routes off these hosts; a router used on
+/// its own (tests, the podcast listener) gets the request as it was sent.
+/// Both are handled here.
+async fn serve_site_host(State(h): State<Hosting>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    use c0mpute_gateway::site_host::{self, SiteHost};
+    let Some(suffix) = h.0.site_host_suffix.as_deref() else {
+        return next.run(req).await;
+    };
+    let (site, path) = match req.extensions().get::<SiteHost>() {
+        Some(mark) => {
+            let prefix = format!("/s/{}", mark.site);
+            let path = req.uri().path().strip_prefix(&prefix).unwrap_or("/");
+            (mark.site.clone(), path.to_string())
+        }
+        None => {
+            let Some(site) =
+                site_host::request_host(req.headers(), req.uri()).and_then(|x| site_host::site_of_host(&x, suffix))
+            else {
+                return next.run(req).await;
+            };
+            if req.method() != axum::http::Method::GET && req.method() != axum::http::Method::HEAD {
+                return (StatusCode::NOT_FOUND, "not found").into_response();
+            }
+            (site, req.uri().path().to_string())
+        }
+    };
+    let (headers, query) = (req.headers(), req.uri().query());
+    let mut resp = match h.record_for(&site).await {
+        Some(rec) => {
+            let resp = h.serve_with_hook(&rec, &path, query, headers).await;
+            let page = meta::public_origin(headers).map(|o| format!("{o}{path}"));
+            with_absolute_meta(resp, page.as_deref()).await
+        }
+        None => (StatusCode::NOT_FOUND, "no such site on the network (yet)").into_response(),
+    };
+    origin::apply(resp.headers_mut(), origin::Served::SiteHost, h.0.sandbox_shared);
+    resp
 }
 
 /// Largest HTML page whose social meta tags get rewritten.
@@ -3319,7 +3882,9 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
         if h.0.dns.confirms(&host, &rec.site_id).await {
             let resp = h.serve_with_hook(&rec, uri.path(), uri.query(), &headers).await;
             let page = meta::public_origin(&headers).map(|o| format!("{o}{}", uri.path()));
-            return with_absolute_meta(resp, page.as_deref()).await;
+            let mut resp = with_absolute_meta(resp, page.as_deref()).await;
+            origin::apply(resp.headers_mut(), origin::Served::Domain, h.0.sandbox_shared);
+            return resp;
         }
     }
     (StatusCode::NOT_FOUND, "not found").into_response()
@@ -3328,6 +3893,83 @@ async fn serve_by_host(State(h): State<Hosting>, req: axum::extract::Request) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_relayed_through_the_challenger_is_not_a_pass() {
+        assert!(answer_passes(true, false));
+        assert!(!answer_passes(true, true), "the chunk was read from us while we asked for it");
+        assert!(!answer_passes(false, false));
+        assert!(!answer_passes(false, true));
+    }
+
+    #[tokio::test]
+    async fn a_challenge_sees_the_chunk_read_from_this_node_meanwhile() {
+        // What Hosting::holds_now does around its fetch: a relay that has
+        // no copy can only answer by reading the chunk from a holder, and
+        // when that holder is the challenger the read is seen.
+        let dir = std::env::temp_dir().join(format!("c0mpute-relay-test-{}", rand::random::<u64>()));
+        let store = ChunkStore::open(&dir).await.unwrap().with_min_free_bytes(0);
+        let hash = store.put(b"the challenged chunk").await.unwrap();
+        let serving = store.clone();
+        // An honest holder answers from its own disk: nothing read here.
+        let watch = store.watch_reads(&hash);
+        assert!(answer_passes(true, watch.seen()));
+        // A relay asks this node (through the chunk server's clone of the
+        // store) for the very chunk it was challenged on.
+        let relayed = serving.get(&hash).await.unwrap();
+        assert!(!answer_passes(Hash::of(&relayed) == hash, watch.seen()));
+        drop(watch);
+        // The next challenge starts clean.
+        assert!(answer_passes(true, store.watch_reads(&hash).seen()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unproven_holders_hold_their_slots_for_one_grace_and_no_longer() {
+        let grace = Duration::from_secs(200);
+        let t0 = Instant::now();
+        let mut since = HashMap::new();
+        // Not asked yet (the round's challenges were used up): no clock, no copy.
+        assert!(!fill_clock(&mut since, "s", false, t0, grace));
+        assert!(since.is_empty());
+        // Asked: the clock starts, and the holders have the grace to answer.
+        assert!(!fill_clock(&mut since, "s", true, t0, grace));
+        assert!(!fill_clock(&mut since, "s", true, t0 + Duration::from_secs(199), grace));
+        // A round that could not ask again (or new keys still to be asked)
+        // does not restart it.
+        assert!(!fill_clock(&mut since, "s", false, t0 + Duration::from_secs(150), grace));
+        assert!(fill_clock(&mut since, "s", true, t0 + grace, grace));
+        // And it stays due while the site is short, asked this round or not.
+        assert!(fill_clock(&mut since, "s", false, t0 + grace * 2, grace));
+        // Another site has its own clock.
+        assert!(!fill_clock(&mut since, "t", true, t0 + grace * 2, grace));
+    }
+
+    #[test]
+    fn a_round_of_proof_asks_is_bounded_per_round_per_peer_and_per_site() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let rec = |name: &str| SiteRecord::sign(&kp, name, &Hash::of(name.as_bytes()), 1, 10, vec![]).unwrap();
+        let peers = |n: usize| -> Vec<String> { (0..n).map(|i| format!("p{i}")).collect() };
+        // Per site: at most `most`, however many announce it.
+        let mut asks = Asks::new(HashSet::new());
+        assert_eq!(asks.take(&rec("a"), peers(40), PROOF_ASKS_PER_SITE), PROOF_ASKS_PER_SITE);
+        assert_eq!(asks.list.len(), PROOF_ASKS_PER_SITE);
+        // Per peer: one peer announcing many sites is asked about a few.
+        let mut asks = Asks::new(HashSet::new());
+        let asked: usize = (0..10).map(|i| asks.take(&rec(&format!("s{i}")), peers(1), 5)).sum();
+        assert_eq!(asked, PROOF_ASKS_PER_PEER);
+        // Per round.
+        let mut asks = Asks::new(HashSet::new());
+        for i in 0..100 {
+            asks.take(&rec(&format!("s{i}")), vec![format!("q{i}")], 5);
+        }
+        assert_eq!(asks.list.len(), PROOF_ASKS_PER_ROUND);
+        // A challenge still running counts as asked and is not started twice.
+        let a = rec("a");
+        let mut asks = Asks::new([(a.site_id.clone(), "p0".to_string())].into());
+        assert_eq!(asks.take(&a, peers(1), 5), 1);
+        assert!(asks.list.is_empty());
+    }
 
     #[test]
     fn a_holding_part_past_its_own_count_does_not_grow_the_list() {
@@ -4372,7 +5014,9 @@ async fn wait_whole(hosting: &Hosting, record: &SiteRecord, wait: Duration) -> u
     while started.elapsed() < wait {
         let left = wait.saturating_sub(started.elapsed());
         tokio::time::sleep(COPY_POLL.min(left)).await;
-        let holders = hosting.holders(&record.site_id).await;
+        // Copies that proved themselves, not announcements (anyone can
+        // announce): this is what decides when the publisher may leave.
+        let holders = hosting.verified_holders(record).await;
         let others = holders.len();
         if others != copies {
             if others > copies {

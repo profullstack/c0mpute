@@ -508,7 +508,9 @@ cargo build --bin c0mpute
 - `c0mpute` Rust binary builds; clap surface for `doctor`, `worker`,
   `job`, `plugin`, `transcode`, `coinpay` (passthrough), `infernet`
   (passthrough), `tui`, `version`
-- `c0mpute plugin install <url>` chain-calls upstream installers
+- `c0mpute plugin install <id>` installs a first-party plugin from the signed
+  release archive; `c0mpute plugin install --unverified <url>` runs a
+  third-party installer
 - `c0mpute doctor` cross-checks `coinpay` and `infernet` on PATH
 - `c0mpute bench` runs fib / matmul / blake3 at 1…N threads, writes
   `bench.json` (same `metadata` + `results` layout as

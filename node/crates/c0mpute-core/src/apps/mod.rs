@@ -64,6 +64,15 @@ pub const RPC_LOGS: &str = "apps.logs";
 pub const RPC_RECORD: &str = "apps.record";
 /// Apps per announcement, so one message stays well under gossipsub's limit.
 const APPS_PER_MESSAGE: usize = 100;
+/// `[apps] max_disk_mb` when the operator sets none: the 1 GiB of state an
+/// app may keep ([`snapshot::MAX_STATE_BYTES`]) plus as much again written
+/// inside its container.
+pub const DEFAULT_MAX_DISK_MB: u64 = 2048;
+/// How often a running app's disk use is measured (docker walks the
+/// container's writable layer to answer).
+const DISK_CHECK_EVERY: Duration = Duration::from_secs(60);
+/// Logged once per run by a node that runs apps without the egress guard.
+const OPEN_EGRESS_WARNING: &str = "apps: no egress guard on this node (it needs a root worker, iptables and [apps] egress_guard on): app containers can reach this machine's LAN, the host itself and cloud metadata addresses. Set [apps] require_egress_guard = true to run apps only behind the guard";
 
 /// How often things happen. Tests shrink these.
 #[derive(Clone, Debug)]
@@ -144,6 +153,15 @@ struct Local {
     last_snap: Option<Instant>,
     #[serde(skip)]
     failures: u32,
+    /// Size of the state directory at the last snapshot (its tar), or one
+    /// byte over the cap when a snapshot was refused for size.
+    #[serde(skip)]
+    state_bytes: u64,
+    #[serde(skip)]
+    disk_checked: Option<Instant>,
+    /// Why this node last stopped the app itself (over its disk limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 impl Local {
@@ -162,6 +180,9 @@ impl Local {
             busy: false,
             last_snap: None,
             failures: 0,
+            state_bytes: 0,
+            disk_checked: None,
+            error: None,
         }
     }
 
@@ -207,6 +228,12 @@ struct Inner {
     max_apps: usize,
     max_memory_mb: u32,
     owners: Vec<String>,
+    egress_guard: bool,
+    require_egress_guard: bool,
+    /// Most disk one app may use (state plus writable layer); 0 = no limit.
+    max_disk_bytes: u64,
+    /// The "apps can reach the LAN" warning has been logged this run.
+    warned_open_egress: std::sync::atomic::AtomicBool,
     timing: Timing,
     x25519: crypto::KeyPair,
     hosting: Option<Hosting>,
@@ -236,6 +263,12 @@ pub struct Options {
     pub dir: Option<PathBuf>,
     /// Run only apps signed by these owner keys (hex ed25519); empty = anyone's.
     pub owners: Vec<String>,
+    /// `[apps] egress_guard`, `require_egress_guard` and `max_disk_mb`.
+    /// `None` reads the node's config file, so a caller that predates these
+    /// settings still gets what the operator wrote.
+    pub egress_guard: Option<bool>,
+    pub require_egress_guard: Option<bool>,
+    pub max_disk_mb: Option<u64>,
     pub timing: Timing,
     /// To read images published as hosting sites.
     pub hosting: Option<Hosting>,
@@ -254,6 +287,9 @@ impl Default for Options {
             max_memory_mb: 2048,
             dir: None,
             owners: Vec::new(),
+            egress_guard: None,
+            require_egress_guard: None,
+            max_disk_mb: None,
             timing: Timing::default(),
             hosting: None,
             dns: dns::Verifier::default(),
@@ -277,6 +313,10 @@ pub struct AppInfo {
     pub snapshot: Option<SnapRef>,
     pub domains: Vec<String>,
     pub path: String,
+    /// Why the answering node last stopped this app itself (over its disk
+    /// limit), when it holds a copy and did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The apps service: one per node. Cheap to clone.
@@ -359,21 +399,49 @@ impl Apps {
             .into_iter()
             .filter(|(_, r)| r.verify())
             .collect();
+        // Settings the caller did not pass come from the node's config file.
+        let file = match (opts.egress_guard, opts.require_egress_guard, opts.max_disk_mb) {
+            (Some(_), Some(_), Some(_)) => crate::config::AppsConfig::default(),
+            _ if !opts.hosts => crate::config::AppsConfig::default(),
+            _ => crate::config::Config::load_raw(&crate::config::default_config_path()).unwrap_or_default().apps,
+        };
+        let require_egress_guard = opts.require_egress_guard.unwrap_or(file.require_egress_guard);
+        let egress_guard = opts.egress_guard.unwrap_or(file.egress_guard) || require_egress_guard;
+        let max_disk_mb = opts.max_disk_mb.unwrap_or(file.max_disk_mb);
+        let mut hosts = opts.hosts;
+        if hosts && require_egress_guard && !crate::container_run::is_root() {
+            // The guard is iptables rules, which only a root worker can add.
+            warn!("apps: [apps] require_egress_guard is set and this worker is not root, so the egress guard cannot be put in place; running no apps");
+            hosts = false;
+        }
+        if hosts && opts.owners.is_empty() {
+            warn!("apps: [apps] owners is empty, so this node runs containers for any owner on the network; list owner keys there to run only theirs");
+        }
+        // Known already at start for a non-root worker or a guard turned
+        // off; a root worker finds out when docker and iptables are asked.
+        let open_egress = hosts && (!egress_guard || !crate::container_run::is_root());
+        if open_egress {
+            warn!("{OPEN_EGRESS_WARNING}");
+        }
         let a = Apps(Arc::new(Inner {
             net: net.clone(),
             store,
             me,
-            hosts: opts.hosts,
+            hosts,
             max_apps: opts.max_apps.max(1),
             max_memory_mb: opts.max_memory_mb,
             owners: opts.owners,
+            egress_guard,
+            require_egress_guard,
+            max_disk_bytes: max_disk_mb.saturating_mul(1 << 20),
+            warned_open_egress: std::sync::atomic::AtomicBool::new(open_egress),
             timing: opts.timing,
             x25519,
             hosting: opts.hosting,
             dns: opts.dns,
             records: RwLock::new(records),
             nodes: RwLock::new(HashMap::new()),
-            local: RwLock::new(if opts.hosts { local } else { HashMap::new() }),
+            local: RwLock::new(if hosts { local } else { HashMap::new() }),
             owned: RwLock::new(persisted.owned),
             sealed_to: RwLock::new(HashMap::new()),
             released: RwLock::new(HashMap::new()),
@@ -911,6 +979,7 @@ impl Apps {
                 } else if let Some(port) = host_port {
                     let ok = runtime::healthy(port, &rec.health_path).await;
                     let alive = ok || runtime::running(&id).await;
+                    let mut disk_due = false;
                     let mut local = self.0.local.write().await;
                     if let Some(l) = local.get_mut(&id) {
                         if l.healthy != ok {
@@ -921,9 +990,15 @@ impl Apps {
                             warn!(app = %id, "apps: container stopped; restarting");
                             l.running_seq = None;
                             l.failures += 1;
+                        } else if l.disk_checked.is_none_or(|t| t.elapsed() >= DISK_CHECK_EVERY) {
+                            l.disk_checked = Some(Instant::now());
+                            disk_due = true;
                         }
                     }
                     drop(local);
+                    if disk_due {
+                        self.spawn_disk_check(id.clone());
+                    }
                     if alive && snap_due {
                         self.spawn_snapshot(id);
                     }
@@ -1159,6 +1234,15 @@ impl Apps {
         };
         let secret_env = secrets.as_ref().map(|s| s.env.clone()).unwrap_or_default();
         let _ = runtime::remove(id).await;
+        let create = runtime::CreateOpts {
+            network: self.app_network().await?,
+            layer_quota_mb: runtime::layer_quota_mb(self.0.max_disk_bytes).await,
+        };
+        // Same floor as the disk watchdog: an app it would stop is not started.
+        let (free, floor) = runtime::host_free().await;
+        if free < floor {
+            anyhow::bail!("this node's docker disk is down to {} GiB free (it keeps {} GiB)", free >> 30, floor >> 30);
+        }
         if let Some(state_path) = &rec.state_path {
             let secrets = secrets.context("no secrets for a stateful app")?;
             let key = secrets.key()?;
@@ -1188,16 +1272,81 @@ impl Apps {
                     runtime::restore_state(id, &tar).await?;
                     info!(app = %id, epoch = s.epoch, n = s.n, bytes = tar.len(), path = %state_path, "apps: state restored");
                 }
-                runtime::create(&rec, &secret_env).await?;
+                runtime::create(&rec, &secret_env, &create).await?;
             } else {
-                runtime::create(&rec, &secret_env).await?;
+                runtime::create(&rec, &secret_env, &create).await?;
             }
         } else {
-            runtime::create(&rec, &secret_env).await?;
+            runtime::create(&rec, &secret_env, &create).await?;
         }
         runtime::start(id).await?;
         let port = runtime::host_port(id, rec.port).await?;
         Ok(port)
+    }
+
+    /// The docker network this node's app containers join: the guarded apps
+    /// network when the egress guard is in place. Without it (a non-root
+    /// worker, or `egress_guard = false`) apps stay on docker's default
+    /// bridge, said once per run; with `require_egress_guard` nothing starts.
+    async fn app_network(&self) -> Result<Option<&'static str>> {
+        let guarded = self.0.egress_guard && runtime::ensure_guarded_network().await;
+        let network = runtime::network_for(guarded, self.0.require_egress_guard).map_err(anyhow::Error::msg)?;
+        if network.is_none() && !self.0.warned_open_egress.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            warn!("{OPEN_EGRESS_WARNING}");
+        }
+        Ok(network)
+    }
+
+    /// Measure one running app's disk use and stop it when it is over its
+    /// limit or the host is under its free-space floor.
+    fn spawn_disk_check(&self, id: String) {
+        let a = self.clone();
+        tokio::spawn(async move {
+            let Some(state) = a.0.local.read().await.get(&id).map(|l| l.state_bytes) else {
+                return;
+            };
+            // A size docker cannot report counts as nothing written: an app
+            // is never stopped on a failed measurement.
+            let layer = runtime::layer_bytes(&id).await.unwrap_or(0);
+            let (free, floor) = runtime::host_free().await;
+            if let Some(stop) = runtime::disk_verdict(layer, state, a.0.max_disk_bytes, free, floor) {
+                a.stop_for_disk(&id, stop).await;
+            }
+        });
+    }
+
+    /// Stop an app this node runs for the disk it uses: record why, give the
+    /// primary role up so another holder can take over from the last
+    /// snapshot, and remove the container (and the state volume when the
+    /// state itself is over the cap).
+    async fn stop_for_disk(&self, id: &str, stop: runtime::DiskStop) {
+        {
+            let mut local = self.0.local.write().await;
+            let Some(l) = local.get_mut(id) else { return };
+            // Mid-start or mid-snapshot: the next check decides.
+            if l.busy || l.role != AppRole::Primary {
+                return;
+            }
+            warn!(app = %id, reason = %stop.reason, "apps: stopping the app");
+            l.error = Some(format!("stopped at {}: {}", now_secs(), stop.reason));
+            l.role = AppRole::Standby;
+            l.running_seq = None;
+            l.host_port = None;
+            l.healthy = false;
+            l.ready_seq = None;
+            l.failures += 1;
+            l.disk_checked = None;
+            if stop.drop_state {
+                l.volume_epoch = None;
+                l.state_bytes = 0;
+            }
+        }
+        let _ = runtime::remove(id).await;
+        if stop.drop_state {
+            let _ = runtime::remove_volume(id).await;
+        }
+        self.persist().await;
+        self.announce().await;
     }
 
     async fn snap_manifest(&self, hash_hex: &str) -> Result<SnapManifest> {
@@ -1227,7 +1376,15 @@ impl Apps {
                         a.persist().await;
                     }
                     Ok(None) => {}
-                    Err(e) => warn!(app = %id, err = %e, "apps: snapshot failed"),
+                    Err(e) => {
+                        warn!(app = %id, err = %e, "apps: snapshot failed");
+                        if runtime::over_state_cap(&e) {
+                            // More state than an app may keep: the disk
+                            // check on the next pass stops it.
+                            l.state_bytes = snapshot::MAX_STATE_BYTES as u64 + 1;
+                            l.disk_checked = None;
+                        }
+                    }
                 }
             }
         });
@@ -1248,6 +1405,9 @@ impl Apps {
             return Ok(None);
         };
         let tar = runtime::snapshot_state(id, path).await?;
+        if let Some(l) = self.0.local.write().await.get_mut(id) {
+            l.state_bytes = tar.len() as u64;
+        }
         let n = match &prev {
             Some(p) if p.epoch == epoch => p.n + 1,
             _ => 1,
@@ -1530,6 +1690,7 @@ impl Apps {
             snapshot: placement::newest_snapshot(&rec.app_id, view).map(|(_, s)| s),
             domains: rec.domains.clone(),
             path: format!("/a/{}/", rec.app_id),
+            error: self.0.local.read().await.get(&rec.app_id).and_then(|l| l.error.clone()),
         }
     }
 

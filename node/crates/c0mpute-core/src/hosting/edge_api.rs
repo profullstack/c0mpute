@@ -178,6 +178,9 @@ pub(super) async fn chunk(
             let mut resp = (StatusCode::OK, bytes).into_response();
             let hdr = resp.headers_mut();
             hdr.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+            // A chunk of a hosted page is that page's HTML: never let a
+            // browser guess a type for it on this origin.
+            hdr.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
             hdr.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=31536000, immutable"),

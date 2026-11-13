@@ -117,8 +117,64 @@ pub async fn load(tar: &Path) -> Result<()> {
     .map(|_| ())
 }
 
+/// The docker network guarded app containers join, and its Linux interface.
+/// Not `container.run`'s jobs network: that one drops everything a container
+/// sends to the host, replies included, and an app must answer the node's
+/// proxy on its loopback-published port.
+pub const APPS_NETWORK: &str = "c0mpute-apps";
+pub const APPS_BRIDGE: &str = "c0apps0";
+
+/// The egress guard for the apps bridge: `container.run`'s rules for private,
+/// loopback, link-local (metadata), CGNAT and reserved ranges, and for the
+/// host itself everything except replies to connections the host opened
+/// (docker's loopback port publishing, which is how the proxy and the health
+/// probe reach the app).
+pub fn guard_rules(bridge: &str) -> Vec<Vec<String>> {
+    let mut rules = crate::container_run::guard_rules(bridge);
+    rules.retain(|r| r.first().map(String::as_str) != Some("INPUT"));
+    rules.push(s(&["INPUT", "-i", bridge, "-m", "conntrack", "!", "--ctstate", "ESTABLISHED", "-j", "DROP"]));
+    rules
+}
+
+/// Make sure the apps network exists with the egress guard on it. True when
+/// app containers can be put behind the guard; false for a non-root worker
+/// (it cannot change the firewall) or when docker or iptables refuse.
+pub async fn ensure_guarded_network() -> bool {
+    if !crate::container_run::is_root() {
+        return false;
+    }
+    if let Err(e) = crate::container_run::ensure_bridge_network(APPS_NETWORK, APPS_BRIDGE, "c0mpute.apps=1").await {
+        tracing::warn!(err = %format!("{e:#}"), "apps: could not create the apps network");
+        return false;
+    }
+    crate::container_run::ensure_rules(guard_rules(APPS_BRIDGE)).await
+}
+
+/// Which network an app container joins: the guarded apps network when the
+/// guard is in, docker's default bridge (`None`) when it is not, or an error
+/// when the operator runs apps only behind the guard.
+pub fn network_for(guarded: bool, required: bool) -> std::result::Result<Option<&'static str>, String> {
+    match (guarded, required) {
+        (true, _) => Ok(Some(APPS_NETWORK)),
+        (false, true) => Err(
+            "[apps] require_egress_guard is set and the egress guard is not in place (it needs a root worker, docker and iptables)".into(),
+        ),
+        (false, false) => Ok(None),
+    }
+}
+
+/// Where and how tightly an app's container is created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CreateOpts {
+    /// The docker network to join; `None` is docker's default bridge.
+    pub network: Option<&'static str>,
+    /// A hard quota on the container's writable layer, MiB, where the
+    /// storage driver has one ([`quota_supported`]).
+    pub layer_quota_mb: Option<u64>,
+}
+
 /// The `docker create` argv for an app. Pure, so it is tested without docker.
-pub fn create_args(rec: &AppRecord, secret_env: &BTreeMap<String, String>) -> Vec<String> {
+pub fn create_args(rec: &AppRecord, secret_env: &BTreeMap<String, String>, opts: &CreateOpts) -> Vec<String> {
     let name = container_name(&rec.app_id);
     let mut a: Vec<String> = vec![
         "create".into(),
@@ -166,6 +222,14 @@ pub fn create_args(rec: &AppRecord, secret_env: &BTreeMap<String, String>) -> Ve
         "--publish",
     ]));
     a.push(format!("127.0.0.1::{}", rec.port));
+    if let Some(network) = opts.network {
+        a.push("--network".into());
+        a.push(network.into());
+    }
+    if let Some(mb) = opts.layer_quota_mb {
+        a.push("--storage-opt".into());
+        a.push(format!("size={mb}m"));
+    }
     if let Some(p) = &rec.state_path {
         a.push("--volume".into());
         a.push(format!("{}:{}", volume_name(&rec.app_id), p));
@@ -182,11 +246,154 @@ pub fn create_args(rec: &AppRecord, secret_env: &BTreeMap<String, String>) -> Ve
     a
 }
 
-pub async fn create(rec: &AppRecord, secret_env: &BTreeMap<String, String>) -> Result<()> {
+pub async fn create(rec: &AppRecord, secret_env: &BTreeMap<String, String>, opts: &CreateOpts) -> Result<()> {
     let _ = remove(&rec.app_id).await;
-    docker(&create_args(rec, secret_env), None, Duration::from_secs(60))
+    let made = docker(&create_args(rec, secret_env, opts), None, Duration::from_secs(60)).await;
+    if made.is_err() && opts.layer_quota_mb.is_some() {
+        // The quota was detected, not promised: a daemon that refuses it
+        // still runs the app, and the disk watchdog stays the limit.
+        let _ = remove(&rec.app_id).await;
+        let without = CreateOpts { layer_quota_mb: None, ..*opts };
+        return docker(&create_args(rec, secret_env, &without), None, Duration::from_secs(60)).await.map(|_| ());
+    }
+    made.map(|_| ())
+}
+
+/// Does `docker create --storage-opt size=` work here? Only overlay2 on an
+/// xfs filesystem mounted with project quotas enforces it; on ext4 (most
+/// hosts) docker refuses the flag. `mount_options` are those of the
+/// filesystem that holds docker's root directory.
+pub fn quota_supported(driver: &str, backing_fs: &str, mount_options: &str) -> bool {
+    driver == "overlay2"
+        && backing_fs == "xfs"
+        && mount_options.split(',').any(|o| matches!(o.trim(), "pquota" | "prjquota"))
+}
+
+/// The mount options of the filesystem holding `path`, from a
+/// `/proc/self/mounts` listing (the longest mount point that is a prefix).
+pub fn mount_options<'a>(mounts: &'a str, path: &Path) -> Option<&'a str> {
+    mounts
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let (_dev, point, _fs, options) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            path.starts_with(point).then_some((point.len(), options))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, options)| options)
+}
+
+/// What `docker info` says about where and how containers are stored.
+#[derive(Clone, Debug, Default)]
+struct Storage {
+    root: Option<std::path::PathBuf>,
+    quota: bool,
+}
+
+/// Asked once per process: the storage driver does not change under a
+/// running node.
+async fn storage() -> &'static Storage {
+    static STORAGE: tokio::sync::OnceCell<Storage> = tokio::sync::OnceCell::const_new();
+    STORAGE
+        .get_or_init(|| async {
+            let format = "{{.DockerRootDir}}\n{{.Driver}}\n{{range .DriverStatus}}{{index . 0}}={{index . 1}}\n{{end}}";
+            let Ok(out) = docker(&s(&["info", "--format", format]), None, Duration::from_secs(20)).await else {
+                return Storage::default();
+            };
+            let text = String::from_utf8_lossy(&out).into_owned();
+            let mut lines = text.lines().map(str::trim);
+            let root = lines.next().filter(|r| r.starts_with('/')).map(std::path::PathBuf::from);
+            let driver = lines.next().unwrap_or("").to_string();
+            let backing = lines.find_map(|l| l.strip_prefix("Backing Filesystem=")).unwrap_or("").to_string();
+            let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+            let quota = root
+                .as_deref()
+                .and_then(|r| mount_options(&mounts, r))
+                .is_some_and(|o| quota_supported(&driver, &backing, o));
+            Storage { root, quota }
+        })
         .await
-        .map(|_| ())
+}
+
+/// The writable-layer quota to create an app with, MiB: its disk limit where
+/// the storage driver enforces one, else none (the watchdog is the limit).
+pub async fn layer_quota_mb(limit_bytes: u64) -> Option<u64> {
+    (limit_bytes > 0 && storage().await.quota).then_some((limit_bytes >> 20).max(1))
+}
+
+/// Bytes the app has written inside its container (docker's own count of
+/// the writable layer; the state volume is not in it).
+pub async fn layer_bytes(app_id: &str) -> Option<u64> {
+    let out = docker(
+        &["inspect".into(), "--size".into(), "--format".into(), "{{.SizeRw}}".into(), container_name(app_id)],
+        None,
+        Duration::from_secs(60),
+    )
+    .await
+    .ok()?;
+    String::from_utf8_lossy(&out).trim().parse().ok()
+}
+
+/// Free bytes on the disk docker stores containers and volumes on, and the
+/// free space `container.run` keeps on such a disk (its default floor).
+pub async fn host_free() -> (u64, u64) {
+    let Some(root) = storage().await.root.as_deref() else {
+        return (u64::MAX, 0);
+    };
+    let (free, total) = c0mpute_store::free_space_at(root);
+    (free, crate::container_run::min_free_bytes(&crate::container_run::ContainersConfig::default(), total))
+}
+
+/// Why an app is being stopped for the disk it uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskStop {
+    pub reason: String,
+    /// Remove the state volume as well. No rule asks for it today: an app
+    /// over its cap is stopped with its data left on this node, because the
+    /// part written since the last snapshot exists nowhere else and deleting
+    /// it is the owner's call, not the node's.
+    pub drop_state: bool,
+}
+
+/// The disk rule for one running app. `layer` is what it wrote inside its
+/// container, `state` the size of its state directory (the last snapshot's
+/// tar; anything over [`super::snapshot::MAX_STATE_BYTES`] when a snapshot
+/// was refused for size). `limit` 0 means no per-app limit. `None`: fine.
+pub fn disk_verdict(layer: u64, state: u64, limit: u64, free: u64, floor: u64) -> Option<DiskStop> {
+    let mib = |b: u64| b >> 20;
+    let state_cap = super::snapshot::MAX_STATE_BYTES as u64;
+    let state_limit = if limit > 0 { limit.min(state_cap) } else { state_cap };
+    if state > state_limit {
+        return Some(DiskStop {
+            reason: format!("its state directory is over {} MiB, the most an app may keep here; the data is kept on this node", mib(state_limit)),
+            drop_state: false,
+        });
+    }
+    if limit > 0 && layer.saturating_add(state) > limit {
+        return Some(DiskStop {
+            reason: format!(
+                "it uses {} MiB of disk, over its {} MiB limit ({} MiB written inside the container, {} MiB of state)",
+                mib(layer.saturating_add(state)),
+                mib(limit),
+                mib(layer),
+                mib(state)
+            ),
+            drop_state: false,
+        });
+    }
+    if free < floor {
+        return Some(DiskStop {
+            reason: format!("this node's docker disk is down to {} GiB free (it keeps {} GiB)", free >> 30, floor >> 30),
+            drop_state: false,
+        });
+    }
+    None
+}
+
+/// Did a snapshot fail because the state is over the size cap (and not
+/// because docker did)?
+pub fn over_state_cap(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("byte limit")
 }
 
 pub async fn start(app_id: &str) -> Result<()> {
@@ -460,9 +667,11 @@ mod tests {
         let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
         let rec = AppRecord::sign(&kp, spec("demo"), 1).unwrap();
         let secret = BTreeMap::from([("DB_PASSWORD".to_string(), "hunter2".to_string())]);
-        let a = create_args(&rec, &secret);
+        let a = create_args(&rec, &secret, &CreateOpts::default());
         let pair = |k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
         assert_eq!(a[0], "create");
+        // Without the guard: docker's default bridge, as before, and no quota flag.
+        assert!(!a.iter().any(|x| x == "--network" || x == "--storage-opt"));
         assert!(pair("--memory", "256m") && pair("--memory-swap", "256m"));
         assert!(pair("--cpus", "0.500"));
         assert!(pair("--cap-drop", "ALL"));
@@ -483,6 +692,104 @@ mod tests {
             || x == "--restart"
             || x == "sh"));
         assert!(!a.iter().any(|x| x.starts_with("SYS_") || x == "NET_ADMIN"));
+    }
+
+    #[test]
+    fn guarded_apps_join_the_apps_network_and_stay_published_on_loopback() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let rec = AppRecord::sign(&kp, spec("demo"), 1).unwrap();
+        let opts = CreateOpts { network: Some(APPS_NETWORK), layer_quota_mb: Some(2048) };
+        let a = create_args(&rec, &BTreeMap::new(), &opts);
+        let pair = |k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
+        assert!(pair("--network", "c0mpute-apps"));
+        assert!(pair("--storage-opt", "size=2048m"));
+        // The proxy still reaches it the same way, and the image is still last.
+        assert!(pair("--publish", "127.0.0.1::8080"));
+        assert_eq!(a.last().unwrap(), rec.image_ref());
+        assert_eq!(a.iter().filter(|x| *x == "--network").count(), 1);
+    }
+
+    #[test]
+    fn the_guard_decides_the_network_and_require_refuses_without_it() {
+        assert_eq!(network_for(true, false), Ok(Some(APPS_NETWORK)));
+        assert_eq!(network_for(true, true), Ok(Some(APPS_NETWORK)));
+        // No guard (a non-root worker): the default bridge, as before.
+        assert_eq!(network_for(false, false), Ok(None));
+        let err = network_for(false, true).unwrap_err();
+        assert!(err.contains("require_egress_guard"), "{err}");
+    }
+
+    #[test]
+    fn apps_guard_blocks_private_ranges_and_the_host_but_lets_replies_back() {
+        let rules = guard_rules(APPS_BRIDGE);
+        let has = |needle: &[&str]| rules.iter().any(|r| r.iter().map(String::as_str).eq(needle.iter().copied()));
+        // The same forward rules container.run puts on its bridge.
+        for range in crate::container_run::GUARDED_RANGES {
+            assert!(has(&["DOCKER-USER", "-i", "c0apps0", "-d", range, "-j", "DROP"]), "{range}");
+        }
+        assert!(crate::container_run::GUARDED_RANGES.contains(&"169.254.0.0/16"), "cloud metadata");
+        // To the host: only replies to connections the host opened (the
+        // published loopback port); a blanket drop would cut the proxy off.
+        assert!(has(&["INPUT", "-i", "c0apps0", "-m", "conntrack", "!", "--ctstate", "ESTABLISHED", "-j", "DROP"]));
+        assert!(!has(&["INPUT", "-i", "c0apps0", "-j", "DROP"]));
+        assert_eq!(rules.iter().filter(|r| r[0] == "INPUT").count(), 1);
+        assert!(rules.iter().all(|r| r.contains(&"c0apps0".to_string()) && r.last().unwrap() == "DROP"));
+    }
+
+    #[test]
+    fn layer_quota_only_on_overlay2_over_xfs_with_project_quotas() {
+        assert!(quota_supported("overlay2", "xfs", "rw,relatime,attr2,inode64,prjquota"));
+        assert!(quota_supported("overlay2", "xfs", "rw,pquota"));
+        assert!(!quota_supported("overlay2", "xfs", "rw,relatime,noquota"));
+        assert!(!quota_supported("overlay2", "extfs", "rw,relatime,prjquota"), "ext4, like most hosts");
+        assert!(!quota_supported("overlayfs", "xfs", "rw,prjquota"), "the containerd image store");
+        assert!(!quota_supported("", "", ""));
+        let mounts = "/dev/sda1 / ext4 rw,relatime 0 0\n/dev/sdb1 /var/lib/docker xfs rw,noatime,prjquota 0 0\nproc /proc proc rw 0 0\n";
+        assert_eq!(mount_options(mounts, Path::new("/var/lib/docker")), Some("rw,noatime,prjquota"));
+        assert_eq!(mount_options(mounts, Path::new("/var/lib/docker/overlay2")), Some("rw,noatime,prjquota"));
+        assert_eq!(mount_options(mounts, Path::new("/var/lib/dockerx")), Some("rw,relatime"), "a prefix of the name is not the mount");
+        assert_eq!(mount_options("", Path::new("/var/lib/docker")), None);
+    }
+
+    #[test]
+    fn disk_limit_arithmetic() {
+        const MIB: u64 = 1 << 20;
+        const GIB: u64 = 1 << 30;
+        let limit = 2048 * MIB;
+        let (free, floor) = (100 * GIB, 20 * GIB);
+        // Under the limit with room on the host: nothing to do.
+        assert_eq!(disk_verdict(500 * MIB, 900 * MIB, limit, free, floor), None);
+        assert_eq!(disk_verdict(1024 * MIB, 1024 * MIB, limit, free, floor), None, "exactly the limit is fine");
+        // Layer plus state over the limit: stopped, state kept.
+        let stop = disk_verdict(1500 * MIB, 600 * MIB, limit, free, floor).unwrap();
+        assert!(!stop.drop_state);
+        assert!(stop.reason.contains("2100 MiB") && stop.reason.contains("2048 MiB limit"), "{}", stop.reason);
+        // A state directory over what an app may keep (a snapshot refused
+        // for size reports one byte more than the cap): stopped, and the
+        // volume is kept, since what it holds past the last snapshot is the
+        // only copy.
+        let cap = crate::apps::snapshot::MAX_STATE_BYTES as u64;
+        let stop = disk_verdict(0, cap + 1, limit, free, floor).unwrap();
+        assert!(!stop.drop_state && stop.reason.contains("1024 MiB"), "{}", stop.reason);
+        // An operator limit below the state cap caps the state too.
+        assert!(!disk_verdict(0, 300 * MIB, 256 * MIB, free, floor).unwrap().drop_state);
+        // No per-app limit (0): the state cap and the host floor still hold.
+        assert_eq!(disk_verdict(50 * GIB, 0, 0, free, floor), None);
+        assert!(disk_verdict(0, cap + 1, 0, free, floor).is_some());
+        // The host under the floor container.run keeps: stopped, state kept.
+        let stop = disk_verdict(MIB, MIB, limit, 19 * GIB, floor).unwrap();
+        assert!(!stop.drop_state && stop.reason.contains("19 GiB free"), "{}", stop.reason);
+        // Sizes that would overflow do not wrap into "fine".
+        assert!(disk_verdict(u64::MAX, 1, limit, free, floor).is_some());
+        // An unknown docker disk (free MAX, floor 0) never stops an app by itself.
+        assert_eq!(disk_verdict(0, 0, limit, u64::MAX, 0), None);
+    }
+
+    #[test]
+    fn a_snapshot_over_the_cap_is_told_from_a_docker_failure() {
+        let over = anyhow::anyhow!("output is over the 1073741824 byte limit").context("docker cp");
+        assert!(over_state_cap(&over));
+        assert!(!over_state_cap(&anyhow::anyhow!("docker cp exited with exit status: 1")));
     }
 
     #[test]

@@ -646,10 +646,19 @@ enum PluginCmd {
     List,
     /// Install a plugin by id (from the c0mpute marketplace) or by URL.
     ///
+    /// An id runs the installer shipped in this release's signed plugins
+    /// archive. A URL is somebody else's script that nothing verifies, so it
+    /// needs --unverified.
+    ///
     /// Examples:
     ///   c0mpute plugin install transcode
-    ///   c0mpute plugin install https://example.com/my-plugin/install.sh
-    Install { target: String },
+    ///   c0mpute plugin install --unverified https://example.com/my-plugin/install.sh
+    Install {
+        target: String,
+        /// Run an installer from a URL even though nothing verifies it.
+        #[arg(long)]
+        unverified: bool,
+    },
     /// Enable a previously disabled plugin.
     Enable { id: String },
     /// Disable a plugin without uninstalling.
@@ -3016,11 +3025,105 @@ mod worker_stop_tests {
 
     #[test]
     fn plugin_targets_cannot_carry_a_command() {
-        assert_eq!(resolve_plugin_target("tts").unwrap(), "https://c0mpute.com/plugins/tts/install.sh");
-        assert_eq!(resolve_plugin_target("https://example.com/p/install.sh").unwrap(), "https://example.com/p/install.sh");
-        for bad in ["x; rm -rf ~", "../x", "-o/tmp/x", "a b", "", "https://", "https://e.com/x; id", "https://e.com/$(id)", "https://e.com/x | sh"] {
+        assert_eq!(resolve_plugin_target("tts").unwrap(), PluginTarget::Id("tts".into()));
+        assert_eq!(resolve_plugin_target(" ad-generator-agent ").unwrap(), PluginTarget::Id("ad-generator-agent".into()));
+        assert_eq!(
+            resolve_plugin_target("https://example.com/p/install.sh").unwrap(),
+            PluginTarget::Url("https://example.com/p/install.sh".into())
+        );
+        for bad in ["x; rm -rf ~", "../x", "-o/tmp/x", "a b", "", "https://", "https://e.com/x; id", "https://e.com/$(id)", "https://e.com/x | sh", "http://e.com/install.sh", "a/b", "Tts"] {
             assert!(resolve_plugin_target(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_plugin_url_needs_the_unverified_flag() {
+        let url = "https://example.com/p/install.sh";
+        // An id is always the signed installer, flag or not.
+        assert_eq!(plugin_install_plan("infernet", false).unwrap(), PluginPlan::Signed("infernet".into()));
+        assert_eq!(plugin_install_plan("infernet", true).unwrap(), PluginPlan::Signed("infernet".into()));
+        // A URL is refused unless the operator said --unverified.
+        let refused = plugin_install_plan(url, false).unwrap_err().to_string();
+        assert!(refused.contains("--unverified"), "{refused}");
+        assert_eq!(plugin_install_plan(url, true).unwrap(), PluginPlan::Unverified(url.into()));
+        // The flag does not make a bad target acceptable.
+        assert!(plugin_install_plan("http://example.com/p/install.sh", true).is_err());
+        assert!(plugin_install_plan("x; id", true).is_err());
+    }
+
+    #[test]
+    fn plugin_install_parses_the_unverified_flag() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).map(|c| c.command);
+        match parse(&["c0mpute", "plugin", "install", "transcode"]).unwrap() {
+            Some(Cmd::Plugin { cmd: PluginCmd::Install { target, unverified } }) => {
+                assert_eq!(target, "transcode");
+                assert!(!unverified);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        match parse(&["c0mpute", "plugin", "install", "--unverified", "https://example.com/i.sh"]).unwrap() {
+            Some(Cmd::Plugin { cmd: PluginCmd::Install { target, unverified } }) => {
+                assert_eq!(target, "https://example.com/i.sh");
+                assert!(unverified);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signed_assets_come_from_this_binarys_own_release() {
+        let tag = own_release_tag();
+        assert_eq!(tag, format!("v{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            release_asset_url("v0.3.65", PLUGINS_ARCHIVE),
+            "https://github.com/profullstack/c0mpute/releases/download/v0.3.65/c0mpute-plugins.tar.gz"
+        );
+        assert_eq!(
+            release_asset_url(&tag, TUI_ARCHIVE),
+            format!("https://github.com/profullstack/c0mpute/releases/download/{tag}/c0mpute-tui.tar.gz")
+        );
+    }
+
+    #[test]
+    fn a_tui_branch_override_is_a_plain_branch_name() {
+        assert_eq!(
+            tui_branch_url("master").unwrap(),
+            "https://github.com/profullstack/c0mpute/archive/refs/heads/master.tar.gz"
+        );
+        assert!(tui_branch_url("feat/tui-2.0_x").is_ok());
+        for bad in ["", "-x", "a b", "a'b", "../x", "x/../y", "a;b", "$(id)", "a?b", "a#b"] {
+            assert!(tui_branch_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_scratch_dir_is_removed_on_drop() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("scratch");
+        std::fs::create_dir_all(dir.join("stale")).unwrap();
+        {
+            let s = ScratchDir::create(&dir).unwrap();
+            assert!(s.path().is_dir());
+            assert!(!s.path().join("stale").exists(), "an existing directory is emptied first");
+        }
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_signed_asset_is_refused_unless_it_is_this_file_of_this_release() {
+        // The verifier `fetch_signed_release_asset` calls. A real published
+        // signature (v0.3.64, linux x86_64) over bytes that are not the
+        // artifact must not verify, whatever name and tag are asked for.
+        let sig = "untrusted comment: signature from minisign secret key\n\
+                   RUQqOew3QbWhATNMJDo0v4saAncRTUdP557zY9X/DggMKQNkZ/id8b+vpXGezphgXnVM2+X7cb1TCB8U0gGJHTejkJBcWiFD+gw=\n\
+                   trusted comment: timestamp:1794555478 version:v0.3.64 file:c0mpute-linux-x86_64.tar.gz\n\
+                   Lh5cSGzX/jrC/n/bobJZWpYxtHeq9unNog/A/UC6Wonf2RWPCUqrWTH12osx3NiUqbHoIo6oWyuDG1g3EklxDg==\n";
+        let verify = |bytes: &[u8], asset: &str, tag: &str| {
+            c0mpute_update::verify_release_signature(c0mpute_update::RELEASE_PUBKEY, bytes, sig, asset, Some(tag))
+        };
+        assert!(verify(b"not the artifact", "c0mpute-linux-x86_64.tar.gz", "v0.3.64").is_err());
+        assert!(verify(b"not the artifact", PLUGINS_ARCHIVE, &own_release_tag()).is_err());
+        assert!(verify(b"", TUI_ARCHIVE, "v0.3.64").is_err());
     }
 
     #[test]
@@ -5221,7 +5324,7 @@ fn run_plugin(cmd: PluginCmd) -> Result<()> {
             }
             Ok(())
         }
-        PluginCmd::Install { target } => install_plugin(&target),
+        PluginCmd::Install { target, unverified } => install_plugin(&target, unverified),
         PluginCmd::Enable { id } => {
             println!("[stub] enable {id}");
             Ok(())
@@ -5280,20 +5383,67 @@ fn preset_to_spec(preset: &str) -> Result<c0mpute_proto::TranscodeSpec> {
 /// Resolve a `c0mpute plugin install <target>` argument and dispatch.
 ///
 /// Accepts either:
-///   - a plugin **id** registered in the c0mpute marketplace, in which
-///     case we chain to `https://c0mpute.com/plugins/<id>/install.sh`
-///   - or any **install.sh URL** (third-party plugins published at
-///     their own URL — e.g. a GitHub raw URL)
-///
-/// Both flows pipe `curl -fsSL <url>` into `sh`. Future: minisign
-/// signature verification before execution (per DIP-0006).
-fn install_plugin(target: &str) -> Result<()> {
-    let url = resolve_plugin_target(target)?;
+///   - a plugin **id**: its `plugins/<id>/install.sh` is taken from the
+///     `c0mpute-plugins.tar.gz` asset of this binary's own release, after
+///     the archive's minisign signature verified against the key compiled
+///     into this binary
+///   - or any **https install.sh URL** (third-party plugins published at
+///     their own URL). Nothing verifies those, so they need `--unverified`.
+fn install_plugin(target: &str, unverified: bool) -> Result<()> {
+    match plugin_install_plan(target, unverified)? {
+        PluginPlan::Signed(id) => install_signed_plugin(&id),
+        PluginPlan::Unverified(url) => {
+            eprintln!("! {url} is not part of a c0mpute release: nothing verifies this script before it runs (--unverified)");
+            run_unverified_installer(&url)
+        }
+    }
+}
+
+/// What `plugin install` will do for a target, before anything is fetched.
+#[derive(Debug, PartialEq)]
+enum PluginPlan {
+    /// Run this id's installer out of the signed release archive.
+    Signed(String),
+    /// Run the script at this URL; only with `--unverified`.
+    Unverified(String),
+}
+
+fn plugin_install_plan(target: &str, unverified: bool) -> Result<PluginPlan> {
+    match resolve_plugin_target(target)? {
+        PluginTarget::Id(id) => Ok(PluginPlan::Signed(id)),
+        PluginTarget::Url(url) if unverified => Ok(PluginPlan::Unverified(url)),
+        PluginTarget::Url(url) => anyhow::bail!(
+            "{url} is not part of a c0mpute release, so nothing verifies it before it runs. \
+             To run it anyway: c0mpute plugin install --unverified {url}"
+        ),
+    }
+}
+
+/// Run plugin `id`'s installer from the signed plugins archive of this release.
+fn install_signed_plugin(id: &str) -> Result<()> {
+    let tag = own_release_tag();
+    let scratch = ScratchDir::create(&c0mpute_home()?.join(format!("plugin-install-{}", std::process::id())))?;
+    let archive = fetch_signed_release_asset(PLUGINS_ARCHIVE, scratch.path())?;
+    untar(&archive, scratch.path())?;
+    let script = scratch.path().join("plugins").join(id).join("install.sh");
+    if !script.is_file() {
+        anyhow::bail!("plugin '{id}' has no installer in the signed plugins archive of c0mpute {tag}");
+    }
+    println!("→ installing plugin {id} (signed installer from c0mpute {tag})");
+    let status = Command::new("sh").arg(&script).status()?;
+    if !status.success() {
+        anyhow::bail!("plugin install failed (exit {status})");
+    }
+    Ok(())
+}
+
+/// The old flow, for `--unverified` URLs only: pipe `curl -fsSL <url>` into `sh`.
+fn run_unverified_installer(url: &str) -> Result<()> {
     println!("→ installing plugin via {url}");
     // No shell string: the URL is one curl argument, and curl's output is
     // sh's stdin, so nothing in the target can add a command.
     let mut curl = std::process::Command::new("curl")
-        .args(["-fsSL", "--", url.as_str()])
+        .args(["-fsSL", "--", url])
         .stdout(std::process::Stdio::piped())
         .spawn()?;
     let script = curl.stdout.take().context("curl has no stdout")?;
@@ -5308,22 +5458,129 @@ fn install_plugin(target: &str) -> Result<()> {
     Ok(())
 }
 
+// Release assets the installer (scripts/install.sh) and this CLI install from.
+// Packed by scripts/pack-release-extras.sh and signed with the release key in
+// .github/workflows/release.yml, like the binaries.
+const PLUGINS_ARCHIVE: &str = "c0mpute-plugins.tar.gz";
+const TUI_ARCHIVE: &str = "c0mpute-tui.tar.gz";
+
+/// The release tag this binary was built from (`v<version>`).
+fn own_release_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Where `asset` of release `tag` is downloaded from.
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    format!("https://github.com/profullstack/c0mpute/releases/download/{tag}/{asset}")
+}
+
+/// `~/.c0mpute`: scratch for installs lives here, not in the shared /tmp where
+/// another local user could pre-create the directory and plant files in it.
+fn c0mpute_home() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("HOME not set"))?;
+    Ok(PathBuf::from(home).join(".c0mpute"))
+}
+
+/// A directory that is emptied and created now and removed on drop.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn create(dir: &std::path::Path) -> Result<Self> {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        Ok(Self(dir.to_path_buf()))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Download `url` to `dest` over https only (redirects included).
+fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
+    let status = Command::new("curl")
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o"])
+        .arg(dest)
+        .args(["--", url])
+        .status()
+        .context("run curl")?;
+    if !status.success() {
+        anyhow::bail!("download failed ({status}): {url}");
+    }
+    Ok(())
+}
+
+/// Download `asset` of this binary's own release into `dir` and verify it the
+/// way self-update verifies a binary: the minisign signature must check out
+/// against the key compiled into this binary and its signed comment must name
+/// this asset and this release. Anything else is an error; there is no
+/// unverified fallback. Returns the verified file.
+fn fetch_signed_release_asset(asset: &str, dir: &std::path::Path) -> Result<PathBuf> {
+    let tag = own_release_tag();
+    let url = release_asset_url(&tag, asset);
+    let file = dir.join(asset);
+    let sig = dir.join(format!("{asset}.minisig"));
+    curl_to_file(&url, &file)
+        .with_context(|| format!("{asset} is not available for c0mpute {tag} (a build that is not a published release has none)"))?;
+    curl_to_file(&format!("{url}.minisig"), &sig)
+        .with_context(|| format!("no signature for {asset} on c0mpute {tag}; refusing to use it"))?;
+    let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+    let sig_text = std::fs::read_to_string(&sig).with_context(|| format!("read {}", sig.display()))?;
+    c0mpute_update::verify_release_signature(c0mpute_update::RELEASE_PUBKEY, &bytes, &sig_text, asset, Some(&tag))?;
+    Ok(file)
+}
+
+/// Unpack a (verified) `.tar.gz` into `dir`.
+fn untar(archive: &std::path::Path, dir: &std::path::Path) -> Result<()> {
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dir)
+        .status()
+        .context("run tar")?;
+    if !status.success() {
+        anyhow::bail!("could not unpack {} ({status})", archive.display());
+    }
+    Ok(())
+}
+
 /// Whether `C0MPUTE_RPC_SHARDING` asks for the llama.cpp RPC slice.
 fn rpc_sharding_opted_in(value: Option<&str>) -> bool {
     matches!(value.map(str::trim), Some("1" | "true" | "yes" | "on"))
 }
 
+/// What a `plugin install` argument names.
+#[derive(Debug, PartialEq)]
+enum PluginTarget {
+    /// A plugin id from this repo's `plugins/` directory.
+    Id(String),
+    /// Somebody's own installer script.
+    Url(String),
+}
+
 /// A plugin id is lowercase letters, digits and dashes; anything else must be
-/// an http(s) URL with no whitespace, quotes or shell metacharacters.
-fn resolve_plugin_target(target: &str) -> Result<String> {
+/// an https URL with no whitespace, quotes or shell metacharacters.
+fn resolve_plugin_target(target: &str) -> Result<PluginTarget> {
     let t = target.trim();
-    if t.starts_with("http://") || t.starts_with("https://") {
+    if t.starts_with("http://") {
+        anyhow::bail!("plugin URLs must be https: {t}");
+    }
+    if t.starts_with("https://") {
         let rest = t.split_once("://").map(|(_, r)| r).unwrap_or("");
         let bad = |c: char| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '`' | '$' | ';' | '|' | '<' | '>' | '\\');
         if rest.is_empty() || rest.starts_with('/') || t.chars().any(bad) {
             anyhow::bail!("not a plugin URL: {t}");
         }
-        return Ok(t.to_string());
+        return Ok(PluginTarget::Url(t.to_string()));
     }
     let id_ok = !t.is_empty()
         && t.len() <= 64
@@ -5332,10 +5589,9 @@ fn resolve_plugin_target(target: &str) -> Result<String> {
     if !id_ok {
         anyhow::bail!("plugin id must be lowercase letters, digits and dashes (or a full https URL): {t}");
     }
-    // Treat anything else as a plugin id and resolve through the
-    // c0mpute marketplace. The route at c0mpute.com/plugins/<id>/install.sh
-    // serves the manifest-checked-in install script for that plugin.
-    Ok(format!("https://c0mpute.com/plugins/{t}/install.sh"))
+    // Anything else is a plugin id: its installer comes out of the signed
+    // plugins archive of this release (see install_signed_plugin).
+    Ok(PluginTarget::Id(t.to_string()))
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -5605,10 +5861,12 @@ fn run_menu() -> Result<()> {
 
 /// `c0mpute tui` — launch the terminal UI, installing it on demand the first
 /// time. The TUI is a Bun app (apps/tui, on @profullstack/hqtui), not part of
-/// the Rust binary, so `c0mpute tui` fetches the source, runs `bun install`,
-/// and writes a launcher — the user never has to know about the underlying
-/// `c0mpute-tui` binary. After an update it reinstalls the TUI from this
-/// release's tag, so the CLI and the TUI move together.
+/// the Rust binary, so `c0mpute tui` fetches the source (the signed
+/// `c0mpute-tui.tar.gz` of this release, verified with the release key
+/// compiled into this binary), runs `bun install`, and writes a launcher —
+/// the user never has to know about the underlying `c0mpute-tui` binary.
+/// After an update it reinstalls the TUI from this release, so the CLI and
+/// the TUI move together.
 fn run_tui(args: &[String]) -> Result<()> {
     let stale = installed_tui_version().is_some_and(|v| tui_is_stale(&v));
     if tui_launcher().is_none() {
@@ -5685,57 +5943,87 @@ fn ensure_bun() -> Option<PathBuf> {
     mise_which(&mise).or_else(|| which_on_path("bun"))
 }
 
+/// The GitHub tarball of a branch, for the `C0MPUTE_TUI_REF` developer
+/// override. Nothing signs a branch, so this is the unverified path.
+fn tui_branch_url(branch: &str) -> Result<String> {
+    let ok = !branch.is_empty()
+        && !branch.starts_with('-')
+        && !branch.contains("..")
+        && branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
+    if !ok {
+        anyhow::bail!("C0MPUTE_TUI_REF is not a branch name: {branch}");
+    }
+    Ok(format!("https://github.com/profullstack/c0mpute/archive/refs/heads/{branch}.tar.gz"))
+}
+
+/// Fetch the TUI source into `scratch` and return its directory (holding
+/// `src/`, `package.json`, `tsconfig.json`). Normally that is the signed
+/// `c0mpute-tui.tar.gz` of this binary's own release, so the TUI matches the
+/// CLI and is verified like it. `C0MPUTE_TUI_REF=<branch>` takes a branch
+/// instead, unverified, with a warning.
+fn fetch_tui_source(scratch: &std::path::Path) -> Result<PathBuf> {
+    if let Some(branch) = std::env::var("C0MPUTE_TUI_REF").ok().filter(|b| !b.is_empty()) {
+        let url = tui_branch_url(&branch)?;
+        eprintln!("! C0MPUTE_TUI_REF={branch}: installing the terminal UI UNVERIFIED from that branch");
+        let tarball = scratch.join("branch.tar.gz");
+        curl_to_file(&url, &tarball)?;
+        untar(&tarball, scratch)?;
+        // The tarball has one top-level directory, <repo>-<branch>.
+        for entry in std::fs::read_dir(scratch)?.flatten() {
+            let tui = entry.path().join("apps").join("tui");
+            if tui.is_dir() {
+                return Ok(tui);
+            }
+        }
+        anyhow::bail!("TUI source not found on branch {branch}");
+    }
+    let archive = fetch_signed_release_asset(TUI_ARCHIVE, scratch).with_context(|| {
+        "could not get the signed terminal UI (developers: C0MPUTE_TUI_REF=<branch> installs it unverified from a branch)"
+    })?;
+    untar(&archive, scratch)?;
+    Ok(scratch.join("tui"))
+}
+
 fn install_tui() -> Result<()> {
     println!("c0mpute tui: installing the terminal UI for v{}…", env!("CARGO_PKG_VERSION"));
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("HOME not set"))?;
+    let c0mpute_dir = c0mpute_home()?;
     let bun = ensure_bun().ok_or_else(|| {
         anyhow::anyhow!(
-            "bun is required for the TUI and couldn't be installed via mise. \
-             Install it, then rerun `c0mpute tui`:\n  curl -fsSL https://bun.sh/install | bash"
+            "bun is required for the TUI. Re-run the c0mpute installer (it installs a pinned, \
+             checksum-verified bun), or install bun yourself (https://bun.sh/docs/installation), \
+             then rerun `c0mpute tui`"
         )
     })?;
 
-    let tui_dir = home.join(".c0mpute/tui");
-    let wrapper = home.join(".c0mpute/bin/c0mpute-tui");
+    let tui_dir = c0mpute_dir.join("tui");
+    let wrapper = c0mpute_dir.join("bin/c0mpute-tui");
     // Scratch under the user's own ~/.c0mpute, not a fixed name in the shared
     // /tmp: there another local user could pre-create the directory and plant
-    // an `apps/tui` that this script would install and run.
-    let tmp = home.join(format!(".c0mpute/tui-install-{}", std::process::id()));
-    // This release's tag, so the TUI matches the CLI; master if the tag is
-    // not there (a dev build). C0MPUTE_TUI_REF picks a branch instead.
-    let archive = match std::env::var("C0MPUTE_TUI_REF") {
-        Ok(branch) if !branch.is_empty() => format!("https://github.com/profullstack/c0mpute/archive/refs/heads/{branch}.tar.gz"),
-        _ => format!("https://github.com/profullstack/c0mpute/archive/refs/tags/v{}.tar.gz", env!("CARGO_PKG_VERSION")),
-    };
-    let fallback = "https://github.com/profullstack/c0mpute/archive/refs/heads/master.tar.gz";
+    // an `apps/tui` that this would install and run.
+    let scratch = ScratchDir::create(&c0mpute_dir.join(format!("tui-install-{}", std::process::id())))?;
+    let src = fetch_tui_source(scratch.path())?;
+    if !src.join("src").is_dir() || !src.join("package.json").is_file() {
+        anyhow::bail!("TUI source not found in the downloaded archive");
+    }
 
-    // Fetch the repo, copy apps/tui into ~/.c0mpute/tui, and materialise deps.
-    let script = format!(
-        "set -e\n\
-         rm -rf '{tmp}' && mkdir -p '{tmp}'\n\
-         curl -fsSL '{archive}' | tar -xz -C '{tmp}' || {{ rm -rf '{tmp}' && mkdir -p '{tmp}' && curl -fsSL '{fallback}' | tar -xz -C '{tmp}'; }}\n\
-         src=$(find '{tmp}' -type d -path '*/apps/tui' | head -1)\n\
-         [ -d \"$src/src\" ] || {{ echo 'TUI source not found' >&2; exit 1; }}\n\
-         rm -rf '{tui}' && mkdir -p '{tui}'\n\
-         cp -R \"$src/src\" \"$src/package.json\" \"$src/tsconfig.json\" '{tui}/'\n\
-         cd '{tui}' && '{bun}' install --production --no-save >/dev/null 2>&1\n\
-         rm -rf '{tmp}'\n",
-        tmp = tmp.display(),
-        archive = archive,
-        fallback = fallback,
-        tui = tui_dir.display(),
-        bun = bun.display(),
-    );
-    let ok = Command::new("sh")
-        .arg("-c")
-        .arg(&script)
+    // Swap the source in (same filesystem: a rename), then materialise deps.
+    if tui_dir.exists() {
+        std::fs::remove_dir_all(&tui_dir).with_context(|| format!("remove {}", tui_dir.display()))?;
+    }
+    std::fs::rename(&src, &tui_dir).with_context(|| format!("install {}", tui_dir.display()))?;
+    drop(scratch);
+    let ok = Command::new(&bun)
+        .args(["install", "--production", "--no-save"])
+        .current_dir(&tui_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        anyhow::bail!("failed to fetch/build the TUI (need network + bun)");
+        anyhow::bail!("failed to install the TUI's dependencies (need network + bun)");
     }
 
     // Launcher — runs the Bun source. Kept as source rather than a
@@ -5747,7 +6035,7 @@ fn install_tui() -> Result<()> {
          BUN=\"$(command -v bun 2>/dev/null || true)\"\n\
          [ -z \"$BUN\" ] && [ -x \"$HOME/.bun/bin/bun\" ] && BUN=\"$HOME/.bun/bin/bun\"\n\
          [ -z \"$BUN\" ] && command -v mise >/dev/null 2>&1 && BUN=\"$(mise which bun 2>/dev/null || true)\"\n\
-         [ -n \"$BUN\" ] || {{ echo 'bun not found; run: mise use --global bun@latest' >&2; exit 1; }}\n\
+         [ -n \"$BUN\" ] || {{ echo 'bun not found; re-run the c0mpute installer (it installs a pinned bun)' >&2; exit 1; }}\n\
          exec \"$BUN\" run \"{}/src/index.ts\" \"$@\"\n",
         tui_dir.display()
     );

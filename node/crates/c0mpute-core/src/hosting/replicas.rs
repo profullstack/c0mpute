@@ -63,6 +63,27 @@ pub struct Holding {
 /// nobody announces go first, and then new ones are refused.
 pub const MAX_RECORDS: usize = 200_000;
 pub const MAX_RECEIPT_LISTS: usize = 200_000;
+/// Proofs (see [`Proof`]) a node remembers. Past the cap the one passed
+/// longest ago makes room.
+pub const MAX_PROOFS: usize = 200_000;
+
+/// What this node has itself seen one holder of one site prove: it asked the
+/// holder for chunks it picked at random and got the right bytes back. A
+/// holding announcement is only a claim (any key can gossip one); this is
+/// what makes a claimed copy count.
+#[derive(Clone, Debug)]
+pub struct Proof {
+    /// The version the passes were for. A new version starts over.
+    pub manifest: String,
+    /// The first pass of this run of passes, and the latest.
+    pub first: Instant,
+    pub last: Instant,
+    /// Passes counted in the run. At most one is counted per gap (see
+    /// [`ReplicaMap::note_pass`]), so three passes are three separate times.
+    pub passes: u32,
+    /// When a pass was last counted.
+    counted: Instant,
+}
 
 #[derive(Debug, Default)]
 pub struct ReplicaMap {
@@ -74,6 +95,13 @@ pub struct ReplicaMap {
     pub rtt_ms: HashMap<String, f64>,
     /// Recent availability receipts per (site id, holder), newest last.
     pub receipts: HashMap<(String, String), Vec<Receipt>>,
+    /// Challenges this node saw pass, per (site id, holder).
+    pub proofs: HashMap<(String, String), Proof>,
+    /// Count a holder on its announcement alone, as every version up to
+    /// 0.3.64 did (`[hosting] require_proofs` off, the default). With it
+    /// false a holder counts only once proven ([`Self::proven`]) and may only
+    /// be relied on for a drop once it has standing ([`Self::has_standing`]).
+    pub count_claims: bool,
 }
 
 impl ReplicaMap {
@@ -334,6 +362,128 @@ impl ReplicaMap {
             .filter(|p| !self.is_demoted(site_id, p))
             .take(super::site::MAX_PREFERRED_HOSTS)
             .collect()
+    }
+
+    /// `holder` just passed a challenge by this node for `manifest` of
+    /// `site_id`. A pass less than `gap` after the last counted one renews
+    /// the proof without adding to the count; a run with no pass for `lapse`
+    /// (or for another version) starts over.
+    pub fn note_pass(&mut self, site_id: &str, holder: &str, manifest: &str, now: Instant, gap: Duration, lapse: Duration) {
+        self.note_pass_capped(site_id, holder, manifest, now, gap, lapse, MAX_PROOFS);
+    }
+
+    /// [`Self::note_pass`] with the table's cap given (tests use a small one).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn note_pass_capped(
+        &mut self,
+        site_id: &str,
+        holder: &str,
+        manifest: &str,
+        now: Instant,
+        gap: Duration,
+        lapse: Duration,
+        max: usize,
+    ) {
+        let key = (site_id.to_string(), holder.to_string());
+        if let Some(p) = self.proofs.get_mut(&key)
+            && p.manifest == manifest
+            && now.duration_since(p.last) <= lapse
+        {
+            p.last = now;
+            if now.duration_since(p.counted) >= gap {
+                p.passes += 1;
+                p.counted = now;
+            }
+            return;
+        }
+        if !self.proofs.contains_key(&key) && self.proofs.len() >= max {
+            let oldest = self.proofs.iter().min_by_key(|(_, p)| p.last).map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.proofs.remove(&k);
+            }
+        }
+        self.proofs.insert(
+            key,
+            Proof {
+                manifest: manifest.to_string(),
+                first: now,
+                last: now,
+                passes: 1,
+                counted: now,
+            },
+        );
+    }
+
+    /// Forget proofs with no pass for `lapse`, and those of sites no longer
+    /// known.
+    pub fn prune_proofs(&mut self, now: Instant, lapse: Duration) {
+        let records = &self.records;
+        self.proofs
+            .retain(|(site, _), p| now.duration_since(p.last) <= lapse && records.contains_key(site));
+    }
+
+    /// Whether `holder`'s copy of the current version of `site_id` counts
+    /// toward the copies the site needs: this node saw it pass a challenge
+    /// within `ttl`, or the latest receipt for it signed by the site's owner
+    /// or payer (the keys [`proof::demoted`] trusts) is a pass no older than
+    /// `ttl`. `now_secs` is the wall clock receipts are dated with.
+    pub fn proven(&self, site_id: &str, holder: &str, now: Instant, now_secs: u64, ttl: Duration) -> bool {
+        if self.count_claims {
+            return true;
+        }
+        let Some(rec) = self.records.get(site_id) else {
+            return false;
+        };
+        if self
+            .proofs
+            .get(&(site_id.to_string(), holder.to_string()))
+            .is_some_and(|p| p.manifest == rec.manifest && now.duration_since(p.last) <= ttl)
+        {
+            return true;
+        }
+        let trusted = [rec.owner.as_str(), rec.payer_key()];
+        self.receipts_for(site_id, holder)
+            .iter()
+            .filter(|r| r.manifest == rec.manifest && trusted.contains(&r.challenger.as_str()))
+            // A receipt dated ahead of this node's clock is not fresher
+            // than one dated now.
+            .filter(|r| r.at <= now_secs.saturating_add(proof::CLOCK_SKEW_SECS))
+            .max_by(|a, b| a.at.cmp(&b.at).then(a.sig.cmp(&b.sig)))
+            .is_some_and(|r| r.ok && now_secs.saturating_sub(r.at) <= ttl.as_secs())
+    }
+
+    /// Whether `holder` has the standing a copy needs before this node gives
+    /// up its own on the strength of it: this node saw it pass at least
+    /// `passes` challenges at separate times, the first at least `span` ago,
+    /// with no gap of `span` between passes since. Receipts from other keys
+    /// do not count here: only what this node asked for itself.
+    pub fn has_standing(&self, site_id: &str, holder: &str, now: Instant, passes: u32, span: Duration) -> bool {
+        if self.count_claims {
+            return true;
+        }
+        let Some(rec) = self.records.get(site_id) else {
+            return false;
+        };
+        self.proofs
+            .get(&(site_id.to_string(), holder.to_string()))
+            .is_some_and(|p| {
+                p.manifest == rec.manifest
+                    && p.passes >= passes
+                    && now.duration_since(p.first) >= span
+                    && now.duration_since(p.last) <= span
+            })
+    }
+
+    /// Whether a pass by `holder` now would be counted (see
+    /// [`Self::note_pass`]): nothing counted for the current version within
+    /// `gap`. Asking sooner proves nothing new.
+    pub fn pass_due(&self, site_id: &str, holder: &str, now: Instant, gap: Duration) -> bool {
+        let Some(rec) = self.records.get(site_id) else {
+            return false;
+        };
+        self.proofs
+            .get(&(site_id.to_string(), holder.to_string()))
+            .is_none_or(|p| p.manifest != rec.manifest || now.duration_since(p.counted) >= gap)
     }
 
     /// Forget peers not heard from within `ttl`.
@@ -636,8 +786,9 @@ pub enum Action {
     Drop,
 }
 
-/// Decide for `me` (which may or may not host). `trim`: the site has had more
-/// than `target` copies for the whole grace period (see [`releases`]).
+/// Decide for `me` (which may or may not host), taking every announced
+/// holder at its word. `trim`: the site has had more than `target` copies for
+/// the whole grace period (see [`releases`]).
 pub fn decide(
     map: &ReplicaMap,
     site_id: &str,
@@ -646,6 +797,29 @@ pub fn decide(
     target: usize,
     max: usize,
     trim: bool,
+) -> Action {
+    decide_counting(map, site_id, me, i_host, target, max, trim, &|_| true)
+}
+
+/// [`decide`], where an announced holder fills one of the `target` copies
+/// only when `counts` says so (it proved its copy, see
+/// [`ReplicaMap::proven`]). Announcing is free, so three keys that only
+/// announce would otherwise keep a site from ever being copied.
+///
+/// A holder that does not count is still left out of the candidates and is
+/// still a source to fetch from. The fill takes the `target` minus counted
+/// top-ranked candidates, so however many nodes doubt the announced holders,
+/// the same few (never more than `target`) are the ones to act.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_counting(
+    map: &ReplicaMap,
+    site_id: &str,
+    me: &str,
+    i_host: bool,
+    target: usize,
+    max: usize,
+    trim: bool,
+    counts: &dyn Fn(&str) -> bool,
 ) -> Action {
     let holders = map.holders(site_id);
     let i_hold = holders.iter().any(|p| p == me);
@@ -669,7 +843,8 @@ pub fn decide(
     if preferred.iter().any(|p| p == me) {
         return Action::Replicate;
     }
-    if holders.len() >= target {
+    let counted = holders.iter().filter(|p| counts(p)).count();
+    if counted >= target {
         return Action::Nothing;
     }
     // The rendezvous fill. Preferred hosts that do not hold yet are left out:
@@ -693,7 +868,7 @@ pub fn decide(
         }
         candidates.push(me.to_string());
     }
-    if chosen_by_space(map, site_id, &candidates, target - holders.len())
+    if chosen_by_space(map, site_id, &candidates, target - counted)
         .iter()
         .any(|p| p == me)
     {
@@ -1025,6 +1200,204 @@ mod tests {
         assert!(m.holders(&site).is_empty(), "holding an old version is not a copy");
         m.prune(t0 + Duration::from_secs(500), Duration::from_secs(200));
         assert!(m.live_peers().is_empty());
+    }
+
+    /// A site with `claimants` announcing it and `spare` hosting nodes that
+    /// do not hold it. Returns (map, site id, manifest, claimants, spares).
+    fn claimed(claimants: usize, spare: usize) -> (ReplicaMap, String, String, Vec<String>, Vec<String>) {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        let fake: Vec<String> = (0..claimants).map(|i| format!("claim{i}")).collect();
+        holding(&mut m, &r.site_id, &r.manifest, &fake);
+        let spares: Vec<String> = (0..spare).map(|i| format!("spare{i:02}")).collect();
+        hosting_peers(&mut m, &spares);
+        (m, r.site_id, r.manifest, fake, spares)
+    }
+
+    const TTL: Duration = Duration::from_secs(1800);
+    const GAP: Duration = Duration::from_secs(7200);
+    const SPAN: Duration = Duration::from_secs(6 * 3600);
+
+    /// The `peers` that would take a copy when only proven holders count.
+    fn takers(m: &ReplicaMap, site: &str, peers: &[String], now: Instant) -> Vec<String> {
+        peers
+            .iter()
+            .filter(|p| {
+                let counts = |h: &str| h == p.as_str() || m.proven(site, h, now, 1_000_000, TTL);
+                decide_counting(m, site, p, true, 3, 5, false, &counts) == Action::Replicate
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn holders_that_only_announce_do_not_fill_the_target() {
+        let (m, site, _, _, spares) = claimed(3, 6);
+        let now = Instant::now();
+        // Taken at their word, three announcements are three copies.
+        assert!(spares.iter().all(|p| decide(&m, &site, p, true, 3, 5, false) == Action::Nothing));
+        // Counted only once proven, the site still needs all three, and
+        // exactly the three top-ranked spare nodes take them: not everyone
+        // who doubts the claims.
+        let t = takers(&m, &site, &spares, now);
+        assert_eq!(t.len(), 3, "{t:?}");
+        let mut want = chosen(&site, &spares, 3);
+        want.sort();
+        assert_eq!(t, want);
+    }
+
+    #[test]
+    fn proven_holders_fill_the_target_and_a_stale_proof_expires() {
+        let (mut m, site, manifest, fake, spares) = claimed(3, 6);
+        let t0 = Instant::now();
+        for p in &fake[..2] {
+            m.note_pass(&site, p, &manifest, t0, GAP, SPAN);
+        }
+        // Two proven: one more copy, from the top-ranked spare node alone.
+        assert_eq!(takers(&m, &site, &spares, t0), chosen(&site, &spares, 1));
+        m.note_pass(&site, &fake[2], &manifest, t0, GAP, SPAN);
+        assert!(takers(&m, &site, &spares, t0).is_empty(), "three proven copies: nothing to do");
+        assert!(takers(&m, &site, &spares, t0 + TTL).is_empty());
+        // Past the TTL the proofs no longer count.
+        let late = t0 + TTL + Duration::from_secs(1);
+        assert!(!m.proven(&site, &fake[0], late, 1_000_000, TTL));
+        assert_eq!(takers(&m, &site, &spares, late).len(), 3);
+        // A proof is for one version of the site.
+        m.note_pass(&site, &fake[0], "another-manifest", t0, GAP, SPAN);
+        assert!(!m.proven(&site, &fake[0], t0, 1_000_000, TTL));
+    }
+
+    #[test]
+    fn the_ceiling_still_holds_when_claims_do_not_count() {
+        // Eight keys announce a site none of them holds. The fill is still
+        // three copies from the three top-ranked nodes, however many nodes
+        // look, and once those three are proven nobody else takes one.
+        let (mut m, site, manifest, fake, spares) = claimed(8, 12);
+        let now = Instant::now();
+        let first = takers(&m, &site, &spares, now);
+        assert_eq!(first.len(), 3, "{first:?}");
+        holding(&mut m, &site, &manifest, &first);
+        for p in &first {
+            m.note_pass(&site, p, &manifest, now, GAP, SPAN);
+        }
+        let rest: Vec<String> = spares.iter().filter(|p| !first.contains(p)).cloned().collect();
+        assert!(takers(&m, &site, &rest, now).is_empty(), "three proven copies stop the fill");
+        // With eleven announced copies the site is far over the ceiling, and
+        // the rule above it is unchanged: one holder a round is named to let
+        // go (whether it does is decided on proofs of the others, see
+        // `Hosting::others_prove_whole`).
+        let all: Vec<String> = fake.iter().chain(first.iter()).cloned().collect();
+        assert_eq!(droppers(&m, &site, &all, false).len(), 1);
+    }
+
+    #[test]
+    fn a_trusted_receipt_proves_a_holder_until_it_is_stale() {
+        use super::super::proof::{Challenge, Receipt};
+        let owner = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let stranger = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&owner, 1);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        holding(&mut m, &r.site_id, &r.manifest, &["h".to_string()]);
+        let chunk = Hash::of(b"c").to_hex();
+        let receipt = |kp: &c0mpute_net::libp2p::identity::Keypair, ok: bool, at: u64| {
+            Receipt::sign(
+                kp,
+                Challenge {
+                    site_id: &r.site_id,
+                    manifest: &r.manifest,
+                    holder: "h",
+                    chunk: &chunk,
+                    ok,
+                    rtt_ms: 1,
+                    at,
+                },
+            )
+            .unwrap()
+        };
+        let now = Instant::now();
+        let proven = |m: &ReplicaMap, secs: u64| m.proven(&r.site_id, "h", now, secs, TTL);
+        // Anyone can sign a receipt: a stranger's proves nothing.
+        m.apply_receipt(receipt(&stranger, true, 1_000));
+        assert!(!proven(&m, 1_000));
+        m.apply_receipt(receipt(&owner, true, 1_000));
+        assert!(proven(&m, 1_000) && proven(&m, 1_000 + TTL.as_secs()));
+        assert!(!proven(&m, 1_001 + TTL.as_secs()), "an old pass is not a copy today");
+        // The owner's latest word wins, and a date from the future is not one.
+        m.apply_receipt(receipt(&owner, false, 1_100));
+        assert!(!proven(&m, 1_200));
+        m.apply_receipt(receipt(&owner, true, 900_000));
+        assert!(!proven(&m, 1_200));
+    }
+
+    #[test]
+    fn one_fresh_pass_counts_for_the_fill_but_dropping_needs_standing() {
+        let (mut m, site, manifest, fake, _) = claimed(1, 0);
+        let h = &fake[0];
+        let t0 = Instant::now();
+        let standing = |m: &ReplicaMap, at: Instant| m.has_standing(&site, h, at, 3, SPAN);
+        assert!(m.pass_due(&site, h, t0, GAP), "never asked: a pass would count");
+        m.note_pass(&site, h, &manifest, t0, GAP, SPAN);
+        assert!(m.proven(&site, h, t0, 0, TTL), "one pass fills a slot");
+        assert!(!standing(&m, t0));
+        // Passes close together are one time, however many there are.
+        for s in 1..50 {
+            m.note_pass(&site, h, &manifest, t0 + Duration::from_secs(s), GAP, SPAN);
+        }
+        assert_eq!(m.proofs[&(site.clone(), h.clone())].passes, 1);
+        assert!(!m.pass_due(&site, h, t0 + Duration::from_secs(60), GAP));
+        assert!(!standing(&m, t0 + SPAN), "six hours since one pass is not three passes");
+        // Three passes two hours apart, but only four hours in: not yet.
+        m.note_pass(&site, h, &manifest, t0 + GAP, GAP, SPAN);
+        m.note_pass(&site, h, &manifest, t0 + GAP * 2, GAP, SPAN);
+        assert_eq!(m.proofs[&(site.clone(), h.clone())].passes, 3);
+        assert!(!standing(&m, t0 + GAP * 2));
+        // A pass at six hours: three or more separate times spanning six hours.
+        m.note_pass(&site, h, &manifest, t0 + SPAN, GAP, SPAN);
+        assert!(standing(&m, t0 + SPAN));
+    }
+
+    #[test]
+    fn standing_lapses_and_the_count_starts_over() {
+        let (mut m, site, manifest, fake, _) = claimed(1, 0);
+        let h = &fake[0];
+        let t0 = Instant::now();
+        for i in 0..4 {
+            m.note_pass(&site, h, &manifest, t0 + GAP * i, GAP, SPAN);
+        }
+        let end = t0 + GAP * 3;
+        assert!(m.has_standing(&site, h, end, 3, SPAN));
+        // No pass for a whole span: the standing is gone...
+        let late = end + SPAN + Duration::from_secs(1);
+        assert!(!m.has_standing(&site, h, late, 3, SPAN));
+        // ...and the next pass is the first of a new run, not the fifth.
+        m.note_pass(&site, h, &manifest, late, GAP, SPAN);
+        let p = &m.proofs[&(site.clone(), h.clone())];
+        assert_eq!((p.passes, p.first), (1, late));
+        // A new version of the site starts over too.
+        m.note_pass(&site, h, "next-version", late + GAP, GAP, SPAN);
+        assert_eq!(m.proofs[&(site.clone(), h.clone())].passes, 1);
+        // Pruning drops what lapsed, and proofs of sites no longer known.
+        m.note_pass("gone-site", h, &manifest, late + GAP, GAP, SPAN);
+        m.prune_proofs(late + GAP, SPAN);
+        assert_eq!(m.proofs.len(), 1);
+        m.prune_proofs(late + GAP + SPAN + Duration::from_secs(1), SPAN);
+        assert!(m.proofs.is_empty());
+    }
+
+    #[test]
+    fn the_proof_table_is_capped_and_the_oldest_pass_makes_room() {
+        let mut m = ReplicaMap::default();
+        let t0 = Instant::now();
+        for i in 0..3u64 {
+            m.note_pass_capped("s", &format!("h{i}"), "m", t0 + Duration::from_secs(i), GAP, SPAN, 3);
+        }
+        m.note_pass_capped("s", "h9", "m", t0 + Duration::from_secs(9), GAP, SPAN, 3);
+        assert_eq!(m.proofs.len(), 3);
+        assert!(!m.proofs.contains_key(&("s".to_string(), "h0".to_string())));
+        assert!(m.proofs.contains_key(&("s".to_string(), "h9".to_string())));
     }
 
     fn pid() -> String {

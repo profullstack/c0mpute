@@ -62,6 +62,8 @@ NODE_ENV = "production"
 | Secrets | Secret env plus the app key travel sealed to each holder's X25519 key (`Seal` gossip): from the owner's CLI at deploy, then from any holder to newcomers, so the owner can go offline. The record carries only their blake3. |
 | Serving | Gateways forward to the primary over the `apps.http` libp2p RPC, so NAT'd primaries work. Requests up to 700 KiB, responses up to 5 MiB, 15 s upstream timeout, no websockets. The app sees `X-Forwarded-For/Host/Proto` and `X-Forwarded-Prefix: /a/<id>`. |
 | Sandbox | `--cap-drop ALL` (plus CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, NET_BIND_SERVICE), `no-new-privileges`, memory/CPU/pid limits, 64 MiB tmpfs `/tmp`, published on loopback only, no restart policy (the supervisor decides what runs). |
+| Network | On a root worker the container joins the `c0mpute-apps` network behind an egress guard: it reaches the public internet but not private, loopback, link-local (cloud metadata) or CGNAT addresses, and not the host. On a non-root worker there is no guard (see below). |
+| Disk | State up to 1 GiB, and by default 2 GiB for state plus everything written inside the container. An app over the limit is stopped and restarts from its last snapshot. |
 
 ## Custom domains
 
@@ -86,9 +88,37 @@ c0mpute worker start --roles ...,apps
 [apps]
 max_apps = 4          # held at once (primary or standby)
 max_memory_mb = 2048  # reserved by held apps together
+owners = []           # owner keys whose apps this node runs; empty = anyone's
+egress_guard = true           # keep apps off your LAN, the host and metadata addresses
+require_egress_guard = false  # true: run no apps unless that guard is in place
+max_disk_mb = 2048            # per app: state volume plus writes inside the container
 ```
 
 Every gateway routes to apps whether or not it runs any.
+
+**Whose apps.** With `owners` empty the node runs containers for anyone on
+the network, and says so in its log at start.
+
+**Network.** The egress guard is a set of iptables rules on the apps bridge
+(`c0apps0`), the same ones `container.run` uses plus one that lets the app
+answer the node's own proxy. Only a root worker can add them. A non-root
+worker keeps apps on docker's default bridge, where a container **can reach
+your LAN, the host and cloud metadata addresses**; the node logs that once at
+start. Set `require_egress_guard = true` to run no apps in that case. An app
+that must reach a private address (a database on your LAN) needs
+`egress_guard = false`. The guard is IPv4 only.
+
+**Disk.** Every minute the node asks docker how much a running app has written
+inside its container and adds the size of its last state snapshot. Over
+`max_disk_mb` (0 = no per-app limit), or with state over 1 GiB, the app is
+stopped, the reason is recorded (`error` in `GET /apps/v1/apps/<id>` on that
+node, and its log), and another holder takes over from the last snapshot. The
+stopped app's state volume is left on the node: what it holds past the last
+snapshot exists nowhere else, so removing it is the owner's decision. Apps are also stopped, and
+none started, while the docker disk has less free than the smaller of 20 GiB
+and 10% (the floor `container.run` keeps). Where docker can enforce a quota
+itself (overlay2 on xfs with project quotas) the container is also created
+with `--storage-opt size=`.
 
 ## Limits, honestly
 

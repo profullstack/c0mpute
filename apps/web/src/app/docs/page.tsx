@@ -411,11 +411,11 @@ c0mpute tui                          # terminal app: chat, jobs, node, network`}
 
       <Section h="plugins" title="[ install third-party plugins ]">
         <Code>
-{`# Install from a plugin's signed install.sh
-c0mpute plugin install https://example.com/my-plugin/install.sh
-
-# Install by id from the c0mpute marketplace
+{`# Install a first-party plugin by id (from the signed release archive)
 c0mpute plugin install my-plugin
+
+# Install a third-party plugin from its install.sh (not verified by c0mpute)
+c0mpute plugin install --unverified https://example.com/my-plugin/install.sh
 
 # List installed
 c0mpute plugin list

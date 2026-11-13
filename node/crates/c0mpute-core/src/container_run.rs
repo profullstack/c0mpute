@@ -1320,7 +1320,7 @@ pub fn guard_rules(bridge: &str) -> Vec<Vec<String>> {
     rules
 }
 
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     #[cfg(unix)]
     {
         // SAFETY: geteuid has no preconditions.
@@ -1333,11 +1333,17 @@ fn is_root() -> bool {
 }
 
 /// Insert the guard rules for `bridge` (idempotent). True when they are in.
-async fn ensure_guard(bridge: &str) -> bool {
+pub(crate) async fn ensure_guard(bridge: &str) -> bool {
+    ensure_rules(guard_rules(bridge)).await
+}
+
+/// Insert iptables `rules` (each as [`guard_rules`] gives them) that are not
+/// in yet. True when all of them are in; always false for a non-root worker.
+pub(crate) async fn ensure_rules(rules: Vec<Vec<String>>) -> bool {
     if !is_root() {
         return false;
     }
-    for rule in guard_rules(bridge) {
+    for rule in rules {
         let (chain, rest) = rule.split_first().expect("non-empty rule");
         let mut check = vec!["-C".to_string(), chain.clone()];
         check.extend(rest.iter().cloned());
@@ -1370,8 +1376,17 @@ async fn ensure_guard(bridge: &str) -> bool {
 /// Make sure the jobs network exists (containers on it cannot reach each
 /// other) and, when configured, guard it. Returns whether egress is guarded.
 async fn ensure_jobs_network(cfg: &ContainersConfig) -> Result<bool> {
+    ensure_bridge_network(JOBS_NETWORK, JOBS_BRIDGE, "c0mpute.jobs=1")
+        .await
+        .context("create the jobs network")?;
+    Ok(cfg.egress_guard && ensure_guard(JOBS_BRIDGE).await)
+}
+
+/// Make sure the docker bridge network `name` exists on the Linux interface
+/// `bridge`, with its containers unable to reach each other.
+pub(crate) async fn ensure_bridge_network(name: &str, bridge: &str, label: &str) -> Result<()> {
     let t = Duration::from_secs(30);
-    if docker_out(&s(&["network", "inspect", JOBS_NETWORK]), t)
+    if docker_out(&s(&["network", "inspect", name]), t)
         .await
         .is_err()
     {
@@ -1379,20 +1394,20 @@ async fn ensure_jobs_network(cfg: &ContainersConfig) -> Result<bool> {
             "network",
             "create",
             "--driver=bridge",
-            &format!("--opt=com.docker.network.bridge.name={JOBS_BRIDGE}"),
+            &format!("--opt=com.docker.network.bridge.name={bridge}"),
             "--opt=com.docker.network.bridge.enable_icc=false",
-            "--label=c0mpute.jobs=1",
-            JOBS_NETWORK,
+            &format!("--label={label}"),
+            name,
         ]);
         if let Err(e) = docker_out(&create, t).await
-            && docker_out(&s(&["network", "inspect", JOBS_NETWORK]), t)
+            && docker_out(&s(&["network", "inspect", name]), t)
                 .await
                 .is_err()
         {
-            return Err(e).context("create the jobs network");
+            return Err(e);
         }
     }
-    Ok(cfg.egress_guard && ensure_guard(JOBS_BRIDGE).await)
+    Ok(())
 }
 
 /// The N-of-M hook: a buyer that ran the same build on several builders can

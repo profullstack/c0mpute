@@ -107,10 +107,15 @@ open (any gateway serves `/s/<id>/o`), exactly like public objects.
   and refuses older ones, so a node cannot quietly undo a revocation or a
   volume write on a machine that saw the newer version. A machine that never
   saw it cannot tell, and the browser loader does not keep this memory.
-- **The browser loader shares an origin** with the public sites that gateway
-  serves. The key stays in the fragment and the decrypted page is sandboxed,
-  but a gateway you do not trust can serve a different loader page; for
-  anything sensitive, `c0mpute storage get` is the stronger path.
+- **The browser loader is served from the gateway's own origin**, the one
+  public sites under `/s/` are served from too. With the default
+  `[gateway] sandbox_shared_sites = true` those public pages are sandboxed
+  into origins of their own and cannot script the loader's origin; an
+  operator who turns that off puts them back on the loader's origin (see
+  [hosting](hosting.md#site-origins)). The key stays in the fragment and
+  the decrypted page is sandboxed either way, but a gateway you do not
+  trust can serve a different loader page; for anything sensitive,
+  `c0mpute storage get` is the stronger path.
 - **Post-quantum.** Key wrapping is X25519. Data with a decades-long secrecy
   horizon should wait for a hybrid ML-KEM wrap (the primitives are already in
   the tree for `c0mpute dm`).

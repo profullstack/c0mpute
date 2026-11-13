@@ -43,7 +43,7 @@ export default function PluginsPage() {
         </p>
         <p>
           Third-party plugins install with{" "}
-          <code>c0mpute plugin install &lt;url&gt;</code> where{" "}
+          <code>c0mpute plugin install --unverified &lt;url&gt;</code> where{" "}
           <code>&lt;url&gt;</code> points at the plugin&apos;s{" "}
           <code>install.sh</code>. See{" "}
           <a href="https://github.com/profullstack/c0mpute/blob/master/dips/0006-module-model.md">

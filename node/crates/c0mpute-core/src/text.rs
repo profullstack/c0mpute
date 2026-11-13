@@ -78,6 +78,159 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// the worker up (three missed beats plus gossip slack) and re-auctions.
 pub const HEARTBEAT_SILENCE: Duration = Duration::from_secs(120);
 
+/// The base models a worker serves when its operator lists none: the ones
+/// this codebase's own clients name (`c0mpute train lora --base`'s example
+/// and the job file on the /train page). A base model is downloaded from
+/// Hugging Face and loaded by the trainer, so a worker runs only the ones
+/// its operator has agreed to.
+pub const DEFAULT_BASE_MODELS: [&str; 2] = ["HuggingFaceTB/SmolLM2-135M-Instruct", "Qwen/Qwen2.5-0.5B-Instruct"];
+
+/// `[text]` in config.toml: what `c0mpute infernet text serve` accepts.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TextConfig {
+    /// Base models buyers may train on and chat with here: exact Hugging
+    /// Face ids (`org/name`, case as on the Hub), `org/*` for every model of
+    /// one organisation, or `*` for any. Jobs naming another get no bid.
+    pub base_models: Vec<String>,
+    /// Free space kept on the disk the text cache is on, GiB; a job that
+    /// starts below it fails at once (0 = min(20 GiB, 10% of the disk), the
+    /// floor container jobs keep).
+    pub min_free_gb: u64,
+}
+
+impl Default for TextConfig {
+    fn default() -> Self {
+        Self { base_models: DEFAULT_BASE_MODELS.iter().map(|m| m.to_string()).collect(), min_free_gb: 0 }
+    }
+}
+
+impl TextConfig {
+    /// The node's `[text]` section. `text serve` is started without a config
+    /// handle, so this reads the file itself, as the speech gateway does.
+    pub fn load() -> Self {
+        crate::config::Config::load_raw(&crate::config::default_config_path()).unwrap_or_default().text
+    }
+
+    /// May a buyer's job use `base_model` on this node?
+    pub fn admits_model(&self, base_model: &str) -> bool {
+        model_allowed(&self.base_models, base_model)
+    }
+
+    /// Fail unless the disk holding `dir` has its free-space floor left.
+    pub fn check_free(&self, dir: &Path) -> Result<()> {
+        let (free, total) = c0mpute_store::free_space_at(dir);
+        let floor = crate::container_run::min_free_bytes(
+            &crate::container_run::ContainersConfig { min_free_gb: self.min_free_gb, ..Default::default() },
+            total,
+        );
+        if free < floor {
+            bail!("E_DISK: {} has {} GiB free; this node keeps {} GiB", dir.display(), free >> 30, floor >> 30);
+        }
+        Ok(())
+    }
+}
+
+/// A Hugging Face repo id, strictly: `org/name`, each part 1 to 96 of
+/// `A-Z a-z 0-9 . _ -`, not starting or ending with `.` or `-`, no `..` or
+/// `--`. Anything else could be read by the trainer as a path on the worker
+/// (`models/x`, `./x`, a bare directory name) or as a URL.
+pub fn valid_repo_id(id: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 96
+            && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && !p.starts_with(['.', '-'])
+            && !p.ends_with(['.', '-'])
+            && !p.contains("..")
+            && !p.contains("--")
+    };
+    matches!(id.split_once('/'), Some((org, name)) if part(org) && part(name))
+}
+
+/// Is `id` a valid repo id that `allow` names: exactly, by `org/*`, or by
+/// `*`? Case matters: the Hub answers a differently-cased id with the same
+/// model, and each spelling would be a second copy in the worker's cache.
+pub fn model_allowed(allow: &[String], id: &str) -> bool {
+    let Some((org, _)) = id.split_once('/').filter(|_| valid_repo_id(id)) else {
+        return false;
+    };
+    allow.iter().map(|e| e.trim()).any(|entry| entry == "*" || entry == id || entry.strip_suffix("/*") == Some(org))
+}
+
+/// Top-level keys a job config may carry: what `c0mpute train lora`
+/// ([`crate::train::LoraOptions::job`]) and a hand-written job file for
+/// `c0mpute infernet text train` send, plus `limits.timeout_s`, which the
+/// worker reads. The trainer is handed the job as its arguments, so a key it
+/// does not know is refused here, not passed on.
+pub const JOB_KEYS: [&str; 8] = ["name", "kind", "base_model", "system_prompt", "hyperparams", "limits", "dataset", "output"];
+/// Hyperparameters a job may set, with the ranges `c0mpute train lora` uses.
+pub const HYPERPARAM_KEYS: [&str; 7] = ["lr", "batch_size", "epochs", "seq_len", "lora_r", "max_steps", "seed"];
+const MAX_SYSTEM_PROMPT_BYTES: usize = 8 * 1024;
+
+fn whole_in(v: &Value, range: std::ops::RangeInclusive<u64>) -> bool {
+    v.as_u64().is_some_and(|n| range.contains(&n))
+}
+
+/// Check a job config before it reaches the trainer: only [`JOB_KEYS`], only
+/// [`HYPERPARAM_KEYS`], every value of the right type and in range.
+pub fn validate_job(job: &Value) -> Result<()> {
+    let obj = job.as_object().context("job must be an object")?;
+    if let Some(k) = obj.keys().find(|k| !JOB_KEYS.contains(&k.as_str())) {
+        bail!("job.{k} is not accepted; a text training job may set {JOB_KEYS:?}");
+    }
+    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("");
+    if !KINDS.contains(&kind) {
+        bail!("job.kind must be one of {KINDS:?}, got {kind:?}");
+    }
+    // A Hugging Face repo id (org/name): never a path or a URL on the worker.
+    if !valid_repo_id(obj.get("base_model").and_then(Value::as_str).unwrap_or("")) {
+        bail!("job.base_model must be a model repo id like org/name");
+    }
+    match obj.get("name") {
+        None => {}
+        Some(Value::String(n)) if !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) => {}
+        Some(_) => bail!("job.name must be 1-64 characters of letters, digits, '-', '_' or '.'"),
+    }
+    match obj.get("system_prompt") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(p)) if p.len() <= MAX_SYSTEM_PROMPT_BYTES => {}
+        Some(_) => bail!("job.system_prompt must be a string of at most {MAX_SYSTEM_PROMPT_BYTES} bytes"),
+    }
+    // The worker replaces both with its own local paths; they only have to
+    // be what the clients send, an object.
+    for k in ["dataset", "output"] {
+        if obj.get(k).is_some_and(|v| !v.is_object()) {
+            bail!("job.{k} must be an object");
+        }
+    }
+    if let Some(limits) = obj.get("limits") {
+        let l = limits.as_object().context("job.limits must be an object")?;
+        if l.keys().any(|k| k != "timeout_s") || l.get("timeout_s").is_some_and(|t| !t.is_u64()) {
+            bail!("job.limits may set only timeout_s, a whole number of seconds");
+        }
+    }
+    if let Some(hp) = obj.get("hyperparams") {
+        let hp = hp.as_object().context("job.hyperparams must be an object")?;
+        for (k, v) in hp {
+            let ok = match k.as_str() {
+                "lr" => v.as_f64().is_some_and(|x| x.is_finite() && x > 0.0 && x <= 1e-2),
+                "batch_size" => whole_in(v, 1..=64),
+                "epochs" => whole_in(v, 1..=20),
+                "seq_len" => whole_in(v, 32..=4096),
+                "lora_r" => whole_in(v, 1..=128),
+                "max_steps" => whole_in(v, 1..=1_000_000),
+                "seed" => whole_in(v, 0..=u32::MAX as u64),
+                _ => bail!("job.hyperparams.{k} is not accepted; a text training job may set {HYPERPARAM_KEYS:?}"),
+            };
+            if !ok {
+                bail!("job.hyperparams.{k} is out of range: lr in (0, 0.01], batch_size 1-64, epochs 1-20, seq_len 32-4096, lora_r 1-128, max_steps 1-1000000, seed 0-4294967295, whole numbers except lr");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Jobs a text worker is running now, by job id, with each one's run id, so a
 /// shutdown can fail them out loud instead of leaving the buyer waiting.
 pub type InFlight = Arc<std::sync::Mutex<HashMap<String, (crate::runner::AcceptedJob, Option<String>)>>>;
@@ -177,15 +330,7 @@ fn is_http(u: &str) -> bool {
 
 impl TextTrainSpec {
     pub fn validate(&self) -> Result<()> {
-        let kind = self.job.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if !KINDS.contains(&kind) {
-            bail!("job.kind must be one of {KINDS:?}, got {kind:?}");
-        }
-        let base = self.job.get("base_model").and_then(|v| v.as_str()).unwrap_or("");
-        // A Hugging Face repo id (org/name): never a path or a URL on the worker.
-        if base.is_empty() || base.len() > 200 || base.starts_with('/') || base.contains("..") || base.contains("://") {
-            bail!("job.base_model must be a model repo id like org/name");
-        }
+        validate_job(&self.job)?;
         if !crate::temporal::is_sha256_ref(&self.dataset_hash) {
             bail!("dataset_hash must be sha256:<64 lowercase hex>");
         }
@@ -323,11 +468,20 @@ pub async fn fetch_corpus(net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>, spec:
 /// Run one accepted job: fetch the corpus, run `infernet model train --job
 /// --json`, relay every event, return the adapter dir and its weights hash.
 /// `buyer` is the peer the corpus pieces are fetched from first.
-pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>) -> Result<(PathBuf, String)> {
+pub async fn run_train(infernet: &Path, job_dir: &Path, spec: &TextTrainSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>, policy: &TextConfig) -> Result<(PathBuf, String)> {
     spec.validate()?;
+    // The opened spec is judged again: at bid time a sealed job showed only
+    // its public fields.
+    let base = spec.job["base_model"].as_str().unwrap_or("");
+    if !policy.admits_model(base) {
+        bail!("base model {base} is not one this node runs ([text] base_models)");
+    }
     tokio::fs::create_dir_all(job_dir).await?;
+    policy.check_free(job_dir)?;
     let dataset = job_dir.join("dataset.jsonl");
     fetch_corpus(net, buyer, spec, &dataset).await.context("fetch dataset")?;
+    // The corpus is on disk now; training writes checkpoints and the adapter.
+    policy.check_free(job_dir)?;
     let mut job = spec.job.clone();
     job["dataset"] = json!({"url": "dataset.jsonl", "sha256": spec.dataset_hash.trim_start_matches("sha256:")});
     job["output"] = json!({"destination_url": "adapter"});
@@ -536,7 +690,7 @@ impl Drop for RemoveDirOnDrop {
     }
 }
 
-pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>, in_flight: InFlight) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, slots: Arc<Semaphore>, in_flight: InFlight, policy: Arc<TextConfig>) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -553,7 +707,7 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
             let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
                 let spec: TextTrainSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
-                let (dir, hash) = run_train(&infernet, &job_dir, &spec, &net, buyer).await?;
+                let (dir, hash) = run_train(&infernet, &job_dir, &spec, &net, buyer, &policy).await?;
                 if spec.adapter_pieces {
                     // Receipt -> manifest -> pieces, all over libp2p.
                     // Sealed to the buyer for e2e jobs.
@@ -582,8 +736,10 @@ pub fn spawn_train_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
     tx
 }
 
-/// Bid only on valid text-train offers, and only while idle.
-pub fn train_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter {
+/// Bid only on valid text-train offers for a base model this node runs, and
+/// only while idle. A job for another model gets no bid, so its buyer is not
+/// charged and a worker that does run the model can take it.
+pub fn train_offer_filter(busy: Arc<AtomicBool>, policy: Arc<TextConfig>) -> crate::dispatch::OfferFilter {
     Arc::new(move |offer| {
         !busy.load(Ordering::Relaxed)
             && match crate::job_e2e::bid_spec(offer) {
@@ -592,11 +748,11 @@ pub fn train_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter
                 Some(crate::job_e2e::BidSpec::Public(v)) => {
                     let kind = v["job"]["kind"].as_str().unwrap_or("");
                     let base = v["job"]["base_model"].as_str().unwrap_or("");
-                    KINDS.contains(&kind) && valid_repo_id(base)
+                    KINDS.contains(&kind) && policy.admits_model(base)
                 }
-                Some(crate::job_e2e::BidSpec::Full(v)) => {
-                    serde_json::from_value::<TextTrainSpec>(v.clone()).ok().is_some_and(|s| s.validate().is_ok())
-                }
+                Some(crate::job_e2e::BidSpec::Full(v)) => serde_json::from_value::<TextTrainSpec>(v.clone())
+                    .ok()
+                    .is_some_and(|s| s.validate().is_ok() && policy.admits_model(s.job["base_model"].as_str().unwrap_or(""))),
                 None => false,
             }
     })
@@ -652,10 +808,6 @@ pub struct TextInferSpec {
     pub adapter_key: Option<String>,
 }
 
-fn valid_repo_id(base: &str) -> bool {
-    !(base.is_empty() || base.len() > 200 || base.starts_with('/') || base.contains("..") || base.contains("://"))
-}
-
 impl TextInferSpec {
     pub fn validate(&self) -> Result<()> {
         if !crate::temporal::is_sha256_ref(&self.adapter_hash) {
@@ -674,6 +826,10 @@ impl TextInferSpec {
                 bail!("message role must be system, user or assistant");
             }
             bytes += m["content"].as_str().context("message content must be a string")?.len();
+            // The messages go to the generator as they are: nothing rides along.
+            if m.as_object().is_none_or(|o| o.len() != 2) {
+                bail!("a message carries only role and content");
+            }
         }
         if bytes > MAX_PROMPT_BYTES {
             bail!("messages exceed {MAX_PROMPT_BYTES} bytes");
@@ -746,34 +902,109 @@ async fn fetch_adapter(url: &str, want: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Answer one request: adapter from the cache (or fetched), then `infernet model generate`.
-/// `buyer` is the peer adapter pieces are fetched from first.
-pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>) -> Result<Vec<u8>> {
-    spec.validate()?;
-    // A sealed adapter (DIP-0032) is the buyer's private data: it lives only
-    // in this job's directory, removed when the job ends, never in the cache.
-    let input_key = spec.adapter_key.as_deref().map(crate::job_e2e::key_from_hex).transpose()?;
-    let (adapter, _private_adapter) = match &input_key {
-        Some(_) => {
-            let d = crate::runner::job_subdir(&cache_root.join("text").join("infer-adapters"), job_id)?;
-            (d.clone(), Some(RemoveDirOnDrop(d)))
-        }
-        None => (cache_root.join("text").join("adapters").join(spec.adapter_hash.trim_start_matches("sha256:")), None),
-    };
-    let cached = crate::temporal::worker::file_sha256(&adapter.join("adapter_model.safetensors")).ok();
-    if cached.as_deref() != Some(spec.adapter_hash.as_str()) {
-        match &spec.adapter_manifest {
-            Some(m) => {
-                let _ = tokio::fs::remove_dir_all(&adapter).await;
-                let got = fetch_adapter_pieces(net, buyer, m, &adapter, input_key.as_ref()).await.context("fetch adapter pieces")?;
-                if got != spec.adapter_hash {
-                    let _ = tokio::fs::remove_dir_all(&adapter).await;
-                    bail!("adapter {got} differs from the offer's {}", spec.adapter_hash);
-                }
-            }
-            None => fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &adapter).await.context("fetch adapter")?,
+/// The digest an adapter cache entry is filed under: every one of
+/// [`ADAPTER_FILES`], in that order, by name and sha256 (or as absent).
+/// Returns it with the weights' `sha256:` hash. Fails when the directory
+/// holds anything else, or no weights: such a directory is never an entry.
+pub fn adapter_cache_key(dir: &Path) -> Result<(String, String)> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_file() || !ADAPTER_FILES.iter().any(|f| name.to_str() == Some(*f)) {
+            bail!("{} holds {:?}, which is not an adapter file", dir.display(), name);
         }
     }
+    let mut key = Sha256::new();
+    let mut weights = None;
+    for f in ADAPTER_FILES {
+        let p = dir.join(f);
+        let hash = if p.exists() { crate::temporal::worker::file_sha256(&p)? } else { "-".to_string() };
+        key.update(f.as_bytes());
+        key.update([0u8]);
+        key.update(hash.as_bytes());
+        key.update([b'\n']);
+        if f == "adapter_model.safetensors" {
+            weights = Some(hash);
+        }
+    }
+    let weights = weights.filter(|w| w != "-").context("no adapter_model.safetensors")?;
+    Ok((hex::encode(key.finalize()), weights))
+}
+
+/// The cached adapter for `manifest` under `slot` (`<cache>/<manifest
+/// hash>/`), if its one entry still is what it was filed as: the directory's
+/// name is the [`adapter_cache_key`] of its contents, and its weights are
+/// the ones the request names.
+fn cached_adapter(slot: &Path, adapter_hash: &str) -> Option<PathBuf> {
+    std::fs::read_dir(slot).ok()?.flatten().map(|e| e.path()).find(|dir| {
+        adapter_cache_key(dir).is_ok_and(|(key, weights)| dir.file_name().and_then(|n| n.to_str()) == Some(key.as_str()) && weights == adapter_hash)
+    })
+}
+
+/// Answer one request: adapter from the cache (or fetched), then `infernet model generate`.
+/// `buyer` is the peer adapter pieces are fetched from first.
+pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &TextInferSpec, net: &Arc<Libp2pNetwork>, buyer: Option<PeerId>, policy: &TextConfig) -> Result<Vec<u8>> {
+    spec.validate()?;
+    if !policy.admits_model(&spec.base_model) {
+        bail!("base model {} is not one this node runs ([text] base_models)", spec.base_model);
+    }
+    tokio::fs::create_dir_all(cache_root.join("text")).await?;
+    policy.check_free(&cache_root.join("text"))?;
+    let input_key = spec.adapter_key.as_deref().map(crate::job_e2e::key_from_hex).transpose()?;
+    let (adapter, _private_adapter) = match (&input_key, &spec.adapter_manifest) {
+        // An unsealed manifest names every file of the adapter by content
+        // hash, so the same manifest is the same adapter: the one case that
+        // is cached, in a directory filed under the digest of its files and
+        // checked against it on every hit. (Filing by the weights' hash
+        // alone let one buyer leave an adapter_config.json that the next
+        // buyer of the same weights then ran with.)
+        (None, Some(m)) => {
+            let slot = cache_root.join("text").join("adapter-cache").join(m);
+            let cached = cached_adapter(&slot, &spec.adapter_hash);
+            let dir = match cached {
+                Some(dir) => dir,
+                None => {
+                    let _ = tokio::fs::remove_dir_all(&slot).await;
+                    tokio::fs::create_dir_all(&slot).await?;
+                    let tmp = slot.join(format!("fetch-{}", uuid::Uuid::new_v4()));
+                    let filed: Result<PathBuf> = async {
+                        let got = fetch_adapter_pieces(net, buyer, m, &tmp, None).await.context("fetch adapter pieces")?;
+                        if got != spec.adapter_hash {
+                            bail!("adapter {got} differs from the offer's {}", spec.adapter_hash);
+                        }
+                        let dir = slot.join(adapter_cache_key(&tmp)?.0);
+                        tokio::fs::rename(&tmp, &dir).await?;
+                        Ok(dir)
+                    }
+                    .await;
+                    if filed.is_err() {
+                        let _ = tokio::fs::remove_dir_all(&slot).await;
+                    }
+                    filed?
+                }
+            };
+            (dir, None)
+        }
+        // A sealed adapter (DIP-0032) is the buyer's private data, and an
+        // HTTP bundle names only its weights' hash, not the files beside
+        // them: both live only in this job's directory, removed when the
+        // job ends, never in the cache.
+        _ => {
+            let d = crate::runner::job_subdir(&cache_root.join("text").join("infer-adapters"), job_id)?;
+            let private = RemoveDirOnDrop(d.clone());
+            match &spec.adapter_manifest {
+                Some(m) => {
+                    let _ = tokio::fs::remove_dir_all(&d).await;
+                    let got = fetch_adapter_pieces(net, buyer, m, &d, input_key.as_ref()).await.context("fetch adapter pieces")?;
+                    if got != spec.adapter_hash {
+                        bail!("adapter {got} differs from the offer's {}", spec.adapter_hash);
+                    }
+                }
+                None => fetch_adapter(&spec.adapter_url, &spec.adapter_hash, &d).await.context("fetch adapter")?,
+            }
+            (d, Some(private))
+        }
+    };
     let dir = crate::runner::job_subdir(&cache_root.join("text").join("infer"), job_id)?;
     tokio::fs::create_dir_all(&dir).await?;
     // The request holds the prompt: removed on every exit, timeouts included.
@@ -796,7 +1027,7 @@ pub async fn run_infer(infernet: &Path, cache_root: &Path, job_id: &str, spec: &
     Ok(serde_json::to_vec(&ans)?)
 }
 
-pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>) -> mpsc::Sender<AcceptedJob> {
+pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root: PathBuf, infernet: PathBuf, busy: Arc<AtomicBool>, policy: Arc<TextConfig>) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(16);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
@@ -805,7 +1036,7 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
             let result: Result<String> = crate::job_control::cancellable(&accept.job_id, async {
                 let spec: TextInferSpec = serde_json::from_value(accept.spec_inline.clone().context("accept lacks spec_inline")?)?;
                 let buyer = accept.buyer_peer_id.parse::<PeerId>().ok();
-                let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec, &net, buyer).await?;
+                let answer = run_infer(&infernet, &cache_root, &accept.job_id, &spec, &net, buyer, &policy).await?;
                 if spec.answer_chunk {
                     // Sealed to the buyer for e2e jobs (one chunk either way).
                     let answer = crate::job_e2e::seal_result(&accept, &answer)?.unwrap_or(answer);
@@ -834,17 +1065,18 @@ pub fn spawn_infer_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, cache_root
     tx
 }
 
-pub fn infer_offer_filter(busy: Arc<AtomicBool>) -> crate::dispatch::OfferFilter {
+/// Bid only on valid requests for a base model this node runs.
+pub fn infer_offer_filter(busy: Arc<AtomicBool>, policy: Arc<TextConfig>) -> crate::dispatch::OfferFilter {
     Arc::new(move |offer| {
         !busy.load(Ordering::Relaxed)
             && match crate::job_e2e::bid_spec(offer) {
                 Some(crate::job_e2e::BidSpec::Public(v)) => {
-                    valid_repo_id(v["base_model"].as_str().unwrap_or(""))
+                    policy.admits_model(v["base_model"].as_str().unwrap_or(""))
                         && v["max_new_tokens"].as_u64().is_some_and(|n| (1..=1024).contains(&n))
                 }
-                Some(crate::job_e2e::BidSpec::Full(v)) => {
-                    serde_json::from_value::<TextInferSpec>(v.clone()).ok().is_some_and(|s| s.validate().is_ok())
-                }
+                Some(crate::job_e2e::BidSpec::Full(v)) => serde_json::from_value::<TextInferSpec>(v.clone())
+                    .ok()
+                    .is_some_and(|s| s.validate().is_ok() && policy.admits_model(&s.base_model)),
                 None => false,
             }
     })
@@ -926,17 +1158,21 @@ pub async fn serve(net_opts: &NetOptions, infernet: PathBuf, cache_root: PathBuf
     let net = spawn_node_with_store(net_opts, store.clone()).await?;
     let hardware = json!({"version": env!("CARGO_PKG_VERSION"), "text_runtime": "peft", "ram_mb": ram_mb, "cuda": runtime["cuda"]});
     tokio::spawn(crate::capabilities::advertise_loop(net.clone(), tags.clone(), hardware, crate::capabilities::local_bench_score(), crate::capabilities::DEFAULT_ADVERTISE_INTERVAL));
+    let policy = Arc::new(TextConfig::load());
+    // Adapters were once cached by their weights' hash alone; those entries
+    // are never read again (see `run_infer`), so they only take up disk.
+    let _ = tokio::fs::remove_dir_all(cache_root.join("text").join("adapters")).await;
     let busy = Arc::new(AtomicBool::new(false));
     let slots = Arc::new(Semaphore::new(1));
     let in_flight = InFlight::default();
-    let tx = spawn_train_runner(net.clone(), store.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots, in_flight.clone());
-    crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy)));
+    let tx = spawn_train_runner(net.clone(), store.clone(), cache_root.clone(), infernet.clone(), busy.clone(), slots, in_flight.clone(), policy.clone());
+    crate::dispatch::run_worker_subscriber_filtered(net.clone(), TRAIN_WORKLOAD.into(), tags.clone(), Some(tx), Some(train_offer_filter(busy, policy.clone())));
     if infer {
         let ibusy = Arc::new(AtomicBool::new(false));
-        let itx = spawn_infer_runner(net.clone(), store.clone(), cache_root, infernet, ibusy.clone());
-        crate::dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(itx), Some(infer_offer_filter(ibusy)));
+        let itx = spawn_infer_runner(net.clone(), store.clone(), cache_root, infernet, ibusy.clone(), policy.clone());
+        crate::dispatch::run_worker_subscriber_filtered(net.clone(), INFER_WORKLOAD.into(), tags.clone(), Some(itx), Some(infer_offer_filter(ibusy, policy.clone())));
     }
-    info!(peer = %net.peer_id().to_base58(), ?tags, "text: serving");
+    info!(peer = %net.peer_id().to_base58(), ?tags, base_models = ?policy.base_models, "text: serving");
     tokio::time::sleep(Duration::from_millis(300)).await;
     Ok(Serving { net, tags, runtime, infer, in_flight })
 }
@@ -1878,6 +2114,285 @@ mod tests {
         let mut bad = p2p_spec();
         bad.run_id = Some("no spaces".into());
         assert!(bad.validate().is_err());
+    }
+
+    fn allow(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|e| e.to_string()).collect()
+    }
+
+    #[test]
+    fn base_model_allowlist_matches_exactly_or_by_org() {
+        let list = allow(&["HuggingFaceTB/SmolLM2-135M-Instruct", "Qwen/*"]);
+        // Exact.
+        assert!(model_allowed(&list, "HuggingFaceTB/SmolLM2-135M-Instruct"));
+        assert!(!model_allowed(&list, "HuggingFaceTB/SmolLM2-360M-Instruct"));
+        assert!(!model_allowed(&list, "HuggingFaceTB/SmolLM2-135M-Instruct-evil"));
+        // A whole organisation, and only that organisation.
+        assert!(model_allowed(&list, "Qwen/Qwen2.5-0.5B-Instruct"));
+        assert!(model_allowed(&list, "Qwen/anything-else"));
+        assert!(!model_allowed(&list, "QwenX/Qwen2.5-0.5B-Instruct"));
+        assert!(!model_allowed(&list, "Qwe/n"));
+        assert!(!model_allowed(&list, "evil/Qwen"));
+        // Case matters: another spelling is another copy in the cache.
+        assert!(!model_allowed(&list, "huggingfacetb/smollm2-135m-instruct"));
+        assert!(!model_allowed(&list, "qwen/Qwen2.5-0.5B-Instruct"));
+        // Paths, traversal and URLs never match, whatever the list says.
+        let any = allow(&["*", "Qwen/*", "../*", "/*"]);
+        for bad in [
+            "", "gpt2", "/etc/passwd", "../x", "Qwen/../etc", "Qwen/..", "./Qwen/x", "Qwen/x/y", "Qwen//x", "/Qwen/x", "Qwen/x/",
+            "https://evil/model", "Qwen/x y", "Qwen/x\n", "Qwen\\x", ".Qwen/x", "Qwen/.x", "-Qwen/x", "Qwen/-x", "Qwen/x.", "Qwen/a--b", "~/model", "Qwen/*",
+        ] {
+            assert!(!model_allowed(&any, bad), "{bad:?}");
+            assert!(!valid_repo_id(bad), "{bad:?}");
+        }
+        assert!(!valid_repo_id(&format!("org/{}", "a".repeat(97))));
+        // "*" is the operator's way back to any model, still only by repo id.
+        assert!(model_allowed(&any, "someone/some-model_v1.5"));
+        assert!(!model_allowed(&[], "Qwen/Qwen2.5-0.5B-Instruct"), "an empty list runs nothing");
+        // Entries are trimmed; an org entry needs its `/*`.
+        assert!(model_allowed(&allow(&[" Qwen/* "]), "Qwen/x"));
+        assert!(!model_allowed(&allow(&["Qwen"]), "Qwen/x"));
+    }
+
+    #[test]
+    fn the_default_allowlist_is_what_the_clients_name_and_config_replaces_it() {
+        let cfg = TextConfig::default();
+        // `c0mpute train lora --base`'s example and the /train page's job file.
+        assert_eq!(cfg.base_models, vec!["HuggingFaceTB/SmolLM2-135M-Instruct", "Qwen/Qwen2.5-0.5B-Instruct"]);
+        assert!(cfg.base_models.iter().all(|m| cfg.admits_model(m) && valid_repo_id(m)));
+        assert!(!cfg.admits_model("meta-llama/Llama-3.1-8B-Instruct"));
+        // A config from before the section existed gets the defaults.
+        let old: crate::config::Config = toml::from_str("roles = []\n").unwrap();
+        assert_eq!(old.text, cfg);
+        let set: crate::config::Config = toml::from_str("[text]\nbase_models = [\"meta-llama/*\"]\nmin_free_gb = 50\n").unwrap();
+        assert!(set.text.admits_model("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(!set.text.admits_model("Qwen/Qwen2.5-0.5B-Instruct"), "the list replaces the default");
+        assert_eq!(set.text.min_free_gb, 50);
+    }
+
+    fn offer(workload: &str, spec: Value, sealed: bool) -> c0mpute_net::topics::JobOffer {
+        let mut o = json!({
+            "job_id": "j", "workload_type": workload, "buyer_peer_id": "buyer", "spec_hash": "",
+            "required_capabilities": [], "max_price_usd": 1.0, "deadline_unix_ms": 2_000_000, "published_at_ms": 1_000_000,
+        });
+        if sealed {
+            // What a buyer publishes for a sealed job: the public view only.
+            o["e2e"] = json!({"v": 1, "buyer_key": "00".repeat(32), "public_spec": crate::job_e2e::public_view(workload, &spec)});
+        } else {
+            o["spec_inline"] = spec;
+        }
+        serde_json::from_value(o).unwrap()
+    }
+
+    #[test]
+    fn a_job_for_a_model_off_the_list_gets_no_bid() {
+        let policy = Arc::new(TextConfig::default());
+        let idle = || Arc::new(AtomicBool::new(false));
+        let train = train_offer_filter(idle(), policy.clone());
+        let infer = infer_offer_filter(idle(), policy.clone());
+        let with_base = |base: &str| {
+            let mut t = p2p_spec();
+            t.job["base_model"] = json!(base);
+            let i = TextInferSpec { adapter_manifest: Some(c0mpute_proto::Hash::of(b"m").to_hex()), answer_chunk: true, base_model: base.into(), ..infer_spec() };
+            (serde_json::to_value(t).unwrap(), serde_json::to_value(i).unwrap())
+        };
+        for sealed in [false, true] {
+            let (t, i) = with_base("Qwen/Qwen2.5-0.5B-Instruct");
+            assert!(train(&offer(TRAIN_WORKLOAD, t, sealed)), "sealed={sealed}");
+            assert!(infer(&offer(INFER_WORKLOAD, i, sealed)), "sealed={sealed}");
+            // A valid repo id, not one this operator runs.
+            let (t, i) = with_base("meta-llama/Llama-3.1-8B-Instruct");
+            assert!(!train(&offer(TRAIN_WORKLOAD, t, sealed)), "sealed={sealed}");
+            assert!(!infer(&offer(INFER_WORKLOAD, i, sealed)), "sealed={sealed}");
+            // Shaped like a repo id, but it could as well be a directory
+            // under the trainer's working directory: the list decides.
+            let (t, i) = with_base("models/local-dir");
+            assert!(!train(&offer(TRAIN_WORKLOAD, t, sealed)) && !infer(&offer(INFER_WORKLOAD, i, sealed)), "sealed={sealed}");
+        }
+        // An operator who lists the org bids on it.
+        let wide = Arc::new(TextConfig { base_models: allow(&["meta-llama/*"]), ..TextConfig::default() });
+        let (t, _) = with_base("meta-llama/Llama-3.1-8B-Instruct");
+        assert!(train_offer_filter(idle(), wide)(&offer(TRAIN_WORKLOAD, t.clone(), true)));
+        // Busy workers still do not bid.
+        assert!(!train_offer_filter(Arc::new(AtomicBool::new(true)), Arc::new(TextConfig { base_models: allow(&["*"]), ..TextConfig::default() }))(&offer(TRAIN_WORKLOAD, t, false)));
+    }
+
+    fn train_request(replicas: u32) -> TrainRequest {
+        TrainRequest {
+            job_path: "job.json".into(),
+            dataset_path: None,
+            output: "adapter".into(),
+            workers: vec![],
+            max_price_usd: 1.0,
+            gpu: false,
+            min_ram_gb: None,
+            legacy_http: false,
+            public_url: None,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            timeout_s: 60,
+            retries: 0,
+            bid_window: Duration::from_secs(1),
+            replicas,
+            replica_tolerance: crate::train_verify::DEFAULT_TOLERANCE,
+            penalty_file: None,
+        }
+    }
+
+    #[test]
+    fn job_validation_accepts_every_shape_the_clients_send() {
+        use crate::train::{DatasetReport, LoraOptions};
+        let report = DatasetReport { system_prompt: Some("You are a pricing coach.".into()), ..Default::default() };
+        // `c0mpute train lora` with its defaults, and with every flag set to
+        // each end of the range the CLI itself accepts.
+        let defaults = LoraOptions { base_model: "Qwen/Qwen2.5-0.5B-Instruct".into(), ..Default::default() };
+        let low = LoraOptions { name: "a".into(), epochs: 1, rank: 1, lr: 1e-9, seq_len: 32, batch_size: 1, max_steps: Some(1), system_prompt: None, ..defaults.clone() };
+        let high = LoraOptions {
+            name: "A-b_c.9".repeat(9),
+            epochs: 20,
+            rank: 128,
+            lr: 1e-2,
+            seq_len: 4096,
+            batch_size: 64,
+            max_steps: Some(1_000_000),
+            system_prompt: Some("s".repeat(8 * 1024)),
+            ..defaults.clone()
+        };
+        for opts in [&defaults, &low, &high] {
+            opts.validate().unwrap();
+            validate_job(&opts.job(&report)).unwrap_or_else(|e| panic!("{opts:?}: {e}"));
+            validate_job(&opts.job(&DatasetReport::default())).unwrap();
+        }
+        // With --replicas the buyer pins a seed in the job (and takes
+        // `replicas` out of it before it is sent).
+        let mut job = defaults.job(&report);
+        job["replicas"] = json!(3);
+        assert_eq!(replica_count(&train_request(0), &mut job).unwrap(), 3);
+        assert_eq!(job["hyperparams"]["seed"], 0);
+        validate_job(&job).unwrap();
+        // The job file on the /train page (apps/web/src/app/train/page.tsx),
+        // which has no dataset, output or name the CLI would add.
+        let page: Value = serde_json::from_str(
+            r#"{ "name": "my-agent", "kind": "lora",
+  "base_model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "system_prompt": "You are a concise, practical business strategist.",
+  "hyperparams": { "max_steps": 200, "batch_size": 2, "seq_len": 256 } }"#,
+        )
+        .unwrap();
+        validate_job(&page).unwrap();
+        let mut page_replicas = page.clone();
+        assert_eq!(replica_count(&train_request(3), &mut page_replicas).unwrap(), 3);
+        validate_job(&page_replicas).unwrap();
+        // The smallest job, the timeout the worker reads, and `peft`.
+        validate_job(&json!({"kind": "peft", "base_model": "a/b"})).unwrap();
+        validate_job(&json!({"kind": "lora", "base_model": "a/b", "limits": {"timeout_s": 600}, "system_prompt": null})).unwrap();
+        // And the whole spec the buyer builds around it.
+        TextTrainSpec { job: high.job(&report), ..p2p_spec() }.validate().unwrap();
+    }
+
+    #[test]
+    fn job_validation_refuses_what_the_trainer_was_not_asked_for() {
+        let job = |patch: Value| {
+            let mut j = json!({"kind": "lora", "base_model": "Qwen/Qwen2.5-0.5B-Instruct", "hyperparams": {"lr": 2e-4, "epochs": 1}});
+            for (k, v) in patch.as_object().unwrap() {
+                j[k] = v.clone();
+            }
+            j
+        };
+        let err = |patch: Value| validate_job(&job(patch)).unwrap_err().to_string();
+        // Unknown top-level keys are named, with the keys that are accepted.
+        let e = err(json!({"trust_remote_code": true}));
+        assert!(e.contains("job.trust_remote_code") && e.contains("hyperparams") && e.contains("system_prompt"), "{e}");
+        assert!(err(json!({"replicas": 3})).contains("job.replicas"));
+        // Unknown hyperparameters would become trainer arguments.
+        let e = err(json!({"hyperparams": {"output_dir": "/home/op/.ssh"}}));
+        assert!(e.contains("hyperparams.output_dir") && e.contains("lora_r"), "{e}");
+        assert!(err(json!({"hyperparams": {"trust_remote_code": true}})).contains("not accepted"));
+        // Types and ranges.
+        for bad in [
+            json!({"lr": "2e-4"}), json!({"lr": 0}), json!({"lr": -1e-4}), json!({"lr": 0.5}), json!({"lr": [2e-4]}),
+            json!({"epochs": 0}), json!({"epochs": 21}), json!({"epochs": 1.5}), json!({"epochs": -1}), json!({"epochs": "1"}),
+            json!({"batch_size": 65}), json!({"seq_len": 31}), json!({"seq_len": 1_000_000}), json!({"lora_r": 129}),
+            json!({"max_steps": 0}), json!({"max_steps": 1_000_001}), json!({"seed": -1}), json!({"seed": 4294967296u64}),
+            json!({"lora_r": {"nested": 1}}), json!({"epochs": null}),
+        ] {
+            assert!(err(json!({"hyperparams": bad.clone()})).contains("out of range"), "{bad}");
+        }
+        assert!(err(json!({"hyperparams": [1, 2]})).contains("must be an object"));
+        assert!(err(json!({"hyperparams": "lr=1"})).contains("must be an object"));
+        assert!(err(json!({"name": "a b"})).contains("job.name"));
+        assert!(err(json!({"name": 7})).contains("job.name"));
+        assert!(err(json!({"system_prompt": "s".repeat(8 * 1024 + 1)})).contains("system_prompt"));
+        assert!(err(json!({"system_prompt": ["a"]})).contains("system_prompt"));
+        assert!(err(json!({"limits": {"timeout_s": 60, "max_memory": 1}})).contains("limits"));
+        assert!(err(json!({"limits": {"timeout_s": "60"}})).contains("limits"));
+        assert!(err(json!({"dataset": "/etc/passwd"})).contains("job.dataset"));
+        assert!(validate_job(&json!(["lora"])).is_err());
+        // The spec check runs it: a worker never writes such a job to disk.
+        let mut s = p2p_spec();
+        s.job["hyperparams"] = json!({"output_dir": "/tmp/x"});
+        assert!(s.validate().is_err());
+        // A chat message carries a role and its text, nothing else.
+        let mut i = infer_spec();
+        i.messages = vec![json!({"role": "user", "content": "hi", "tool_calls": [{"name": "x"}]})];
+        assert!(i.validate().unwrap_err().to_string().contains("only role and content"));
+    }
+
+    #[test]
+    fn adapter_cache_entries_are_filed_under_every_file_and_checked_on_a_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |dir: &Path, config: &[u8]| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("adapter_model.safetensors"), b"weights").unwrap();
+            std::fs::write(dir.join("adapter_config.json"), config).unwrap();
+            std::fs::write(dir.join("manifest.json"), br#"{"base_model":"org/m"}"#).unwrap();
+        };
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        write(&a, b"{\"r\": 8}");
+        write(&b, b"{\"r\": 8, \"base_model_name_or_path\": \"/home/op/private\"}");
+        let (key_a, weights_a) = adapter_cache_key(&a).unwrap();
+        let (key_b, weights_b) = adapter_cache_key(&b).unwrap();
+        // Same weights, another config: the old cache key was the same.
+        assert_eq!(weights_a, sha256_hex(b"weights"));
+        assert_eq!(weights_a, weights_b);
+        assert_ne!(key_a, key_b, "the key covers adapter_config.json");
+        assert_eq!(adapter_cache_key(&a).unwrap().0, key_a, "and is stable");
+        // A missing file is not the same as an empty one.
+        let (c, d) = (tmp.path().join("c"), tmp.path().join("d"));
+        write(&c, b"");
+        write(&d, b"");
+        std::fs::remove_file(d.join("adapter_config.json")).unwrap();
+        assert_ne!(adapter_cache_key(&c).unwrap().0, adapter_cache_key(&d).unwrap().0);
+        // Anything that is not an adapter file, or no weights: not an entry.
+        std::fs::write(c.join("extra.py"), b"x").unwrap();
+        assert!(adapter_cache_key(&c).is_err());
+        std::fs::remove_file(d.join("adapter_model.safetensors")).unwrap();
+        assert!(adapter_cache_key(&d).is_err());
+
+        // A slot holds the entry under its key; a hit recomputes it.
+        let slot = tmp.path().join("slot");
+        let entry = slot.join(&key_a);
+        write(&entry, b"{\"r\": 8}");
+        assert_eq!(cached_adapter(&slot, &weights_a), Some(entry.clone()));
+        assert_eq!(cached_adapter(&slot, &sha256_hex(b"other weights")), None, "not the weights the request names");
+        assert_eq!(cached_adapter(&tmp.path().join("no-such-slot"), &weights_a), None);
+        // Changed after it was filed (a config swapped in beside the same
+        // weights): never used again.
+        std::fs::write(entry.join("adapter_config.json"), b"{\"r\": 8, \"base_model_name_or_path\": \"/home/op/private\"}").unwrap();
+        assert_eq!(cached_adapter(&slot, &weights_a), None);
+        write(&entry, b"{\"r\": 8}");
+        std::fs::write(entry.join("tokenizer.json"), b"{}").unwrap();
+        assert_eq!(cached_adapter(&slot, &weights_a), None, "a file dropped beside the adapter");
+    }
+
+    #[test]
+    fn a_job_starts_only_with_the_free_space_floor_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        TextConfig { min_free_gb: 0, ..TextConfig::default() }.check_free(Path::new("relative/unknown")).unwrap();
+        // Where the disk is known, a floor above its size refuses the job.
+        if c0mpute_store::free_space_at(tmp.path()).0 != u64::MAX {
+            let err = TextConfig { min_free_gb: 1 << 30, ..TextConfig::default() }.check_free(tmp.path()).unwrap_err();
+            assert!(err.to_string().starts_with("E_DISK:"), "{err}");
+        }
     }
 
     #[test]

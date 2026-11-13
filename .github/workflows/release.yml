@@ -15,6 +15,12 @@ name: release
 # production minisign key (repo secrets MINISIGN_SECRET_KEY + MINISIGN_PASSWORD;
 # public key minisign.pub) and uploads <artifact>.minisig next to it, which
 # scripts/install.sh requires. A release is never published unsigned.
+# The same goes for the two platform-independent archives the `extras` job
+# packs from the tagged tree (scripts/pack-release-extras.sh):
+# c0mpute-plugins.tar.gz (plugins/<id>/install.sh) and c0mpute-tui.tar.gz
+# (apps/tui), which the installer and the CLI install from instead of fetching
+# unsigned scripts. The desktop artifacts are built after publishing and signed
+# by `desktop-sign`.
 #
 # A failed platform leaves the draft unpublished (Latest stays on the
 # previous release); fix and re-run the failed jobs.
@@ -157,10 +163,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT_SHA" --clobber
 
+  # Platform-independent archives the installer and the CLI install from: the
+  # plugin installers and the TUI source, packed from the tagged tree. Uploaded
+  # to the draft with a .sha256 like the binaries; `publish` signs them.
+  extras:
+    name: plugins + tui archives
+    needs: draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          path: tree
+
+      # The packer comes from the commit this workflow runs at, so re-running
+      # an older tag (workflow_dispatch) from before the script existed still
+      # works. On a tag push that commit is the tag itself.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: tools
+          sparse-checkout: scripts/pack-release-extras.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Pack and upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh tools/scripts/pack-release-extras.sh "$GITHUB_WORKSPACE/tree" "$RUNNER_TEMP/extras"
+          cd "$RUNNER_TEMP/extras"
+          sha256sum -c c0mpute-plugins.tar.gz.sha256
+          sha256sum -c c0mpute-tui.tar.gz.sha256
+          tar -tzf c0mpute-plugins.tar.gz
+          tar -tzf c0mpute-tui.tar.gz
+          gh release upload "$TAG" \
+            c0mpute-plugins.tar.gz c0mpute-plugins.tar.gz.sha256 \
+            c0mpute-tui.tar.gz c0mpute-tui.tar.gz.sha256 --clobber
+
   publish:
     name: publish + mark latest
-    # Runs only when every platform job succeeded (needs + default success()).
-    needs: release
+    # Runs only when every platform job and the extras job succeeded (needs +
+    # default success()).
+    needs: [release, extras]
     runs-on: ubuntu-latest
     steps:
       # Only for minisign.pub, the public key every signature must verify against.
@@ -200,7 +245,7 @@ jobs:
           work="$RUNNER_TEMP/sign"; mkdir -p "$work"; cd "$work"
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
           trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
-          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip"
+          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip c0mpute-plugins.tar.gz c0mpute-tui.tar.gz"
           for a in $want; do
             gh release download "$TAG" -p "$a" -p "$a.sha256" --clobber
             # Sign only what the platform build uploaded: check its checksum first.
@@ -217,7 +262,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip"
+          want="c0mpute-linux-x86_64.tar.gz c0mpute-linux-aarch64.tar.gz c0mpute-darwin-x86_64.tar.gz c0mpute-darwin-aarch64.tar.gz c0mpute-windows-x86_64.zip c0mpute-plugins.tar.gz c0mpute-tui.tar.gz"
           have=$(gh release view "$TAG" --json assets -q '.assets[].name')
           for a in $want; do
             for f in "$a" "$a.sha256" "$a.minisig"; do
@@ -326,5 +371,65 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "no desktop artifacts built" >&2; ls -la; exit 1; }
           for f in "${files[@]}"; do
             if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+            # On a re-run the build differs from the one the old signature
+            # covers: drop it, `desktop-sign` uploads a fresh one.
+            gh release delete-asset "$TAG" "$f.minisig" -y >/dev/null 2>&1 || true
             gh release upload "$TAG" "$f" "$f.sha256" --clobber
+          done
+
+  # Sign the desktop artifacts with the same key as everything else. They are
+  # built after `publish` (a desktop failure must not hold back a CLI release),
+  # so this is its own job, and the key never enters a job that runs
+  # `bun install` or electron-builder. It signs whatever desktop builds are on
+  # the release, so one failed platform does not leave the others unsigned;
+  # after re-running a failed desktop job, re-run this one too.
+  # scripts/install.sh --desktop requires the AppImage's .minisig.
+  desktop-sign:
+    name: sign desktop artifacts
+    needs: [publish, desktop]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          sparse-checkout: minisign.pub
+          sparse-checkout-cone-mode: false
+
+      - name: Install minisign (pinned)
+        run: |
+          set -eu
+          curl -fsSL -o "$RUNNER_TEMP/minisign.tar.gz" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" minisign-linux/x86_64/minisign
+          install -m 755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign 2>/dev/null \
+            || sudo install -m 755 "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/minisign
+          minisign -v
+
+      - name: Sign desktop artifacts and upload .minisig files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -eu
+          [ -n "$MINISIGN_SECRET_KEY" ] && [ -n "$MINISIGN_PASSWORD" ] || { echo "MINISIGN_SECRET_KEY / MINISIGN_PASSWORD secrets missing; cannot sign" >&2; exit 1; }
+          umask 077
+          pub="$GITHUB_WORKSPACE/minisign.pub"
+          [ -s "$pub" ] || { echo "minisign.pub missing at $TAG; not signing" >&2; exit 1; }
+          work="$RUNNER_TEMP/sign-desktop"; mkdir -p "$work"; cd "$work"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
+          names=$(gh release view "$TAG" --json assets -q '.assets[].name' \
+            | grep -E '^c0mpute-desktop-[A-Za-z0-9._-]+\.(AppImage|deb|dmg|zip|exe)$' || true)
+          [ -n "$names" ] || { echo "no desktop artifacts on $TAG; nothing to sign" >&2; exit 1; }
+          for a in $names; do
+            gh release download "$TAG" -p "$a" -p "$a.sha256" --clobber
+            # Sign only what the desktop build uploaded: check its checksum first.
+            sha256sum -c "$a.sha256"
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$a" \
+              -t "timestamp:$(date +%s) version:$TAG file:$a" >/dev/null
+            minisign -V -p "$pub" -m "$a"
+            gh release upload "$TAG" "$a.minisig" --clobber
+            rm -f "$a" "$a.sha256" "$a.minisig"
           done
