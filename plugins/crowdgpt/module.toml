@@ -43,7 +43,7 @@
 [module]
 id          = "crowdgpt"
 name        = "CrowdGPT: donate idle compute"
-version     = "0.3.66"
+version     = "0.3.67"
 kind        = "donation"
 category    = "ai"
 status      = "available"

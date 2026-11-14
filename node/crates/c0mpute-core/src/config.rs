@@ -434,8 +434,8 @@ impl CaptchaConfig {
 
 /// Chat completions (`infernet.inference`) on nodes that do not run their own
 /// Ollama or llama-server: the worker downloads a pinned, prebuilt llama.cpp
-/// `llama-server` and one small house GGUF (Qwen2.5 1.5B Instruct, or 0.5B on
-/// a box with less than `min_ram_gb`) and runs it on loopback. On by default;
+/// `llama-server` and one house GGUF (Qwen2.5 7B Instruct with twice
+/// `min_ram_gb`, 1.5B with `min_ram_gb`, else 0.5B) and runs it on loopback. On by default;
 /// opt out with `C0MPUTE_INFERENCE_AUTO=0` or `auto_install = false`. A node
 /// whose own runtime answers at the default address, or whose operator set
 /// `C0MPUTE_INFERENCE_URL`, never installs it.
@@ -443,7 +443,8 @@ impl CaptchaConfig {
 pub struct InferenceConfig {
     #[serde(default = "default_true")]
     pub auto_install: bool,
-    /// Total RAM for the 1.5B model; boxes with half of it get the 0.5B one.
+    /// Total RAM for the 1.5B model; boxes with twice it get the 7B one, boxes
+    /// with half of it the 0.5B one.
     #[serde(default = "default_inference_min_ram_gb")]
     pub min_ram_gb: u64,
     /// Available RAM needed to start the runtime (halved for the 0.5B model).
