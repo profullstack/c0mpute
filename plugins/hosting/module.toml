@@ -30,7 +30,7 @@
 [module]
 id          = "hosting"
 name        = "Hosting — p2p static sites"
-version     = "0.3.65"
+version     = "0.3.66"
 kind        = "service"
 category    = "data"
 status      = "available"

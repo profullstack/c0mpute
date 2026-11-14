@@ -1,5 +1,5 @@
 import "server-only";
-import { fetchFromAggregators } from "./aggregators";
+import { aggregatorUrls } from "./aggregators";
 import { OPERATOR_SHARE_PCT } from "./market";
 
 /**
@@ -170,12 +170,52 @@ export function publicRow(row: NodeRow & { cpu?: unknown }): NodeRow {
   return rest;
 }
 
+type RawNodes = Omit<NodesPayload, "source">;
+
+/**
+ * Overlay each node's 24h job stats from every aggregator onto `base`, taking
+ * for each node the answer that counted the most jobs. Each aggregator keeps
+ * its 24h window in memory, so one restarted by a deploy starts at zero while
+ * another still holds the whole day; the board should show the fuller one.
+ */
+export function mergeJobStats(base: NodeRow[], answers: RawNodes[]): NodeRow[] {
+  const best = new Map<string, NodeJobs>();
+  for (const a of answers) {
+    for (const n of Array.isArray(a.nodes) ? a.nodes : []) {
+      const j = n.jobs_24h;
+      if (!j || !(j.jobs > 0)) continue;
+      const cur = best.get(n.id);
+      if (!cur || j.jobs > cur.jobs) best.set(n.id, j);
+    }
+  }
+  return base.map((n) => {
+    const j = best.get(n.id);
+    return j ? { ...n, jobs_24h: j } : n;
+  });
+}
+
+async function fetchNodesFrom(base: string): Promise<RawNodes | null> {
+  try {
+    const r = await fetch(`${base}/nodes`, { signal: AbortSignal.timeout(2_000), cache: "no-store" });
+    return r.ok ? ((await r.json()) as RawNodes) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getNodesPayload(): Promise<NodesPayload> {
-  const data = await fetchFromAggregators<Omit<NodesPayload, "source">>("/nodes");
+  const answers = (await Promise.all(aggregatorUrls().map(fetchNodesFrom))).filter(
+    (a): a is RawNodes => a !== null && typeof a === "object",
+  );
+  // The board itself comes from the aggregator that sees the most workers.
+  const data = answers.reduce<RawNodes | null>(
+    (b, a) => (b === null || (a.workers_online ?? 0) > (b.workers_online ?? 0) ? a : b),
+    null,
+  );
   if (data) {
     return {
       ...data,
-      nodes: Array.isArray(data.nodes) ? data.nodes.map(publicRow) : [],
+      nodes: mergeJobStats(Array.isArray(data.nodes) ? data.nodes.map(publicRow) : [], answers),
       operators: Array.isArray(data.operators) ? data.operators : [],
       referrers: Array.isArray(data.referrers) ? data.referrers : [],
       source: "aggregator",
