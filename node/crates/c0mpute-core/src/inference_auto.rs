@@ -8,15 +8,16 @@
 //!
 //! - a prebuilt llama.cpp `llama-server` from the ggml-org GitHub release for
 //!   this platform, pinned to a build tag and SHA-256 (no cmake, no sudo);
-//! - one small house GGUF from Hugging Face, pinned to a repo revision and
-//!   SHA-256: Qwen2.5 1.5B Instruct Q4_K_M (~1.1 GB) on a box with
-//!   `min_ram_gb` (8 GiB) of RAM, else Qwen2.5 0.5B Instruct (~0.5 GB) on one
-//!   with half of that;
+//! - one house GGUF from Hugging Face, pinned to a repo revision and SHA-256
+//!   (every shard of a split file): Qwen2.5 7B Instruct Q4_K_M (~4.7 GB, the
+//!   model the fleet's apps ask for) on a box with twice `min_ram_gb`
+//!   (16 GiB), Qwen2.5 1.5B Instruct (~1.1 GB) on one with `min_ram_gb`
+//!   (8 GiB), else Qwen2.5 0.5B Instruct (~0.5 GB) on one with half of that;
 //!
 //! and runs it as a supervised child on `127.0.0.1:AUTO_PORT` (restarted when
 //! it exits), with the model served under the Ollama-style id buyers ask for
-//! (`qwen2.5:1.5b`), so the node advertises `infernet:inference` and
-//! `infernet:inference:model:qwen2.5:1.5b`.
+//! (`qwen2.5:7b`, `qwen2.5:1.5b` or `qwen2.5:0.5b`), so the node advertises
+//! `infernet:inference` and `infernet:inference:model:<that id>`.
 //!
 //! The runtime runs at low CPU priority (`--prio -1`) and the node bids on a
 //! chat only while no song or image is rendering and the load is under
@@ -95,7 +96,36 @@ pub struct HouseModel {
     pub url: &'static str,
     pub sha256: &'static str,
     pub size: &'static str,
+    /// Further shards of a split GGUF (`-0000N-of-0000M`), downloaded next to
+    /// `file`; llama-server loads them when pointed at the first one.
+    pub parts: &'static [GgufPart],
+    /// Free disk (GB) needed to install it; the config floor applies too.
+    pub disk_gb: u64,
 }
+
+/// One extra shard of a split GGUF, pinned like the first.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GgufPart {
+    pub file: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+}
+
+/// Qwen2.5 7B Instruct, the model the fleet's apps ask for by default
+/// (`@profullstack/ai-providers`). Qwen ships the Q4_K_M as two shards.
+pub const QWEN_7B: HouseModel = HouseModel {
+    id: "qwen2.5:7b",
+    file: "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+    url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+    sha256: "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db",
+    size: "~4.7 GB",
+    parts: &[GgufPart {
+        file: "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+        sha256: "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a",
+    }],
+    disk_gb: 10,
+};
 
 pub const QWEN_1_5B: HouseModel = HouseModel {
     id: "qwen2.5:1.5b",
@@ -103,6 +133,8 @@ pub const QWEN_1_5B: HouseModel = HouseModel {
     url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
     sha256: "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
     size: "~1.1 GB",
+    parts: &[],
+    disk_gb: 0,
 };
 
 pub const QWEN_0_5B: HouseModel = HouseModel {
@@ -111,12 +143,20 @@ pub const QWEN_0_5B: HouseModel = HouseModel {
     url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf",
     sha256: "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
     size: "~0.5 GB",
+    parts: &[],
+    disk_gb: 0,
 };
+
+/// Every house model, biggest first.
+pub const HOUSE_MODELS: [&HouseModel; 3] = [&QWEN_7B, &QWEN_1_5B, &QWEN_0_5B];
 
 /// The model a box with `total_ram` bytes runs, and the available RAM it
 /// needs to start it (GiB), or None when the box is too small for either.
 pub fn pick_model(config: &InferenceConfig, total_ram: u64) -> Option<(&'static HouseModel, u64)> {
-    if total_ram >= config.min_ram_gb.saturating_mul(GIB) {
+    // Twice the 1.5B floor (16 GiB by default) runs the 7B the fleet asks for.
+    if total_ram >= config.min_ram_gb.saturating_mul(2).saturating_mul(GIB) {
+        Some((&QWEN_7B, config.min_free_ram_gb.saturating_mul(2)))
+    } else if total_ram >= config.min_ram_gb.saturating_mul(GIB) {
         Some((&QWEN_1_5B, config.min_free_ram_gb))
     } else if total_ram >= (config.min_ram_gb / 2).max(1).saturating_mul(GIB) {
         Some((&QWEN_0_5B, (config.min_free_ram_gb / 2).max(1)))
@@ -147,7 +187,8 @@ fn log_path() -> PathBuf {
     root().join("llama-server.log")
 }
 fn ready_stamp(model: &HouseModel) -> String {
-    format!("llama={LLAMA_BUILD} model={}\n", model.sha256)
+    let parts: String = model.parts.iter().map(|p| format!(" part={}", p.sha256)).collect();
+    format!("llama={LLAMA_BUILD} model={}{parts}\n", model.sha256)
 }
 
 /// The runtime binary and this model are installed and checked.
@@ -155,6 +196,7 @@ pub fn installed(model: &HouseModel) -> bool {
     platform_supported()
         && llama_server().is_file()
         && model_path(model).is_file()
+        && model.parts.iter().all(|p| root().join("models").join(p.file).is_file())
         && std::fs::read_to_string(ready_marker(model)).is_ok_and(|s| s == ready_stamp(model))
 }
 
@@ -182,8 +224,9 @@ pub fn host_gate(config: &InferenceConfig, total: u64, available: u64, free_disk
     let Some((model, min_free)) = pick_model(config, total) else {
         return Some(format!("{:.0} GiB RAM, the house model needs {} GiB", gib(total), (config.min_ram_gb / 2).max(1)));
     };
-    if !installed && free_disk < config.min_free_disk_gb.saturating_mul(GIB) {
-        return Some(format!("{:.1} GB free disk, installing {} needs {} GB", gib(free_disk), model.id, config.min_free_disk_gb));
+    let disk_gb = config.min_free_disk_gb.max(model.disk_gb);
+    if !installed && free_disk < disk_gb.saturating_mul(GIB) {
+        return Some(format!("{:.1} GB free disk, installing {} needs {} GB", gib(free_disk), model.id, disk_gb));
     }
     if available < min_free.saturating_mul(GIB) {
         return Some(format!("load gate: {:.1} GiB RAM free, {} needs {min_free} GiB free", gib(available), model.id));
@@ -293,15 +336,25 @@ pub async fn install(model: &HouseModel) -> Result<()> {
     version.arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     crate::speech::run_checked(version, "run llama-server --version").await?;
 
-    let path = model_path(model);
-    if file_sha256(&path).await.as_deref() != Some(model.sha256) {
-        let _ = tokio::fs::remove_file(&path).await;
-        download_verified(model.url, &path, model.sha256).await.with_context(|| format!("download {}", model.id))?;
+    let shards = std::iter::once((model.file, model.url, model.sha256))
+        .chain(model.parts.iter().map(|p| (p.file, p.url, p.sha256)));
+    for (file, url, sha) in shards {
+        let path = root.join("models").join(file);
+        if file_sha256(&path).await.as_deref() != Some(sha) {
+            let _ = tokio::fs::remove_file(&path).await;
+            // Resumable with retries: the 7B shards are gigabytes.
+            crate::diffusion::download_verified_streaming(url, &path, sha)
+                .await
+                .with_context(|| format!("download {} ({file})", model.id))?;
+        }
     }
-    // The other house model is dead weight once this one is in.
-    for other in [&QWEN_1_5B, &QWEN_0_5B] {
+    // The other house models are dead weight once this one is in.
+    for other in HOUSE_MODELS {
         if other.file != model.file {
             let _ = tokio::fs::remove_file(model_path(other)).await;
+            for p in other.parts {
+                let _ = tokio::fs::remove_file(root.join("models").join(p.file)).await;
+            }
             let _ = tokio::fs::remove_file(ready_marker(other)).await;
         }
     }
@@ -514,7 +567,9 @@ mod tests {
     #[test]
     fn model_tiers() {
         let c = InferenceConfig::default();
-        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
+        assert_eq!(pick_model(&c, 32 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:7b", 8)));
+        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:7b", 8)));
+        assert_eq!(pick_model(&c, 15 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
         assert_eq!(pick_model(&c, 8 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
         assert_eq!(pick_model(&c, 6 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:0.5b", 2)));
         assert_eq!(pick_model(&c, 4 * GIB).map(|(m, _)| m.id), Some("qwen2.5:0.5b"));
@@ -525,6 +580,9 @@ mod tests {
     fn host_gates() {
         let c = InferenceConfig::default();
         assert_eq!(host_gate(&c, 16 * GIB, 8 * GIB, 50 * GIB, false), None);
+        // The 7B wants 10 GB of disk, not just the 5 GB floor.
+        assert!(host_gate(&c, 16 * GIB, 8 * GIB, 7 * GIB, false).unwrap().contains("10 GB"));
+        assert_eq!(host_gate(&c, 12 * GIB, 8 * GIB, 7 * GIB, false), None);
         assert!(host_gate(&c, 2 * GIB, GIB, 50 * GIB, false).unwrap().contains("RAM"));
         assert!(host_gate(&c, 16 * GIB, 8 * GIB, GIB, false).unwrap().contains("disk"));
         // Disk only matters before the install.
@@ -538,9 +596,13 @@ mod tests {
 
     #[test]
     fn pins_are_well_formed() {
-        for m in [&QWEN_1_5B, &QWEN_0_5B] {
+        for m in HOUSE_MODELS {
             assert_eq!(m.sha256.len(), 64);
             assert!(m.url.ends_with(m.file));
+            for p in m.parts {
+                assert_eq!(p.sha256.len(), 64);
+                assert!(p.url.ends_with(p.file));
+            }
             assert!(crate::inference::model_tag(m.id).starts_with("infernet:inference:model:qwen2.5:"));
         }
         if let Some((url, sha)) = llama_asset() {
