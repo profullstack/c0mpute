@@ -6,10 +6,15 @@
 //!   1. Overloaded bids go last: a queue load at or above
 //!      [`OVERLOAD_THRESHOLD`], or an ETA the deadline cannot absorb. If
 //!      every bid is overloaded, the least loaded wins.
-//!   2. Among the rest, the highest benchmark score wins. Scores within
-//!      about 10% of each other are treated as equal (one bucket), so a
-//!      marginally faster node does not take every job.
-//!   3. Then the lower ETA, then the lower price, then the earlier bid.
+//!   2. Among the rest, the fastest ETA wins. ETAs within 1.5x of the
+//!      fastest share a bucket. The ETA is measured (recent job time times
+//!      queue depth), so it already says how fast the box runs under its
+//!      real load; a synthetic CPU benchmark does not. 2026-11-14 a node
+//!      at load 32/16 with eta 301 s beat one with eta 60 s on its higher
+//!      bench score, and the job waited a minute for nothing.
+//!   3. Then the highest benchmark score (scores within about 10% of each
+//!      other share a bucket), then the lower ETA, then the lower price,
+//!      then the earlier bid.
 //!
 //! Exact ties are rotated by the caller so parallel chunks spread out.
 //! Bids from workers older than 0.2.49 carry no score or load: they count
@@ -29,6 +34,9 @@ pub const OVERLOAD_THRESHOLD: f32 = 0.85;
 
 /// Benchmark scores within this ratio share a bucket.
 const BENCH_BUCKET_RATIO: f64 = 1.10;
+
+/// ETAs within this ratio of the fastest share a bucket.
+const ETA_BUCKET_RATIO: f64 = 1.5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelectionPolicy {
@@ -74,6 +82,18 @@ fn bench_bucket(bid: &JobBid, best: u32) -> i64 {
     }
 }
 
+/// Distance from the fastest ETA among the bids, in 1.5x steps: 0 is within
+/// 1.5x of the fastest.
+fn eta_bucket(bid: &JobBid, fastest: u64) -> i64 {
+    let ratio = (bid.eta_seconds.max(1) as f64 / fastest.max(1) as f64).max(1.0);
+    (ratio.ln() / ETA_BUCKET_RATIO.ln()).floor() as i64
+}
+
+/// Fastest ETA among the bids (0 when there are none).
+pub fn fastest_eta(bids: &[JobBid]) -> u64 {
+    bids.iter().map(|b| b.eta_seconds).min().unwrap_or(0)
+}
+
 /// Highest bench score among the bids (0 when none is benchmarked).
 pub fn best_bench(bids: &[JobBid]) -> u32 {
     bids.iter().filter_map(|b| b.bench_score).max().unwrap_or(0)
@@ -84,7 +104,14 @@ fn price_cmp(a: &JobBid, b: &JobBid) -> Ordering {
 }
 
 /// Order two bids under `policy`, ignoring publish time (the tie-breaker).
-pub fn compare(a: &JobBid, b: &JobBid, policy: SelectionPolicy, deadline_secs: u64, best: u32) -> Ordering {
+pub fn compare(
+    a: &JobBid,
+    b: &JobBid,
+    policy: SelectionPolicy,
+    deadline_secs: u64,
+    best: u32,
+    fastest: u64,
+) -> Ordering {
     match policy {
         SelectionPolicy::Cheapest => price_cmp(a, b),
         SelectionPolicy::Smart => {
@@ -97,6 +124,7 @@ pub fn compare(a: &JobBid, b: &JobBid, policy: SelectionPolicy, deadline_secs: u
                         Ordering::Equal
                     }
                 })
+                .then_with(|| eta_bucket(a, fastest).cmp(&eta_bucket(b, fastest)))
                 .then_with(|| bench_bucket(a, best).cmp(&bench_bucket(b, best)))
                 .then_with(|| a.eta_seconds.cmp(&b.eta_seconds))
                 .then_with(|| price_cmp(a, b))
@@ -108,14 +136,16 @@ pub fn compare(a: &JobBid, b: &JobBid, policy: SelectionPolicy, deadline_secs: u
 /// (so the caller can rotate among them).
 pub fn rank(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64) -> usize {
     let best = best_bench(bids);
+    let fastest = fastest_eta(bids);
     bids.sort_by(|a, b| {
-        compare(a, b, policy, deadline_secs, best).then(a.published_at_ms.cmp(&b.published_at_ms))
+        compare(a, b, policy, deadline_secs, best, fastest)
+            .then(a.published_at_ms.cmp(&b.published_at_ms))
     });
     match bids.first() {
         None => 0,
         Some(top) => bids
             .iter()
-            .take_while(|b| compare(b, top, policy, deadline_secs, best) == Ordering::Equal)
+            .take_while(|b| compare(b, top, policy, deadline_secs, best, fastest) == Ordering::Equal)
             .count(),
     }
 }
@@ -150,6 +180,27 @@ mod tests {
         let bids = vec![
             bid("slow-cheap", 0.10, 60, Some(5_000), Some(0.1)),
             bid("fast", 0.40, 60, Some(20_000), Some(0.1)),
+        ];
+        assert_eq!(winner(bids, SelectionPolicy::Smart), "fast");
+    }
+
+    #[test]
+    fn measured_eta_beats_a_higher_bench_score() {
+        // 2026-11-14: vienna (bench 4156, eta 301 s) beat bonita (bench 2452,
+        // eta 60 s) and the job waited a minute before it moved.
+        let bids = vec![
+            bid("vienna", 0.006745, 301, Some(4_156), Some(0.0)),
+            bid("bonita", 0.006, 60, Some(2_452), Some(0.0)),
+        ];
+        assert_eq!(winner(bids, SelectionPolicy::Smart), "bonita");
+    }
+
+    #[test]
+    fn similar_etas_still_go_to_the_more_capable_node() {
+        // 60 s vs 80 s is within 1.5x: the bench score decides.
+        let bids = vec![
+            bid("slow", 0.10, 60, Some(5_000), Some(0.1)),
+            bid("fast", 0.40, 80, Some(20_000), Some(0.1)),
         ];
         assert_eq!(winner(bids, SelectionPolicy::Smart), "fast");
     }
