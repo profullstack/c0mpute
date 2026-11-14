@@ -40,7 +40,11 @@ use crate::{Config, JobAuction, Supervisor, run_auction, workflow};
 pub const DEFAULT_BIND: &str = "127.0.0.1:8788";
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
-pub const MAX_TIMEOUT_MS: u64 = 300_000;
+/// 15 min. Every live inference worker is a CPU node: an agent-sized chat turn
+/// (1k+ tokens on a 7B-9B model) takes 3-5 min, and at 300 s the bridge threw
+/// away answers that landed seconds later. The requester picks its own budget
+/// under this ceiling.
+pub const MAX_TIMEOUT_MS: u64 = 900_000;
 pub const DEFAULT_BID_WINDOW: Duration = Duration::from_secs(2);
 /// Jobs in flight through one bridge; more wait for a slot (inside their
 /// own timeout).
@@ -398,11 +402,7 @@ async fn submit_inner(
         Some(_) => return Err(bad_request("max_price must be a non-negative number")),
     };
     let allowed = effective_allow_peers(&state.allow_peers, req.allow_peers.as_deref())?;
-    let timeout_ms = req
-        .timeout_ms
-        .unwrap_or(DEFAULT_TIMEOUT_MS)
-        .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
-    let timeout = Duration::from_millis(timeout_ms);
+    let timeout = request_timeout(req.timeout_ms);
 
     match tokio::time::timeout(
         timeout,
@@ -418,6 +418,15 @@ async fn submit_inner(
             json!({ "error": "timeout" }),
         )),
     }
+}
+
+/// The request's `timeout_ms`, defaulted and clamped to the bridge's range.
+fn request_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
+    )
 }
 
 /// The request's `allow_peers` narrows the bridge's global list; it may not
@@ -829,6 +838,15 @@ async fn attach_render_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_timeout_allows_a_cpu_agent_turn() {
+        assert_eq!(request_timeout(None), Duration::from_secs(60));
+        // Infernet asks 420 s for chat on CPU workers; it must not be cut to 300 s.
+        assert_eq!(request_timeout(Some(420_000)), Duration::from_secs(420));
+        assert_eq!(request_timeout(Some(10_000_000)), Duration::from_secs(15 * 60));
+        assert_eq!(request_timeout(Some(5)), Duration::from_secs(1));
+    }
 
     #[test]
     fn workloads() {

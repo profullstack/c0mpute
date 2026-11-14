@@ -92,7 +92,7 @@ C0MPUTE_JOBS_TOKEN=<24-256 chars> c0mpute jobs serve [--listen 127.0.0.1:8788] [
   - 504 `{ "error": "timeout" }`: no receipt, or the result could not be
     fetched, before `timeout_ms`
 - `max_price` defaults to the bridge's `--max-price` and can only lower it.
-  `timeout_ms` defaults to 60 000 and is clamped to 1 000..300 000; it covers
+  `timeout_ms` defaults to 60 000 and is clamped to 1 000..900 000; it covers
   the bid window, the run and the result fetch.
 - The bridge does not retry. An `http_call` may not be idempotent; retrying
   is the requester's decision.
