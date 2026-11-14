@@ -1,10 +1,21 @@
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
-import { getNodesPayload, NODE_GOAL } from "@/lib/nodes";
+import {
+  BUSY_WATTS,
+  duration,
+  getNodesPayload,
+  NODE_GOAL,
+  operatorEarnings,
+  POWER_USD_PER_KWH,
+  powerCostUsd,
+  summarizeByType,
+  usd,
+} from "@/lib/nodes";
+import { MARKET_FEE_PCT } from "@/lib/market";
 import { pageOg } from "@/lib/og";
 
 const DESCRIPTION =
-  "Every c0mpute node online right now, ranked by its c0mpute bench score, with who runs each one and who invited them. How to name your node. The goal is 100,000 nodes.";
+  "Every c0mpute node online right now: jobs each one ran in the last 24 hours by type, how long they took, what they earned against the power they used, who runs each node and who invited them. The goal is 100,000 nodes.";
 
 export const metadata = {
   title: "nodes — c0mpute",
@@ -17,6 +28,26 @@ export const metadata = {
 // loopback call over in-memory state.
 export const dynamic = "force-dynamic";
 
+/** Short label for a workload type: "infernet.inference" -> "inference". */
+function jobLabel(t: string): string {
+  const known: Record<string, string> = {
+    "infernet.inference": "chat / inference",
+    "tts.synthesize": "text to speech",
+    "stt.transcribe": "speech to text",
+    "diffusion.txt2img": "images",
+    "music.txt2music": "music",
+    "video.txt2vid": "video",
+    "video.img2vid": "image to video",
+    "ffmpeg.transcode": "transcode",
+    "workflow.step": "workflow step",
+    "container.run": "container",
+    "infernet.temporal.train": "fine-tune",
+    "infernet.temporal.infer": "temporal inference",
+    unknown: "other",
+  };
+  return known[t] ?? t;
+}
+
 function ago(s: number): string {
   if (s < 90) return `${s}s ago`;
   return `${Math.round(s / 60)}m ago`;
@@ -26,12 +57,16 @@ export default async function NodesPage() {
   const p = await getNodesPayload();
   const online = p.workers_online;
   const pct = Math.max(0.5, Math.min(100, (online / NODE_GOAL) * 100));
+  const byType = summarizeByType(p.nodes);
+  const totalJobs = byType.reduce((a, t) => a + t.jobs, 0);
+  const totalEarned = operatorEarnings(byType.reduce((a, t) => a + t.paid_usd, 0));
+  const earningNodes = p.nodes.filter((n) => (n.jobs_24h?.jobs ?? 0) > 0).length;
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-16 space-y-10">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-16 space-y-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">nodes</h1>
-        <p className="comment">// every node online now, best benchmark first</p>
+        <p className="comment">// every node online now, best benchmark first, with what it ran and earned in the last 24h</p>
       </header>
 
       <section className="space-y-2">
@@ -58,6 +93,67 @@ export default async function NodesPage() {
         See <Link href="/benchmark">hardware details and per-workload benchmarks</Link>.
       </p>
 
+      <section className="space-y-3" id="jobs">
+        <h2 className="text-sm font-semibold">[ last 24h: what nodes earned, by job type ]</h2>
+        {totalJobs === 0 ? (
+          <p className="text-sm text-[var(--color-dim)]">
+            No completed jobs heard in the last 24 hours yet (the window restarts when the aggregator does).
+          </p>
+        ) : (
+          <>
+            <p className="text-sm leading-7">
+              <span className="accent font-bold">{earningNodes}</span> nodes ran{" "}
+              <span className="accent font-bold">{totalJobs.toLocaleString()}</span> jobs and kept{" "}
+              <span className="accent font-bold">{usd(totalEarned)}</span> after the {MARKET_FEE_PCT}% fee.
+            </p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="text-[var(--color-dim)]">
+                  <tr>
+                    <th className="py-2 pr-3">job type</th>
+                    <th className="py-2 pr-3">jobs</th>
+                    <th className="py-2 pr-3">nodes</th>
+                    <th className="py-2 pr-3">avg run time</th>
+                    <th className="py-2 pr-3">avg price</th>
+                    <th className="py-2 pr-3">node keeps / job</th>
+                    <th className="py-2">node keeps / busy hour</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-rule)]">
+                  {byType.map((t) => (
+                    <tr key={t.type}>
+                      <td className="py-2 pr-3">
+                        {jobLabel(t.type)}
+                        <span className="block font-mono text-[var(--color-dim)]">{t.type}</span>
+                      </td>
+                      <td className="py-2 pr-3">{t.jobs.toLocaleString()}</td>
+                      <td className="py-2 pr-3">{t.nodes}</td>
+                      <td className="py-2 pr-3">{duration(t.busy_s / t.jobs)}</td>
+                      <td className="py-2 pr-3">{usd(t.paid_usd / t.jobs)}</td>
+                      <td className="py-2 pr-3">{usd(operatorEarnings(t.paid_usd) / t.jobs)}</td>
+                      <td className="py-2 accent">
+                        {t.busy_s > 0 ? usd(operatorEarnings(t.paid_usd) / (t.busy_s / 3600)) : "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        <p className="text-xs text-[var(--color-dim)] leading-6">
+          Counted from the job accepts and receipts every node gossips: a job is
+          credited to a node only when its receipt comes from the peer the buyer
+          accepted. Run time is accept to receipt. Price is what the buyer agreed
+          to before the {MARKET_FEE_PCT}% house fee; the node keeps the rest. Free
+          jobs count at $0. Est. power on the board below assumes{" "}
+          {BUSY_WATTS.cpu} W for a CPU node and {BUSY_WATTS["gpu:nvidia"]} W for a
+          GPU node while busy, at ${POWER_USD_PER_KWH}/kWh; it is a typical
+          figure, not a measurement, and an idle node costs close to nothing
+          extra. Demand is early: these are real numbers, not a promise.
+        </p>
+      </section>
+
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">[ board ]</h2>
         {p.nodes.length === 0 ? (
@@ -72,6 +168,11 @@ export default async function NodesPage() {
                   <th className="py-2 pr-3">class</th>
                   <th className="py-2 pr-3">cores</th>
                   <th className="py-2 pr-3">bench</th>
+                  <th className="py-2 pr-3" title="Completed jobs in the last 24h, by type">jobs 24h</th>
+                  <th className="py-2 pr-3" title="Accept-to-receipt time summed over those jobs">busy</th>
+                  <th className="py-2 pr-3" title={`What buyers paid, minus the ${MARKET_FEE_PCT}% fee`}>earned</th>
+                  <th className="py-2 pr-3" title="Estimated electricity for the busy time">est. power</th>
+                  <th className="py-2 pr-3">net</th>
                   <th className="py-2 pr-3">version</th>
                   <th className="py-2 pr-3">invited by</th>
                   <th className="py-2">seen</th>
@@ -103,6 +204,41 @@ export default async function NodesPage() {
                     <td className="py-2 pr-3">{n.class}</td>
                     <td className="py-2 pr-3">{n.cores ?? "-"}</td>
                     <td className="py-2 pr-3">{n.bench_score?.toLocaleString() ?? "-"}</td>
+                    {n.jobs_24h && n.jobs_24h.jobs > 0 ? (
+                      (() => {
+                        const j = n.jobs_24h;
+                        const earned = operatorEarnings(j.paid_usd);
+                        const power = powerCostUsd(n.class, j.busy_s);
+                        const net = earned - power;
+                        return (
+                          <>
+                            <td className="py-2 pr-3">
+                              {j.jobs.toLocaleString()}
+                              {Object.entries(j.by_type)
+                                .sort((a, b) => b[1].jobs - a[1].jobs)
+                                .slice(0, 3)
+                                .map(([t, w]) => (
+                                  <span key={t} className="block text-[var(--color-dim)] whitespace-nowrap">
+                                    {jobLabel(t)} {w.jobs}
+                                  </span>
+                                ))}
+                            </td>
+                            <td className="py-2 pr-3">{duration(j.busy_s)}</td>
+                            <td className="py-2 pr-3 accent">{usd(earned)}</td>
+                            <td className="py-2 pr-3 text-[var(--color-dim)]">{usd(power)}</td>
+                            <td className={`py-2 pr-3 ${net >= 0 ? "accent" : "text-red-500"}`}>{usd(net)}</td>
+                          </>
+                        );
+                      })()
+                    ) : (
+                      <>
+                        <td className="py-2 pr-3 text-[var(--color-dim)]">0</td>
+                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
+                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
+                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
+                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
+                      </>
+                    )}
                     <td className="py-2 pr-3 text-[var(--color-dim)]">{n.version ?? "-"}</td>
                     <td className="py-2 pr-3">{n.ref ? <Link href={`/r/${n.ref}`}>{n.ref}</Link> : "-"}</td>
                     <td className="py-2 text-[var(--color-dim)]">{ago(n.last_seen_s)}</td>

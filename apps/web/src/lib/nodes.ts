@@ -1,5 +1,6 @@
 import "server-only";
 import { fetchFromAggregators } from "./aggregators";
+import { OPERATOR_SHARE_PCT } from "./market";
 
 /**
  * One row of the public node board, as served by the aggregator's `GET /nodes`.
@@ -38,6 +39,23 @@ export interface NodeRow {
    * process and it stopped bidding. Absent when there is no duplicate.
    */
   duplicate?: { instances: number; reported: boolean; yielding: boolean } | null;
+  /**
+   * Jobs this node completed in the last 24h as the aggregator heard them on
+   * the job topics: run time (accept to receipt) and what buyers agreed to pay,
+   * before the fee, by workload type. Absent when it completed none, and from
+   * aggregators older than this field.
+   */
+  jobs_24h?: NodeJobs | null;
+}
+
+export interface WorkloadJobs {
+  jobs: number;
+  busy_s: number;
+  paid_usd: number;
+}
+
+export interface NodeJobs extends WorkloadJobs {
+  by_type: Record<string, WorkloadJobs>;
 }
 
 export interface BenchSample {
@@ -67,6 +85,69 @@ export function priceLabel(p: Pricing | null | undefined): string {
     return `fixed ${usd(Math.max(p.fixed_usd, p.min_usd))}`;
   }
   return p.min_usd > 0 ? `dynamic · min ${usd(p.min_usd)}` : "dynamic";
+}
+
+/**
+ * Rough power draw while a job runs, by board class. Only used for the
+ * "est. power" column: the board knows the class, not the machine, so this is
+ * a typical figure for a desktop under load, not a measurement.
+ */
+export const BUSY_WATTS: Record<string, number> = {
+  cpu: 65,
+  "gpu:apple": 40,
+  "gpu:nvidia": 250,
+  "gpu:amd": 250,
+};
+
+/** Electricity price used for the estimate (about the US residential average). */
+export const POWER_USD_PER_KWH = 0.17;
+
+/** Estimated electricity spent on `busySeconds` of work on a node of `cls`. */
+export function powerCostUsd(cls: string, busySeconds: number): number {
+  const watts = BUSY_WATTS[cls] ?? BUSY_WATTS.cpu;
+  return (watts / 1000) * (busySeconds / 3600) * POWER_USD_PER_KWH;
+}
+
+/** What the operator keeps from what buyers paid: the share after the house fee. */
+export function operatorEarnings(paidUsd: number): number {
+  return (paidUsd * OPERATOR_SHARE_PCT) / 100;
+}
+
+/** One row of the network-wide "by job type" table. */
+export interface WorkloadSummary extends WorkloadJobs {
+  type: string;
+  nodes: number;
+}
+
+/** Sum every node's 24h jobs by workload type, busiest type first. */
+export function summarizeByType(nodes: NodeRow[]): WorkloadSummary[] {
+  const by = new Map<string, WorkloadSummary>();
+  for (const n of nodes) {
+    for (const [type, w] of Object.entries(n.jobs_24h?.by_type ?? {})) {
+      const row = by.get(type) ?? { type, jobs: 0, busy_s: 0, paid_usd: 0, nodes: 0 };
+      row.jobs += w.jobs;
+      row.busy_s += w.busy_s;
+      row.paid_usd += w.paid_usd;
+      row.nodes += 1;
+      by.set(type, row);
+    }
+  }
+  return [...by.values()].sort((a, b) => b.jobs - a.jobs || a.type.localeCompare(b.type));
+}
+
+/** "$0.0042" for sub-cent amounts, "$1.23" otherwise, "$0" for nothing. */
+export function usd(n: number): string {
+  if (n === 0) return "$0";
+  const sign = n < 0 ? "-" : "";
+  const a = Math.abs(n);
+  return a < 0.01 ? `${sign}$${a.toPrecision(2)}` : `${sign}$${a.toFixed(2)}`;
+}
+
+/** "42s" / "3.5m" / "2.1h". */
+export function duration(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${(seconds / 60).toFixed(1)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 export interface NodesPayload {

@@ -176,12 +176,29 @@ struct WorkloadStats {
 struct InFlight {
     workload_type: String,
     accepted_at_ms: u64,
+    /// The winning bidder's full peer id, from the accept.
+    worker: String,
+    /// The price the buyer agreed to, in dollars (0 for free jobs).
+    price_usd: f64,
 }
 
 struct Completed {
     workload_type: String,
     completed_at_ms: u64,
     latency_s: Option<f64>,
+    /// Who ran it and for how much, when we saw the accept and the receipt
+    /// came from the accepted winner. `None` otherwise: the job still counts
+    /// network-wide but is credited to no node.
+    credit: Option<(String, f64)>,
+}
+
+/// Highest agreed price we credit to a node for one job. Anyone can gossip an
+/// accept, so a forged one must not put a fantasy number on the board.
+const MAX_CREDITED_PRICE_USD: f64 = 1_000.0;
+
+/// An accept's price as we credit it: finite, non-negative, capped.
+fn credited_price(usd: f64) -> f64 {
+    if usd.is_finite() && usd > 0.0 { usd.min(MAX_CREDITED_PRICE_USD) } else { 0.0 }
 }
 
 /// Jobs tracked at once. Accepts and receipts come from any peer on the
@@ -211,6 +228,8 @@ impl JobState {
                 workload_type: a.workload_type,
                 // Never ahead of our clock, or it would never age out.
                 accepted_at_ms: a.published_at_ms.min(now_ms()),
+                worker: a.winning_bidder_peer_id,
+                price_usd: credited_price(a.agreed_price_usd),
             },
         );
     }
@@ -235,6 +254,12 @@ impl JobState {
                 .checked_sub(inf.accepted_at_ms)
                 .map(|d| d as f64 / 1000.0)
         });
+        // Credit the node only when the receipt comes from the peer the buyer
+        // accepted; a receipt from anyone else proves nothing about who ran it.
+        let credit = started
+            .as_ref()
+            .filter(|inf| inf.worker == r.worker_peer_id)
+            .map(|inf| (inf.worker.clone(), inf.price_usd));
         let workload_type = started
             .map(|inf| inf.workload_type)
             .unwrap_or_else(|| "unknown".to_string());
@@ -248,6 +273,7 @@ impl JobState {
             // at the front would block eviction of everything behind it.
             completed_at_ms: r.completed_at_ms.min(now_ms()),
             latency_s,
+            credit,
         });
     }
 
@@ -497,6 +523,10 @@ struct NodeRow {
     /// from two instances of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     duplicate: Option<Duplicate>,
+    /// Jobs this node completed in the last 24h, by type, with run time and
+    /// what buyers paid. Absent when it completed none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jobs_24h: Option<NodeJobs>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Clone, Default)]
@@ -517,6 +547,54 @@ fn reported_duplicate(hw: &serde_json::Value) -> Option<Duplicate> {
         reported: true,
         yielding: twin.get("yielding").and_then(|v| v.as_bool()).unwrap_or(false),
     })
+}
+
+/// One workload type's share of a node's last 24h on the board.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+struct NodeWorkloadJobs {
+    /// Completed jobs.
+    jobs: u64,
+    /// Accept-to-receipt time summed over those jobs, in seconds.
+    busy_s: f64,
+    /// What buyers agreed to pay for them, in dollars, before any fee.
+    paid_usd: f64,
+}
+
+/// A node's completed jobs over the last 24h, as this aggregator heard them
+/// on the job topics: totals plus a breakdown by workload type. In-memory, so
+/// an aggregator restart starts the window over.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+struct NodeJobs {
+    jobs: u64,
+    busy_s: f64,
+    paid_usd: f64,
+    by_type: BTreeMap<String, NodeWorkloadJobs>,
+}
+
+/// Fold the 24h completions into per-node stats keyed by short id (the board's
+/// row id).
+fn node_job_stats<'a>(completed: impl IntoIterator<Item = &'a Completed>) -> HashMap<String, NodeJobs> {
+    let mut out: HashMap<String, NodeJobs> = HashMap::new();
+    for c in completed {
+        let Some((worker, price)) = &c.credit else { continue };
+        let busy = c.latency_s.unwrap_or(0.0).max(0.0);
+        let n = out.entry(short_id(worker)).or_default();
+        n.jobs += 1;
+        n.busy_s += busy;
+        n.paid_usd += price;
+        let t = n.by_type.entry(c.workload_type.clone()).or_default();
+        t.jobs += 1;
+        t.busy_s += busy;
+        t.paid_usd += price;
+    }
+    out
+}
+
+/// Put each node's 24h job stats on its row.
+fn apply_job_stats(payload: &mut NodesPayload, stats: &HashMap<String, NodeJobs>) {
+    for n in &mut payload.nodes {
+        n.jobs_24h = stats.get(&n.id).cloned();
+    }
 }
 
 /// Add what the aggregator saw itself: ads from more than one instance.
@@ -696,6 +774,7 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
             donates: donates(&ad.tags),
             last_seen_s: now.saturating_sub(ad.published_at_ms) / 1000,
             duplicate: reported_duplicate(&ad.hardware),
+            jobs_24h: None,
         })
         .collect();
     // Benchmarked nodes first, best score first; then by id for a stable order.
@@ -751,6 +830,9 @@ async fn nodes_handler(State(state): State<AppState>) -> Json<NodesPayload> {
         .map(|(p, n)| (short_id(&p.to_base58()), n))
         .collect();
     apply_instance_counts(&mut payload, &instances);
+    state.jobs.evict(now_ms()).await;
+    let stats = node_job_stats(state.jobs.completed.read().await.iter());
+    apply_job_stats(&mut payload, &stats);
     keep_reachable_gateways(&mut payload, &*state.gateways.read().await);
     Json(payload)
 }
@@ -1225,16 +1307,54 @@ mod tests {
             InFlight {
                 workload_type: "ffmpeg.transcode".into(),
                 accepted_at_ms: now - 2 * 60 * 60 * 1000,
+                worker: "worker".into(),
+                price_usd: 0.0,
             },
         );
         jobs.completed.write().await.push_back(Completed {
             workload_type: "ffmpeg.transcode".into(),
             completed_at_ms: now - 25 * 60 * 60 * 1000,
             latency_s: Some(3.0),
+            credit: None,
         });
         jobs.evict(now).await;
         assert_eq!(jobs.in_flight.read().await.len(), 0);
         assert_eq!(jobs.completed.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn completions_credit_the_accepted_worker_by_type() {
+        let jobs = JobState::default();
+        let now = now_ms();
+        let worker = "12D3KooWworkerAAAAAAAAAAAAAAAAworkerXYZ12345";
+        let mut a = accept_for("t1", "tts.synthesize");
+        a.winning_bidder_peer_id = worker.into();
+        a.agreed_price_usd = 0.02;
+        a.published_at_ms = now - 4_000;
+        jobs.on_accept(a).await;
+        let mut a = accept_for("i1", "infernet.inference");
+        a.winning_bidder_peer_id = worker.into();
+        a.agreed_price_usd = f64::INFINITY; // forged: credited as 0
+        a.published_at_ms = now - 2_000;
+        jobs.on_accept(a).await;
+        // A receipt from a peer the buyer did not accept credits nobody.
+        let mut a = accept_for("x1", "tts.synthesize");
+        a.winning_bidder_peer_id = worker.into();
+        jobs.on_accept(a).await;
+        for (id, from) in [("t1", worker), ("i1", worker), ("x1", "someone-else")] {
+            let mut r = receipt_for(id, now);
+            r.worker_peer_id = from.into();
+            jobs.on_receipt(r).await;
+        }
+        let completed = jobs.completed.read().await;
+        assert_eq!(completed.len(), 3, "all three still count network-wide");
+        let stats = node_job_stats(completed.iter());
+        let n = &stats[&short_id(worker)];
+        assert_eq!(n.jobs, 2);
+        assert!((n.paid_usd - 0.02).abs() < 1e-9);
+        assert!((n.busy_s - 6.0).abs() < 0.5);
+        assert_eq!(n.by_type["tts.synthesize"].jobs, 1);
+        assert_eq!(n.by_type["infernet.inference"].paid_usd, 0.0);
     }
 }
 
