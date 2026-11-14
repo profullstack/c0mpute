@@ -460,6 +460,13 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     // identity) is not a result: the job goes to the next bidder at once, and
     // a valid receipt from any awarded worker ends the auction.
     let mut recv_deadline = Instant::now() + receipt_wait(auction.receipt_timeout, &winner);
+    // A worker that fails the job (Failed/Timeout receipt) or never answers
+    // hands it to the next bidder from this same auction, up to MAX_REAWARDS
+    // times, instead of failing the whole job (2026-11-14: an outside node
+    // fresh on a new model won every chat and failed each after ~60 s).
+    let awarded_at = Instant::now();
+    let mut reawards = 0usize;
+    'receipts: loop {
     while Instant::now() < recv_deadline {
         let remaining = recv_deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
@@ -521,11 +528,48 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                     }
                     continue;
                 }
+                if receipt.status != JobStatus::Completed
+                    && should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline)
+                {
+                    let failed = awards.swap_remove(i);
+                    let next = bids.remove(0);
+                    bids.retain(|b| b.bidder_peer_id != next.bidder_peer_id);
+                    warn!(
+                        %job_id,
+                        worker = %failed.bid.bidder_peer_id,
+                        status = ?receipt.status,
+                        next = %next.bidder_peer_id,
+                        "buyer: worker failed the job; re-awarding to the next bidder"
+                    );
+                    match award(&net, &auction, &offer, &session, &topic, &job_id, &next).await {
+                        Ok(a) => {
+                            reawards += 1;
+                            recv_deadline = Instant::now() + receipt_wait(auction.receipt_timeout, &next);
+                            winner = next;
+                            awards.push(a);
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(%job_id, err = %e, "buyer: re-award failed; returning the failed receipt");
+                            awards.push(failed);
+                            let i = awards.len() - 1;
+                            let a = awards.swap_remove(i);
+                            return Ok(AuctionOutcome {
+                                job_id,
+                                accepted_bid: a.bid,
+                                receipt,
+                                external_ref: auction.external_ref.clone(),
+                                result_key: a.result_key,
+                            });
+                        }
+                    }
+                }
                 let a = awards.swap_remove(i);
                 info!(
                     %job_id,
                     status = ?receipt.status,
                     output_hash = ?receipt.output_hash,
+                    reawards,
                     "buyer: receipt received"
                 );
                 return Ok(AuctionOutcome {
@@ -540,9 +584,32 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
                 warn!(skipped = n, "buyer: receipt stream lagged");
             }
-            Ok(Err(_)) => break,
+            Ok(Err(_)) => break 'receipts,
             Err(_) => break,
         }
+    }
+    // No receipt in time from the current winner: the next bidder, if any.
+    if should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline) {
+        let next = bids.remove(0);
+        bids.retain(|b| b.bidder_peer_id != next.bidder_peer_id);
+        warn!(
+            %job_id,
+            worker = %winner.bidder_peer_id,
+            next = %next.bidder_peer_id,
+            "buyer: no receipt in time; re-awarding to the next bidder"
+        );
+        match award(&net, &auction, &offer, &session, &topic, &job_id, &next).await {
+            Ok(a) => {
+                reawards += 1;
+                recv_deadline = Instant::now() + receipt_wait(auction.receipt_timeout, &next);
+                winner = next;
+                awards.push(a);
+                continue 'receipts;
+            }
+            Err(e) => warn!(%job_id, err = %e, "buyer: re-award failed"),
+        }
+    }
+    break 'receipts;
     }
 
     Err(AuctionFailure::NoReceipt(format!(
@@ -981,6 +1048,17 @@ pub const REFERENCE_BENCH_SCORE: u32 = 5_000;
 
 /// How long to wait for `winner`'s receipt: the auction's timeout, longer
 /// for a winner that says it needs longer (2.5x its quoted ETA) or that
+/// How many times one job moves to the next bidder after its worker failed it
+/// (a Failed/Timeout receipt, or no receipt in time), on top of the first award.
+pub const MAX_REAWARDS: usize = 2;
+
+/// Should a job its worker could not finish go to the next bidder? Only while
+/// there is one, re-awards are left, and the job is still inside its deadline:
+/// a buyer waiting on the answer (Infernet chat) falls back on its own after.
+pub(crate) fn should_reaward(reawards: usize, has_next: bool, elapsed: Duration, deadline: Duration) -> bool {
+    has_next && reawards < MAX_REAWARDS && elapsed < deadline
+}
+
 /// benchmarks slower than [`REFERENCE_BENCH_SCORE`] (scaled by how much
 /// slower), never more than 4x the timeout. A slow CPU node (bench 1,606)
 /// needed ~7 min per image against a 6 min timeout: it was benched for
@@ -1104,4 +1182,19 @@ mod tests {
         assert_eq!(receipt_wait(base, &b), base * 4, "capped");
     }
 
+}
+
+#[cfg(test)]
+mod reaward_tests {
+    use super::*;
+
+    #[test]
+    fn reawards_only_with_a_next_bidder_budget_and_time() {
+        let d = Duration::from_secs(300);
+        assert!(should_reaward(0, true, Duration::from_secs(60), d));
+        assert!(should_reaward(MAX_REAWARDS - 1, true, Duration::from_secs(60), d));
+        assert!(!should_reaward(MAX_REAWARDS, true, Duration::from_secs(60), d), "budget spent");
+        assert!(!should_reaward(0, false, Duration::from_secs(60), d), "nobody else bid");
+        assert!(!should_reaward(0, true, Duration::from_secs(301), d), "past the job deadline");
+    }
 }
