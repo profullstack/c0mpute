@@ -1,6 +1,6 @@
 {
   "name": "@c0mpute/tui",
-  "version": "0.3.67",
+  "version": "0.3.68",
   "private": true,
   "type": "module",
   "bin": {
