@@ -103,6 +103,18 @@ fn price_cmp(a: &JobBid, b: &JobBid) -> Ordering {
     a.price_usd.partial_cmp(&b.price_usd).unwrap_or(Ordering::Equal)
 }
 
+/// True when some bid for the asked-for model (not an alternative) comes
+/// from an idle worker: alternatives then wait their turn.
+pub fn preferred_idle(bids: &[JobBid], deadline_secs: u64) -> bool {
+    bids.iter()
+        .any(|b| b.fallback != Some(true) && load_of(b) == 0.0 && !is_overloaded(b, deadline_secs))
+}
+
+/// An alternative-model bid while an idle worker offers the asked-for model.
+fn yields(bid: &JobBid, preferred_idle: bool) -> bool {
+    preferred_idle && bid.fallback == Some(true)
+}
+
 /// Order two bids under `policy`, ignoring publish time (the tie-breaker).
 pub fn compare(
     a: &JobBid,
@@ -111,6 +123,21 @@ pub fn compare(
     deadline_secs: u64,
     best: u32,
     fastest: u64,
+) -> Ordering {
+    compare_with(a, b, policy, deadline_secs, best, fastest, false)
+}
+
+/// [`compare`], knowing whether an idle worker offers the asked-for model
+/// ([`preferred_idle`]): smaller alternative models only win once every
+/// worker serving the asked-for one is working.
+pub fn compare_with(
+    a: &JobBid,
+    b: &JobBid,
+    policy: SelectionPolicy,
+    deadline_secs: u64,
+    best: u32,
+    fastest: u64,
+    preferred_idle: bool,
 ) -> Ordering {
     match policy {
         SelectionPolicy::Cheapest => price_cmp(a, b),
@@ -124,6 +151,7 @@ pub fn compare(
                         Ordering::Equal
                     }
                 })
+                .then_with(|| yields(a, preferred_idle).cmp(&yields(b, preferred_idle)))
                 .then_with(|| eta_bucket(a, fastest).cmp(&eta_bucket(b, fastest)))
                 .then_with(|| bench_bucket(a, best).cmp(&bench_bucket(b, best)))
                 .then_with(|| a.eta_seconds.cmp(&b.eta_seconds))
@@ -137,15 +165,16 @@ pub fn compare(
 pub fn rank(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64) -> usize {
     let best = best_bench(bids);
     let fastest = fastest_eta(bids);
+    let idle = preferred_idle(bids, deadline_secs);
     bids.sort_by(|a, b| {
-        compare(a, b, policy, deadline_secs, best, fastest)
+        compare_with(a, b, policy, deadline_secs, best, fastest, idle)
             .then(a.published_at_ms.cmp(&b.published_at_ms))
     });
     match bids.first() {
         None => 0,
         Some(top) => bids
             .iter()
-            .take_while(|b| compare(b, top, policy, deadline_secs, best, fastest) == Ordering::Equal)
+            .take_while(|b| compare_with(b, top, policy, deadline_secs, best, fastest, idle) == Ordering::Equal)
             .count(),
     }
 }
@@ -153,6 +182,40 @@ pub fn rank(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alt(mut b: JobBid, fallback: bool) -> JobBid {
+        b.model = Some(if fallback { "qwen3:4b" } else { "qwen2.5:7b" }.into());
+        b.fallback = Some(fallback);
+        b
+    }
+
+    #[test]
+    fn a_smaller_model_waits_while_an_idle_worker_serves_the_asked_for_one() {
+        // Idle node with the asked-for model vs a much faster idle node with
+        // an alternative: the asked-for model wins.
+        let mut bids = vec![
+            alt(bid("fast-small", 0.001, 10, Some(9000), Some(0.0)), true),
+            alt(bid("idle-7b", 0.001, 90, Some(5000), Some(0.0)), false),
+        ];
+        rank(&mut bids, SelectionPolicy::Smart, 600);
+        assert_eq!(bids[0].bidder_peer_id, "idle-7b");
+    }
+
+    #[test]
+    fn a_free_smaller_model_beats_a_working_node_with_the_asked_for_one() {
+        // Every 7b worker is busy (load 0.5, ETA stretched): the free node
+        // with an alternative takes the plain-text prompt.
+        let mut bids = vec![
+            alt(bid("busy-7b", 0.001, 131, Some(12898), Some(0.5)), false),
+            alt(bid("free-small", 0.001, 40, Some(4000), Some(0.0)), true),
+        ];
+        rank(&mut bids, SelectionPolicy::Smart, 600);
+        assert_eq!(bids[0].bidder_peer_id, "free-small");
+        // Old workers (no model fields) count as the asked-for model.
+        let mut old = vec![bid("old-idle", 0.001, 90, Some(5000), Some(0.0)), alt(bid("free-small", 0.001, 10, Some(9000), Some(0.0)), true)];
+        rank(&mut old, SelectionPolicy::Smart, 600);
+        assert_eq!(old[0].bidder_peer_id, "old-idle");
+    }
 
     fn bid(peer: &str, price: f64, eta: u64, bench: Option<u32>, load: Option<f32>) -> JobBid {
         JobBid {
@@ -167,6 +230,8 @@ mod tests {
             load,
             e2e: None,
             instance: None,
+            model: None,
+            fallback: None,
         }
     }
 

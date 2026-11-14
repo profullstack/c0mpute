@@ -56,6 +56,26 @@ pub fn model_tag(model: &str) -> String {
     format!("{ROLE_TAG}:model:{model}")
 }
 
+/// Workers that understand `accept_models` (0.3.71+) carry this tag; offers
+/// that list alternatives require it, so older workers never win a job they
+/// would refuse once opened.
+pub const ACCEPT_TAG: &str = "infernet:inference:accept";
+/// At most this many alternatives on one offer.
+pub const MAX_ACCEPT: usize = 8;
+
+/// Smaller standard models a plain-text prompt for the key model may take
+/// when every worker serving the key model is busy, best first. 0.5b is left
+/// out on purpose: it parrots the conversation back.
+pub const FALLBACK_LADDER: &[(&str, &[&str])] = &[
+    ("qwen2.5:7b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
+    ("huihui_ai/qwen3.5-abliterated:9b", &["huihui_ai/qwen3.5-abliterated:4b", "qwen2.5:7b", "qwen3:4b", "qwen2.5:3b"]),
+    ("qwen3:4b", &["qwen2.5:3b", "qwen2.5:1.5b"]),
+    ("gemma3:4b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
+];
+
+/// Largest prompt still routed as "plain text" (bytes over all messages).
+pub const PLAIN_TEXT_MAX_BYTES: usize = 16 * 1024;
+
 /// What a buyer asks for.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ChatSpec {
@@ -68,6 +88,14 @@ pub struct ChatSpec {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Other models this request takes when no worker serving `model` is
+    /// free, best first. The jobs bridge fills it for plain-text prompts.
+    #[serde(default)]
+    pub accept_models: Vec<String>,
+    /// Never substitute: this request needs exactly `model` (agent tool
+    /// protocols, JSON output). The bridge then adds no alternatives.
+    #[serde(default)]
+    pub exact_model: bool,
 }
 
 fn valid_model_id(m: &str) -> bool {
@@ -81,6 +109,9 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<ChatSpec, String> {
     }
     if s.model.as_deref().is_some_and(|m| !valid_model_id(m)) {
         return Err("model must be 1-128 characters of letters, digits and -_.:/@".into());
+    }
+    if s.accept_models.len() > MAX_ACCEPT || s.accept_models.iter().any(|m| !valid_model_id(m)) {
+        return Err(format!("accept_models must hold up to {MAX_ACCEPT} valid model ids"));
     }
     if s.messages.is_empty() || s.messages.len() > MAX_MESSAGES {
         return Err(format!("messages must hold 1..={MAX_MESSAGES} entries"));
@@ -108,13 +139,104 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<ChatSpec, String> {
     Ok(s)
 }
 
-/// Tags a worker must carry for `spec`.
+/// Tags a worker must carry for `spec`. An offer that accepts alternatives
+/// needs a worker that understands them, not one particular model.
 pub fn required_capabilities(spec: &Value) -> Vec<String> {
     let mut t = vec![ROLE_TAG.to_string()];
-    if let Ok(ChatSpec { model: Some(m), .. }) = parse_spec(spec) {
-        t.push(model_tag(&m));
+    match parse_spec(spec) {
+        Ok(s) if !s.accept_models.is_empty() => t.push(ACCEPT_TAG.to_string()),
+        Ok(ChatSpec { model: Some(m), .. }) => t.push(model_tag(&m)),
+        _ => {}
     }
     t
+}
+
+/// The model to answer `model` / `accept_models` with from `ready`, and
+/// whether it is an alternative: the asked-for model when served, else the
+/// first served alternative; any served model when nothing was asked for.
+pub fn choose_model(model: Option<&str>, accept: &[String], ready: &[String]) -> Option<(String, bool)> {
+    match model {
+        Some(m) if ready.iter().any(|r| r == m) => Some((m.to_string(), false)),
+        Some(_) => accept.iter().find(|a| ready.contains(a)).map(|a| (a.clone(), true)),
+        None if accept.is_empty() => ready.first().map(|m| (m.clone(), false)),
+        None => accept.iter().find(|a| ready.contains(a)).map(|a| (a.clone(), false)),
+    }
+}
+
+fn accept_of(v: &Value) -> Vec<String> {
+    v.get("accept_models")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).filter(|m| valid_model_id(m)).take(MAX_ACCEPT).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// What this node would answer `offer` with, if anything (see [`choose_model`]).
+pub fn bid_model(offer: &c0mpute_net::topics::JobOffer) -> Option<(String, bool)> {
+    let ready = ready_models();
+    if ready.is_empty() {
+        return None;
+    }
+    match crate::job_e2e::bid_spec(offer)? {
+        crate::job_e2e::BidSpec::Public(v) => choose_model(v.get("model").and_then(Value::as_str), &accept_of(v), &ready),
+        crate::job_e2e::BidSpec::Full(v) => {
+            let s = parse_spec(v).ok()?;
+            choose_model(s.model.as_deref(), &s.accept_models, &ready)
+        }
+    }
+}
+
+/// A prompt any capable chat model can answer: no agent tool protocol, no
+/// JSON-only output, not huge. Only these get smaller alternatives.
+pub fn is_plain_text(s: &ChatSpec) -> bool {
+    if s.exact_model {
+        return false;
+    }
+    let mut bytes = 0;
+    for m in &s.messages {
+        let c = m.get("content").and_then(Value::as_str).unwrap_or("");
+        bytes += c.len();
+        let lc = c.to_ascii_lowercase();
+        // Agent harnesses (moshcode, Claude-Code-style tool loops) and
+        // OpenAI tool calling need the model the caller tuned them for.
+        if ["<tool", "</tool>", "tool_result", "tool_call", "function_call", "\"tool\":", "<function"].iter().any(|k| lc.contains(k)) {
+            return false;
+        }
+        // Structured output: a smaller model breaks the format more often.
+        if lc.contains("json")
+            && ["only json", "valid json", "json object", "json format", "in json", "as json", "json only", "json schema", "return json", "respond with json", "output json"]
+                .iter()
+                .any(|k| lc.contains(k))
+        {
+            return false;
+        }
+    }
+    bytes <= PLAIN_TEXT_MAX_BYTES
+}
+
+/// The jobs bridge's routing step: a plain-text prompt for a standard model
+/// also accepts smaller standard models (see [`FALLBACK_LADDER`]), so a free
+/// worker can answer it instead of the job queuing on a working one. Returns
+/// the widened spec, or None to send it as asked.
+pub fn with_alternatives(spec: &Value) -> Option<Value> {
+    let s = parse_spec(spec).ok()?;
+    if !s.accept_models.is_empty() || !is_plain_text(&s) {
+        return None;
+    }
+    let model = s.model.as_deref()?;
+    let (_, ladder) = FALLBACK_LADDER.iter().find(|(k, _)| *k == model)?;
+    let mut out = spec.clone();
+    out["accept_models"] = json!(ladder.iter().take(MAX_ACCEPT).collect::<Vec<_>>());
+    Some(out)
+}
+
+/// `spec` without alternatives: what the bridge sends when no worker that
+/// understands them bid (an older network).
+pub fn without_alternatives(spec: &Value) -> Value {
+    let mut out = spec.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.remove("accept_models");
+    }
+    out
 }
 
 /// A result the buyer accepts: `{v:1, ok:true, text, model}` or `{v:1, ok:false, error}`.
@@ -206,10 +328,12 @@ pub async fn execute(base: &str, spec: &Value, ready: &[String]) -> Value {
 
 async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
     let s = parse_spec(spec).map_err(anyhow::Error::msg)?;
-    let model = match &s.model {
-        Some(m) if ready.iter().any(|r| r == m) => m.clone(),
-        Some(m) => anyhow::bail!("model {m} is not served here"),
-        None => ready.first().cloned().context("no model is served here")?,
+    let model = match choose_model(s.model.as_deref(), &s.accept_models, ready) {
+        Some((m, _)) => m,
+        None => match &s.model {
+            Some(m) => anyhow::bail!("model {m} is not served here"),
+            None => anyhow::bail!("no model is served here"),
+        },
     };
     let mut body = json!({
         "model": model,
@@ -252,8 +376,8 @@ pub fn offer_filter() -> crate::dispatch::OfferFilter {
         match crate::job_e2e::bid_spec(offer) {
             // An e2e offer shows only the model; the whole spec is checked
             // again here once it is opened.
-            Some(crate::job_e2e::BidSpec::Public(v)) => v.get("model").and_then(Value::as_str).is_none_or(|m| ready.iter().any(|r| r == m)),
-            Some(crate::job_e2e::BidSpec::Full(v)) => parse_spec(v).ok().is_some_and(|s| s.model.is_none_or(|m| ready.contains(&m))),
+            Some(crate::job_e2e::BidSpec::Public(v)) => choose_model(v.get("model").and_then(Value::as_str), &accept_of(v), &ready).is_some(),
+            Some(crate::job_e2e::BidSpec::Full(v)) => parse_spec(v).ok().is_some_and(|s| choose_model(s.model.as_deref(), &s.accept_models, &ready).is_some()),
             None => false,
         }
     })
@@ -297,6 +421,45 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ready(models: &[&str]) -> Vec<String> {
+        models.iter().map(|m| m.to_string()).collect()
+    }
+
+    #[test]
+    fn choose_model_prefers_the_asked_for_model_then_alternatives_in_order() {
+        let alts = ready(&["qwen3:4b", "qwen2.5:1.5b"]);
+        assert_eq!(choose_model(Some("qwen2.5:7b"), &alts, &ready(&["qwen2.5:7b", "qwen3:4b"])), Some(("qwen2.5:7b".into(), false)));
+        assert_eq!(choose_model(Some("qwen2.5:7b"), &alts, &ready(&["qwen2.5:1.5b", "qwen3:4b"])), Some(("qwen3:4b".into(), true)));
+        assert_eq!(choose_model(Some("qwen2.5:7b"), &alts, &ready(&["llama3"])), None);
+        assert_eq!(choose_model(Some("qwen2.5:7b"), &[], &ready(&["qwen3:4b"])), None, "no alternatives: exact only");
+        assert_eq!(choose_model(None, &[], &ready(&["m"])), Some(("m".into(), false)));
+    }
+
+    #[test]
+    fn plain_text_prompts_get_smaller_alternatives_and_agent_or_json_ones_do_not() {
+        let plain = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "write a haiku about rain"}]});
+        let widened = with_alternatives(&plain).expect("plain text is widened");
+        assert_eq!(widened["accept_models"], json!(["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]));
+        assert_eq!(widened["model"], "qwen2.5:7b", "the asked-for model stays first");
+        assert_eq!(required_capabilities(&widened), vec![ROLE_TAG.to_string(), ACCEPT_TAG.to_string()]);
+        assert_eq!(required_capabilities(&without_alternatives(&widened)), vec![ROLE_TAG.to_string(), model_tag("qwen2.5:7b")]);
+
+        let agent = json!({"v": 1, "model": "qwen2.5:7b", "messages": [
+            {"role": "system", "content": "Call tools like <tool name=\"bash\">ls</tool>"},
+            {"role": "user", "content": "fix the test"}]});
+        assert!(with_alternatives(&agent).is_none(), "agent tool protocol keeps the exact model");
+        let json_mode = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "Respond with JSON only: {\"title\": string}"}]});
+        assert!(with_alternatives(&json_mode).is_none(), "JSON output keeps the exact model");
+        let exact = json!({"v": 1, "model": "qwen2.5:7b", "exact_model": true, "messages": [{"role": "user", "content": "hi"}]});
+        assert!(with_alternatives(&exact).is_none(), "exact_model opts out");
+        let big = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "x".repeat(PLAIN_TEXT_MAX_BYTES + 1)}]});
+        assert!(with_alternatives(&big).is_none(), "long context keeps the exact model");
+        let unknown = json!({"v": 1, "model": "devstral:24b", "messages": [{"role": "user", "content": "hi"}]});
+        assert!(with_alternatives(&unknown).is_none(), "only standard models have a ladder");
+        let too_many = json!({"v": 1, "model": "m", "accept_models": ["a","b","c","d","e","f","g","h","i"], "messages": [{"role": "user", "content": "hi"}]});
+        assert!(parse_spec(&too_many).is_err());
+    }
 
     fn spec(v: Value) -> std::result::Result<ChatSpec, String> {
         parse_spec(&v)

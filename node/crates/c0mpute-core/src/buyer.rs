@@ -835,6 +835,8 @@ pub async fn resume_auction(
             load: None,
             e2e: None,
             instance: None,
+            model: None,
+            fallback: None,
         },
         receipt,
         external_ref: job.external_ref.clone(),
@@ -1130,6 +1132,8 @@ mod tests {
             load: None,
             e2e: None,
             instance: None,
+            model: None,
+            fallback: None,
         }
     }
 

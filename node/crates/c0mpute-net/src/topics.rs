@@ -271,6 +271,16 @@ pub struct JobBid {
     /// instance on the accept. `None` from workers older than 0.3.20.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// The model the worker would answer with, on inference offers. `None`
+    /// from other workloads and from workers older than 0.3.71.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// True when `model` is one of the offer's accepted alternatives (a
+    /// smaller model a plain-text prompt can take) rather than the model it
+    /// asked for. Buyers keep the asked-for model while a worker serving it
+    /// is idle; once those are all working, a free alternative wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<bool>,
 }
 
 impl JobBid {
@@ -399,6 +409,8 @@ mod tests {
             load: None,
             e2e: None,
             instance: None,
+            model: None,
+            fallback: None,
         };
         let json = serde_json::to_value(&bid).unwrap();
         assert_eq!(json["expires_at_ms"], 1000);
@@ -447,6 +459,8 @@ mod tests {
             load: None,
             e2e: None,
             instance: None,
+            model: None,
+            fallback: None,
         };
         assert!(bid.is_live(u64::MAX), "old bids never expire");
         bid.expires_at_ms = Some(100);

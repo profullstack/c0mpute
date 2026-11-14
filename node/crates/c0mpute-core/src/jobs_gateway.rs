@@ -479,6 +479,17 @@ async fn run_job(
         )
     })?;
 
+    // Routing: a plain-text prompt for a standard model also accepts smaller
+    // standard models, so a free worker answers it instead of the job
+    // queuing on a working one (inference::with_alternatives). Agent tool
+    // loops, JSON output and big prompts keep exactly the model they asked for.
+    let widened = if matches!(workload, Workload::Inference) {
+        crate::inference::with_alternatives(&spec)
+    } else {
+        None
+    };
+    let exact_spec = widened.as_ref().map(|_| spec.clone());
+    let spec = widened.unwrap_or(spec);
     let required = workload.required_capabilities(&spec);
     // Kept for checking the result (embeddings: one vector per text).
     let spec_for_check = spec.clone();
@@ -491,14 +502,32 @@ async fn run_job(
     let remaining = timeout.saturating_sub(started.elapsed());
     let auction = JobAuction::new(workload.name(), spec_inline)
         .with_required_capabilities(required)
-        .with_allowed_bidders(allowed)
+        .with_allowed_bidders(allowed.clone())
         .with_max_price_usd(max_price)
         .with_bid_window(state.bid_window)
         .with_deadline(remaining)
         .with_receipt_timeout(remaining);
-    let outcome = run_auction(state.net.clone(), auction)
-        .await
-        .map_err(|error| match error.downcast_ref::<AuctionFailure>() {
+    let outcome = match (run_auction(state.net.clone(), auction).await, exact_spec) {
+        // Nobody that understands alternatives bid (workers older than
+        // 0.3.71): ask again for exactly the model the caller named, so the
+        // widening never costs a request its answer.
+        (Err(error), Some(exact))
+            if !matches!(error.downcast_ref::<AuctionFailure>(), Some(AuctionFailure::NoReceipt(_))) =>
+        {
+            tracing::info!(err = %error, "jobs bridge: no bids on the widened inference offer, retrying with the exact model");
+            let remaining = timeout.saturating_sub(started.elapsed());
+            let auction = JobAuction::new(workload.name(), exact.clone())
+                .with_required_capabilities(workload.required_capabilities(&exact))
+                .with_allowed_bidders(allowed.clone())
+                .with_max_price_usd(max_price)
+                .with_bid_window(state.bid_window)
+                .with_deadline(remaining)
+                .with_receipt_timeout(remaining);
+            run_auction(state.net.clone(), auction).await
+        }
+        (result, _) => result,
+    }
+    .map_err(|error| match error.downcast_ref::<AuctionFailure>() {
             Some(AuctionFailure::NoReceipt(_)) => {
                 ApiError(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "timeout" }))
             }
