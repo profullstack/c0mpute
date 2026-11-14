@@ -18,7 +18,7 @@
 [module]
 id          = "apps"
 name        = "Apps — backends with 3x redundancy"
-version     = "0.3.68"
+version     = "0.3.69"
 kind        = "workload"
 category    = "infrastructure"
 status      = "available"
