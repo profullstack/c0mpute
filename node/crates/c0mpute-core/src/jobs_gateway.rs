@@ -165,6 +165,11 @@ pub struct JobsBridge {
     allow_peers: Arc<Vec<String>>,
     bid_window: Duration,
     slots: Arc<Semaphore>,
+    /// Workers that won and then failed or went silent, benched for this
+    /// bridge's auctions (30 min, doubling to 6 h; a delivery clears it).
+    /// Benched workers still win when nobody else bids. Persisted: the bridge
+    /// restarts on every auto-update.
+    penalties: crate::penalty_box::PenaltyBox,
 }
 
 impl JobsBridge {
@@ -191,6 +196,11 @@ impl JobsBridge {
             allow_peers: Arc::new(allow_peers),
             bid_window: DEFAULT_BID_WINDOW,
             slots: Arc::new(Semaphore::new(MAX_CONCURRENT_JOBS)),
+            penalties: crate::penalty_box::PenaltyBox::persistent(
+                crate::config::data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+                    .join("jobs-bridge-penalties.json"),
+            ),
         })
     }
 
@@ -503,6 +513,7 @@ async fn run_job(
     let auction = JobAuction::new(workload.name(), spec_inline)
         .with_required_capabilities(required)
         .with_allowed_bidders(allowed.clone())
+        .with_fallback_bidders(state.penalties.benched())
         .with_max_price_usd(max_price)
         .with_bid_window(state.bid_window)
         .with_deadline(remaining)
@@ -519,6 +530,7 @@ async fn run_job(
             let auction = JobAuction::new(workload.name(), exact.clone())
                 .with_required_capabilities(workload.required_capabilities(&exact))
                 .with_allowed_bidders(allowed.clone())
+                .with_fallback_bidders(state.penalties.benched())
                 .with_max_price_usd(max_price)
                 .with_bid_window(state.bid_window)
                 .with_deadline(remaining)
@@ -539,6 +551,17 @@ async fn run_job(
         })?;
 
     let worker = outcome.accepted_bid.bidder_peer_id.clone();
+    // A worker that won and failed (or went silent) loses its turn for a
+    // while; one that delivered is in good standing again. Before this the
+    // bridge never benched anyone: a node that could not take jobs kept
+    // winning and cost each one a ~50 s re-award (sergey-234, 2026-11-15).
+    for failed in &outcome.failed_workers {
+        let bench = state.penalties.strike(failed);
+        tracing::info!(worker = %failed, bench_secs = bench.as_secs(), "jobs bridge: worker failed a job, benched");
+    }
+    if outcome.receipt.status == JobStatus::Completed {
+        state.penalties.clear(&worker);
+    }
     let worker_failed = |detail: &str| {
         ApiError(
             StatusCode::BAD_GATEWAY,

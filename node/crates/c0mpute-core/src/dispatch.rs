@@ -686,8 +686,13 @@ pub(crate) fn live_tags(workload_type: &str, advertised: &[String], inference_mo
         let role = crate::inference::ROLE_TAG;
         let model_prefix = crate::inference::model_tag("");
         tags.retain(|t| t.as_str() != role && !t.starts_with(&model_prefix));
+        tags.retain(|t| t.as_str() != crate::inference::ACCEPT_TAG);
         if !inference_models.is_empty() {
             tags.push(role.to_string());
+            // Offers that accept alternative models require this tag (0.3.71).
+            // It has to be added here: the boot snapshot predates the runtime's
+            // model list, so it never carried it and widened offers got no bids.
+            tags.push(crate::inference::ACCEPT_TAG.to_string());
             tags.extend(inference_models.iter().map(|m| crate::inference::model_tag(m)));
         }
     }
@@ -1110,6 +1115,15 @@ mod tests {
         assert!(!stale.contains(&crate::inference::model_tag("qwen2.5:0.5b")));
         // Other workloads keep their snapshot untouched.
         assert_eq!(live_tags("diffusion.txt2img", &boot, &models), boot);
+        // An offer that accepts alternatives needs the accept tag, which only
+        // the live set has (the boot snapshot predates the model list).
+        let mut widened = offer_at(NOW, None);
+        widened.workload_type = crate::inference::WORKLOAD.into();
+        widened.required_capabilities = crate::inference::required_capabilities(&serde_json::json!({
+            "v": 1, "model": "qwen2.5:7b", "accept_models": ["qwen3:4b"], "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert!(missing_capabilities(&widened, &live_tags(w, &boot, &models)).is_empty());
+        assert_eq!(missing_capabilities(&widened, &live_tags(w, &boot, &[])).len(), 2, "no models served: neither tag");
     }
 
     #[test]
