@@ -173,7 +173,7 @@ async fn node_dm_address(node: &str) -> Result<String> {
         return Ok(addr.to_string());
     }
     let contact = n["contact"].as_str().map(|c| format!(" Its operator lists a contact: {c}")).unwrap_or_default();
-    bail!("node {node} cannot receive DMs yet: it runs c0mpute older than 0.3.73.{contact}")
+    bail!("node {node} cannot receive DMs yet: it runs c0mpute older than 0.3.74.{contact}")
 }
 
 /// Boot the client node and wait briefly for mailboxes.

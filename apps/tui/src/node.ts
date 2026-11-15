@@ -354,7 +354,7 @@ export async function probeMessages(bin: string): Promise<NodeMessages> {
   if (parsed) return parsed;
   const last = (r.stderr || r.stdout || "").trim().split("\n").slice(-1)[0] ?? "";
   const error = /unrecognized subcommand|unexpected argument/.test(r.stderr)
-    ? "this c0mpute is older than 0.3.73: c0mpute update adds node messages"
+    ? "this c0mpute is older than 0.3.74: c0mpute update adds node messages"
     : last || "c0mpute dm read failed";
   return { address: null, total: 0, fresh: 0, messages: [], error };
 }
