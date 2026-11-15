@@ -362,7 +362,15 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
 // ─── worker runner ────────────────────────────────────────────────────────
 
 pub fn worker_load() -> WorkerLoad {
-    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)), MAX_CONCURRENT)
+    // Job times survive restarts like every other workload's (runner::with_history):
+    // without it each update reset every node's ETA to the 60 s placeholder, and
+    // the bench score alone picked winners until real jobs finished again.
+    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)), MAX_CONCURRENT).with_history(
+        crate::config::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
+            .join("job-times")
+            .join(format!("{WORKLOAD}.ms")),
+    )
 }
 
 /// Bid only on valid specs for a model served right now.
