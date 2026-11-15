@@ -36,6 +36,7 @@ mod git_cli;
 mod peers;
 mod private_storage;
 mod promo;
+mod site_owner;
 mod storage;
 mod swarm_cli;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
@@ -900,8 +901,10 @@ enum AppsSecretsCmd {
 enum HostingCmd {
     /// Publish (or update) a site from a directory of static files.
     ///
-    /// The site is signed with this machine's identity, so only this machine
-    /// can update it; publishing the same --name again ships a new version.
+    /// The site is signed with your account key (derived from your c0mpute
+    /// identity, which only you hold), so publishing the same --name again
+    /// from ANY machine with that identity ships a new version of the same
+    /// site, same URL. The folder remembers its site in .c0mpute/site.json.
     /// Stays up until three hosting nodes hold copies, then exits.
     /// Sites over 1 GiB (up to 64 GiB free, 4 TiB with --disks) are striped
     /// over the network in 64 MiB groups (bigger past 512 GiB); files are served from the folder
@@ -951,6 +954,19 @@ enum HostingCmd {
         /// The gateway the printed link points at (public and --private sites).
         #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
         gateway: String,
+        /// Which key signs: `auto` keeps the site's current owner (else your
+        /// account key), `account`, or `machine` (the pre-0.3.73 default).
+        #[arg(long, value_enum, default_value_t = site_owner::KeyChoice::Auto)]
+        key: site_owner::KeyChoice,
+        /// Hand a site owned by this machine's key to your account key: publish
+        /// it under the account key, then take the machine-owned copy down.
+        /// The site id changes once, so repoint Moshpit names and domains.
+        #[arg(long = "move", conflicts_with = "key")]
+        move_to_account: bool,
+        /// Publish even though a site with this name is live under another
+        /// key (that makes a separate site with its own URL).
+        #[arg(long)]
+        new_site: bool,
     },
     /// Show the c0mpute hosting nodes d1sks lists, ranked the way
     /// `publish --disks` would pick them.
@@ -972,12 +988,18 @@ enum HostingCmd {
     /// Take a site down: publish an empty version of it. Holders switch to
     /// it and delete the old files; gateways answer 404.
     Rm {
-        /// Site name (as published from this machine).
+        /// Site name (as published with your account key or this machine's).
         #[arg(long)]
         name: String,
         /// Seconds to keep telling the network.
         #[arg(long, default_value_t = 90)]
         wait_secs: u64,
+        /// Which key's site to take down: `auto` finds the live one.
+        #[arg(long, value_enum, default_value_t = site_owner::KeyChoice::Auto)]
+        key: site_owner::KeyChoice,
+        /// Gateway asked which key owns the live site.
+        #[arg(long, default_value = c0mpute_core::sealed_store::DEFAULT_GATEWAY)]
+        gateway: String,
     },
     /// Download one file of a site from the network (as a gateway would),
     /// showing the transfer rate.
@@ -4647,8 +4669,14 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             private,
             rekey,
             gateway,
+            key,
+            move_to_account,
+            new_site,
         } => {
             if private {
+                if move_to_account || key != site_owner::KeyChoice::Auto {
+                    anyhow::bail!("--private sites are always owned by your c0mpute identity: drop --key / --move");
+                }
                 if !domains.is_empty() || disks.is_some() {
                     anyhow::bail!("--private sites are reached by their link only: drop --domain and --disks");
                 }
@@ -4668,7 +4696,9 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                     None
                 }
             };
-            let (record, copies) = c0mpute_core::hosting::publish_dir_with(
+            let choice = site_owner::for_publish(&dir, &name, key, &gateway, move_to_account, new_site).await?;
+            let (record, copies) = c0mpute_core::hosting::publish_dir_as(
+                choice.owner.signer(),
                 &dir,
                 &name,
                 domains.clone(),
@@ -4676,7 +4706,17 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                 market,
             )
             .await?;
+            site_owner::write_link(
+                &dir,
+                &site_owner::Link {
+                    name: name.clone(),
+                    site_id: record.site_id.clone(),
+                    owner: record.owner.clone(),
+                    key: choice.owner.kind,
+                },
+            );
             println!("site:    {}", record.site_id);
+            println!("owner:   {} ({}…)", choice.owner.kind.label(), &record.owner[..12]);
             println!("version: {}", record.seq);
             println!("copies:  {copies}/{}", c0mpute_core::hosting::TARGET_REPLICAS);
             if !record.preferred_hosts.is_empty() {
@@ -4720,6 +4760,17 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                      re-run publish with the same --name"
                 );
                 std::process::exit(1);
+            }
+            if let Some(old) = choice.move_from {
+                let old_id = old.site_id(&name);
+                c0mpute_core::hosting::unpublish(&name, std::time::Duration::from_secs(90)).await?;
+                println!("moved:   {old_id} (this machine's key) is empty now; {name} lives at {}", record.site_id);
+                println!(
+                    "repoint: moshcode name c0mpute <your.name> {}   and any TXT {}.<domain> \"site={}\"",
+                    record.site_id,
+                    c0mpute_core::hosting::dns::TXT_PREFIX,
+                    record.site_id
+                );
             }
             Ok(())
         }
@@ -4782,8 +4833,16 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             }
             Ok(())
         }
-        HostingCmd::Rm { name, wait_secs } => {
-            let rec = c0mpute_core::hosting::unpublish(&name, std::time::Duration::from_secs(wait_secs)).await?;
+        HostingCmd::Rm {
+            name,
+            wait_secs,
+            key,
+            gateway,
+        } => {
+            let owner = site_owner::for_rm(&name, key, &gateway).await?;
+            let rec =
+                c0mpute_core::hosting::unpublish_as(owner.signer(), &name, std::time::Duration::from_secs(wait_secs))
+                    .await?;
             println!("site:    {} ({name}) is empty now, version {}", rec.site_id, rec.seq);
             Ok(())
         }

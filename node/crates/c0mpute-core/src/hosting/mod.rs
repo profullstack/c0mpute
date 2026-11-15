@@ -4258,6 +4258,32 @@ pub fn publisher_keypair() -> Result<c0mpute_net::libp2p::identity::Keypair> {
     c0mpute_net::identity::load_or_create(&id_dir)
 }
 
+/// HKDF label that turns a producer's c0mpute identity seed (`chat.key`, the
+/// one private storage and `c0mpute dm` use) into the key that owns their
+/// sites. Same identity on any machine = same owner = same `site_id`.
+pub const ACCOUNT_OWNER_LABEL: &[u8] = b"c0mpute-hosting-owner-v1";
+
+/// The account key: owns a producer's sites from every machine they unlock
+/// their identity on. Derived on this machine; c0mpute.com and node
+/// operators never see it, so only the producer can publish or change them.
+pub fn account_keypair(key: &c0mpute_secure_chat::ChatKey) -> Result<c0mpute_net::libp2p::identity::Keypair> {
+    let mut seed: [u8; 32] = *key.derive_subkey(ACCOUNT_OWNER_LABEL);
+    // ed25519_from_bytes zeroizes its input.
+    c0mpute_net::libp2p::identity::Keypair::ed25519_from_bytes(&mut seed)
+        .map_err(|e| anyhow::anyhow!("account key: {e}"))
+}
+
+/// Paid terms for a site signed by `keypair`: when that is not this machine's
+/// publisher key (an account-owned site), this machine pays, since it is the
+/// node that challenges the holders and settles.
+fn payer_for(keypair: &c0mpute_net::libp2p::identity::Keypair, mut terms: site::HostingTerms) -> site::HostingTerms {
+    let machine = publisher_keypair().ok().and_then(|k| site::owner_hex(&k));
+    if terms.payer.is_none() && machine.is_some() && site::owner_hex(keypair) != machine {
+        terms.payer = machine;
+    }
+    terms
+}
+
 /// `c0mpute hosting publish`: build a site from `dir`, sign it with this
 /// machine's buyer identity, hand it to the network, and stay up until
 /// `TARGET_REPLICAS` other nodes hold copies (or `wait` runs out).
@@ -4582,6 +4608,19 @@ pub async fn publish_dir_with(
     wait: Duration,
     market: Option<MarketOptions>,
 ) -> Result<(SiteRecord, usize)> {
+    publish_dir_as(None, dir, name, domains, wait, market).await
+}
+
+/// `publish_dir_with`, signed by `signer` (the account key) instead of this
+/// machine's publisher key when given.
+pub async fn publish_dir_as(
+    signer: Option<&c0mpute_net::libp2p::identity::Keypair>,
+    dir: &std::path::Path,
+    name: &str,
+    domains: Vec<String>,
+    wait: Duration,
+    market: Option<MarketOptions>,
+) -> Result<(SiteRecord, usize)> {
     for d in &domains {
         if !site::valid_domain(d) {
             bail!("invalid domain {d:?}");
@@ -4590,7 +4629,9 @@ pub async fn publish_dir_with(
     // Before hashing anything: a big folder takes minutes to scan, and an
     // unreadable identity (created by `sudo c0mpute ...`) used to fail only
     // after the scan finished.
-    publisher_keypair()?;
+    if signer.is_none() {
+        publisher_keypair()?;
+    }
     let cache_path = crate::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hosting")
@@ -4631,7 +4672,10 @@ pub async fn publish_dir_with(
     let striped = stripe::is_striped(total);
     let manifest_hash = scanned.manifest.stored().hash();
     let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
-    let keypair = publisher_keypair()?;
+    let keypair = match signer {
+        Some(k) => k.clone(),
+        None => publisher_keypair()?,
+    };
     let owner = site::owner_hex(&keypair).context("hosting needs an ed25519 identity")?;
     let site_id = site::site_id_for(&owner, name);
     let seq = std::time::SystemTime::now()
@@ -4691,7 +4735,7 @@ pub async fn publish_dir_with(
                             seq,
                             total,
                             domains.clone(),
-                            Some(terms),
+                            Some(payer_for(&keypair, terms)),
                         )?)
                     }
                     None => {
@@ -4714,7 +4758,9 @@ pub async fn publish_dir_with(
         }
         None => {
             let terms = match &market {
-                Some(m) => pick_terms(m, share_for(m), Some(&hosting)).await,
+                Some(m) => pick_terms(m, share_for(m), Some(&hosting))
+                    .await
+                    .map(|t| payer_for(&keypair, t)),
                 None => None,
             };
             if terms.is_none() && total > site::MAX_FREE_SITE_BYTES {
@@ -4972,6 +5018,15 @@ pub async fn download(
 /// record stays (a few hundred bytes), so the name can be published again.
 /// Works on every node version: it is a plain v1 record.
 pub async fn unpublish(name: &str, wait: Duration) -> Result<SiteRecord> {
+    unpublish_as(None, name, wait).await
+}
+
+/// `unpublish`, signed by `signer` (the account key) when given.
+pub async fn unpublish_as(
+    signer: Option<&c0mpute_net::libp2p::identity::Keypair>,
+    name: &str,
+    wait: Duration,
+) -> Result<SiteRecord> {
     let manifest = SiteManifest {
         v: 1,
         name: name.to_string(),
@@ -4983,7 +5038,10 @@ pub async fn unpublish(name: &str, wait: Duration) -> Result<SiteRecord> {
     };
     let manifest_hash = scanned.manifest.stored().hash();
     let supervisor = crate::Supervisor::boot_buyer(crate::Config::default()).await?;
-    let keypair = publisher_keypair()?;
+    let keypair = match signer {
+        Some(k) => k.clone(),
+        None => publisher_keypair()?,
+    };
     let seq = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

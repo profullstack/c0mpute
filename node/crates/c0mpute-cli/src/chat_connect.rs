@@ -477,6 +477,12 @@ pub(crate) fn publish_args(dir: &Path, name: &str, wait_secs: u64, disks: &str) 
         name.into(),
         "--wait-secs".into(),
         wait_secs.to_string().into(),
+        // Pushes queued on c0mpute.com are signed by this node's push
+        // identity (XDG_DATA_HOME above), never the operator's account key,
+        // and are one site per (account, name) by construction.
+        "--key".into(),
+        "machine".into(),
+        "--new-site".into(),
     ];
     if disks != "free" {
         a.push("--disks".into());
@@ -487,7 +493,7 @@ pub(crate) fn publish_args(dir: &Path, name: &str, wait_secs: u64, disks: &str) 
 
 /// `c0mpute hosting rm --name <n>`.
 pub(crate) fn rm_args(name: &str) -> Vec<std::ffi::OsString> {
-    vec!["hosting".into(), "rm".into(), "--name".into(), name.into()]
+    vec!["hosting".into(), "rm".into(), "--name".into(), name.into(), "--key".into(), "machine".into()]
 }
 
 /// Run a child, sending its latest stderr line to the chat at most every 2 s.

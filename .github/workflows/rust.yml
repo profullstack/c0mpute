@@ -2,8 +2,8 @@ name: rust
 
 # The Rust build/test gate.
 #
-# Until this existed, CI ran only security scanners (CodeQL, ThreatCrush,
-# gitleaks, semgrep, Socket, bun audit) — nothing compiled the workspace or ran
+# Until this existed, CI ran only security scanners (ThreatCrush,
+# gitleaks, Socket, bun audit) — nothing compiled the workspace or ran
 # a test. A PR could break every crate in the tree and still show all-green.
 #
 # `build-and-test` is the gate and must stay blocking. `lint` is advisory for
