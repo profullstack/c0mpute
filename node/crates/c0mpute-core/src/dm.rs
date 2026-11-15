@@ -933,6 +933,13 @@ pub fn serve_node_identity(dm: Dm, config_dir: PathBuf) {
         let address = key.address();
         let _ = NODE_DM_ADDRESS.set(address.clone());
         info!(%address, "secure-chat: node DM identity (operators read with `c0mpute dm read`)");
+        // The first publish runs before this node has found any mailbox node,
+        // so it stores the key nowhere; until it lands somewhere, retry soon
+        // (30 s, doubling to 10 min), then refresh every NODE_REPUBLISH.
+        // Before this the retry waited 6 h and senders got "its key is not on
+        // the network yet" (2026-11-15).
+        let mut retry = Duration::from_secs(30);
+        let mut published = false;
         loop {
             let now = unix_now();
             match HomeRecord::sign(&key, dm.peer_id(), now, NODE_RECORD_SECS) {
@@ -943,15 +950,30 @@ pub fn serve_node_identity(dm: Dm, config_dir: PathBuf) {
                 }
                 Err(e) => debug!(err = %e, "secure-chat: node home record not signed"),
             }
-            match KeyRecord::sign(&key, now, NODE_RECORD_SECS) {
-                Ok(rec) => {
-                    if let Err(e) = dm.publish_key(&rec).await {
+            let stored = match KeyRecord::sign(&key, now, NODE_RECORD_SECS) {
+                Ok(rec) => match dm.publish_key(&rec).await {
+                    Ok(n) => n,
+                    Err(e) => {
                         debug!(err = %e, "secure-chat: node key record not published yet");
+                        0
                     }
+                },
+                Err(e) => {
+                    debug!(err = %e, "secure-chat: node key record not signed");
+                    0
                 }
-                Err(e) => debug!(err = %e, "secure-chat: node key record not signed"),
+            };
+            if stored > 0 {
+                if !published {
+                    info!(copies = stored, "secure-chat: node key published; `c0mpute dm send <node>` can reach this node");
+                    published = true;
+                }
+                retry = Duration::from_secs(30);
+                tokio::time::sleep(NODE_REPUBLISH).await;
+            } else {
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(600));
             }
-            tokio::time::sleep(NODE_REPUBLISH).await;
         }
     });
 }
