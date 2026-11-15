@@ -546,7 +546,7 @@ fn public_keys(workload: &str) -> &'static [&'static str] {
             "frame_timeout_secs",
         ],
         "workflow.step" => &["v", "kind"],
-        "infernet.inference" => &["v", "model", "max_tokens", "temperature"],
+        "infernet.inference" => &["v", "model", "accept_models", "max_tokens", "temperature"],
         "infernet.text.infer" => &["base_model", "max_new_tokens"],
         "infernet.temporal.infer" => &["model_hash", "ttl_s"],
         "webhook.deliver" => &["v", "max_attempts", "timeout_ms", "backoff_ms"],

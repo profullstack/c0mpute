@@ -276,8 +276,21 @@ pub fn run_worker_subscriber_with_load(
                     );
                     continue;
                 }
-                let eta = eta_seconds(
+                // Jobs already running share this box with the new one.
+                let busy = capacity
+                    .free_slots
+                    .map(|free| capacity.total_slots.saturating_sub(free))
+                    .unwrap_or(0);
+                // Inference offers may accept alternatives: which model we
+                // would answer with, and whether it is one (see routing).
+                let pick = if offer.workload_type == crate::inference::WORKLOAD {
+                    crate::inference::bid_model(&offer)
+                } else {
+                    None
+                };
+                let eta = eta_seconds_busy(
                     capacity.queued,
+                    busy,
                     capacity.total_slots,
                     load.as_ref().and_then(WorkerLoad::recent_job_duration),
                 );
@@ -295,6 +308,7 @@ pub fn run_worker_subscriber_with_load(
                     eta,
                     bench.get(),
                     capacity.load_fraction(queue_load(tx)),
+                    pick,
                 )
                 .await
                 {
@@ -573,6 +587,21 @@ impl Capacity {
 /// `total_slots` at a time, then it runs, each wave taking about the recent
 /// average job time ([`DEFAULT_ETA_SECS`] before any job has completed).
 pub(crate) fn eta_seconds(queued: usize, total_slots: usize, recent: Option<Duration>) -> u64 {
+    eta_seconds_busy(queued, 0, total_slots, recent)
+}
+
+/// [`eta_seconds`] on a node already running `busy` jobs: they share the box
+/// with the new one, so each running job stretches it by 1/`total_slots`
+/// (an idle node quotes its plain recent time, a half-busy one 1.5x). Before
+/// this a working node quoted the same ETA as an idle one and kept winning.
+pub(crate) fn eta_seconds_busy(queued: usize, busy: usize, total_slots: usize, recent: Option<Duration>) -> u64 {
+    let slots = total_slots.max(1);
+    let contention = 1.0 + busy.min(slots) as f64 / slots as f64;
+    let plain = eta_plain(queued, total_slots, recent);
+    ((plain as f64 * contention).ceil() as u64).clamp(1, MAX_ETA_SECS)
+}
+
+fn eta_plain(queued: usize, total_slots: usize, recent: Option<Duration>) -> u64 {
     let per_job = recent
         .map(|d| d.as_secs_f64())
         .filter(|s| *s > 0.0)
@@ -685,6 +714,7 @@ async fn handle_offer(
     eta_seconds: u64,
     bench_score: Option<u32>,
     bid_load: f32,
+    pick: Option<(String, bool)>,
 ) -> Option<(f64, u64, Vec<u8>, Option<crate::job_e2e::WorkerSession>)> {
     let now_ms = unix_ms();
     if !offer_is_fresh(offer.published_at_ms, now_ms) {
@@ -755,6 +785,8 @@ async fn handle_offer(
         load: Some(bid_load),
         e2e,
         instance: Some(net.instance_id().to_string()),
+        model: pick.as_ref().map(|(m, _)| m.clone()),
+        fallback: pick.as_ref().map(|(_, f)| *f),
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,
@@ -1179,5 +1211,10 @@ mod tests {
         assert_eq!(eta_seconds(3, 1, None), 4 * DEFAULT_ETA_SECS);
         assert_eq!(eta_seconds(0, 0, Some(Duration::from_millis(1))), 1);
         assert_eq!(eta_seconds(usize::MAX, 1, None), MAX_ETA_SECS);
+        // A node already running jobs says so in its ETA.
+        assert_eq!(eta_seconds_busy(0, 0, 2, Some(Duration::from_secs(87))), 87);
+        assert_eq!(eta_seconds_busy(0, 1, 2, Some(Duration::from_secs(87))), 131);
+        assert_eq!(eta_seconds_busy(0, 2, 2, Some(Duration::from_secs(10))), 20);
+        assert_eq!(eta_seconds_busy(0, 9, 2, Some(Duration::from_secs(10))), 20, "busy is capped at the slot count");
     }
 }
