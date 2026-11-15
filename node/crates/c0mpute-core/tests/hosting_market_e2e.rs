@@ -207,8 +207,13 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     publisher.publish_site(&built, rec.clone()).await.unwrap();
 
     // Both preferred hosts hold copies and the site settles at exactly three.
+    // 240 s, not 90: on a loaded CI runner one host's 5 MiB fetch can fail and
+    // retry ("chunks still missing"), the second preferred copy then lands
+    // ~60 s in, and the extra copies still need their trim grace. That ran
+    // past 90 s on most master runs on 2026-11-15. A real convergence bug
+    // still fails here; it just fails later.
     let (p, s, r, pref) = (publisher.clone(), site.clone(), rec.clone(), preferred.clone());
-    wait_for("preferred copies and three in total", 90, || {
+    wait_for("preferred copies and three in total", 240, || {
         let (p, s, r, pref) = (p.clone(), s.clone(), r.clone(), pref.clone());
         async move {
             p.regossip(&r).await;
@@ -222,7 +227,7 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     // that was briefly extra has been released and none comes back.
     // Bounded, rather than a fixed sleep that races the trim.
     let stable_for = fast().holder_ttl + Duration::from_secs(2);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let mut since: Option<(tokio::time::Instant, Vec<String>)> = None;
     let holders = loop {
         publisher.regossip(&rec).await;
