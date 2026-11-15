@@ -265,6 +265,9 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
     if let Some(name) = node_name() {
         blob["name"] = serde_json::Value::String(name);
     }
+    if let Some(contact) = node_contact() {
+        blob["contact"] = serde_json::Value::String(contact);
+    }
     blob["pricing"] = config.pricing.listing();
     if let Some(origin) = announced_gateway(config) {
         blob["gateway"] = serde_json::Value::String(origin);
@@ -346,6 +349,54 @@ pub fn node_name() -> Option<String> {
 /// `~/.c0mpute/name`.
 pub fn node_name_path() -> Option<std::path::PathBuf> {
     c0mpute_home().map(|h| h.join("name"))
+}
+
+/// The email the operator offers for questions about this node, if any.
+///
+/// Optional and PUBLIC: it rides in the capability ad and is shown on
+/// c0mpute.com/nodes, so callers and the network's maintainers can reach
+/// whoever runs a node that misbehaves (2026-11-15: a node failing 3 in 4
+/// jobs had no way to be contacted). `C0MPUTE_CONTACT` wins; otherwise
+/// `~/.c0mpute/contact`, written by `c0mpute contact <email>` or
+/// `install.sh --contact <email>`. Nothing is sent to it automatically.
+pub fn node_contact() -> Option<String> {
+    let raw = std::env::var("C0MPUTE_CONTACT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| std::fs::read_to_string(node_contact_path()?).ok())?;
+    sanitize_contact(&raw)
+}
+
+/// Where `c0mpute contact` stores the email: `$C0MPUTE_HOME/contact`, else
+/// `~/.c0mpute/contact`.
+pub fn node_contact_path() -> Option<std::path::PathBuf> {
+    c0mpute_home().map(|h| h.join("contact"))
+}
+
+/// A plain email address (`local@domain.tld`), lowercased, up to 254
+/// characters, or nothing. No spaces, quotes, angle brackets or display
+/// names: it is printed into a public web page as a mailto link. Shared with
+/// the status aggregator, which re-checks every ad before it publishes one.
+pub fn sanitize_contact(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    if email.is_empty() || email.len() > 254 {
+        return None;
+    }
+    let (local, domain) = email.split_once('@')?;
+    let ok_chars = |s: &str, extra: &[char]| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+    };
+    let ok = local.len() <= 64
+        && ok_chars(local, &['.', '_', '%', '+', '-'])
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && ok_chars(domain, &['.', '-'])
+        && domain.contains('.')
+        && !domain.starts_with(['.', '-'])
+        && !domain.ends_with(['.', '-'])
+        && !domain.contains("..")
+        && !domain.contains('@');
+    ok.then_some(email)
 }
 
 fn c0mpute_home() -> Option<std::path::PathBuf> {
@@ -731,6 +782,16 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_emails_are_plain_addresses_or_nothing() {
+        assert_eq!(sanitize_contact("  Sergey@Example.COM \n"), Some("sergey@example.com".into()));
+        assert_eq!(sanitize_contact("ops+c0mpute@mail.example.co.uk"), Some("ops+c0mpute@mail.example.co.uk".into()));
+        for bad in ["", "nobody", "a@b", "@example.com", "a@.example.com", "a@example..com", "Name <a@b.com>",
+                    "a b@c.com", "a@b.com\"><script>", "javascript:alert(1)@x.com", "a@@b.com", ".a@b.com"] {
+            assert_eq!(sanitize_contact(bad), None, "{bad:?} must be refused");
+        }
+    }
 
     #[test]
     fn an_ad_dated_in_the_future_is_refused_or_filed_at_now() {

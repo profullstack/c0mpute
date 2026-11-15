@@ -131,6 +131,21 @@ enum Cmd {
         #[arg(long, conflicts_with = "handle")]
         clear: bool,
     },
+    /// Show or set the contact email for questions about this node.
+    ///
+    /// Optional and PUBLIC: it is shown next to your node on
+    /// c0mpute.com/nodes so callers and the network's maintainers can reach
+    /// you (say, when your node keeps failing jobs). `c0mpute contact` prints
+    /// it, `c0mpute contact <email>` sets it, `--clear` removes it. Stored in
+    /// `~/.c0mpute/contact` (`C0MPUTE_CONTACT` overrides it). A running worker
+    /// picks a change up on restart.
+    Contact {
+        /// The email to show, e.g. `ops@example.com`.
+        email: Option<String>,
+        /// Remove the contact email.
+        #[arg(long, conflicts_with = "email")]
+        clear: bool,
+    },
     /// Private mode: serve only your own machines, stay off the public list.
     ///
     /// A private node only bids on jobs whose signed publisher is one of the
@@ -1812,6 +1827,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
         Cmd::Name { handle, clear } => run_name(handle, clear),
+        Cmd::Contact { email, clear } => run_contact(email, clear),
         Cmd::Private { cmd } => run_private(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
@@ -2618,6 +2634,36 @@ fn run_name(handle: Option<String>, clear: bool) -> Result<()> {
             println!("shown on : https://c0mpute.com/nodes");
         }
         None => println!("name     : (none; set one with `c0mpute name <handle>`)"),
+    }
+    Ok(())
+}
+
+fn run_contact(email: Option<String>, clear: bool) -> Result<()> {
+    use c0mpute_core::capabilities::{node_contact, node_contact_path, sanitize_contact};
+    let path = node_contact_path().context("cannot find a home directory for ~/.c0mpute")?;
+    let apply = "(apply: c0mpute worker stop && c0mpute worker start -d)";
+    if clear {
+        match std::fs::remove_file(&path) {
+            Ok(()) => println!("removed {} {apply}", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no contact email was set"),
+            Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+        }
+    } else if let Some(raw) = email {
+        let email = sanitize_contact(&raw)
+            .with_context(|| format!("{raw:?} is not a plain email address (like ops@example.com)"))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, format!("{email}\n")).with_context(|| format!("write {}", path.display()))?;
+        println!("saved to {} {apply}", path.display());
+    }
+    match node_contact() {
+        Some(e) => {
+            let via = if std::env::var_os("C0MPUTE_CONTACT").is_some() { " (from C0MPUTE_CONTACT)" } else { "" };
+            println!("contact  : {e}{via}");
+            println!("shown on : https://c0mpute.com/nodes (public)");
+        }
+        None => println!("contact  : (none; add one with `c0mpute contact <email>` so people can reach you about this node)"),
     }
     Ok(())
 }
