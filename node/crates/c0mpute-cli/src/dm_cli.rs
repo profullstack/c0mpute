@@ -147,8 +147,10 @@ fn node_target(who: &str) -> Option<String> {
     if w.starts_with("12D3KooW") && w.len() >= 46 && alnum(w) {
         return Some(w[w.len() - 8..].to_string());
     }
-    let has_upper = w.chars().any(|c| c.is_ascii_uppercase());
-    (w.len() == 8 && alnum(w) && has_upper).then(|| w.to_string())
+    // Any 8 alphanumerics: c0mpute.com/nodes shows ids like `mgsu3m6q` as
+    // well as `fdxBAdC8`. Contact names were already tried before this, and
+    // no address (64 hex) or fingerprint (16 hex) has 8 characters.
+    (w.len() == 8 && alnum(w)).then(|| w.to_string())
 }
 
 /// A node's DM address from the public node list (c0mpute.com/api/nodes;
@@ -525,7 +527,7 @@ mod tests {
         assert_eq!(node_target(&"ab".repeat(32)), None, "a 64-char address is a person");
         assert_eq!(node_target("0123456789abcdef"), None, "a fingerprint is a person");
         assert_eq!(node_target("sergey"), None);
-        assert_eq!(node_target("deadbeef"), None, "8 lowercase chars stay a contact name");
+        assert_eq!(node_target("mgsu3m6q").as_deref(), Some("mgsu3m6q"), "all-lowercase node ids exist");
         assert_eq!(node_target("12D3KooWshort"), None);
     }
 }
