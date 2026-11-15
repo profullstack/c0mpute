@@ -84,6 +84,7 @@ from a provider that claimed the capabilities relied on.
 | [relay.md](relay.md) | NAT traversal: AutoNAT, circuit relay v2, DCUtR on every node |
 | [scallion-network.md](scallion-network.md) | **Scallion Network:** experimental three-hop route planner, sticky sessions, HQTerm integration boundaries and security backlog |
 | [scallion-exit-policy.md](scallion-exit-policy.md) | Opt-in exit admission guard: block private IPs, local DNS and DNS rebinding |
+| [scallion-clients.md](scallion-clients.md) | Independent native and OpenVPN Connect client modes, profile security requirements and rollout gates |
 
 ## Implementation
 
