@@ -17,6 +17,7 @@
 
 pub mod bootstrap;
 pub mod identity;
+pub mod scallion;
 pub mod swarm;
 pub mod topics;
 
