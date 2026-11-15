@@ -132,7 +132,7 @@ pub fn create_openvpn_profile(gateway: &OpenVpnGatewayProfile) -> Result<String>
         OpenVpnTransport::Tcp => "tcp-client",
     };
     Ok(format!(
-        "client\ndev tun\nproto {proto}\nremote {host} {port}\nresolv-retry infinite\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\nverify-x509-name {expected} name\ntls-version-min 1.2\nauth-user-pass\nauth-nocache\nverb 3\n<ca>\n{ca}\n</ca>\n",
+        "client\ndev tun\nproto {proto}\nremote {host} {port}\nresolv-retry infinite\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\nverify-x509-name {expected} name\ntls-version-min 1.2\nsetenv CLIENT_CERT 0\nauth-user-pass\nauth-nocache\nverb 3\n<ca>\n{ca}\n</ca>\n",
         port = gateway.port,
     ))
 }
@@ -245,6 +245,7 @@ mod tests {
         assert!(profile.contains("remote-cert-tls server"));
         assert!(profile.contains("verify-x509-name entry.example.org name"));
         assert!(profile.contains("auth-user-pass\n"));
+        assert!(profile.contains("setenv CLIENT_CERT 0\n"));
         assert!(profile.contains("<ca>\n-----BEGIN CERTIFICATE-----\n"));
         assert!(!profile.contains("redirect-gateway"));
         assert!(!profile.contains("script-security"));
