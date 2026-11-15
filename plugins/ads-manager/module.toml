@@ -38,7 +38,7 @@
 [module]
 id          = "ads-manager"
 name        = "Ads Manager — shared ad operations layer"
-version     = "0.3.77"
+version     = "0.3.78"
 kind        = "service"
 category    = "applications"
 status      = "partial"
