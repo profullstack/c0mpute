@@ -204,6 +204,9 @@ pub struct AuctionOutcome {
     /// Opens the result the worker sealed to us (the chunk the receipt's
     /// `output_hash` names is ciphertext). Never leaves this process.
     pub result_key: c0mpute_net::topics::JobKey,
+    /// Workers that won this auction earlier and failed the job or sent no
+    /// receipt in time (it was re-awarded past them). Callers bench them.
+    pub failed_workers: Vec<String>,
 }
 
 impl AuctionOutcome {
@@ -466,6 +469,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     // fresh on a new model won every chat and failed each after ~60 s).
     let awarded_at = Instant::now();
     let mut reawards = 0usize;
+    let mut failed_workers: Vec<String> = Vec::new();
     'receipts: loop {
     while Instant::now() < recv_deadline {
         let remaining = recv_deadline.saturating_duration_since(Instant::now());
@@ -549,6 +553,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                         next = %next.bidder_peer_id,
                         "buyer: worker failed the job; re-awarding to the next bidder"
                     );
+                    failed_workers.push(failed.bid.bidder_peer_id.clone());
                     match award(&net, &auction, &offer, &session, &topic, &job_id, &next).await {
                         Ok(a) => {
                             reawards += 1;
@@ -568,6 +573,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                                 receipt,
                                 external_ref: auction.external_ref.clone(),
                                 result_key: a.result_key,
+                                failed_workers: failed_workers.clone(),
                             });
                         }
                     }
@@ -586,6 +592,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                     receipt,
                     external_ref: auction.external_ref.clone(),
                     result_key: a.result_key,
+                    failed_workers: failed_workers.clone(),
                 });
             }
             Ok(Ok(_)) => continue,
@@ -608,6 +615,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             next = %next.bidder_peer_id,
             "buyer: no receipt in time; re-awarding to the next bidder"
         );
+        failed_workers.push(winner.bidder_peer_id.clone());
         match award(&net, &auction, &offer, &session, &topic, &job_id, &next).await {
             Ok(a) => {
                 reawards += 1;
@@ -851,6 +859,7 @@ pub async fn resume_auction(
         receipt,
         external_ref: job.external_ref.clone(),
         result_key: key,
+        failed_workers: Vec::new(),
     };
     // A receipt is only taken from the winner itself, for this job.
     let valid = |r: &JobReceipt| r.job_id == job.job_id && r.worker_peer_id == job.winner_peer;
