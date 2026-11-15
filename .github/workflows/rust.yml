@@ -75,12 +75,34 @@ jobs:
       - name: Install FUSE
         run: sudo apt-get update && sudo apt-get install -y fuse3
 
+      # Multi-node loopback E2Es (hosting replication, private objects, git
+      # over the network) time out now and then on a loaded runner: on
+      # 2026-11-15 a different one failed on nearly every PR and on master.
+      # Failed tests get ONE retry, by exact name; a real bug fails both runs
+      # and still fails the job. Everything runs with --no-fail-fast so all
+      # failures are collected first.
       - name: Test
         env:
           C0MPUTE_REQUIRE_FUSE: "1"
           # Keep loopback E2Es isolated when the runner is near real workers.
           C0MPUTE_DISABLE_MDNS: "1"
-        run: cargo test --workspace --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          if cargo test --workspace --locked --no-fail-fast 2>&1 | tee test.log; then
+            exit 0
+          fi
+          failed=$(grep -aoE '^test [^ ]+ \.\.\. FAILED' test.log | awk '{print $2}' | sort -u)
+          if [ -z "$failed" ]; then
+            echo "::error::cargo test failed without a failing test name (build or harness error)"
+            exit 1
+          fi
+          echo "::warning::retrying once: $(echo $failed | tr '\n' ' ')"
+          status=0
+          for t in $failed; do
+            cargo test --workspace --locked -- --exact "$t" || { echo "::error::$t failed twice"; status=1; }
+          done
+          exit $status
 
       # Blocking, unlike the lint job: this invariant has no legacy debt to
       # work through, and it is cheap to keep green from the start.
