@@ -1499,6 +1499,18 @@ enum ChatCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Read messages sent to this NODE (`c0mpute dm send <node-id>`): fetch
+    /// new ones, then show the most recent. No keygen or password: the key is
+    /// the node's own (`node-dm.secret`). Use sudo if the worker runs as a
+    /// system service.
+    Read {
+        /// Most recent N messages.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Machine-readable output (the TUI uses it).
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve a fingerprint or address to a full public key.
     Lookup { query: String },
     /// Contacts (stored locally, encrypted under your key). Lists by default.

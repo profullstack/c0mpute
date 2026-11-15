@@ -27,6 +27,8 @@ export interface NodeRow {
    * addresses. Absent when unset and on nodes older than 0.3.73.
    */
   contact?: string | null;
+  /** The node's secure-chat address: message whoever runs it with `c0mpute dm send <id>` (0.3.73+). */
+  dm?: string | null;
   /** The operator's listing; absent on nodes older than 0.2.35. */
   pricing?: Pricing | null;
   /**

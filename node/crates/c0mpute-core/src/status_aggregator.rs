@@ -504,6 +504,10 @@ struct NodeRow {
     /// any. Public by the operator's choice; re-validated to a plain address.
     #[serde(skip_serializing_if = "Option::is_none")]
     contact: Option<String>,
+    /// The node's secure-chat address (`c0mpute dm send <node>` resolves the
+    /// node id to it). Re-validated to the address format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dm: Option<String>,
     /// The operator's listing (`mode`, `min_usd`, `fixed_usd`), if the node
     /// advertises one. Re-validated here: only known fields, sane numbers.
     pricing: Option<serde_json::Value>,
@@ -773,6 +777,12 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .get("contact")
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::sanitize_contact),
+            dm: ad
+                .hardware
+                .get("dm")
+                .and_then(|v| v.as_str())
+                .filter(|a| a.len() <= 128)
+                .and_then(c0mpute_secure_chat::identity::normalize_query),
             pricing: listing(&ad.hardware),
             storage: storage_offer(&ad.hardware),
             gateway: ad

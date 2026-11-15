@@ -56,6 +56,7 @@ export function tabKeys(state: AppState): { key: string; label: string }[] {
       return [
         { key: "r", label: "re-check" },
         { key: "b", label: state.nodePanel === "bench" ? "roles" : "bench" },
+        { key: "m", label: state.nodePanel === "messages" ? "roles" : "messages" },
         { key: "↑↓", label: "scroll" },
       ];
     case "network":

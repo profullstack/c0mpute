@@ -268,6 +268,10 @@ pub fn hardware_blob(config: &Config) -> serde_json::Value {
     if let Some(contact) = node_contact() {
         blob["contact"] = serde_json::Value::String(contact);
     }
+    // Where to DM whoever runs this node (`c0mpute dm send <node>`).
+    if let Some(dm) = crate::dm::node_dm_address() {
+        blob["dm"] = serde_json::Value::String(dm);
+    }
     blob["pricing"] = config.pricing.listing();
     if let Some(origin) = announced_gateway(config) {
         blob["gateway"] = serde_json::Value::String(origin);

@@ -168,6 +168,16 @@ export function demoState(): AppState {
         { time: "11:59:40", level: "WARN", message: "c0mpute_core::diffusion: load gate: not bidding on diffusion.txt2img" },
       ],
       logSource: "journalctl -u c0mpute-worker",
+      messages: {
+        address: "4f1c9a2e7b3d5c8f0a6e2b4d9c1f7a3e5b8d0c2f4a6e8b1d3f5a7c9e2b4d6f8a",
+        total: 2,
+        fresh: 1,
+        messages: [
+          { id: "m1", from: "9a1b", name: "9a1b2c3d", text: "Hi! Your node is fast on qwen2.5:7b, thanks for running it.", created_at: Math.floor(NOW / 1000) - 7200, via: "mailbox" },
+          { id: "m2", from: "c0ff", name: "riotcoder", text: "Your node fails most inference jobs: the buyer cannot reach it. Is outbound TCP blocked?", created_at: Math.floor(NOW / 1000) - 300, via: "direct" },
+        ],
+        error: null,
+      },
     },
     net: {
       status: {

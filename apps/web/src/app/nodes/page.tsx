@@ -190,6 +190,11 @@ export default async function NodesPage() {
                           {n.contact}
                         </a>
                       )}
+                      {n.dm && (
+                        <span className="block font-mono text-[var(--color-dim)]" title="Message whoever runs this node (end-to-end encrypted)">
+                          c0mpute dm send {n.id} &quot;…&quot;
+                        </span>
+                      )}
                       {n.donates?.includes("crowdgpt") && (
                         <Link href="/plugins#crowdgpt" className="block text-[var(--color-dim)] !border-0" title="Donates idle compute to CrowdGPT when it has no paid work">
                           donates idle to CrowdGPT

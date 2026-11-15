@@ -862,6 +862,100 @@ pub fn write_home_record(dir: &Path, record: &HomeRecord) -> Result<()> {
     Ok(())
 }
 
+/// Every node's own secure-chat identity, so anyone can message whoever runs
+/// it (`c0mpute dm send <node>`) without the operator ever running `dm keygen`
+/// (2026-11-15: a node failing most of its jobs had no way to be reached).
+/// The seed is 32 random bytes in `<config_dir>/node-dm.secret` (mode 600,
+/// created on first use, like the job secret); the operator reads with
+/// `c0mpute dm read`. The worker registers itself as this key's home and
+/// publishes its key record, so messages land in its spool.
+pub const NODE_DM_SECRET: &str = "node-dm.secret";
+/// How long the node's home and key records stay valid; refreshed well before.
+pub const NODE_RECORD_SECS: u64 = 30 * 86_400;
+const NODE_REPUBLISH: Duration = Duration::from_secs(6 * 3600);
+
+static NODE_DM_ADDRESS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The node's DM key from `<config_dir>/node-dm.secret`, creating the secret
+/// the first time. `create: false` only reads (the CLI on a box with no worker).
+pub fn node_chat_key(config_dir: &Path, create: bool) -> Result<c0mpute_secure_chat::ChatKey> {
+    let path = config_dir.join(NODE_DM_SECRET);
+    let seed: [u8; 32] = match std::fs::read(&path) {
+        Ok(b) => b.as_slice().try_into().map_err(|_| anyhow!("{} must hold 32 bytes", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+            let mut b = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut b);
+            std::fs::create_dir_all(config_dir)?;
+            write_private(&path, &b)?;
+            b
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("this machine has no node DM identity yet ({} missing): start the worker once", path.display())
+        }
+        Err(e) => return Err(e).with_context(|| format!("read {} (try sudo if the worker runs as a system service)", path.display())),
+    };
+    Ok(c0mpute_secure_chat::ChatKey::from_seed(seed))
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        f.write_all(bytes)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+}
+
+/// This node's DM address once the worker has published it (for its
+/// capability ad: `hardware.dm`).
+pub fn node_dm_address() -> Option<String> {
+    NODE_DM_ADDRESS.get().cloned()
+}
+
+/// Make this node reachable by DM: home it on the running worker and publish
+/// its key record, now and every [`NODE_REPUBLISH`]. Runs in the background.
+pub fn serve_node_identity(dm: Dm, config_dir: PathBuf) {
+    tokio::spawn(async move {
+        let key = match node_chat_key(&config_dir, true) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(err = %e, "secure-chat: no node DM identity");
+                return;
+            }
+        };
+        let address = key.address();
+        let _ = NODE_DM_ADDRESS.set(address.clone());
+        info!(%address, "secure-chat: node DM identity (operators read with `c0mpute dm read`)");
+        loop {
+            let now = unix_now();
+            match HomeRecord::sign(&key, dm.peer_id(), now, NODE_RECORD_SECS) {
+                Ok(home) => {
+                    if let Err(e) = dm.add_local_home(&home).await {
+                        debug!(err = %e, "secure-chat: node home record not stored");
+                    }
+                }
+                Err(e) => debug!(err = %e, "secure-chat: node home record not signed"),
+            }
+            match KeyRecord::sign(&key, now, NODE_RECORD_SECS) {
+                Ok(rec) => {
+                    if let Err(e) = dm.publish_key(&rec).await {
+                        debug!(err = %e, "secure-chat: node key record not published yet");
+                    }
+                }
+                Err(e) => debug!(err = %e, "secure-chat: node key record not signed"),
+            }
+            tokio::time::sleep(NODE_REPUBLISH).await;
+        }
+    });
+}
+
 /// The worker's libp2p peer id on this machine (its identity lives in the
 /// config dir), if it has ever run.
 pub fn worker_peer_id(config_dir: &Path) -> Option<String> {
@@ -884,6 +978,22 @@ pub async fn boot_client(identity_dir: &Path) -> Result<Arc<Libp2pNetwork>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_dm_identity_is_created_once_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("c0dm-node-{}-{}", std::process::id(), unix_now()));
+        assert!(node_chat_key(&dir, false).is_err(), "reading never creates the secret");
+        let made = node_chat_key(&dir, true).unwrap();
+        let again = node_chat_key(&dir, false).unwrap();
+        assert_eq!(made.address(), again.address(), "same secret, same identity");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(NODE_DM_SECRET)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn wire_formats_are_tagged() {

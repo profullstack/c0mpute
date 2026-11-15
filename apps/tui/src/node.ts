@@ -313,6 +313,50 @@ export interface NodeSnapshot {
   jobTimes: JobTime[];
   logs: LogLine[];
   logSource: string;
+  /** Messages people sent to this node (`c0mpute dm read --json`). */
+  messages: NodeMessages | null;
+}
+
+/** One message sent to this node. */
+export interface NodeMessage {
+  id: string;
+  from: string;
+  name: string;
+  text: string;
+  created_at: number;
+  via: string;
+}
+
+/** `c0mpute dm read --json`: messages people sent to this node with `c0mpute dm send <node>`. */
+export interface NodeMessages {
+  address: string | null;
+  total: number;
+  fresh: number;
+  messages: NodeMessage[];
+  error: string | null;
+}
+
+export function parseMessagesJson(text: string): NodeMessages | null {
+  try {
+    const v = JSON.parse(text.trim().split("\n").filter((l) => l.startsWith("{")).pop() ?? "") as {
+      address?: string; total?: number; new?: number; messages?: NodeMessage[];
+    };
+    if (!v || !Array.isArray(v.messages)) return null;
+    return { address: v.address ?? null, total: v.total ?? v.messages.length, fresh: v.new ?? 0, messages: v.messages, error: null };
+  } catch {
+    return null;
+  }
+}
+
+export async function probeMessages(bin: string): Promise<NodeMessages> {
+  const r = await run(bin, ["dm", "read", "--json", "--limit", "30"], 60_000);
+  const parsed = r.code === 0 ? parseMessagesJson(r.stdout) : null;
+  if (parsed) return parsed;
+  const last = (r.stderr || r.stdout || "").trim().split("\n").slice(-1)[0] ?? "";
+  const error = /unrecognized subcommand|unexpected argument/.test(r.stderr)
+    ? "this c0mpute is older than 0.3.73: c0mpute update adds node messages"
+    : last || "c0mpute dm read failed";
+  return { address: null, total: 0, fresh: 0, messages: [], error };
 }
 
 export function emptyNode(cliPath = "c0mpute"): NodeSnapshot {
@@ -329,6 +373,7 @@ export function emptyNode(cliPath = "c0mpute"): NodeSnapshot {
     jobTimes: [],
     logs: [],
     logSource: "",
+    messages: null,
   };
 }
 
