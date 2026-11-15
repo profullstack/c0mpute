@@ -81,7 +81,7 @@ export interface AppState {
   jobSel: number;
   node: NodeSnapshot;
   bench: BenchState;
-  nodePanel: "roles" | "bench";
+  nodePanel: "roles" | "bench" | "messages";
   nodeScroll: number;
   net: { status: Loadable<StatusPayload>; nodes: Loadable<NodesPayload>; pricing: Loadable<PricingPayload> };
   netPanel: "nodes" | "prices";

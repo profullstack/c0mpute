@@ -730,6 +730,13 @@ impl Supervisor {
         )
         .await
         {
+            // Every node is reachable by DM at its own address (`c0mpute dm
+            // send <node>`), read by its operator with `c0mpute dm read`.
+            Ok(dm) if !self.config.private.enabled => {
+                if let Some(dir) = crate::config::config_dir() {
+                    crate::dm::serve_node_identity(dm, dir);
+                }
+            }
             Ok(_) => {}
             Err(e) => tracing::warn!(err = %e, "secure-chat: not started"),
         }

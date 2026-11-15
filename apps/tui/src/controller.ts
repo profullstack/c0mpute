@@ -18,7 +18,7 @@ import {
   jobTimesDir,
   probeLatest,
   probeLogs,
-  probeStatus,
+  probeMessages, probeStatus,
   probeVersion,
   probeWorker,
   readJobTimes,
@@ -89,6 +89,7 @@ export class Controller {
       void this.refreshLogs();
       void this.refreshVersion();
       void this.refreshNetwork();
+      void this.refreshMessages();
     }, 0);
     const every = (ms: number, fn: () => void) => {
       const t = setInterval(fn, ms);
@@ -104,6 +105,7 @@ export class Controller {
     every(3000, () => this.refreshWorker());
     every(6000, () => this.state.tab === "node" && void this.refreshLogs());
     every(30_000, () => void this.refreshStatus());
+    every(5 * 60_000, () => void this.refreshMessages());
     every(30_000, () => (this.state.tab === "network" ? void this.refreshNetwork() : undefined));
     every(120_000, () => (this.state.tab !== "network" ? void this.refreshNetwork() : undefined));
     every(60_000, () => void this.refreshAccount());
@@ -182,6 +184,16 @@ export class Controller {
       const bin = c0mputeBin();
       const r = await probeStatus(bin);
       this.set({ node: { ...this.state.node, cliPath: bin, status: r.status ?? this.state.node.status, statusText: r.text, statusError: r.error, statusAt: this.now() } });
+    });
+  }
+
+  /** Messages people sent to this node (`c0mpute dm read --json`). */
+  refreshMessages(): Promise<void> {
+    return this.once("messages", async () => {
+      const messages = await probeMessages(c0mputeBin());
+      const before = this.state.node.messages?.total ?? 0;
+      this.set({ node: { ...this.state.node, messages } });
+      if (messages.total > before && before > 0) this.toast(`${messages.total - before} new message(s) for this node: m shows them`);
     });
   }
 
@@ -781,6 +793,11 @@ export class Controller {
 
   toggleBench(): void {
     this.set({ nodePanel: this.state.nodePanel === "bench" ? "roles" : "bench" });
+  }
+
+  toggleMessages(): void {
+    this.set({ nodePanel: this.state.nodePanel === "messages" ? "roles" : "messages" });
+    if (this.state.nodePanel === "messages") void this.refreshMessages();
   }
 
   scrollNode(delta: number): void {

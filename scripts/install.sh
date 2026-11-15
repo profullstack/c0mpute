@@ -24,6 +24,9 @@
 #   --force         Reinstall over existing
 #   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF)
 #   --name <handle> Your node's nickname on c0mpute.com/nodes (same as C0MPUTE_NAME)
+#   --contact <email> Optional public email for questions about your node, shown
+#                   on c0mpute.com/nodes (same as C0MPUTE_CONTACT). Asked for
+#                   when run from a terminal; later `c0mpute contact <email>`.
 #   --no-house-models       Don't pull Infernet house models (same as
 #                           INFERNET_NO_HOUSE_MODELS=1). They are ON by default:
 #                           the node pulls and serves the models listed at
@@ -112,6 +115,8 @@ while [ $# -gt 0 ]; do
     --ref=*)        C0MPUTE_REF="${1#--ref=}" ;;
     --name)         shift; C0MPUTE_NAME="${1:-}" ;;
     --name=*)       C0MPUTE_NAME="${1#--name=}" ;;
+    --contact)      shift; C0MPUTE_CONTACT="${1:-}" ;;
+    --contact=*)    C0MPUTE_CONTACT="${1#--contact=}" ;;
     --no-house-models)      INFERNET_NO_HOUSE_MODELS=1 ;;
     --uncensored-models)    INFERNET_UNCENSORED_MODELS=1 ;;
     --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
@@ -1258,6 +1263,32 @@ save_handle() { # <value> <file> <label>
 save_ref() {
   save_handle "${C0MPUTE_REF:-}" ref "referral code"
   save_handle "${C0MPUTE_NAME:-}" name "node name"
+  save_contact
+}
+
+# Optional, PUBLIC contact email for questions about this node (shown on
+# c0mpute.com/nodes). From --contact / C0MPUTE_CONTACT; otherwise asked once
+# when a person is at a terminal (`curl ... | sh` still reads /dev/tty) and no
+# contact is saved yet. Enter skips it. Never asked in CI or with --no-exec.
+save_contact() {
+  email="${C0MPUTE_CONTACT:-}"
+  if [ -z "$email" ] && [ ! -s "$C0MPUTE_HOME/contact" ] && [ -z "${CI:-}" ] \
+     && [ "${NO_EXEC:-0}" != 1 ] && [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '%s' "Contact email for questions about your node (optional, public on c0mpute.com/nodes; Enter to skip): " > /dev/tty
+    IFS= read -r email < /dev/tty || email=""
+  fi
+  # Trim the ends only: a space inside is a typo to refuse, not to close up.
+  email=$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$email" ] || return 0
+  case "$email" in
+    *@*.*) ;;
+    *) warn "ignoring contact '$email' (not an email address)"; return 0 ;;
+  esac
+  case "$email" in
+    *[!a-z0-9@._%+-]*|*@*@*|@*|*@.*|*.) warn "ignoring contact '$email' (use a plain address like ops@example.com)"; return 0 ;;
+  esac
+  mkdir -p "$C0MPUTE_HOME" && printf '%s\n' "$email" > "$C0MPUTE_HOME/contact" \
+    && ok "contact '$email' saved (public on https://c0mpute.com/nodes; change with \`c0mpute contact\`)"
 }
 
 # ────────────────────────────────────────────────────────────────────────

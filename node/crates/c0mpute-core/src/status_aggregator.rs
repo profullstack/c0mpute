@@ -500,6 +500,14 @@ struct NodeRow {
     referral: Option<String>,
     /// The operator's nickname (`c0mpute name`), if the node sets one.
     name: Option<String>,
+    /// The email its operator offers for questions (`c0mpute contact`), if
+    /// any. Public by the operator's choice; re-validated to a plain address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contact: Option<String>,
+    /// The node's secure-chat address (`c0mpute dm send <node>` resolves the
+    /// node id to it). Re-validated to the address format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dm: Option<String>,
     /// The operator's listing (`mode`, `min_usd`, `fixed_usd`), if the node
     /// advertises one. Re-validated here: only known fields, sane numbers.
     pricing: Option<serde_json::Value>,
@@ -764,6 +772,17 @@ fn build_nodes(ads: &[(String, c0mpute_net::topics::CapabilityAd)], now: u64) ->
                 .get("name")
                 .and_then(|v| v.as_str())
                 .and_then(crate::capabilities::sanitize_ref),
+            contact: ad
+                .hardware
+                .get("contact")
+                .and_then(|v| v.as_str())
+                .and_then(crate::capabilities::sanitize_contact),
+            dm: ad
+                .hardware
+                .get("dm")
+                .and_then(|v| v.as_str())
+                .filter(|a| a.len() <= 128)
+                .and_then(c0mpute_secure_chat::identity::normalize_query),
             pricing: listing(&ad.hardware),
             storage: storage_offer(&ad.hardware),
             gateway: ad
@@ -1055,6 +1074,7 @@ mod tests {
                         "version": "0.2.32",
                         "ref": "chovy",
                         "name": "profullstack",
+                        "contact": "Ops@Example.com",
                         "gateway": "http://203.0.113.7:7777/",
                         "cpu": "Example CPU",
                         "bench_at": "2026-11-01T12:00:00Z",
@@ -1070,7 +1090,7 @@ mod tests {
                 mk(
                     &["c0mpute:cpu"],
                     Some(100),
-                    serde_json::json!({"ref": "<bad>", "name": "has space", "gateway": "javascript:alert(1)"}),
+                    serde_json::json!({"ref": "<bad>", "name": "has space", "gateway": "javascript:alert(1)", "contact": "x@y.com\"><script>"}),
                 ),
             ),
         ];
@@ -1089,6 +1109,8 @@ mod tests {
         assert_eq!(p.nodes[2].bench_score, None);
         assert_eq!(p.nodes[1].referral, None, "invalid ref dropped");
         assert_eq!(p.nodes[1].name, None, "invalid name dropped");
+        assert_eq!(p.nodes[0].contact.as_deref(), Some("ops@example.com"), "a plain contact email passes, lowercased");
+        assert_eq!(p.nodes[1].contact, None, "a contact that is not a plain email is dropped");
         assert_eq!(p.nodes[0].name.as_deref(), Some("profullstack"));
         assert_eq!(
             p.nodes[0].gateway.as_deref(),

@@ -21,6 +21,14 @@ export interface NodeRow {
   ref: string | null;
   /** The operator's nickname (`c0mpute name`); absent on nodes older than 0.2.64. */
   name?: string | null;
+  /**
+   * The email the operator offers for questions about this node (`c0mpute
+   * contact`), public by their choice; the aggregator passes only plain
+   * addresses. Absent when unset and on nodes older than 0.3.74.
+   */
+  contact?: string | null;
+  /** The node's secure-chat address: message whoever runs it with `c0mpute dm send <id>` (0.3.74+). */
+  dm?: string | null;
   /** The operator's listing; absent on nodes older than 0.2.35. */
   pricing?: Pricing | null;
   /**

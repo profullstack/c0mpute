@@ -185,6 +185,16 @@ export default async function NodesPage() {
                     <td className="py-2 pr-3">
                       {n.name ? <span className="accent font-bold">{n.name}</span> : <span className="text-[var(--color-dim)]">unnamed</span>}
                       <span className="block font-mono text-[var(--color-dim)]">{n.id}</span>
+                      {n.contact && /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z0-9-]+$/.test(n.contact) && (
+                        <a href={`mailto:${n.contact}`} className="block text-[var(--color-dim)] !border-0" title="The operator's contact for questions about this node">
+                          {n.contact}
+                        </a>
+                      )}
+                      {n.dm && (
+                        <span className="block font-mono text-[var(--color-dim)]" title="Message whoever runs this node (end-to-end encrypted)">
+                          c0mpute dm send {n.id} &quot;…&quot;
+                        </span>
+                      )}
                       {n.donates?.includes("crowdgpt") && (
                         <Link href="/plugins#crowdgpt" className="block text-[var(--color-dim)] !border-0" title="Donates idle compute to CrowdGPT when it has no paid work">
                           donates idle to CrowdGPT
@@ -279,6 +289,13 @@ $ c0mpute name                    # check what is set`}</CodeBlock>
           who gets paid: earnings go to the payout address set on the node
           (<code>infernet payout set</code>), never to a name. Needs c0mpute 0.2.64 or newer (<code>c0mpute update</code>).
         </p>
+        <p className="text-sm leading-7" id="contact">
+          Add a contact email too, so people who use your node (and the
+          network&apos;s maintainers, if it starts failing jobs) can reach you.
+          It is optional and shown publicly under your node&apos;s name:
+        </p>
+        <CodeBlock>{`$ c0mpute contact ops@example.com   # set it, then restart the worker
+$ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --contact ops@example.com`}</CodeBlock>
         {p.operators.length > 0 && (
           <table id="operators" className="w-full text-left border-collapse text-xs">
             <thead className="text-[var(--color-dim)]">

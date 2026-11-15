@@ -44,6 +44,28 @@ struct Session {
 }
 
 impl Session {
+    /// This node's own DM session (`c0mpute dm read`): the node's key from
+    /// `node-dm.secret`, no password, and a state file of its own.
+    fn node() -> Result<Self> {
+        let dir = config::config_dir().context("cannot find the c0mpute config directory")?;
+        let key = dm::node_chat_key(&dir, false)?;
+        let state_path = config::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("dm")
+            .join("node-state.enc");
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let state = LocalState::load(&state_path, &key)?;
+        let cfg = Config::load_or_default(&config::default_config_path())?;
+        Ok(Self {
+            key,
+            state,
+            state_path,
+            cfg,
+        })
+    }
+
     fn open() -> Result<Self> {
         let path = chat::key_file_path()?;
         let kf = chat::load_keyfile(&path).with_context(|| "no chat key yet: run `c0mpute dm keygen`".to_string())?;
@@ -82,6 +104,21 @@ impl Session {
         if let Some(id) = self.state.resolve(who) {
             return Ok(id);
         }
+        // A node (its peer id, or the 8-character id c0mpute.com/nodes shows):
+        // DM whoever runs it, at the node's own address.
+        if let Some(node) = node_target(who) {
+            let Some(net) = net else {
+                bail!("node {node}: messaging a node needs the network");
+            };
+            let address = node_dm_address(&node).await?;
+            return match net.lookup(&address).await {
+                Some(id) => {
+                    self.state.remember(&id);
+                    Ok(id)
+                }
+                None => bail!("node {node} has a DM address but its key is not on the network yet: try again in a minute"),
+            };
+        }
         let Some(net) = net else {
             bail!("unknown recipient {who}: use an address, fingerprint, contact name, or c0dm1. identity");
         };
@@ -98,6 +135,45 @@ impl Session {
             ),
         }
     }
+}
+
+/// `who` as a node: a full libp2p peer id (12D3KooW...), or the 8-character
+/// node id c0mpute.com/nodes shows (its last 8 characters). Returns the
+/// 8-character id. Contact names, addresses and fingerprints are never these
+/// (addresses and fingerprints are lowercase hex of 64 and 16 characters).
+fn node_target(who: &str) -> Option<String> {
+    let w = who.trim();
+    let alnum = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric());
+    if w.starts_with("12D3KooW") && w.len() >= 46 && alnum(w) {
+        return Some(w[w.len() - 8..].to_string());
+    }
+    let has_upper = w.chars().any(|c| c.is_ascii_uppercase());
+    (w.len() == 8 && alnum(w) && has_upper).then(|| w.to_string())
+}
+
+/// A node's DM address from the public node list (c0mpute.com/api/nodes;
+/// `C0MPUTE_NODES_URL` overrides it).
+async fn node_dm_address(node: &str) -> Result<String> {
+    let url = std::env::var("C0MPUTE_NODES_URL").unwrap_or_else(|_| "https://c0mpute.com/api/nodes".into());
+    let body: serde_json::Value = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("fetch {url}"))?
+        .error_for_status()?
+        .json()
+        .await?;
+    let found = body["nodes"].as_array().into_iter().flatten().find(|n| n["id"].as_str() == Some(node));
+    let Some(n) = found else {
+        bail!("no node {node} on {url} right now (is it online?)");
+    };
+    if let Some(addr) = n["dm"].as_str() {
+        return Ok(addr.to_string());
+    }
+    let contact = n["contact"].as_str().map(|c| format!(" Its operator lists a contact: {c}")).unwrap_or_default();
+    bail!("node {node} cannot receive DMs yet: it runs c0mpute older than 0.3.74.{contact}")
 }
 
 /// Boot the client node and wait briefly for mailboxes.
@@ -163,48 +239,7 @@ pub async fn run_chat(cmd: ChatCmd) -> Result<()> {
         }
         ChatCmd::Pull => {
             let mut s = Session::open()?;
-            s.register_home();
-            let now = unix_now();
-            let me = s.key.address();
-            let mut new = 0usize;
-            let mut dropped = 0usize;
-            let mut bad = 0usize;
-            // 1. Direct deliveries on this machine's node.
-            let spool_dir = s.paths().spool;
-            if spool_dir.exists() {
-                let mut spool = Mailbox::open(&spool_dir, Limits::default(), now);
-                for tag in pull_tags(&me, now) {
-                    for (id, bytes) in spool.fetch(&tag, now) {
-                        let res = chat::SealedMessage::parse(&bytes)
-                            .and_then(|m| s.state.receive(&s.key, &m, "direct", now));
-                        match res {
-                            Ok(r) => {
-                                tally(&r, &mut new, &mut dropped);
-                                spool.ack(&tag, &id, r.ack());
-                            }
-                            Err(e) => {
-                                bad += 1;
-                                eprintln!("skipped a direct message: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-            // 2. Mailboxes.
-            let net = connect(&s).await?;
-            for f in net.fetch(&me).await {
-                match s.state.receive(&s.key, &f.msg, "mailbox", unix_now()) {
-                    Ok(r) => {
-                        tally(&r, &mut new, &mut dropped);
-                        net.ack(&f, r.ack()).await;
-                    }
-                    Err(e) => {
-                        bad += 1;
-                        eprintln!("skipped a mailbox message: {e}");
-                    }
-                }
-            }
-            s.save()?;
+            let (new, dropped, bad) = pull_all(&mut s).await?;
             println!(
                 "{new} new message(s){}{}",
                 if dropped > 0 { format!(", {dropped} from blocked senders dropped") } else { String::new() },
@@ -212,6 +247,42 @@ pub async fn run_chat(cmd: ChatCmd) -> Result<()> {
             );
             if new > 0 {
                 print_inbox(&s.state, new);
+            }
+            Ok(())
+        }
+        ChatCmd::Read { limit, json } => {
+            let mut s = Session::node()?;
+            let (new, dropped, bad) = pull_all(&mut s).await?;
+            let start = s.state.inbox.len().saturating_sub(limit);
+            if json {
+                let messages: Vec<serde_json::Value> = s.state.inbox[start..]
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id, "from": m.from, "name": s.state.name_of(&m.from), "text": m.text,
+                            "created_at": m.created_at, "received_at": m.received_at, "via": m.via,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "address": s.key.address(), "new": new, "dropped": dropped, "rejected": bad,
+                        "total": s.state.inbox.len(), "messages": messages,
+                    })
+                );
+            } else {
+                println!("node address: {}", s.key.address());
+                println!(
+                    "{new} new message(s){}{}",
+                    if dropped > 0 { format!(", {dropped} from blocked senders dropped") } else { String::new() },
+                    if bad > 0 { format!(", {bad} rejected") } else { String::new() }
+                );
+                if s.state.inbox.is_empty() {
+                    println!("no messages yet. People reach this node with `c0mpute dm send <node-id> \"...\"`");
+                } else {
+                    print_inbox(&s.state, limit);
+                }
             }
             Ok(())
         }
@@ -311,6 +382,54 @@ fn tally(r: &Received, new: &mut usize, dropped: &mut usize) {
     }
 }
 
+/// Fetch new messages for `s`'s key: direct deliveries in this machine's node
+/// spool, then the mailboxes. Saves the state. (new, dropped, rejected).
+async fn pull_all(s: &mut Session) -> Result<(usize, usize, usize)> {
+    s.register_home();
+    let now = unix_now();
+    let me = s.key.address();
+    let mut new = 0usize;
+    let mut dropped = 0usize;
+    let mut bad = 0usize;
+    // 1. Direct deliveries on this machine's node.
+    let spool_dir = s.paths().spool;
+    if spool_dir.exists() {
+        let mut spool = Mailbox::open(&spool_dir, Limits::default(), now);
+        for tag in pull_tags(&me, now) {
+            for (id, bytes) in spool.fetch(&tag, now) {
+                let res = chat::SealedMessage::parse(&bytes)
+                    .and_then(|m| s.state.receive(&s.key, &m, "direct", now));
+                match res {
+                    Ok(r) => {
+                        tally(&r, &mut new, &mut dropped);
+                        spool.ack(&tag, &id, r.ack());
+                    }
+                    Err(e) => {
+                        bad += 1;
+                        eprintln!("skipped a direct message: {e}");
+                    }
+                }
+            }
+        }
+    }
+    // 2. Mailboxes.
+    let net = connect(&s).await?;
+    for f in net.fetch(&me).await {
+        match s.state.receive(&s.key, &f.msg, "mailbox", unix_now()) {
+            Ok(r) => {
+                tally(&r, &mut new, &mut dropped);
+                net.ack(&f, r.ack()).await;
+            }
+            Err(e) => {
+                bad += 1;
+                eprintln!("skipped a mailbox message: {e}");
+            }
+        }
+    }
+    s.save()?;
+    Ok((new, dropped, bad))
+}
+
 fn print_inbox(state: &LocalState, limit: usize) {
     let start = state.inbox.len().saturating_sub(limit);
     for m in &state.inbox[start..] {
@@ -389,5 +508,24 @@ fn key_cmd(cmd: KeyCmd) -> Result<()> {
             println!("  3. c0mpute dm keygen");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_ids_are_told_apart_from_people() {
+        // A full libp2p peer id names the node by its last 8 characters.
+        assert_eq!(node_target("12D3KooWCMnyGXtT1DvWyVDSZwEqYL45V2UnanXiLpHbmgsu3m6q").as_deref(), Some("mgsu3m6q"));
+        // The 8-character id c0mpute.com/nodes shows (mixed case).
+        assert_eq!(node_target("fdxBAdC8").as_deref(), Some("fdxBAdC8"));
+        // Addresses and fingerprints are lowercase hex; contact names are anything else.
+        assert_eq!(node_target(&"ab".repeat(32)), None, "a 64-char address is a person");
+        assert_eq!(node_target("0123456789abcdef"), None, "a fingerprint is a person");
+        assert_eq!(node_target("sergey"), None);
+        assert_eq!(node_target("deadbeef"), None, "8 lowercase chars stay a contact name");
+        assert_eq!(node_target("12D3KooWshort"), None);
     }
 }

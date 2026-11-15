@@ -68,8 +68,10 @@ export function handleKey(ctl: Controller, e: KeyEvent): "quit" | void {
         void ctl.refreshStatus();
         void ctl.refreshLogs();
         void ctl.refreshVersion();
+        void ctl.refreshMessages();
         ctl.toast("re-checking the node (c0mpute status --json)…");
       } else if (is(e, "b")) ctl.toggleBench();
+      else if (is(e, "m")) ctl.toggleMessages();
       else if (is(e, "up", "k")) ctl.scrollNode(-1);
       else if (is(e, "down", "j")) ctl.scrollNode(1);
       else if (is(e, "pageup")) ctl.scrollNode(-10);

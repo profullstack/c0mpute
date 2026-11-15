@@ -71,6 +71,16 @@ export function summaryRows(node: NodeSnapshot, state: AppState, theme: Theme): 
     rows.push({ label: "earned", value: `$${Number(me.balance.earned_spendable_usd).toFixed(4)} spendable from your nodes · balance $${Number(me.balance.spendable_usd).toFixed(2)}`, color: theme.accent });
   }
   const b = state.bench.bench;
+  const msgs = node.messages;
+  rows.push(
+    !msgs
+      ? { label: "messages", value: "checking…", color: theme.muted }
+      : msgs.error
+        ? { label: "messages", value: msgs.error, color: theme.muted }
+        : msgs.total === 0
+          ? { label: "messages", value: "none yet · people reach you with c0mpute dm send <node-id>", color: theme.muted }
+          : { label: "messages", value: `${msgs.total}${msgs.fresh ? ` (${msgs.fresh} new)` : ""} · latest from ${msgs.messages[msgs.messages.length - 1]?.name ?? "?"} · m shows them`, color: theme.accent },
+  );
   rows.push({ label: "bench", value: b ? `score ${b.score.toLocaleString("en-US")}${b.metadata.quick ? " (quick run, not advertised)" : ""} · b shows it` : "no score: c0mpute bench", color: b ? theme.accent : theme.muted });
   return rows;
 }
@@ -110,6 +120,38 @@ export function roleLines(node: NodeSnapshot, width: number, theme: Theme): Line
   for (const l of wrapBlock(`advertised: ${tags}`, width, "")) out.push({ text: l, fg: theme.muted });
   if (node.statusAt) out.push({ text: `checked ${clock(new Date(node.statusAt))} · r re-checks`, fg: theme.muted, dim: true });
   return out;
+}
+
+/** Messages people sent to this node, newest last (`c0mpute dm read`). */
+export function messageLines(node: NodeSnapshot, width: number, theme: Theme, now: number): Line[] {
+  const m = node.messages;
+  if (!m) return [{ text: "asking c0mpute dm read…", fg: theme.muted }];
+  if (m.error) return wrapBlock(m.error, width, "").map((t) => ({ text: t, fg: theme.warning }));
+  const out: Line[] = [];
+  if (m.address) out.push({ text: `this node's DM address ${m.address.slice(0, 16)}…`, fg: theme.muted });
+  if (!m.messages.length) {
+    out.push({ text: "" });
+    for (const t of wrapBlock("No messages yet. Anyone can message whoever runs this node with `c0mpute dm send <node-id> \"...\"`; a contact email (`c0mpute contact <email>`) shows on c0mpute.com/nodes too.", width, ""))
+      out.push({ text: t, fg: theme.muted });
+    return out;
+  }
+  for (const msg of m.messages) {
+    out.push({ text: "" });
+    const age = Math.max(0, Math.floor(now / 1000) - msg.created_at);
+    out.push({ text: `${msg.name} · ${duration(age)} ago · ${msg.via}`, fg: theme.accent, bold: true });
+    for (const t of wrapBlock(msg.text, width, "  ")) out.push({ text: t, fg: theme.foreground });
+  }
+  out.push({ text: "" });
+  out.push({ text: "reply: c0mpute dm send <their address> \"...\" · r refreshes · m goes back", fg: theme.muted });
+  return out;
+}
+
+function messagesPanel(parent: Container, state: AppState, theme: Theme): void {
+  panel(parent, theme, "Messages", { subtitle: "m: back · r: refresh" }, (p) => {
+    p.draw((surface) => {
+      drawLines(surface, messageLines(state.node, surface.width - 1, theme, state.now), state.nodeScroll, theme, true);
+    });
+  });
 }
 
 function benchPanel(parent: Container, state: AppState, theme: Theme): void {
@@ -182,7 +224,8 @@ export function renderNode(ui: Container, state: AppState, theme: Theme, h: Node
     });
   const roles = (parent: Container) => {
     if (state.nodePanel === "bench") return benchPanel(parent, state, theme);
-    panel(parent, theme, "Roles", { subtitle: "b: bench" }, (p) => {
+    if (state.nodePanel === "messages") return messagesPanel(parent, state, theme);
+    panel(parent, theme, "Roles", { subtitle: "b: bench · m: messages" }, (p) => {
       p.draw((surface) => {
         drawLines(surface, roleLines(node, surface.width - 1, theme), state.nodeScroll, theme, false);
         p.ctx.hit({ rect: surface.hitRect(), onScroll: (d) => h.onScrollRoles?.(d * 2) });
