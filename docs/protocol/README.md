@@ -83,6 +83,7 @@ from a provider that claimed the capabilities relied on.
 | [scheduling.md](scheduling.md) | eligibility, offer selection, and reputation scoring |
 | [relay.md](relay.md) | NAT traversal: AutoNAT, circuit relay v2, DCUtR on every node |
 | [scallion-network.md](scallion-network.md) | **Scallion Network:** experimental three-hop route planner, sticky sessions, HQTerm integration boundaries and security backlog |
+| [scallion-exit-policy.md](scallion-exit-policy.md) | Opt-in exit admission guard: block private IPs, local DNS and DNS rebinding |
 
 ## Implementation
 
