@@ -19,7 +19,7 @@
 [module]
 id          = "threatcrush"
 name        = "ThreatCrush — protect this node"
-version     = "0.3.74"
+version     = "0.3.75"
 kind        = "service"
 category    = "infrastructure"
 status      = "available"

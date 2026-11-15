@@ -590,6 +590,13 @@ pub fn with_instance(mut hardware: serde_json::Value, instance: &str) -> serde_j
                 obj.remove("twin");
             }
         }
+        // The node's DM address appears a moment after boot (the worker
+        // creates it once secure chat is up), after the hardware blob was
+        // built, so it is added on every tick. Before this 0.3.74 nodes never
+        // advertised it and `c0mpute dm send <node>` could not find them.
+        if let Some(dm) = crate::dm::node_dm_address() {
+            obj.insert("dm".into(), serde_json::Value::String(dm));
+        }
     }
     hardware
 }
