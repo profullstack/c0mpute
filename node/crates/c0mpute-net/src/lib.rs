@@ -19,6 +19,7 @@ pub mod bootstrap;
 pub mod identity;
 pub mod scallion;
 pub mod scallion_exit;
+pub mod scallion_clients;
 pub mod swarm;
 pub mod topics;
 
