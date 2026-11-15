@@ -34,7 +34,7 @@ pub enum ScallionCmd {
     /// Diagnose a single client mode without starting a tunnel.
     Doctor {
         /// Select native Scallion or OpenVPN compatibility.
-        #[arg(long, value_enum, default_value_t = ModeArg::Native)]
+        #[arg(long, value_enum, default_value = "native")]
         mode: ModeArg,
         /// Print machine-readable status.
         #[arg(long)]
