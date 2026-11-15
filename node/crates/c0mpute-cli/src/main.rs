@@ -39,6 +39,7 @@ mod promo;
 mod site_owner;
 mod storage;
 mod swarm_cli;
+mod scallion_cli;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod mount;
 mod node_status;
@@ -89,6 +90,14 @@ enum Cmd {
         /// the restart-loop guard to units that lack it.
         #[arg(long)]
         fix: bool,
+    },
+    /// Scallion native / OpenVPN client compatibility diagnostics.
+    ///
+    /// Neither mode starts an unreviewed tunnel or silently falls back to
+    /// an unprotected Internet connection.
+    Scallion {
+        #[command(subcommand)]
+        cmd: scallion_cli::ScallionCmd,
     },
     /// Benchmark this machine (fib / matmul / hash at 1…N threads) and record
     /// a score the worker advertises to the network. Report lands in
@@ -1848,6 +1857,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Pool { node: Some(id), .. } => run_pool_node(&id),
         Cmd::Pool { model, node: None } => run_pool(model),
         Cmd::Doctor { fix } => run_doctor(fix).await,
+        Cmd::Scallion { cmd } => scallion_cli::run(cmd),
         Cmd::Bench {
             cmd,
             quick,
