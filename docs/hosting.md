@@ -13,10 +13,32 @@ c0mpute hosting get <site_id> movies/a.mp4                 # download one file, 
 c0mpute hosting rm --name my-site                          # take it down (publishes an empty version)
 ```
 
-`publish` signs the site with this machine's identity (`<data_dir>/buyer/identity.key`),
-seeds it, and stays up until three hosting nodes hold copies (default wait 10 min; for a
-large site, 10 min without progress). Only the machine holding that key can publish new
-versions of the site.
+`publish` signs the site with your **account key**, seeds it, and stays up until three
+hosting nodes hold copies (default wait 10 min; for a large site, 10 min without
+progress). The account key is derived on your machine from your c0mpute identity
+(`~/.config/c0mpute/chat.key`, HKDF label `c0mpute-hosting-owner-v1`; the identity
+private storage and `c0mpute dm` use), so the same `--name` is the same site from every
+machine that holds your identity, and c0mpute.com and node operators can never publish
+to it. Scripts unlock it with `C0MPUTE_DM_PASSWORD`. Re-deploying is running the same
+command again: same name, same site id, same URL, names and domains.
+
+Who signs (`--key`):
+
+- `auto` (default): the owner recorded in the folder's `.c0mpute/site.json`; else this
+  machine's key if a site of that name is already live under it (sites from before
+  0.3.73); else your account key; else, with no identity on the machine, this machine's
+  key (with a note).
+- `account` / `machine`: force one.
+
+Publish refuses instead of silently forking a second site when the folder belongs to a
+site this machine cannot sign for, and when the name is live only under another key
+(`--new-site` overrides). `--move`, run on the machine that owns an older site, publishes
+it under your account key and empties the machine-owned copy; the site id changes once,
+so repoint its Moshpit name (`moshcode name c0mpute <name> <new id>`) and TXT records.
+`rm` signs with whichever of your keys owns the live site. Pushes queued on c0mpute.com
+(`c0mpute chat connect hosting`) keep using that node's push identity. Paid sites owned
+by the account key name this machine as `payer`, since it is the node that challenges
+the holders and settles.
 
 The folder is scanned in place: nothing is copied, and the publisher serves chunks
 straight from the files while the network takes its copies, so publishing 50 GiB of

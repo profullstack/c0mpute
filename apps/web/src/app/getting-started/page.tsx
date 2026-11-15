@@ -85,26 +85,32 @@ $ c0mpute uninstall --purge   # also remove ~/.config/c0mpute`}</CodeBlock>
           copies, replace any copy whose node disappears, and every c0mpute
           gateway serves it. Live example:{" "}
           <a className="accent" href="http://alt.2600/">alt.2600</a> is site{" "}
-          <code>ea0e1f5afde44477e71d</code>, also at{" "}
-          <a className="accent" href="https://gateway.c0mpute.com/s/ea0e1f5afde44477e71d/">
-            gateway.c0mpute.com/s/ea0e1f5afde44477e71d/
+          <code>76eaa600f9373b7dd35b</code>, also at{" "}
+          <a className="accent" href="https://gateway.c0mpute.com/s/76eaa600f9373b7dd35b/">
+            gateway.c0mpute.com/s/76eaa600f9373b7dd35b/
           </a>{" "}
           and, for browsers without Moshpit DNS,{" "}
           <a className="accent" href="https://alt.2600.pit.world/">alt.2600.pit.world</a>.
         </p>
 
         <p className="text-sm">publish (after step 1):</p>
-        <CodeBlock>{`$ c0mpute hosting publish ./public --name mysite
-site:    ea0e1f5afde44477e71d
-version: 1
+        <CodeBlock>{`$ c0mpute storage key init --backup-to ~/c0mpute-identity.backup   # once, on your first machine
+$ c0mpute hosting publish ./public --name mysite
+c0mpute identity password (signs your sites):
+site:    76eaa600f9373b7dd35b
+owner:   your account key (3f2a9c41d0e7…)
+version: 1794403490504
 copies:  3/3
-path:    /s/ea0e1f5afde44477e71d/   (on any c0mpute gateway, e.g. http://<gateway>:7777/s/ea0e1f5afde44477e71d/)
+url:     https://gateway.c0mpute.com/s/76eaa600f9373b7dd35b/
 
-$ c0mpute hosting ls          # sites a gateway knows, with live copy counts`}</CodeBlock>
+$ c0mpute hosting ls --mine   # your sites, with live copy counts`}</CodeBlock>
         <p className="text-sm text-[var(--color-dim)]">
-          The site is signed with this machine&apos;s key, so only this machine
-          can publish new versions: run the same command with the same{" "}
-          <code>--name</code> to update it. Any gateway serves it at{" "}
+          The site belongs to <span className="accent">you</span>, not to the
+          machine you published from: it is signed with your account key,
+          derived on your machine from your c0mpute identity (the same one{" "}
+          <code>c0mpute dm</code> and <a className="accent" href="#private-storage">private storage</a>{" "}
+          use). c0mpute.com and node operators never hold that key, so nobody
+          but you can publish to or change your site. Any gateway serves it at{" "}
           <code>/s/&lt;site_id&gt;/</code>, for example{" "}
           <code>https://gateway.c0mpute.com/s/&lt;site_id&gt;/</code>, with
           byte ranges so video seeks. Limits: 64 GiB per free site, 4 TiB
@@ -113,8 +119,52 @@ $ c0mpute hosting ls          # sites a gateway knows, with live copy counts`}</
           interrupted publish.
         </p>
 
+        <p className="text-sm" id="redeploy">re-deploy (update the same site, same URL):</p>
+        <CodeBlock>{`$ c0mpute hosting publish ./public --name mysite   # same --name = new version of the same site`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          That is the whole re-deploy: the site id, its{" "}
+          <code>/s/&lt;site_id&gt;/</code> URL, its Moshpit name and its
+          domains all stay put, and gateways serve the new version within a
+          minute (they cache for 60 s). Unchanged files are not uploaded again.
+          The folder remembers which site it is in{" "}
+          <code>.c0mpute/site.json</code> (hidden, never published); commit it
+          with your site so every checkout re-deploys to the same place.
+          Scripts and CI unlock the identity with{" "}
+          <code>C0MPUTE_DM_PASSWORD</code>.
+        </p>
+
+        <p className="text-sm">publish from another machine:</p>
+        <CodeBlock>{`# copy your identity once (or restore the backup you saved)
+$ scp ~/.config/c0mpute/chat.key laptop:.config/c0mpute/chat.key
+laptop$ c0mpute hosting publish ./public --name mysite   # same site, same URL`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          Same identity, same <code>--name</code>, same site, from any machine.
+          Without the identity a machine cannot sign for your site, and publish
+          stops rather than quietly making a second site with a new URL: it
+          names the site the folder belongs to, and if the name is already live
+          under another key it asks first (<code>--new-site</code> to really
+          make a separate one).
+        </p>
+
+        <p className="text-sm">sites published before 0.3.73 (owned by one machine):</p>
+        <CodeBlock>{`old-machine$ c0mpute hosting publish ./public --name mysite --move
+moved:   ea0e1f5afde44477e71d (this machine's key) is empty now; mysite lives at <new_site_id>
+repoint: moshcode name c0mpute <your.name> <new_site_id>   and any TXT _c0mpute-hosting.<domain> "site=<new_site_id>"`}</CodeBlock>
+        <p className="text-sm text-[var(--color-dim)]">
+          Older sites were signed with the publishing machine&apos;s key and keep
+          working as they are: publishing them again from that machine still
+          updates them in place. Run <code>--move</code> once on that machine
+          to hand the site to your account key. The site id changes that one
+          time, so repoint its Moshpit name and domains; after that it
+          re-deploys from anywhere.
+        </p>
+
+        <p className="text-sm">take it down:</p>
+        <CodeBlock>{`$ c0mpute hosting rm --name mysite   # finds the key that owns the live site
+$ moshcode name c0mpute alt.2600 off  # and stop pointing the name at it`}</CodeBlock>
+
         <p className="text-sm">point a Moshpit name at it (free to register):</p>
-        <CodeBlock>{`$ moshcode name c0mpute alt.2600 ea0e1f5afde44477e71d
+        <CodeBlock>{`$ moshcode name c0mpute alt.2600 76eaa600f9373b7dd35b
 $ moshcode dns resolve alt.2600
 alt.2600 → edge.c0mpute.com
 
