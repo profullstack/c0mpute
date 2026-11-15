@@ -87,24 +87,22 @@ preserving a TCP socket when the exit IP changes.
 
 ## Existing libp2p bootstrap behavior and limitation
 
-Core nodes currently use
-`bootstrap::fetch_or_fallback(DEFAULT_BOOTSTRAP_URL, default_seeds())`,
-which performs an HTTPS request to c0mpute.com and otherwise uses
-hardcoded seeds. Those seed operators can see a startup request, and
-using their seeds is not equivalent to joining through independent
-community contacts. For privacy-sensitive usage, a no-default-HTTP
-bootstrap option and independent bootstrap peers are required. This PR
-does not yet change that behavior.
+Core nodes call `bootstrap::fetch_or_fallback`. The current default
+dials built-in libp2p seeds **without an HTTPS check-in**. Community
+bootstrap mode uses only operator-selected peers, while offline mode
+skips configured WAN peers. A directly dialed seed still sees the
+client's source IP, so neither mode provides network-layer anonymity.
+See [community bootstrap](scallion-bootstrap.md).
 
 ## Test plan
 
-`cargo test -p c0mpute-net privacy_routes` (when Rust dependencies are
+`cargo test -p c0mpute-net scallion` (when Rust dependencies are
 available) covers independent role selection, exit consent, stale
 measurement rejection, alternative-route selection, no direct fallback
 and preserving established sessions during rotation. These are **unit
 tests of route decisions**, not cryptographic or multi-node E2E tests.
 
-### Follow-up integration work (not done here)
+### Follow-up integration work (still required)
 
 1. Specify a threat model: traffic correlation, hostile guards/exits,
    compromised nodes, disclosure of DNS/SNI, guard fingerprinting, exit
@@ -137,4 +135,11 @@ and diverse peers over a trivial global-minimum latency route.
 - **Tagline:** *Green routes. Private roots.*
 - **Style:** scallion green, healthy and approachable; avoid imagery or claims implying that this is Tor or a production-ready anonymous VPN.
 - **Code namespace:** `c0mpute_net::scallion` (experimental route planner only).
-- **Future CLI surface:** `c0mpute scallion …`, not implemented yet.
+- **CLI diagnostics:** `c0mpute scallion modes` and `c0mpute scallion doctor`. Both native and OpenVPN client modes remain unimplemented as transports.
+
+## Optional OpenVPN Connect compatibility
+
+Native Scallion does **not** require OpenVPN. A separate operator-opted-in
+OpenVPN-compatible entry adapter will support stock OpenVPN clients by
+bridging authenticated VPN packets into Scallion circuits when the
+security-reviewed transport exists. See [client modes](scallion-clients.md).
