@@ -82,7 +82,7 @@ from a provider that claimed the capabilities relied on.
 | [receipts.md](receipts.md) | `receipt/v1`, acceptance, and derived reputation |
 | [scheduling.md](scheduling.md) | eligibility, offer selection, and reputation scoring |
 | [relay.md](relay.md) | NAT traversal: AutoNAT, circuit relay v2, DCUtR on every node |
-| [privacy-network.md](privacy-network.md) | Experimental route planner, sticky sessions, HQTerm integration boundaries and onion-transport security backlog |
+| [scallion-network.md](scallion-network.md) | **Scallion Network:** experimental three-hop route planner, sticky sessions, HQTerm integration boundaries and security backlog |
 
 ## Implementation
 
