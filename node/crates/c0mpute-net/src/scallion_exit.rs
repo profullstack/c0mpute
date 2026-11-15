@@ -129,7 +129,6 @@ fn normalize_host(raw: &str) -> Result<String> {
     ensure!(!raw.is_empty() && raw.len() <= 253, "invalid hostname length");
     ensure!(raw == raw.trim(), "hostname must not contain surrounding whitespace");
     ensure!(!raw.starts_with('[') && !raw.ends_with(']'), "bracketed host literals are not supported");
-    ensure!(!raw.chars().any(|c| c.is_control() || c == '/' || c == '\\' || c == '@' || c == '%' || c == ':'), "invalid hostname character");
     let name = raw.trim_end_matches('.').to_ascii_lowercase();
     ensure!(!name.is_empty() && !raw.ends_with(".."), "invalid hostname");
 
@@ -137,6 +136,7 @@ fn normalize_host(raw: &str) -> Result<String> {
         ensure!(public_ip(ip), "private or reserved IP literal is blocked");
         return Ok(name);
     }
+    ensure!(!name.chars().any(|c| c.is_control() || c == '/' || c == '\\' || c == '@' || c == '%' || c == ':'), "invalid hostname character");
 
     // Require real FQDN syntax, avoiding localhost, search-domain,
     // integer/octal/hex IP shortcuts and other resolver-specific spellings.
@@ -262,6 +262,7 @@ mod tests {
             assert!(policy.approve(host, 443, &[ip("8.8.8.8")]).is_err(), "unexpectedly allowed: {host}");
         }
         assert!(policy.approve("api.example.com", 443, &[ip("8.8.8.8")]).is_ok());
+        assert!(policy.approve("2001:4860:4860::8888", 443, &[ip("2001:4860:4860::8888")]).is_ok());
         assert!(policy.approve("api.example.com.", 443, &[ip("8.8.8.8")]).is_ok());
     }
 
