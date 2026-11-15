@@ -13,7 +13,7 @@
 
 use std::net::Ipv4Addr;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
