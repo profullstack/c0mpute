@@ -51,7 +51,8 @@ TLS certificate name and pinned CA certificate. The builder:
 - prevents line injection into OpenVPN directives;
 - adds server certificate EKU checks and certificate-name validation;
 - uses OpenVPN's interactive `auth-user-pass` instead of embedding
-  client secrets or private keys;
+  client secrets or private keys, and `setenv CLIENT_CERT 0` as required
+  by OpenVPN Connect for cert-free password-authentication profiles;
 - does **not** install system-wide routes, bypass DNS configuration,
   enable gateway access or connect to a destination.
 
