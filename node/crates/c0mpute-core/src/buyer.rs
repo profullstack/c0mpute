@@ -508,6 +508,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                         strikes,
                         "buyer: the accept reached a twin of the winner (one identity running twice); not a compute fault, re-awarding"
                     );
+                    retain_live_bids(&mut bids, unix_ms());
                     match bids.first().cloned() {
                         Some(next) => {
                             bids.remove(0);
@@ -528,6 +529,13 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                     }
                     continue;
                 }
+                // Only bids their workers still honour: a worker keeps its bid open for
+                // BID_TTL, then discards an accept for it ("our bid expired before the
+                // accept arrived") without a receipt, and the job sat out the whole
+                // receipt wait (2.5x the bidder ETA, 34 min for a CPU song) before the
+                // gateway auctioned it again. With no live bid left the failure returns
+                // and the caller re-auctions at once.
+                retain_live_bids(&mut bids, unix_ms());
                 if receipt.status != JobStatus::Completed
                     && should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline)
                 {
@@ -588,7 +596,9 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             Err(_) => break,
         }
     }
-    // No receipt in time from the current winner: the next bidder, if any.
+    // No receipt in time from the current winner: the next bidder, if any,
+    // while its bid is still live (see the failed-receipt path above).
+    retain_live_bids(&mut bids, unix_ms());
     if should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline) {
         let next = bids.remove(0);
         bids.retain(|b| b.bidder_peer_id != next.bidder_peer_id);
@@ -1147,6 +1157,20 @@ mod tests {
         retain_live_bids(&mut bids, 1_500);
         let peers: Vec<_> = bids.iter().map(|b| b.bidder_peer_id.as_str()).collect();
         assert_eq!(peers, ["old", "live"]);
+    }
+
+    #[test]
+    fn a_reaward_never_goes_to_an_expired_bid() {
+        // 2026-11-15: two workers failed a song, then the third bid (placed
+        // 70 s earlier, worker TTL 60 s) won the re-award; that worker
+        // discarded the accept and the job hung 20 min. Prune first: with no
+        // live bid left there is nothing to re-award, so the caller re-auctions.
+        let mut bids = vec![bid("expired-runner-up", Some(60_000))];
+        retain_live_bids(&mut bids, 70_000);
+        assert!(!should_reaward(0, !bids.is_empty(), Duration::from_secs(70), Duration::from_secs(600)));
+        let mut bids = vec![bid("live-runner-up", Some(80_000))];
+        retain_live_bids(&mut bids, 70_000);
+        assert!(should_reaward(0, !bids.is_empty(), Duration::from_secs(70), Duration::from_secs(600)));
     }
 
     #[test]
