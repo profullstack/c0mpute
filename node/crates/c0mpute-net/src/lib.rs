@@ -20,6 +20,7 @@ pub mod identity;
 pub mod scallion;
 pub mod scallion_exit;
 pub mod scallion_clients;
+pub mod scallion_frames;
 pub mod swarm;
 pub mod topics;
 
