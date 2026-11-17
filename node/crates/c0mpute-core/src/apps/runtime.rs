@@ -136,6 +136,34 @@ pub fn guard_rules(bridge: &str) -> Vec<Vec<String>> {
     rules
 }
 
+/// Accept only the exact Docker bridge we created. An existing network
+/// with the same name can otherwise be attached to a different interface,
+/// bypassing the iptables rules on c0apps0. Since our rules are IPv4-only,
+/// reject any IPv6-enabled bridge instead of falsely claiming isolation.
+pub fn inspect_guarded_network(value: &serde_json::Value) -> Result<()> {
+    use anyhow::ensure;
+
+    let network = value.as_array()
+        .and_then(|entries| entries.first())
+        .ok_or_else(|| anyhow::anyhow!("missing Docker network description"))?;
+    ensure!(network["Name"].as_str() == Some(APPS_NETWORK), "wrong Docker network name");
+    ensure!(network["Driver"].as_str() == Some("bridge"), "apps require a Docker bridge");
+    ensure!(network["EnableIPv6"].as_bool() == Some(false), "IPv6-enabled bridge has no verified egress firewall");
+    ensure!(
+        network["Options"]["com.docker.network.bridge.name"].as_str() == Some(APPS_BRIDGE),
+        "apps network uses unexpected bridge; IPv4 firewall cannot protect it"
+    );
+    ensure!(
+        network["Options"]["com.docker.network.bridge.enable_icc"].as_str() == Some("false"),
+        "apps network allows inter-container communication"
+    );
+    ensure!(
+        network["Labels"]["c0mpute.apps"].as_str() == Some("1"),
+        "apps network ownership label is missing"
+    );
+    Ok(())
+}
+
 /// Make sure the apps network exists with the egress guard on it. True when
 /// app containers can be put behind the guard; false for a non-root worker
 /// (it cannot change the firewall) or when docker or iptables refuse.
@@ -145,6 +173,21 @@ pub async fn ensure_guarded_network() -> bool {
     }
     if let Err(e) = crate::container_run::ensure_bridge_network(APPS_NETWORK, APPS_BRIDGE, "c0mpute.apps=1").await {
         tracing::warn!(err = %format!("{e:#}"), "apps: could not create the apps network");
+        return false;
+    }
+    // Check the effective Docker network settings (including preexisting
+    // networks), not just whether docker network inspect returned success.
+    let inspect = docker(
+        &["network".into(), "inspect".into(), APPS_NETWORK.into()],
+        None,
+        Duration::from_secs(15),
+    ).await;
+    let verified = inspect.and_then(|bytes| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        inspect_guarded_network(&value)
+    });
+    if let Err(e) = verified {
+        tracing::warn!(err = %format!("{e:#}"), "apps: refusing unverified bridge or IPv6 egress");
         return false;
     }
     crate::container_run::ensure_rules(guard_rules(APPS_BRIDGE)).await
@@ -707,6 +750,39 @@ mod tests {
         assert!(pair("--publish", "127.0.0.1::8080"));
         assert_eq!(a.last().unwrap(), rec.image_ref());
         assert_eq!(a.iter().filter(|x| *x == "--network").count(), 1);
+    }
+
+    #[test]
+    fn a_reused_or_ipv6_enabled_docker_bridge_is_not_considered_guarded() {
+        let safe = serde_json::json!([{
+            "Name": "c0mpute-apps",
+            "Driver": "bridge",
+            "EnableIPv6": false,
+            "Options": {
+                "com.docker.network.bridge.name": "c0apps0",
+                "com.docker.network.bridge.enable_icc": "false"
+            },
+            "Labels": {"c0mpute.apps": "1"}
+        }]);
+        assert!(inspect_guarded_network(&safe).is_ok());
+
+        for (path, unsafe_value) in [
+            (vec!["0", "EnableIPv6"], serde_json::json!(true)),
+            (vec!["0", "Driver"], serde_json::json!("macvlan")),
+            (vec!["0", "Name"], serde_json::json!("bridge")),
+            (vec!["0", "Options", "com.docker.network.bridge.name"], serde_json::json!("br0")),
+            (vec!["0", "Options", "com.docker.network.bridge.enable_icc"], serde_json::json!("true")),
+            (vec!["0", "Labels", "c0mpute.apps"], serde_json::json!("0")),
+        ] {
+            let mut network = safe.clone();
+            let mut current = &mut network[0];
+            for segment in &path[1..path.len() - 1] {
+                current = &mut current[*segment];
+            }
+            current[path[path.len() - 1]] = unsafe_value;
+            assert!(inspect_guarded_network(&network).is_err(), "{path:?}");
+        }
+        assert!(inspect_guarded_network(&serde_json::json!([])).is_err());
     }
 
     #[test]

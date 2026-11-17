@@ -76,6 +76,23 @@ _c0mpute-app.api.example.org.  TXT  "app=<app_id>"
 A gateway serves the host only when the owner-signed record lists the domain
 **and** DNS agrees. Apps are tried before static sites.
 
+## Operator safety requirements
+
+**Default as of this change:** apps require a working egress guard.
+On hosts where Docker/iptables cannot install and enforce that guard,
+`apps` workers do not start app containers; this is intentional and may
+reduce the available capacity until the operator provisions protected
+workers. Existing configurations that explicitly contain
+`require_egress_guard = false` remain opted out; review them before
+running untrusted workloads. For an untrusted marketplace, also configure
+`[apps] owners` and the signed `hosts` allowlist to constrain which
+operators can access app secrets and runtime memory.
+
+A successful unit test does not validate your host's iptables,
+Docker bridge, IPv6 routing, side-channel isolation, or failover
+behavior. Verify those on actual hosts before accepting untrusted
+containers.
+
 ## Running apps for the network
 
 `apps` is **opt-in** (it runs other people's containers and needs docker):
@@ -90,7 +107,7 @@ max_apps = 4          # held at once (primary or standby)
 max_memory_mb = 2048  # reserved by held apps together
 owners = []           # owner keys whose apps this node runs; empty = anyone's
 egress_guard = true           # keep apps off your LAN, the host and metadata addresses
-require_egress_guard = false  # true: run no apps unless that guard is in place
+require_egress_guard = true   # default: run no apps unless that guard is in place
 max_disk_mb = 2048            # per app: state volume plus writes inside the container
 ```
 
@@ -102,11 +119,14 @@ the network, and says so in its log at start.
 **Network.** The egress guard is a set of iptables rules on the apps bridge
 (`c0apps0`), the same ones `container.run` uses plus one that lets the app
 answer the node's own proxy. Only a root worker can add them. A non-root
-worker keeps apps on docker's default bridge, where a container **can reach
-your LAN, the host and cloud metadata addresses**; the node logs that once at
-start. Set `require_egress_guard = true` to run no apps in that case. An app
-that must reach a private address (a database on your LAN) needs
-`egress_guard = false`. The guard is IPv4 only.
+worker **refuses to run app containers by default** rather than placing
+untrusted workloads on Docker's unguarded bridge. The operator can explicitly
+set `require_egress_guard = false` to opt out, but that can give containers
+access to the host, LAN and cloud metadata addresses. An app needing a private
+LAN database must be run on a trusted dedicated host with explicit restrictions:
+`egress_guard = false` **and** `require_egress_guard = false`; do not expose
+that host to arbitrary app owners. The current guard is IPv4 only; treat
+IPv6 exposure as unverified until an IPv6 policy is implemented and tested.
 
 **Disk.** Every minute the node asks docker how much a running app has written
 inside its container and adds the size of its last state snapshot. Over
