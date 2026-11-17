@@ -662,6 +662,7 @@ dependencies = [
 name = "c0mpute-net"
 version = "0.3.77"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "c0mpute-proto",
@@ -676,6 +677,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x25519-dalek",
  "zeroize",
 ]
 
