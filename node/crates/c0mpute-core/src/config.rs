@@ -221,7 +221,9 @@ pub struct AppsConfig {
     /// `container.run` uses (needs root; without it apps stay on docker's
     /// default bridge and the node says so at start).
     pub egress_guard: bool,
-    /// Run no apps at all unless that guard is in place.
+    /// Refuse unguarded container network access by default. Operators must
+    /// explicitly accept LAN/host/metadata exposure to opt out, and should
+    /// then restrict owners to trusted identities.
     pub require_egress_guard: bool,
     /// Most disk one app may use, MiB: its state volume plus what it writes
     /// inside its container. An app over it is stopped.
@@ -235,7 +237,7 @@ impl Default for AppsConfig {
             max_memory_mb: 2048,
             owners: Vec::new(),
             egress_guard: true,
-            require_egress_guard: false,
+            require_egress_guard: true,
             max_disk_mb: crate::apps::DEFAULT_MAX_DISK_MB,
         }
     }
@@ -1164,6 +1166,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_fail_closed_without_an_egress_guard_by_default() {
+        let defaults = AppsConfig::default();
+        assert!(defaults.egress_guard);
+        assert!(defaults.require_egress_guard);
+
+        // Existing config files that omit the new field take the safer default.
+        let parsed: AppsConfig = toml::from_str("max_apps = 4").unwrap();
+        assert!(parsed.require_egress_guard);
+        assert!(parsed.egress_guard);
+
+        // An operator can still make a deliberate, documented opt-out.
+        let explicit: AppsConfig = toml::from_str(
+            "egress_guard = false\nrequire_egress_guard = false",
+        ).unwrap();
+        assert!(!explicit.require_egress_guard);
+        assert!(!explicit.egress_guard);
+    }
+
 
     #[test]
     fn save_replaces_the_config_whole_and_keeps_the_old_one_when_it_cannot() {
