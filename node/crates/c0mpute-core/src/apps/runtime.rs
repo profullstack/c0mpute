@@ -775,7 +775,7 @@ mod tests {
             (vec!["0", "Labels", "c0mpute.apps"], serde_json::json!("0")),
         ] {
             let mut network = safe.clone();
-            let mut current = &mut network;
+            let mut current = &mut network[0];
             for segment in &path[1..path.len() - 1] {
                 current = &mut current[*segment];
             }
