@@ -1,0 +1,87 @@
+name: scallion-client-modes-release
+
+# One-time, gated release of Scallion optional client interfaces, not a VPN.
+# A unique marker is created in the release PR and triggers once on merge.
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/release-signals/scallion-v0.3.78.md"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: scallion-foundation-v0.3.78
+  cancel-in-progress: false
+
+jobs:
+  tag-and-dispatch:
+    name: test, tag, dispatch signed release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check prerequisites and exact version
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fxq 'version = "0.3.78"' Cargo.toml
+          grep -Fq 'pub mod scallion;' node/crates/c0mpute-net/src/lib.rs
+          grep -Fq 'C0MPUTE_BOOTSTRAP_MODE' node/crates/c0mpute-net/src/bootstrap.rs
+          grep -Fq 'pub mod scallion_clients;' node/crates/c0mpute-net/src/lib.rs
+          grep -Fq 'Cmd::Scallion { cmd }' node/crates/c0mpute-cli/src/main.rs
+          test -s .github/release-signals/scallion-v0.3.78.md
+          if git ls-remote --tags origin refs/tags/v0.3.78 | grep -q .; then
+            echo "::error::tag v0.3.78 already exists; refusing overwrite"
+            exit 1
+          fi
+      - name: Resolve Rust toolchain
+        id: rust
+        shell: bash
+        run: |
+          version=$(grep -E '^rust[[:space:]]*=' .mise.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify locked workspace and Scallion unit tests
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo test -p c0mpute-net --locked
+          cargo test -p c0mpute-cli --locked scallion_cli
+      - name: Ensure this is the next stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [ "$latest" != v0.3.77 ]; then
+            echo "::error::Expected latest v0.3.77, got $latest; no tag written"
+            exit 1
+          fi
+      - name: Tag tested master commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a v0.3.78 -m "Scallion clients: native and OpenVPN entry interfaces"
+          git push origin refs/tags/v0.3.78
+      - name: Start existing signed multi-platform release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GITHUB_TOKEN tag pushes do not trigger tag workflows.
+          # workflow_dispatch does trigger them and uses the tested tag.
+          gh workflow run release.yml --ref master --field tag=v0.3.78
+          echo "Signed release build dispatched. Publication is gated by"
+          echo "platform builds, checksums and minisign verification."
