@@ -183,8 +183,13 @@ struct InFlight {
 }
 
 struct Completed {
+    job_id: String,
     workload_type: String,
     completed_at_ms: u64,
+    /// When this aggregator filed the receipt (its own clock). Never decreases
+    /// along the queue, so `GET /jobs?since=` can page through it without
+    /// missing a receipt that arrived late with an older `completed_at_ms`.
+    seen_at_ms: u64,
     latency_s: Option<f64>,
     /// Who ran it and for how much, when we saw the accept and the receipt
     /// came from the accepted winner. `None` otherwise: the job still counts
@@ -267,11 +272,14 @@ impl JobState {
         if completed.len() >= MAX_COMPLETED {
             completed.pop_front();
         }
+        let seen_at_ms = completed.back().map_or(0, |c| c.seen_at_ms).max(now_ms());
         completed.push_back(Completed {
+            job_id: r.job_id,
             workload_type,
             // Filed in arrival order at no later than now: a far-future time
             // at the front would block eviction of everything behind it.
             completed_at_ms: r.completed_at_ms.min(now_ms()),
+            seen_at_ms,
             latency_s,
             credit,
         });
@@ -856,6 +864,87 @@ async fn nodes_handler(State(state): State<AppState>) -> Json<NodesPayload> {
     Json(payload)
 }
 
+/// One completed job credited to the node that ran it (`GET /jobs`).
+#[derive(Serialize, Debug, PartialEq, Clone)]
+struct CreditedJob {
+    job_id: String,
+    /// The board's row id (short peer id) of the node the buyer accepted.
+    node: String,
+    #[serde(rename = "type")]
+    workload_type: String,
+    completed_at_ms: u64,
+    /// When this aggregator filed the receipt; page with `?since=` on it.
+    seen_at_ms: u64,
+    /// Accept to receipt, in seconds (0 when the accept was not seen).
+    busy_s: f64,
+    /// What the buyer agreed to pay, in dollars, before the house fee.
+    paid_usd: f64,
+}
+
+#[derive(Serialize, Debug)]
+struct JobsPayload {
+    generated_at_ms: u64,
+    /// Pass back as `?since=` for the next page (or the next poll).
+    next_since: u64,
+    /// More credited jobs are waiting after `next_since`.
+    more: bool,
+    jobs: Vec<CreditedJob>,
+}
+
+/// Rows `GET /jobs` returns at most per call, by default and at most.
+const JOBS_PAGE_DEFAULT: usize = 2_000;
+const JOBS_PAGE_MAX: usize = 5_000;
+
+/// Credited completions filed after `since` (aggregator clock, ms), oldest
+/// first, at most about `limit` of them. A page never splits one `seen_at_ms`,
+/// so `next_since` is safe to pass back with `>`.
+fn credited_jobs_since<'a>(
+    completed: impl IntoIterator<Item = &'a Completed>,
+    since: u64,
+    limit: usize,
+) -> (Vec<CreditedJob>, bool) {
+    let mut out: Vec<CreditedJob> = Vec::new();
+    for c in completed {
+        if c.seen_at_ms <= since {
+            continue;
+        }
+        let Some((worker, price)) = &c.credit else { continue };
+        if out.len() >= limit && out.last().is_some_and(|l| l.seen_at_ms != c.seen_at_ms) {
+            return (out, true);
+        }
+        out.push(CreditedJob {
+            job_id: c.job_id.clone(),
+            node: short_id(worker),
+            workload_type: c.workload_type.clone(),
+            completed_at_ms: c.completed_at_ms,
+            seen_at_ms: c.seen_at_ms,
+            busy_s: c.latency_s.unwrap_or(0.0).max(0.0),
+            paid_usd: *price,
+        });
+    }
+    (out, false)
+}
+
+/// `GET /jobs?since=<ms>&limit=<n>`: every completed job this aggregator
+/// credited to a node in its 24h window, one row each with its job id, so a
+/// site can keep durable per-node history (the window itself is in memory
+/// and starts over when this process restarts).
+async fn jobs_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Json<JobsPayload> {
+    let since = q.get("since").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(JOBS_PAGE_DEFAULT)
+        .clamp(1, JOBS_PAGE_MAX);
+    state.jobs.evict(now_ms()).await;
+    let (jobs, more) = credited_jobs_since(state.jobs.completed.read().await.iter(), since, limit);
+    let next_since = jobs.last().map_or(since, |j| j.seen_at_ms);
+    Json(JobsPayload { generated_at_ms: now_ms(), next_since, more, jobs })
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -994,6 +1083,7 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
     let app = Router::new()
         .route("/", get(status_handler))
         .route("/nodes", get(nodes_handler))
+        .route("/jobs", get(jobs_handler))
         .route("/healthz", get(healthz))
         .with_state(state);
 
@@ -1334,8 +1424,10 @@ mod tests {
             },
         );
         jobs.completed.write().await.push_back(Completed {
+            job_id: "old".into(),
             workload_type: "ffmpeg.transcode".into(),
             completed_at_ms: now - 25 * 60 * 60 * 1000,
+            seen_at_ms: now - 25 * 60 * 60 * 1000,
             latency_s: Some(3.0),
             credit: None,
         });
@@ -1377,6 +1469,48 @@ mod tests {
         assert!((n.busy_s - 6.0).abs() < 0.5);
         assert_eq!(n.by_type["tts.synthesize"].jobs, 1);
         assert_eq!(n.by_type["infernet.inference"].paid_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn credited_jobs_page_by_seen_at() {
+        let jobs = JobState::default();
+        let now = now_ms();
+        let worker = "12D3KooWworkerAAAAAAAAAAAAAAAAworkerXYZ12345";
+        for (i, id) in ["a", "b", "c"].iter().enumerate() {
+            let mut a = accept_for(id, "tts.synthesize");
+            a.winning_bidder_peer_id = worker.into();
+            a.agreed_price_usd = 0.01 * (i as f64 + 1.0);
+            a.published_at_ms = now - 3_000;
+            jobs.on_accept(a).await;
+            let mut r = receipt_for(id, now);
+            r.worker_peer_id = worker.into();
+            jobs.on_receipt(r).await;
+        }
+        // Uncredited (receipt from someone else): never listed.
+        let mut a = accept_for("x", "tts.synthesize");
+        a.winning_bidder_peer_id = worker.into();
+        jobs.on_accept(a).await;
+        let mut r = receipt_for("x", now);
+        r.worker_peer_id = "someone-else".into();
+        jobs.on_receipt(r).await;
+
+        let completed = jobs.completed.read().await;
+        let seen: Vec<u64> = completed.iter().map(|c| c.seen_at_ms).collect();
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "seen_at never decreases");
+        let (all, more) = credited_jobs_since(completed.iter(), 0, 100);
+        assert!(!more);
+        assert_eq!(all.iter().map(|j| j.job_id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(all[0].node, short_id(worker));
+        assert!((all[2].paid_usd - 0.03).abs() < 1e-9);
+        assert!(all[0].busy_s >= 2.5);
+        // Nothing after the last one seen.
+        let (none, _) = credited_jobs_since(completed.iter(), all[2].seen_at_ms, 100);
+        assert!(none.is_empty());
+        // A page of 1 never splits rows filed in the same millisecond.
+        let (page, _) = credited_jobs_since(completed.iter(), 0, 1);
+        assert!(page.iter().all(|j| j.seen_at_ms == page[0].seen_at_ms));
+        let json = serde_json::to_value(&all[0]).unwrap();
+        assert_eq!(json["type"], "tts.synthesize");
     }
 }
 

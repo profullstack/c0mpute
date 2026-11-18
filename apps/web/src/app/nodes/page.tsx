@@ -67,6 +67,9 @@ export default async function NodesPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">nodes</h1>
         <p className="comment">// every node online now, best benchmark first, with what it ran and earned in the last 24h</p>
+        <p className="text-sm">
+          Run a node? <Link href="/dashboard/nodes">See your own earnings vs spend</Link> over the last hour to 30 days.
+        </p>
       </header>
 
       <section className="space-y-2">
