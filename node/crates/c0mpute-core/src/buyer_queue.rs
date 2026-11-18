@@ -370,6 +370,30 @@ mod tests {
             .expect("other queue has its own turn");
     }
 
+    #[tokio::test]
+    async fn a_requeued_job_waits_behind_the_jobs_already_queued() {
+        let turns = AuctionTurns::default();
+        let q = AuctionTurns::queue_of("infernet.inference", &[]);
+        // "busy" got its turn first (enqueued at 100), was turned away and
+        // re-enters with a fresh enqueue time: it goes behind "b" (200).
+        let first = turns.acquire(&q, "busy", 100).await;
+        let b = {
+            let turns = turns.clone();
+            let q = q.clone();
+            tokio::spawn(async move {
+                let _t = turns.acquire(&q, "b", 200).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "b"
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(first);
+        let again = turns.acquire(&q, "busy", 300).await;
+        assert!(b.is_finished(), "the job behind it went first");
+        drop(again);
+        assert_eq!(b.await.unwrap(), "b");
+    }
+
     #[test]
     fn config_reads_env_per_workload_and_caps() {
         let env: HashMap<&str, &str> = [

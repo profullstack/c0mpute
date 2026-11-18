@@ -532,7 +532,23 @@ static READVERTISE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLo
 /// bridge, the speech gateway) re-auction them at once rather than on their
 /// backoff. Rate-limited in the advertise loop.
 pub fn readvertise_now() {
-    READVERTISE.get_or_init(tokio::sync::Notify::new).notify_one();
+    READVERTISE.get_or_init(tokio::sync::Notify::new).notify_waiters();
+}
+
+/// `hardware` field of an ad sent because a job just ended: unix ms.
+pub const SLOT_FREED_FIELD: &str = "slot_freed_at_ms";
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The ad says a slot freed within the last `within` (by the sender's clock,
+/// so loosely).
+pub fn ad_slot_freed(ad: &CapabilityAd, within: Duration) -> bool {
+    ad.hardware
+        .get(SLOT_FREED_FIELD)
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|t| unix_now_ms().saturating_sub(t) <= within.as_millis() as u64 + 30_000)
 }
 
 /// Soonest a triggered re-advertise follows the previous ad.
@@ -563,20 +579,22 @@ async fn advertise(
     let readvertise = READVERTISE.get_or_init(tokio::sync::Notify::new);
     let mut last = tokio::time::Instant::now() - MIN_READVERTISE_GAP;
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
+        let freed = tokio::select! {
+            _ = ticker.tick() => false,
             _ = readvertise.notified() => {
                 tokio::time::sleep_until(last + MIN_READVERTISE_GAP).await;
                 debug!("re-advertising: a job ended and freed a slot");
+                true
             }
-        }
+        };
         last = tokio::time::Instant::now();
-        let ad = CapabilityAd::with_score(
-            peer_id.clone(),
-            tag_source.tags(),
-            with_instance(hardware.clone(), net.instance_id()),
-            bench_score,
-        );
+        let mut hw = with_instance(hardware.clone(), net.instance_id());
+        // Buyers holding queued jobs re-auction only on this marker, not on
+        // every periodic ad (which would spend their retries for nothing).
+        if freed && let Some(obj) = hw.as_object_mut() {
+            obj.insert(SLOT_FREED_FIELD.into(), serde_json::json!(unix_now_ms()));
+        }
+        let ad = CapabilityAd::with_score(peer_id.clone(), tag_source.tags(), hw, bench_score);
         let payload = match serde_json::to_vec(&ad) {
             Ok(b) => b,
             Err(e) => {
@@ -783,6 +801,17 @@ impl Registry {
             .iter()
             .map(|(p, m)| (*p, live_instances(m, cutoff)))
             .collect()
+    }
+
+    /// Some peer advertised every one of `tags` in the last [`MAX_AD_AGE`],
+    /// busy or not.
+    pub async fn any_with_tags(&self, tags: &[String]) -> bool {
+        let cutoff = unix_now_ms().saturating_sub(MAX_AD_AGE.as_millis() as u64);
+        self.inner
+            .read()
+            .await
+            .values()
+            .any(|ad| ad.published_at_ms >= cutoff && tags.iter().all(|t| ad.tags.contains(t)))
     }
 
     pub async fn list(&self) -> Vec<(PeerId, CapabilityAd)> {

@@ -173,9 +173,47 @@ pub struct JobsBridge {
     /// Whose turn it is to auction, per queue (workload + tags): oldest
     /// waiting job first, requeued jobs keep their first enqueue time.
     turns: crate::buyer_queue::AuctionTurns,
+    /// Capability ads seen, to tell "every capable node is busy" (wait) from
+    /// "no node runs this at all" (fail now).
+    registry: crate::capabilities::Registry,
+    registry_since: tokio::time::Instant,
+    /// Until the registry has heard a full advert round it cannot say a node
+    /// does not exist.
+    registry_grace: Duration,
+    /// Requeues before a job ends with [`NETWORK_BUSY`]
+    /// (`C0MPUTE_JOBS_MAX_REQUEUES`, default [`DEFAULT_MAX_REQUEUES`]).
+    max_requeues: u32,
 }
 
 impl JobsBridge {
+    /// Nobody has advertised what the job needs (`required`, or `alt` for the
+    /// exact-model fallback) in the last few minutes, and the bridge has been
+    /// listening long enough to know.
+    async fn no_capable_node(&self, required: &[String], alt: Option<&[String]>) -> bool {
+        if self.registry_since.elapsed() < self.registry_grace {
+            return false;
+        }
+        if self.registry.any_with_tags(required).await {
+            return false;
+        }
+        match alt {
+            Some(a) => !self.registry.any_with_tags(a).await,
+            None => true,
+        }
+    }
+
+    /// Requeues before a job gives up (at least 0).
+    pub fn with_max_requeues(mut self, n: u32) -> Self {
+        self.max_requeues = n;
+        self
+    }
+
+    /// How long after start the bridge trusts "no capable node" (tests).
+    pub fn with_registry_grace(mut self, grace: Duration) -> Self {
+        self.registry_grace = grace;
+        self
+    }
+
     /// `token` must be 24 to 256 characters; `max_price_usd` finite and >= 0.
     /// `allow_peers` (may be empty) is the global bidder allowlist.
     pub fn new(
@@ -191,6 +229,10 @@ impl JobsBridge {
         if !max_price_usd.is_finite() || max_price_usd < 0.0 {
             bail!("maximum job price must be a non-negative number");
         }
+        let registry = crate::capabilities::Registry::new();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            registry.run(net.clone());
+        }
         Ok(Self {
             net,
             store,
@@ -205,6 +247,14 @@ impl JobsBridge {
                     .join("jobs-bridge-penalties.json"),
             ),
             turns: crate::buyer_queue::AuctionTurns::default(),
+            registry,
+            registry_since: tokio::time::Instant::now(),
+            // One advert interval plus slack.
+            registry_grace: crate::capabilities::DEFAULT_ADVERTISE_INTERVAL + Duration::from_secs(15),
+            max_requeues: std::env::var("C0MPUTE_JOBS_MAX_REQUEUES")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(DEFAULT_MAX_REQUEUES),
         })
     }
 
@@ -578,12 +628,18 @@ async fn run_job(
     run_job_with_progress(state, workload, spec, spec_bytes, max_price, allowed, timeout, None).await
 }
 
-/// Run one job until it is answered or its own deadline passes. A round that
-/// gets no bid, or whose worker turns the job away, puts it back at the head
-/// of its queue (FIFO among waiting jobs by first enqueue time, see
-/// [`crate::buyer_queue::AuctionTurns`]); it is re-auctioned as soon as a
-/// capable worker announces itself (workers re-advertise when a job ends and
-/// frees a slot) or after a short backoff.
+/// Run one job until it is answered, it has been requeued
+/// [`JobsBridge::max_requeues`] times, or its own deadline passes.
+///
+/// Every round is an ordinary auction open to every capable node, GPU or CPU
+/// (bids rank by ETA). A round that does not land (nobody bid because every
+/// capable node is full, or the winner turned the job away, failed it, went
+/// silent or its runtime was busy) requeues the job at the BACK of its queue
+/// (a fresh enqueue time) and releases the queue's turn, so the jobs behind it
+/// keep dispatching; it auctions again when a capable worker announces a
+/// freed slot, or after a short backoff. After the last requeue the caller
+/// gets [`NETWORK_BUSY`]. A job no node can run at all (nobody advertises its
+/// role and model) fails at once instead of waiting.
 #[allow(clippy::too_many_arguments)]
 async fn run_job_with_progress(
     state: &JobsBridge,
@@ -617,78 +673,118 @@ async fn run_job_with_progress(
     let exact_spec = widened.as_ref().map(|_| spec.clone());
     let spec = widened.unwrap_or(spec);
     let required = workload.required_capabilities(&spec);
+    let exact_required = exact_spec.as_ref().map(|e| workload.required_capabilities(e));
 
-    let queued_at_ms = crate::job_progress::now_ms_pub();
     let key = uuid::Uuid::new_v4().to_string();
     let queue = crate::buyer_queue::AuctionTurns::queue_of(workload.name(), &required);
-    let mut rounds = 0u32;
-    let mut last_reason = String::new();
-    // Held through no-bid rounds (so a freed slot goes to this, the oldest
-    // job, not a newer one); handed on when a worker accepts.
-    let mut turn: Option<crate::buyer_queue::AuctionTurn> = None;
+    let mut enqueued_ms = crate::job_progress::now_ms_pub();
+    let mut requeues = 0u32;
     loop {
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() {
-            return Err(gave_up(workload, &spec, &required, &last_reason, timeout));
+        if tokio::time::Instant::now() >= deadline {
+            return Err(gave_up(workload, &spec, &required, timeout));
         }
-        // Our turn: the oldest waiting job of this queue auctions first. A job
-        // whose worker turned it away re-enters with its first enqueue time,
-        // so it is next.
-        if turn.is_none() {
-            turn = {
-            let waiting = state.turns.acquire(&queue, &key, queued_at_ms);
+        // Our turn: the oldest waiting job of this queue auctions first.
+        let turn = {
+            let waiting = state.turns.acquire(&queue, &key, enqueued_ms);
             tokio::pin!(waiting);
             let mut tick = tokio::time::interval(Duration::from_secs(5));
+            tick.tick().await;
             loop {
                 tokio::select! {
                     t = &mut waiting => break Some(t),
                     _ = tokio::time::sleep_until(deadline) => break None,
-                    _ = tick.tick(), if rounds > 0 || state.turns.waiting(&queue) > 0 => {
+                    _ = tick.tick() => {
                         let (position, length) = state.turns.position(&queue, &key).unwrap_or((1, 1));
                         emit(progress.as_ref(), json!({"event": "queued", "position": position, "queue_length": length,
-                            "status": waiting_for(workload), "waited_ms": started.elapsed().as_millis() as u64}));
+                            "status": waiting_for(workload), "requeues": requeues, "waited_ms": started.elapsed().as_millis() as u64}));
                     }
                 }
             }
-            };
-            if turn.is_none() {
-                return Err(gave_up(workload, &spec, &required, &last_reason, timeout));
-            }
-        }
-        match run_round(state, workload, &spec, exact_spec.as_ref(), &required, max_price, &allowed, deadline, started, &mut turn, progress.as_ref()).await {
+        };
+        let Some(turn) = turn else {
+            return Err(gave_up(workload, &spec, &required, timeout));
+        };
+        let reason = match run_round(state, workload, &spec, exact_spec.as_ref(), &required, max_price, &allowed, deadline, turn, progress.as_ref()).await {
             Round::Done(r) => return r,
-            Round::Requeue(reason) => {
-                rounds += 1;
-                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                tracing::info!(workload = workload.name(), rounds, waited_secs = started.elapsed().as_secs(), left_secs = left.as_secs(),
-                    reason = %reason, "jobs bridge: no free worker; job back at the head of its queue");
-                let (position, length) = state.turns.position(&queue, &key).unwrap_or((1, state.turns.waiting(&queue).max(1)));
-                emit(progress.as_ref(), json!({"event": "queued", "position": position, "queue_length": length,
-                    "status": waiting_for(workload), "reason": reason, "waited_ms": started.elapsed().as_millis() as u64}));
-                last_reason = reason;
-                // Wake on a capable worker's announcement (a slot freed), else
-                // after the backoff; never past the deadline.
-                let pause = requeue_pause(rounds, left);
-                crate::speech_gateway::wait_for_capable(&state.net, &required, pause, Duration::from_millis(250)).await;
+            Round::Requeue(reason) => reason,
+        };
+        // Nobody can run it at all: say so now rather than wait it out.
+        if state.no_capable_node(&required, exact_required.as_deref()).await {
+            let model = crate::buyer_queue::model_of(&spec, &required);
+            let detail = match model {
+                Some(m) => format!("no node on the network runs {} with {m}", workload.name()),
+                None => format!("no node on the network runs {}", workload.name()),
+            };
+            tracing::info!(workload = workload.name(), %detail, "jobs bridge: no capable node; failing the job");
+            return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_capable_node", "detail": detail })));
+        }
+        if requeues >= state.max_requeues {
+            tracing::info!(workload = workload.name(), requeues, waited_secs = started.elapsed().as_secs(), reason = %reason,
+                "jobs bridge: still no free node after the last requeue; ending the job");
+            return Err(network_busy(requeues));
+        }
+        requeues += 1;
+        // The back of the queue: behind every job that is waiting now.
+        enqueued_ms = crate::job_progress::now_ms_pub();
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tracing::info!(workload = workload.name(), requeues, max = state.max_requeues, waited_secs = started.elapsed().as_secs(),
+            left_secs = left.as_secs(), reason = %reason, "jobs bridge: no free node; job requeued at the back");
+        let behind = state.turns.waiting(&queue) + 1;
+        emit(progress.as_ref(), json!({"event": "queued", "position": behind, "queue_length": behind,
+            "status": waiting_for(workload), "reason": reason, "requeues": requeues, "waited_ms": started.elapsed().as_millis() as u64}));
+        // Wait (holding no turn) for a capable worker to free a slot, else
+        // the backoff; never past the deadline.
+        wait_for_freed_slot(&state.net, &required, exact_required.as_deref(), requeue_pause(requeues, left)).await;
+    }
+}
+
+/// What a caller sees when its job found no free node after the last requeue.
+pub const NETWORK_BUSY: &str = "Network is busy. Run a node or wait. (c0mpute.com/getting-started)";
+
+fn network_busy(requeues: u32) -> ApiError {
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "network_busy", "detail": NETWORK_BUSY, "requeues": requeues }))
+}
+
+/// Default of `C0MPUTE_JOBS_MAX_REQUEUES`.
+pub const DEFAULT_MAX_REQUEUES: u32 = 3;
+
+/// Sleep up to `pause`, waking early when a worker advertising `required`
+/// (or `alt`) says it just freed a slot.
+async fn wait_for_freed_slot(net: &Libp2pNetwork, required: &[String], alt: Option<&[String]>, pause: Duration) {
+    let deadline = tokio::time::Instant::now() + pause;
+    let mut rx = net.messages();
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => return,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) => {
+                tokio::time::sleep_until(deadline).await;
+                return;
             }
+            Ok(Ok(msg)) if msg.topic == c0mpute_net::topics::CAPABILITY_TOPIC => {
+                let Ok(ad) = serde_json::from_slice::<c0mpute_net::topics::CapabilityAd>(&msg.data) else { continue };
+                let fits = |tags: &[String]| tags.iter().all(|t| ad.tags.contains(t));
+                if (fits(required) || alt.is_some_and(fits)) && crate::capabilities::ad_slot_freed(&ad, Duration::from_secs(10)) {
+                    // Let the worker's slot actually come free.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    return;
+                }
+            }
+            Ok(Ok(_)) => {}
         }
     }
 }
 
-/// Fallback pause between rounds when no worker announces a free slot:
-/// 2, 4, 8, then 10 s, never past the deadline.
-fn requeue_pause(rounds: u32, left: Duration) -> Duration {
-    Duration::from_secs(2u64 << rounds.saturating_sub(1).min(3)).min(Duration::from_secs(10)).min(left)
+/// Fallback pause between rounds when no worker announces a freed slot:
+/// 5, 10, then 20 s, never past the deadline.
+fn requeue_pause(requeues: u32, left: Duration) -> Duration {
+    Duration::from_secs(5u64 << requeues.saturating_sub(1).min(2)).min(left)
 }
 
-fn gave_up(workload: Workload, spec: &Value, required: &[String], last_reason: &str, waited: Duration) -> ApiError {
+fn gave_up(workload: Workload, spec: &Value, required: &[String], waited: Duration) -> ApiError {
     let model = crate::buyer_queue::model_of(spec, required);
     let detail = crate::buyer_queue::expired_message(workload.name(), model.as_deref(), waited);
-    if last_reason.is_empty() {
-        ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": detail }))
-    } else {
-        ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": format!("{detail} ({last_reason})") }))
-    }
+    ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": detail }))
 }
 
 /// One auction of the job (the widened spec, then the exact one when nobody
@@ -704,10 +800,13 @@ async fn run_round(
     max_price: f64,
     allowed: &[String],
     deadline: tokio::time::Instant,
-    started: tokio::time::Instant,
-    turn: &mut Option<crate::buyer_queue::AuctionTurn>,
+    turn: crate::buyer_queue::AuctionTurn,
     progress: Option<&Progress>,
 ) -> Round {
+    // Held until a worker accepts, then handed on; dropped at the end of the
+    // round either way, so a job that goes back in line blocks nobody.
+    let mut turn = Some(turn);
+    let turn = &mut turn;
     // The awarded job, so a winner that goes silent is told to stop before
     // the job is auctioned again.
     let in_flight: Arc<std::sync::Mutex<Option<crate::job_e2e::InFlightJob>>> = Arc::default();
@@ -811,7 +910,6 @@ async fn run_round(
     } else {
         result
     };
-    let _ = started;
     Round::Done(Ok(json!({
         "job_id": outcome.job_id,
         "worker": worker,
@@ -1138,8 +1236,10 @@ mod tests {
     #[test]
     fn requeue_pauses_are_short_and_never_pass_the_deadline() {
         let lots = Duration::from_secs(600);
-        let p: Vec<u64> = (1..=6).map(|r| requeue_pause(r, lots).as_secs()).collect();
-        assert_eq!(p, vec![2, 4, 8, 10, 10, 10]);
+        let p: Vec<u64> = (1..=4).map(|r| requeue_pause(r, lots).as_secs()).collect();
+        assert_eq!(p, vec![5, 10, 20, 20]);
+        assert_eq!(DEFAULT_MAX_REQUEUES, 3);
+        assert_eq!(NETWORK_BUSY, "Network is busy. Run a node or wait. (c0mpute.com/getting-started)");
         assert_eq!(requeue_pause(1, Duration::from_millis(300)), Duration::from_millis(300));
     }
 

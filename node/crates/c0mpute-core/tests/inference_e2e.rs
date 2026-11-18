@@ -223,3 +223,79 @@ async fn a_full_worker_gets_the_queued_jobs_in_turn() {
     }
     assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1, "never more answers at once than the worker's slots");
 }
+
+/// Nobody runs the asked-for model at all: the job fails at once with
+/// `no_capable_node` instead of waiting out its deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_no_node_can_run_fails_at_once() {
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
+    let tmp = tempdir().unwrap();
+    let (buyer, buyer_store) = node(&tmp.path().join("b"), vec![]).await;
+    let bridge = JobsBridge::new(buyer.clone(), buyer_store, "test-token-0123456789abcdef".into(), 1.0, vec![])
+        .unwrap()
+        .with_bid_window(Duration::from_millis(500))
+        .with_registry_grace(Duration::ZERO);
+    let spec = json!({"v": 1, "model": "nobody-serves:70b", "messages": [{"role": "user", "content": "hi"}]});
+    let t = std::time::Instant::now();
+    let err = bridge.submit_once(inference::WORKLOAD, spec, Duration::from_secs(120)).await.unwrap_err().to_string();
+    assert!(err.contains("no_capable_node"), "{err}");
+    assert!(t.elapsed() < Duration::from_secs(30), "failed after {:?}, not at once", t.elapsed());
+}
+
+/// The only worker is busy: a job that cannot get a slot within its requeues
+/// ends with "Network is busy" (requeued at the back each time), while the
+/// job behind it in line is answered as the slot frees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requeues_run_out_with_network_busy_and_others_proceed() {
+    unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let base = slow_runtime(Duration::from_secs(4), peak.clone()).await;
+    let tmp = tempdir().unwrap();
+    tokio::spawn(inference::refresh_loop(base.clone()));
+    for _ in 0..50 {
+        if !inference::ready_models().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (worker, worker_store) = node(&tmp.path().join("w"), vec![]).await;
+    let worker_addr = wait_for_listen(&worker).await.with(Protocol::P2p(worker.peer_id()));
+    let load = inference::worker_load(1);
+    let runner = inference::spawn_inference_runner(worker.clone(), worker_store, base.clone(), load.clone());
+    let tags = vec![inference::ROLE_TAG.to_string(), inference::ACCEPT_TAG.to_string(), "c0mpute:cpu".to_string(), inference::model_tag("tiny:1b")];
+    tokio::spawn(c0mpute_core::advertise_loop(worker.clone(), tags.clone(), json!({}), None, Duration::from_secs(60)));
+    dispatch::run_worker_subscriber_with_load(worker.clone(), inference::WORKLOAD.to_string(), tags, Some(runner), Some(inference::offer_filter()), Some(PricingConfig { min_usd: 0.0, ..PricingConfig::default() }), Some(load));
+
+    let (buyer, buyer_store) = node(&tmp.path().join("b"), vec![worker_addr]).await;
+    let bridge = JobsBridge::new(buyer.clone(), buyer_store, "test-token-0123456789abcdef".into(), 1.0, vec![])
+        .unwrap()
+        .with_bid_window(Duration::from_secs(1))
+        .with_max_requeues(1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut jobs = Vec::new();
+    for i in 0..3 {
+        let bridge = bridge.clone();
+        jobs.push(tokio::spawn(async move {
+            let spec = json!({"v": 1, "model": "tiny:1b", "max_tokens": 8, "messages": [{"role": "user", "content": format!("job {i}")}]});
+            bridge.submit_once(inference::WORKLOAD, spec, Duration::from_secs(120)).await
+        }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let (mut answered, mut busy) = (0, 0);
+    for j in jobs {
+        match j.await.unwrap() {
+            Ok(out) => {
+                assert_eq!(out["result"]["ok"], true);
+                answered += 1;
+            }
+            Err(e) => {
+                let e = e.to_string();
+                assert!(e.contains("network_busy") && e.contains("Network is busy. Run a node or wait."), "{e}");
+                busy += 1;
+            }
+        }
+    }
+    assert_eq!((answered, busy), (2, 1), "one runs, one gets the freed slot, the last runs out of requeues");
+    assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
