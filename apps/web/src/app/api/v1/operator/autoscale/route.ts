@@ -12,7 +12,10 @@ const autoscaleStore = () => (_store ??= createAutoscaleStore(cloudSql));
 export async function GET(req: Request) {
   const user = await currentUser(req);
   if (!user) return unauthorized();
-  return json({ nodes: await autoscaleStore().nodes(user.id) });
+  // Only nodes still on the account: removing a node hides its autoscale row too.
+  const [rows, mine] = await Promise.all([autoscaleStore().nodes(user.id), operatorNodes(user.id)]);
+  const on = new Set(mine.map((n) => n.node));
+  return json({ nodes: rows.filter((r) => on.has(r.node)) });
 }
 
 /**

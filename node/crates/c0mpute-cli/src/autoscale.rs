@@ -306,6 +306,12 @@ pub struct NodeState {
     pub cold_starts_s: Vec<u64>,
     #[serde(default)]
     pub replacement: Option<Replacement>,
+    /// `dry_run` nodes: the last action it would have taken, and what the
+    /// stops it would have made would have saved.
+    #[serde(default)]
+    pub would: String,
+    #[serde(default)]
+    pub would_save_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -790,6 +796,8 @@ struct Ctx {
     dry_run: bool,
     /// Log every pass (`once`), not only transitions.
     verbose: bool,
+    /// A `dry_run = true` node in the loop: keep its watch state, report it.
+    watch: bool,
 }
 
 fn now_ms() -> u64 {
@@ -838,7 +846,7 @@ async fn sh(cmd: &str, n: &NodeCfg, instance: &str) -> Option<i32> {
 }
 
 async fn report(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState, force: bool) {
-    if !ctx.cfg.report || ctx.dry_run {
+    if !ctx.cfg.report || (ctx.dry_run && !ctx.watch) {
         return;
     }
     let now = now_ms();
@@ -849,7 +857,7 @@ async fn report(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState, force: bool) {
     let body = json!({
         "node": n.node, "provider": n.provider, "instance": st.instance.clone().unwrap_or_else(|| n.instance.clone()),
         "state": st.phase.as_str(), "reason": st.reason.chars().take(300).collect::<String>(), "at_ms": st.since_ms,
-        "saved_usd": (st.saved_usd * 10_000.0).round() / 10_000.0,
+        "saved_usd": ((if ctx.watch { st.would_save_usd } else { st.saved_usd }) * 10_000.0).round() / 10_000.0,
         "running_usd_per_hour": st.running_usd_h, "stopped_usd_per_hour": st.stopped_usd_h,
         "idle_minutes": n.idle_minutes, "models": n.models,
     });
@@ -870,7 +878,7 @@ fn transition(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState, phase: Phase, reason: 
 
 async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
     if n.dry_run && !ctx.dry_run {
-        let dry = Ctx { cfg: ctx.cfg.clone(), site: ctx.site.clone(), http: ctx.http.clone(), dry_run: true, verbose: ctx.verbose };
+        let dry = Ctx { cfg: ctx.cfg.clone(), site: ctx.site.clone(), http: ctx.http.clone(), dry_run: true, verbose: ctx.verbose, watch: true };
         return Box::pin(tick(&dry, n, st)).await;
     }
     let now = now_ms();
@@ -924,9 +932,47 @@ async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
     };
     let action = decide(&Inputs { cfg: n, st, provider: ps.state, signal: signal.as_ref(), busy, now });
     if ctx.dry_run {
-        if ctx.verbose || action != Action::Nothing {
+        if ctx.verbose {
             log(ctx, &n.name, &format!("[dry-run] provider {:?} ({}), phase {}, would: {action:?}", ps.state, ps.detail, st.phase.as_str()));
         }
+        if !ctx.watch {
+            return Ok(());
+        }
+        // Watch only: follow what the provider reports, never act; log each
+        // change in what it would do, and tally what its stops would save.
+        match &action {
+            Action::Up(_) => {
+                st.started_at_ms = now;
+                transition(ctx, n, st, Phase::Running, "[dry-run] running".into());
+            }
+            Action::Down => transition(ctx, n, st, Phase::Stopped, "[dry-run] provider reports it stopped".into()),
+            _ => {}
+        }
+        let kind = match &action {
+            Action::Stop(_) => "stop",
+            Action::Start(_) => "start",
+            Action::StartTimedOut(_) => "timeout",
+            _ => "hold",
+        };
+        if kind == "stop" && st.would == "stop" && st.last_tick_ms > 0 {
+            let hours = now.saturating_sub(st.last_tick_ms) as f64 / 3_600_000.0;
+            let rate = st.running_usd_h.unwrap_or(0.0) - st.stopped_usd_h.unwrap_or(0.0);
+            if rate > 0.0 && hours < 1.0 {
+                st.would_save_usd += rate * hours;
+            }
+        }
+        if kind != st.would {
+            let what = match &action {
+                Action::Stop(w) | Action::Start(w) | Action::StartTimedOut(w) => format!("would {kind}: {w}"),
+                _ => "would hold (busy or demand)".to_string(),
+            };
+            log(ctx, &n.name, &format!("[dry-run] {what} (would have saved ${:.2} so far)", st.would_save_usd));
+            st.would = kind.to_string();
+            st.reason = format!("[dry-run] {what}");
+            report(ctx, n, st, true).await;
+        }
+        st.last_tick_ms = now;
+        report(ctx, n, st, false).await;
         return Ok(());
     }
     match action {
@@ -1100,7 +1146,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
                         "online": sig.as_ref().map(|s| s.node.online), "demand": sig.as_ref().and_then(Signal::demand)}));
                 } else {
                     println!("{}  {} {}  phase={} since={}s ago  provider={}  saved=${:.2}  cold_starts={:?}\n  reason: {}\n  network: {}",
-                        n.name, n.provider, inst, st.phase.as_str(), now_ms().saturating_sub(st.since_ms) / 1000, ps, st.saved_usd, st.cold_starts_s, st.reason,
+                        n.name, n.provider, inst, st.phase.as_str(), if st.since_ms == 0 { 0 } else { now_ms().saturating_sub(st.since_ms) / 1000 }, ps, if n.dry_run { st.would_save_usd } else { st.saved_usd }, st.cold_starts_s, st.reason,
                         match &sig { Some(s) => format!("online={} in_flight={} serves={:?} demand={}", s.node.online, s.node.in_flight, s.node.serves, s.demand().unwrap_or_else(|| "none".into())), None => "unavailable".into() });
                 }
             }
@@ -1122,7 +1168,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
         AutoscaleCmd::Start { ref name } | AutoscaleCmd::Stop { ref name } => {
             let on = matches!(args.cmd, AutoscaleCmd::Start { .. });
             let n = find(&name)?;
-            let ctx = Ctx { cfg: cfg.clone(), site, http: http.clone(), dry_run: false, verbose: true };
+            let ctx = Ctx { cfg: cfg.clone(), site, http: http.clone(), dry_run: false, verbose: true, watch: false };
             let st = states.entry(n.name.clone()).or_default();
             let inst = st.instance.clone().unwrap_or_else(|| n.instance.clone());
             Provider::new(&n, http)?.set_running(&inst, on).await?;
@@ -1138,7 +1184,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
         }
         AutoscaleCmd::Once { dry_run } | AutoscaleCmd::Run { dry_run } => {
             let looping = matches!(args.cmd, AutoscaleCmd::Run { .. });
-            let ctx = Ctx { cfg: cfg.clone(), site, http, dry_run, verbose: !looping };
+            let ctx = Ctx { cfg: cfg.clone(), site, http, dry_run, verbose: !looping, watch: false };
             loop {
                 for n in cfg.nodes.iter().filter(|n| n.enabled) {
                     let st = states.entry(n.name.clone()).or_default();
