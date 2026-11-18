@@ -1,0 +1,32 @@
+name: dev2 DNS recovery regression tests
+
+on:
+  pull_request:
+    paths:
+      - "scripts/dev2-dns-recovery.py"
+      - "tests/test_dev2_dns_recovery.py"
+      - ".github/workflows/dev2-dns-recovery-tests.yml"
+  push:
+    branches: [master]
+    paths:
+      - "scripts/dev2-dns-recovery.py"
+      - "tests/test_dev2_dns_recovery.py"
+      - ".github/workflows/dev2-dns-recovery-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: DNS recovery dry-run / rollback tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check syntax
+        run: python3 -m py_compile scripts/dev2-dns-recovery.py tests/test_dev2_dns_recovery.py
+      - name: Test safe recovery behavior
+        run: python3 -m unittest discover -s tests -p test_dev2_dns_recovery.py -v
