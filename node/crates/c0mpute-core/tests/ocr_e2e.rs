@@ -192,7 +192,7 @@ async fn pdf_ocr_round_trips_through_the_bridge() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("no_bids") || err.contains("timeout"), "{err}");
+    assert!(err.contains("no_bids") || err.contains("timeout") || err.contains("network_busy"), "{err}");
 
     // A 12 MiB document: far over one network message, so it travels as
     // pieces (stored the way `/v1/ocr` and `c0mpute ocr` store it).

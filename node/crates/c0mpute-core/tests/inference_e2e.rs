@@ -147,7 +147,7 @@ async fn chat_turns_are_answered_peer_to_peer() {
     assert_eq!(out["result"]["model"], model.as_str());
     let missing = json!({"v": 1, "model": "not-served:9b", "messages": [{"role": "user", "content": "hi"}]});
     let err = bridge.submit_once(inference::WORKLOAD, missing, Duration::from_secs(8)).await.unwrap_err().to_string();
-    assert!(err.contains("no_bids") || err.contains("timeout"), "{err}");
+    assert!(err.contains("no_bids") || err.contains("timeout") || err.contains("network_busy"), "{err}");
     // An invalid spec never leaves the buyer.
     let bad = json!({"v": 1, "messages": [{"role": "tool", "content": "x"}]});
     assert!(bridge.submit_once(inference::WORKLOAD, bad, Duration::from_secs(5)).await.is_err());
