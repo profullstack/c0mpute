@@ -9,4 +9,12 @@ export async function register() {
   } catch (e) {
     console.error("chat runs: could not start the run manager", e);
   }
+  // Node earnings history for /dashboard/nodes: copy credited jobs out of the
+  // aggregators before their in-memory 24h window forgets them.
+  try {
+    const { startRecorder } = await import("./lib/earnings/recorder");
+    startRecorder();
+  } catch (e) {
+    console.error("node earnings: could not start the recorder", e);
+  }
 }
