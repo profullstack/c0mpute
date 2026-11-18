@@ -106,7 +106,7 @@ c0mpute worker start --gpu
 
 # submit jobs
 c0mpute transcode submit https://example.com/input.mp4 --preset video-1080p --max-price 1.25
-c0mpute infernet chat --model qwen2.5:7b "hello"
+c0mpute infernet chat --model eriktonon/qwen3.8-uncensored:9b "hello"
 c0mpute crawl fetch https://example.com/ --max-price 0.01   # scrape a page from a worker's IP
 
 # free local CPU speech models + P2P speech worker roles
@@ -163,13 +163,13 @@ its models. Otherwise it provisions a house runtime in the background:
 - **GPU nodes** (any NVIDIA card, or a discrete AMD card with at least 4 GiB of
   dedicated VRAM; integrated APUs do not count) get the official Ollama Linux
   release (pinned, SHA-256 checked, CUDA and ROCm runtimes bundled, no sudo)
-  under the data dir, run `ollama serve` on `127.0.0.1:11434`, and pull models
-  sized to the card: 10 GiB+ gets `qwen2.5:7b` and
-  `eriktonon/qwen3.8-uncensored:9b`, 6 GiB+ gets `qwen2.5:7b`, smaller cards
-  `qwen2.5:1.5b`. If that fails it retries after 6 hours and the CPU runtime
+  under the data dir, run `ollama serve` on `127.0.0.1:11434`, and pull one
+  model sized to the card: 8 GiB+ gets the house default
+  `eriktonon/qwen3.8-uncensored:9b`, 6 GiB+ gets `qwen3:4b`, smaller cards
+  `qwen2.5:1.5b`. Ollama keeps it loaded (`OLLAMA_KEEP_ALIVE=-1`). If that fails it retries after 6 hours and the CPU runtime
   runs meanwhile.
-- **CPU nodes** get a pinned llama.cpp `llama-server` with one Qwen2.5 GGUF
-  sized to RAM (7B on 16 GiB+, 1.5B on 8 GiB+, else 0.5B) on
+- **CPU nodes** get a pinned llama.cpp `llama-server` with one GGUF sized to
+  RAM (the 9B house default on 16 GiB+, Qwen2.5 1.5B on 8 GiB+, else 0.5B) on
   `127.0.0.1:11439`, at low priority so songs and images keep the box.
 
 `c0mpute status` says which applies and why. Opt out with

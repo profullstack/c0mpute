@@ -67,12 +67,17 @@ pub const ACCEPT_TAG: &str = "infernet:inference:accept";
 /// At most this many alternatives on one offer.
 pub const MAX_ACCEPT: usize = 8;
 
+/// The network's default chat model: what house runtimes serve first and
+/// what the router leads with.
+pub const HOUSE_DEFAULT_MODEL: &str = "eriktonon/qwen3.8-uncensored:9b";
+
 /// Smaller standard models a plain-text prompt for the key model may take
 /// when every worker serving the key model is busy, best first. 0.5b is left
 /// out on purpose: it parrots the conversation back.
 pub const FALLBACK_LADDER: &[(&str, &[&str])] = &[
-    ("qwen2.5:7b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
-    ("huihui_ai/qwen3.5-abliterated:9b", &["huihui_ai/qwen3.5-abliterated:4b", "qwen2.5:7b", "qwen3:4b", "qwen2.5:3b"]),
+    // The house default (GPU and 16 GiB+ CPU nodes serve it). qwen2.5:7b is
+    // no key and no alternative: it is not a house model any more.
+    (HOUSE_DEFAULT_MODEL, &["huihui_ai/qwen3.5-abliterated:4b", "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
     ("qwen3:4b", &["qwen2.5:3b", "qwen2.5:1.5b"]),
     ("gemma3:4b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
 ];
@@ -339,9 +344,15 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
             None => anyhow::bail!("no model is served here"),
         },
     };
+    let mut messages = s.messages.clone();
+    if let Some(system) = crate::inference_auto::default_system(base, &model) {
+        if !messages.iter().any(|m| m.get("role").and_then(Value::as_str) == Some("system")) {
+            messages.insert(0, json!({"role": "system", "content": system}));
+        }
+    }
     let mut body = json!({
         "model": model,
-        "messages": s.messages,
+        "messages": messages,
         "max_tokens": s.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "stream": false,
     });
@@ -487,23 +498,26 @@ mod tests {
 
     #[test]
     fn plain_text_prompts_get_smaller_alternatives_and_agent_or_json_ones_do_not() {
-        let plain = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "write a haiku about rain"}]});
+        let plain = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "write a haiku about rain"}]});
         let widened = with_alternatives(&plain).expect("plain text is widened");
-        assert_eq!(widened["accept_models"], json!(["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]));
-        assert_eq!(widened["model"], "qwen2.5:7b", "the asked-for model stays first");
+        assert_eq!(widened["accept_models"], json!(["huihui_ai/qwen3.5-abliterated:4b", "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]));
+        assert_eq!(widened["model"], HOUSE_DEFAULT_MODEL, "the asked-for model stays first");
         assert_eq!(required_capabilities(&widened), vec![ROLE_TAG.to_string(), ACCEPT_TAG.to_string()]);
-        assert_eq!(required_capabilities(&without_alternatives(&widened)), vec![ROLE_TAG.to_string(), model_tag("qwen2.5:7b")]);
+        assert_eq!(required_capabilities(&without_alternatives(&widened)), vec![ROLE_TAG.to_string(), model_tag(HOUSE_DEFAULT_MODEL)]);
 
-        let agent = json!({"v": 1, "model": "qwen2.5:7b", "messages": [
+        let agent = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [
             {"role": "system", "content": "Call tools like <tool name=\"bash\">ls</tool>"},
             {"role": "user", "content": "fix the test"}]});
         assert!(with_alternatives(&agent).is_none(), "agent tool protocol keeps the exact model");
-        let json_mode = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "Respond with JSON only: {\"title\": string}"}]});
+        let json_mode = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "Respond with JSON only: {\"title\": string}"}]});
         assert!(with_alternatives(&json_mode).is_none(), "JSON output keeps the exact model");
-        let exact = json!({"v": 1, "model": "qwen2.5:7b", "exact_model": true, "messages": [{"role": "user", "content": "hi"}]});
+        let exact = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "exact_model": true, "messages": [{"role": "user", "content": "hi"}]});
         assert!(with_alternatives(&exact).is_none(), "exact_model opts out");
-        let big = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "x".repeat(PLAIN_TEXT_MAX_BYTES + 1)}]});
+        let big = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "x".repeat(PLAIN_TEXT_MAX_BYTES + 1)}]});
         assert!(with_alternatives(&big).is_none(), "long context keeps the exact model");
+        let retired = json!({"v": 1, "model": "qwen2.5:7b", "messages": [{"role": "user", "content": "hi"}]});
+        assert!(with_alternatives(&retired).is_none(), "qwen2.5:7b is no ladder key any more");
+        assert!(FALLBACK_LADDER.iter().all(|(k, alts)| *k != "qwen2.5:7b" && !alts.contains(&"qwen2.5:7b")));
         let unknown = json!({"v": 1, "model": "devstral:24b", "messages": [{"role": "user", "content": "hi"}]});
         assert!(with_alternatives(&unknown).is_none(), "only standard models have a ladder");
         let too_many = json!({"v": 1, "model": "m", "accept_models": ["a","b","c","d","e","f","g","h","i"], "messages": [{"role": "user", "content": "hi"}]});

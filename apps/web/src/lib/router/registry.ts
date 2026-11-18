@@ -18,6 +18,17 @@ export type PriceRow = {
 
 export type PriceTable = { default_model_price?: { input_per_m_usd: number; output_per_m_usd: number }; models?: PriceRow[] };
 
+/**
+ * The network's default chat model: house runtimes (GPU Ollama, 16 GiB CPU
+ * nodes) and Infernet serve it first, so the router leads with it. Its image
+ * is a no-think template, so it is not a "reasoning" model, and as the house
+ * default it is not gated behind adult mode like other uncensored models.
+ */
+export const HOUSE_DEFAULT_MODEL = "eriktonon/qwen3.8-uncensored:9b";
+
+/** No longer a house model: never the router's first choice. */
+const RETIRED_DEFAULTS = new Set(["qwen2.5:7b"]);
+
 /** House fine-tunes and the one category each is for. */
 const SPECIALISTS: [RegExp, Category][] = [
   [/not-a-lawyer|lawyer|legal/i, "legal"],
@@ -44,8 +55,10 @@ export function parseModel(id: string): Omit<ModelProfile, "priceIn" | "priceOut
   const tags: ModelTag[] = [];
   let specialty: Category | undefined;
   if (/coder|code/.test(name)) tags.push("coder");
-  if (/abliterated|uncensored|nsfw/.test(lower)) tags.push("uncensored");
-  if (/qwen3|deepseek-r1|reasoning|thinking|qwq/.test(name)) tags.push("reasoning");
+  const house = id === HOUSE_DEFAULT_MODEL;
+  if (house) tags.push("house");
+  if (!house && /abliterated|uncensored|nsfw/.test(lower)) tags.push("uncensored");
+  if (!house && /qwen3|deepseek-r1|reasoning|thinking|qwq/.test(name)) tags.push("reasoning");
   if (paramsB !== null && paramsB < 1.6) tags.push("tiny");
   if (/^hf\.co\/profullstack\//.test(lower) || /-agent\b/.test(name)) {
     for (const [re, cat] of SPECIALISTS) {
@@ -104,5 +117,9 @@ export function prior(m: ModelProfile, category: Category): number {
     q = m.specialty === category ? q + 0.25 : q - 0.2;
   }
   if (m.tags.includes("uncensored")) q -= 0.03;
+  // Lead with the house default on general work; specialists and coders keep
+  // their lanes (their own bonuses are larger).
+  if (m.tags.includes("house")) q += 0.1;
+  if (RETIRED_DEFAULTS.has(m.id)) q -= 0.15;
   return clamp(q);
 }
