@@ -25,6 +25,11 @@
 //! Gates before installing: `min_ram_gb / 2` total RAM, `min_free_ram_gb`
 //! available (halved for 0.5B), `min_free_disk_gb` free in the data dir.
 //! Opt out with `C0MPUTE_INFERENCE_AUTO=0` or `[inference] auto_install = false`.
+//!
+//! A node with a real GPU (any NVIDIA card or a discrete AMD card, never an
+//! integrated APU) skips this CPU runtime: [`crate::inference_gpu`] installs a
+//! user-space Ollama and serves VRAM-sized models from the card, and only falls
+//! back here when that fails.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -237,6 +242,20 @@ pub fn host_gate(config: &InferenceConfig, total: u64, available: u64, free_disk
 /// What `c0mpute status` says about the house runtime when it is not
 /// answering: off, too small, or not installed/started yet.
 pub fn gate_reason(config: &InferenceConfig) -> String {
+    if let Some(gpu) = crate::gpu::detect() {
+        let gpu_installed = crate::inference_gpu::installed(gpu.kind);
+        let disk = crate::speech::free_bytes_for(&root());
+        if crate::inference_gpu::gate(config, Some(gpu), disk, gpu_installed).is_none() {
+            let models = crate::inference_gpu::models_for_vram(gpu.vram_mib).join(", ");
+            return if crate::inference_gpu::in_backoff() {
+                format!("{} GPU: setting up Ollama failed recently; the CPU runtime runs meanwhile, GPU retry within 6 h", gpu.kind.as_str())
+            } else if gpu_installed {
+                format!("{} GPU ({} MiB): the worker starts Ollama on {} with {models}", gpu.kind.as_str(), gpu.vram_mib, crate::inference_gpu::OLLAMA_URL)
+            } else {
+                format!("{} GPU ({} MiB): the worker installs Ollama {} and pulls {models} in the background", gpu.kind.as_str(), gpu.vram_mib, crate::inference_gpu::OLLAMA_VERSION)
+            };
+        }
+    }
     if !platform_supported() {
         return "no Ollama or llama-server, and no prebuilt llama.cpp for this platform".into();
     }
@@ -405,7 +424,7 @@ async fn ensure(config: &InferenceConfig) -> Option<&'static HouseModel> {
 /// Kill llama-servers left from our own binary path (an auto-update
 /// re-executes the worker in place, and the child keeps the port).
 #[cfg(target_os = "linux")]
-fn kill_strays(bin: &Path) -> usize {
+pub(crate) fn kill_strays(bin: &Path) -> usize {
     let mut killed = 0;
     let Ok(entries) = std::fs::read_dir("/proc") else { return 0 };
     for e in entries.flatten() {
@@ -422,7 +441,7 @@ fn kill_strays(bin: &Path) -> usize {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn kill_strays(_bin: &Path) -> usize {
+pub(crate) fn kill_strays(_bin: &Path) -> usize {
     0
 }
 
@@ -452,7 +471,7 @@ fn server_command(model: &HouseModel) -> Command {
 
 /// Linux: the child gets SIGTERM when the worker goes away.
 #[cfg(target_os = "linux")]
-fn die_with_parent(cmd: &mut Command) {
+pub(crate) fn die_with_parent(cmd: &mut Command) {
     // SAFETY: prctl(2) is async-signal-safe and touches no shared state.
     unsafe {
         cmd.pre_exec(|| {
@@ -463,7 +482,7 @@ fn die_with_parent(cmd: &mut Command) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn die_with_parent(_cmd: &mut Command) {}
+pub(crate) fn die_with_parent(_cmd: &mut Command) {}
 
 /// Run llama-server forever: restart when it exits, backing off from 5 s to
 /// 5 min while it keeps dying young.
@@ -539,6 +558,12 @@ pub async fn choose_runtime(operator: String, config: &InferenceConfig) -> Strin
         if attempt < 2 {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
+    }
+    // A real GPU (any NVIDIA card or a discrete AMD one, never an APU) gets
+    // a user-space Ollama on the card instead of the CPU llama.cpp; on any
+    // failure that path backs off and the CPU runtime below runs instead.
+    if let Some(url) = crate::inference_gpu::start(config).await {
+        return url;
     }
     let Some(model) = ensure(config).await else {
         return operator;
