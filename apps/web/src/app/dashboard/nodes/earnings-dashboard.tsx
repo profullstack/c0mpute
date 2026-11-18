@@ -167,6 +167,7 @@ export function EarningsDashboard() {
           <Summary data={data} />
           {data.nodes.length > 0 && <Chart data={data} />}
           <NodesTable data={data} onChange={load} />
+          <AutoscaleTable />
           {data.by_type.length > 0 && <TypesTable data={data} />}
           <ClaimForm onDone={load} />
           <Notes data={data} />
@@ -566,6 +567,123 @@ function Notes({ data }: { data: Dashboard }) {
       {data.history_from != null && <p>c0mpute job history on file since {new Date(data.history_from).toLocaleString()}.</p>}
       {data.infernet === null && <p className="text-[var(--color-warn)]">Settled pay could not be read from Infernet right now, so earned shows $0.</p>}
       {data.infernet && !data.infernet.linked && <p>No Infernet account is linked to this CoinPay sign-in yet.</p>}
+    </section>
+  );
+}
+
+// Mirrors lib/autoscale.ts AutoscaleNodeOut.
+type AutoscaleNode = {
+  node: string;
+  provider: string;
+  instance: string;
+  state: string;
+  reason: string;
+  last_transition_ms: number;
+  reported_ms: number;
+  saved_usd: number;
+  running_usd_per_hour: number | null;
+  stopped_usd_per_hour: number | null;
+  idle_minutes: number | null;
+  models: string[];
+  events: { state: string; reason: string; at_ms: number }[];
+};
+
+function ago(ms: number): string {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 172_800) return `${(s / 3600).toFixed(1)} h ago`;
+  return `${Math.round(s / 86_400)} days ago`;
+}
+
+function stateClass(state: string): string {
+  if (state === "running") return "accent";
+  if (state === "error") return "text-[var(--color-warn)]";
+  return "text-[var(--color-dim)]";
+}
+
+/** Rented nodes `c0mpute autoscale` stops when idle and starts on demand (docs#autoscale). */
+function AutoscaleTable() {
+  const [nodes, setNodes] = useState<AutoscaleNode[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const get = () =>
+      fetch("/api/v1/operator/autoscale", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => live && setNodes(Array.isArray(d?.nodes) ? d.nodes : []))
+        .catch(() => live && setNodes([]));
+    get();
+    const t = setInterval(get, 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+  if (nodes === null) return null;
+  if (nodes.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-dim)]">
+        Renting a GPU node? <a href="/docs#autoscale">c0mpute autoscale</a> stops it when the network has no work for it and starts it when jobs wait.
+      </p>
+    );
+  }
+  const saved = nodes.reduce((a, n) => a + n.saved_usd, 0);
+  return (
+    <section className="space-y-2" aria-label="autoscale">
+      <h2 className="font-bold">
+        autoscale <span className="font-normal text-xs text-[var(--color-dim)]">saved {usd(saved)} so far · <a href="/docs#autoscale">how it works</a></span>
+      </h2>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[640px] text-xs [&_td]:px-1 [&_th]:px-1">
+          <thead className="text-[var(--color-dim)]">
+            <tr>
+              <th className="text-left font-normal py-1">node</th>
+              <th className="text-left font-normal">state</th>
+              <th className="text-left font-normal">since</th>
+              <th className="text-left font-normal">why</th>
+              <th className="text-right font-normal">saved</th>
+            </tr>
+          </thead>
+          <tbody>
+            {nodes.map((n) => (
+              <tr key={n.node} className="border-t border-[var(--color-rule)] align-top">
+                <td className="py-2 pr-2">
+                  <div>{n.node}</div>
+                  <div className="text-[var(--color-dim)]">
+                    {n.provider} {n.instance}
+                    {n.running_usd_per_hour != null && ` · ${usd(n.running_usd_per_hour)}/h running`}
+                    {n.stopped_usd_per_hour != null && `, ${usd(n.stopped_usd_per_hour)}/h stopped`}
+                  </div>
+                </td>
+                <td className={stateClass(n.state)}>
+                  <span className="border border-current px-1">{n.state}</span>
+                </td>
+                <td title={new Date(n.last_transition_ms).toLocaleString()}>
+                  {ago(n.last_transition_ms)}
+                  {Date.now() - n.reported_ms > 10 * 60_000 && <div className="text-[var(--color-warn)]">no report for {ago(n.reported_ms).replace(" ago", "")}</div>}
+                </td>
+                <td className="max-w-[260px]">
+                  <div>{n.reason || "-"}</div>
+                  {n.events.length > 1 && (
+                    <details>
+                      <summary className="cursor-pointer text-[var(--color-dim)]">last {n.events.length} changes</summary>
+                      <ul className="mt-1 space-y-0.5 text-[var(--color-dim)]">
+                        {n.events.map((e, i) => (
+                          <li key={i}>
+                            {new Date(e.at_ms).toLocaleString()}: {e.state}
+                            {e.reason ? `, ${e.reason}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </td>
+                <td className="text-right">{usd(n.saved_usd)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

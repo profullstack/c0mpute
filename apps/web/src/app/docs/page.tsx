@@ -322,6 +322,102 @@ c0mpute infernet reservation --help`}
         </Code>
       </Section>
 
+      <Section h="autoscale" title="[ autoscale rented nodes ]">
+        <P>
+          Opt-in, for GPU nodes you <em>rent</em> by the hour (Vast.ai,
+          SaladCloud, ...). <code>c0mpute autoscale</code> stops the rented
+          instance when the network has no work for it and starts it again as
+          soon as jobs for its models are waiting. A box you own saves nothing
+          by stopping, so leave those out.
+        </P>
+        <P>
+          Run it on any always-on machine you own (a home server, a fixed
+          node), never on the rented box itself: it has to be awake to start
+          the box again. Your cloud provider&apos;s API key stays on that
+          machine, in a file or an environment variable. c0mpute.com never
+          sees it: the CLI only reports the node&apos;s state to your{" "}
+          <a href="/dashboard/nodes">dashboard</a> with your{" "}
+          <code>C0MPUTE_API_KEY</code>.
+        </P>
+        <Code>
+{`c0mpute autoscale init        # writes ~/.config/c0mpute/autoscale.toml (0600)
+c0mpute autoscale once        # one decision per node, then exit
+c0mpute autoscale run         # keep deciding (every minute)
+c0mpute autoscale status      # each node: state, idle time, demand, saved`}
+        </Code>
+        <Code>
+{`report = true            # send state to your c0mpute.com dashboard (needs C0MPUTE_API_KEY)
+
+[[node]]
+name = "vast-3060"
+provider = "vast"         # vast | salad | thunder (thunder: status only, no native stop)
+instance = "61205210"
+node = "sdNT3kCN"         # board id or peer id
+models = ["eriktonon/qwen3.8-uncensored:9b"]
+api_key_file = "~/.config/c0mpute/vast.key"
+idle_minutes = 20
+min_run_minutes = 15
+boot_timeout_minutes = 8
+# busy_cmd = "ssh -p 39620 root@ssh3.vast.ai 'nvidia-smi ...'"  # optional: exit 0 = busy, never stop
+
+# [node.replace]          # vast only: rent a replacement if a start never comes up
+# max_usd_per_hour = 0.12
+# gpus = ["RTX 3060", "RTX 3070", "RTX 4060 Ti"]
+# min_gpu_ram_gb = 12
+# min_reliability = 0.98
+# disk_gb = 60
+# image = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
+# onstart_file = "~/.config/c0mpute/vast-onstart.sh"
+# identity_file = "~/.config/c0mpute/node-identity.key"   # keep the node id on the replacement`}
+        </Code>
+        <P>
+          <b>Stop</b> when all of these hold: the node has had no job for{" "}
+          <code>idle_minutes</code>, nothing is in flight on it, the network
+          has no waiting or recent demand for its models,{" "}
+          <code>busy_cmd</code> (if set) says idle, and it has run at least{" "}
+          <code>min_run_minutes</code> since it was started.{" "}
+          <b>Start</b> at once when the network has offers for its models
+          (waiting, or in the last 2 minutes) or recent demand nobody served.
+          The demand comes from the status aggregators (
+          <code>GET /api/v1/autoscale/signal?node=&lt;id&gt;&amp;models=a,b</code>
+          ), which watch every job offer on the network.
+        </P>
+        <P>
+          Providers: on Vast.ai a stopped instance still bills its disk, and
+          its GPU can go to another renter while it is stopped, so a start can
+          fail; set <code>[node.replace]</code> and the CLI rents a matching
+          offer under your price cap after <code>boot_timeout_minutes</code>{" "}
+          and destroys the old instance only once the new one serves.
+          SaladCloud container groups are stopped and started. Thunder Compute
+          has no native stop (only snapshot and delete), so it is status only
+          for now.
+        </P>
+        <Code>
+{`# ~/.config/systemd/user/c0mpute-autoscale.service
+[Unit]
+Description=c0mpute autoscale: stop idle rented nodes, start them on demand
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/c0mpute/autoscale.env   # C0MPUTE_API_KEY=... (0600)
+ExecStart=%h/.c0mpute/bin/c0mpute autoscale run
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+
+# then: systemctl --user enable --now c0mpute-autoscale
+#       loginctl enable-linger $USER     # keep it running after you log out`}
+        </Code>
+        <P>
+          The <a href="/dashboard/nodes">dashboard</a> shows each autoscaled
+          node&apos;s state (running, stopped, starting, ...), its last
+          change and why, and what stopping it has saved. Full reference:{" "}
+          <a href="https://github.com/profullstack/c0mpute/blob/master/docs/autoscale.md">docs/autoscale.md</a>.
+        </P>
+      </Section>
+
       <Section h="crawl" title="[ distributed scraping ]">
         <P>
           <code>crawl.fetch</code> fetches one public page from a worker&apos;s
