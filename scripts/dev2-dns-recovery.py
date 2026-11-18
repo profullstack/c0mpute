@@ -18,7 +18,6 @@ import argparse
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -29,7 +28,7 @@ BACKUP_DIR = Path("/var/backups")
 NAMES = ("moshpit.conf", "00-moshpit.conf")
 CHECK_NAMES = ("github.com", "c0mpute.com")
 LOOPBACK_DNS = re.compile(r"^\s*DNS\s*=\s*(?:127\.0\.0\.1|::1|\[::1\])(?::\d+)?(?:\s|$)", re.I | re.M)
-ROUTE_ALL = re.compile(r"^\s*Domains\s*=.*(?:^|\s)~\.(?=\s|$)", re.I | re.M)
+ROUTE_ALL = re.compile(r"^\s*Domains\s*=\s*(?:\S+\s+)*~\.(?:\s|$)", re.I | re.M)
 
 
 def owned(name: str, data: str) -> bool:
