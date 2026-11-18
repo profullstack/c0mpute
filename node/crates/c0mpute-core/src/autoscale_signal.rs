@@ -173,9 +173,11 @@ impl Demand {
             .filter_map(|o| o.external_ref.as_deref())
             .collect();
         let mut out: HashMap<String, ModelDemand> = models.iter().map(|m| (m.clone(), ModelDemand::default())).collect();
-        for o in self.offers.iter().rev() {
+        // Filed in arrival order, but a buyer's clock is only clamped to the
+        // last minute, so scan the lot rather than stop at the first old one.
+        for o in self.offers.iter() {
             if o.at_ms < since {
-                break;
+                continue;
             }
             let Some(m) = o.model.as_ref() else { continue };
             let Some(d) = out.get_mut(m) else { continue };
