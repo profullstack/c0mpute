@@ -52,6 +52,9 @@ pub struct WorkerLoad {
     /// a job starts only while the node has room for it beside every other
     /// role's running jobs. `None`: the slots alone bound this workload.
     budget: Option<(Arc<crate::budget::Budget>, crate::budget::Cost)>,
+    /// The workload these slots run, named on the capability ad sent when one
+    /// frees (see [`JobSlot`]).
+    workload: Option<Arc<str>>,
 }
 
 /// A running job's hold on its workload's slot and on the node budget; both
@@ -60,6 +63,7 @@ pub struct WorkerLoad {
 pub struct JobSlot {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     reservation: Option<crate::budget::Reservation>,
+    workload: Option<Arc<str>>,
 }
 
 impl Drop for JobSlot {
@@ -70,7 +74,9 @@ impl Drop for JobSlot {
     fn drop(&mut self) {
         drop(self.reservation.take());
         drop(self.permit.take());
-        crate::capabilities::readvertise_now();
+        if let Some(w) = &self.workload {
+            crate::capabilities::slot_freed(w);
+        }
     }
 }
 
@@ -82,6 +88,7 @@ impl WorkerLoad {
             recent_job_ms: Arc::new(AtomicU64::new(0)),
             history: None,
             budget: None,
+            workload: None,
         }
     }
 
@@ -101,6 +108,7 @@ impl WorkerLoad {
             "capacity: role slots from the node budget"
         );
         Self::new(Arc::new(Semaphore::new(slots)), slots)
+            .with_workload(workload)
             .with_budget(budget, cost)
             .with_history(
                 crate::config::data_dir()
@@ -108,6 +116,12 @@ impl WorkerLoad {
                     .join("job-times")
                     .join(format!("{workload}.ms")),
             )
+    }
+
+    /// Name the workload, so a freed slot is announced for it.
+    pub fn with_workload(mut self, workload: &str) -> Self {
+        self.workload = Some(Arc::from(workload));
+        self
     }
 
     /// Reserve `cost` from `budget` for every job (see [`Self::acquire`]).
@@ -124,7 +138,7 @@ impl WorkerLoad {
             Some((budget, cost)) => Some(budget.reserve(*cost).await),
             None => None,
         };
-        Some(JobSlot { permit: Some(permit), reservation })
+        Some(JobSlot { permit: Some(permit), reservation, workload: self.workload.clone() })
     }
 
     /// Keep the recent-job average in `path` and start from what it holds.

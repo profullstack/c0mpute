@@ -734,7 +734,7 @@ async fn run_job_with_progress(
             "status": waiting_for(workload), "reason": reason, "requeues": requeues, "waited_ms": started.elapsed().as_millis() as u64}));
         // Wait (holding no turn) for a capable worker to free a slot, else
         // the backoff; never past the deadline.
-        wait_for_freed_slot(&state.net, &required, exact_required.as_deref(), requeue_pause(requeues, left)).await;
+        wait_for_freed_slot(&state.net, workload.name(), &required, exact_required.as_deref(), requeue_pause(requeues, left)).await;
     }
 }
 
@@ -750,7 +750,7 @@ pub const DEFAULT_MAX_REQUEUES: u32 = 3;
 
 /// Sleep up to `pause`, waking early when a worker advertising `required`
 /// (or `alt`) says it just freed a slot.
-async fn wait_for_freed_slot(net: &Libp2pNetwork, required: &[String], alt: Option<&[String]>, pause: Duration) {
+async fn wait_for_freed_slot(net: &Libp2pNetwork, workload: &str, required: &[String], alt: Option<&[String]>, pause: Duration) {
     let deadline = tokio::time::Instant::now() + pause;
     let mut rx = net.messages();
     loop {
@@ -764,7 +764,7 @@ async fn wait_for_freed_slot(net: &Libp2pNetwork, required: &[String], alt: Opti
             Ok(Ok(msg)) if msg.topic == c0mpute_net::topics::CAPABILITY_TOPIC => {
                 let Ok(ad) = serde_json::from_slice::<c0mpute_net::topics::CapabilityAd>(&msg.data) else { continue };
                 let fits = |tags: &[String]| tags.iter().all(|t| ad.tags.contains(t));
-                if (fits(required) || alt.is_some_and(fits)) && crate::capabilities::ad_slot_freed(&ad, Duration::from_secs(10)) {
+                if (fits(required) || alt.is_some_and(fits)) && crate::capabilities::ad_slot_freed(&ad, workload, Duration::from_secs(10)) {
                     // Let the worker's slot actually come free.
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     return;

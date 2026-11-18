@@ -527,10 +527,33 @@ impl TagSource {
 
 static READVERTISE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
 
-/// Publish this node's capability ad now instead of at the next tick: a job
-/// just ended and freed a slot, so buyers holding requeued jobs (the jobs
-/// bridge, the speech gateway) re-auction them at once rather than on their
-/// backoff. Rate-limited in the advertise loop.
+/// Workloads that freed a slot recently: workload -> unix ms.
+static FREED: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+/// A job of `workload` ended and its slot is free: publish this node's
+/// capability ad now, with `slot_freed.<workload>` set, so buyers holding
+/// queued jobs of that workload (the jobs bridge) re-auction at once instead
+/// of on their backoff. Rate-limited in the advertise loop.
+pub fn slot_freed(workload: &str) {
+    if let Ok(mut f) = FREED.lock() {
+        let now = unix_now_ms();
+        let map = f.get_or_insert_with(HashMap::new);
+        map.retain(|_, t| now.saturating_sub(*t) < 10_000);
+        map.insert(workload.to_string(), now);
+    }
+    readvertise_now();
+}
+
+fn recently_freed() -> serde_json::Map<String, serde_json::Value> {
+    let now = unix_now_ms();
+    FREED
+        .lock()
+        .ok()
+        .and_then(|f| f.as_ref().map(|m| m.iter().filter(|(_, t)| now.saturating_sub(**t) < 10_000).map(|(w, t)| (w.clone(), serde_json::json!(t))).collect()))
+        .unwrap_or_default()
+}
+
+/// Publish this node's capability ad now instead of at the next tick.
 pub fn readvertise_now() {
     READVERTISE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     READVERTISE.get_or_init(tokio::sync::Notify::new).notify_waiters();
@@ -540,18 +563,20 @@ pub fn readvertise_now() {
 /// when it was called still sees it.
 static READVERTISE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// `hardware` field of an ad sent because a job just ended: unix ms.
-pub const SLOT_FREED_FIELD: &str = "slot_freed_at_ms";
+/// `hardware` field of an ad: `{ <workload>: unix ms }` for workloads that
+/// just freed a slot.
+pub const SLOT_FREED_FIELD: &str = "slot_freed";
 
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// The ad says a slot freed within the last `within` (by the sender's clock,
-/// so loosely).
-pub fn ad_slot_freed(ad: &CapabilityAd, within: Duration) -> bool {
+/// The ad says a slot of `workload` freed within the last `within` (by the
+/// sender's clock, so loosely: 30 s of skew allowed).
+pub fn ad_slot_freed(ad: &CapabilityAd, workload: &str, within: Duration) -> bool {
     ad.hardware
         .get(SLOT_FREED_FIELD)
+        .and_then(|m| m.get(workload))
         .and_then(serde_json::Value::as_u64)
         .is_some_and(|t| unix_now_ms().saturating_sub(t) <= within.as_millis() as u64 + 30_000)
 }
@@ -605,8 +630,9 @@ async fn advertise(
         let mut hw = with_instance(hardware.clone(), net.instance_id());
         // Buyers holding queued jobs re-auction only on this marker, not on
         // every periodic ad (which would spend their retries for nothing).
-        if freed && let Some(obj) = hw.as_object_mut() {
-            obj.insert(SLOT_FREED_FIELD.into(), serde_json::json!(unix_now_ms()));
+        let freed_now = if freed { recently_freed() } else { serde_json::Map::new() };
+        if !freed_now.is_empty() && let Some(obj) = hw.as_object_mut() {
+            obj.insert(SLOT_FREED_FIELD.into(), serde_json::Value::Object(freed_now));
         }
         let ad = CapabilityAd::with_score(peer_id.clone(), tag_source.tags(), hw, bench_score);
         let payload = match serde_json::to_vec(&ad) {
@@ -849,6 +875,23 @@ impl Registry {
 
     pub async fn count(&self) -> usize {
         self.inner.read().await.len()
+    }
+}
+
+#[cfg(test)]
+mod slot_freed_tests {
+    use super::*;
+
+    #[test]
+    fn the_freed_marker_names_the_workload() {
+        let ad = |hw: serde_json::Value| CapabilityAd::now("p".into(), vec![], hw);
+        let now = unix_now_ms();
+        let a = ad(serde_json::json!({"slot_freed": {"infernet.inference": now}}));
+        assert!(ad_slot_freed(&a, "infernet.inference", Duration::from_secs(10)));
+        assert!(!ad_slot_freed(&a, "music.txt2music", Duration::from_secs(10)), "a song's slot is not a chat slot");
+        let old = ad(serde_json::json!({"slot_freed": {"infernet.inference": now - 120_000}}));
+        assert!(!ad_slot_freed(&old, "infernet.inference", Duration::from_secs(10)));
+        assert!(!ad_slot_freed(&ad(serde_json::json!({})), "infernet.inference", Duration::from_secs(10)));
     }
 }
 

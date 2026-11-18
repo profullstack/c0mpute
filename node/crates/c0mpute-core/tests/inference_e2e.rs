@@ -26,6 +26,10 @@ use tempfile::tempdir;
 
 struct StoreSource(ChunkStore);
 
+/// The worker tests share process-wide state (the ready-model list, the
+/// freed-slot announcement); run them one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[async_trait::async_trait]
 impl ChunkSource for StoreSource {
     async fn read_chunk(&self, hash: &Hash) -> anyhow::Result<Vec<u8>> {
@@ -78,6 +82,7 @@ async fn fake_runtime() -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_turns_are_answered_peer_to_peer() {
+    let _serial = SERIAL.lock().await;
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
     // Keep the loopback buyer and worker off the live LAN network.
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
@@ -182,6 +187,7 @@ async fn slow_runtime(delay: Duration, peak: Arc<std::sync::atomic::AtomicUsize>
 /// more than the worker's one slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_worker_gets_the_queued_jobs_in_turn() {
+    let _serial = SERIAL.lock().await;
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -247,6 +253,7 @@ async fn a_job_no_node_can_run_fails_at_once() {
 /// job behind it in line is answered as the slot frees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requeues_run_out_with_network_busy_and_others_proceed() {
+    let _serial = SERIAL.lock().await;
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=debug,c0mpute_net=warn").with_test_writer().try_init();
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
