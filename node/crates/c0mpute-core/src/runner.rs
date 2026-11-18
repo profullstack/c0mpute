@@ -805,7 +805,7 @@ pub async fn publish_receipt(
     status: JobStatus,
 ) {
     crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
-    send_receipt(net, accept, output_hash, status).await
+    finish_and_send_receipt(net, accept, output_hash, status).await
 }
 
 /// A won job turned away because this node could not reach its buyer (the
@@ -816,10 +816,10 @@ pub async fn publish_receipt(
 /// links came up and paused chat bidding for the full 2 h (2026-11-18).
 pub async fn publish_unreachable_refusal(net: &Libp2pNetwork, accept: &JobAccept) {
     crate::activity::note_unreachable(&accept.workload_type);
-    send_receipt(net, accept, None, JobStatus::Failed).await
+    finish_and_send_receipt(net, accept, None, JobStatus::Failed).await
 }
 
-async fn send_receipt(
+async fn finish_and_send_receipt(
     net: &Libp2pNetwork,
     accept: &JobAccept,
     output_hash: Option<String>,
