@@ -390,7 +390,7 @@ pub fn worker_load(slots: usize) -> WorkerLoad {
     // Job times survive restarts like every other workload's (runner::with_history):
     // without it each update reset every node's ETA to the 60 s placeholder, and
     // the bench score alone picked winners until real jobs finished again.
-    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(slots)), slots).with_budget(budget, cost).with_history(
+    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(slots)), slots).with_workload(WORKLOAD).with_budget(budget, cost).with_history(
         crate::config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("job-times")

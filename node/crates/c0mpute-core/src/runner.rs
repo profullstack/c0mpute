@@ -52,14 +52,32 @@ pub struct WorkerLoad {
     /// a job starts only while the node has room for it beside every other
     /// role's running jobs. `None`: the slots alone bound this workload.
     budget: Option<(Arc<crate::budget::Budget>, crate::budget::Cost)>,
+    /// The workload these slots run, named on the capability ad sent when one
+    /// frees (see [`JobSlot`]).
+    workload: Option<Arc<str>>,
 }
 
 /// A running job's hold on its workload's slot and on the node budget; both
 /// are handed back when it drops.
 #[derive(Debug)]
 pub struct JobSlot {
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    _reservation: Option<crate::budget::Reservation>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    reservation: Option<crate::budget::Reservation>,
+    workload: Option<Arc<str>>,
+}
+
+impl Drop for JobSlot {
+    /// Free the slot, then tell buyers holding queued jobs (the jobs bridge)
+    /// that it is free: the capability ad goes out marked `slot_freed_at_ms`
+    /// and they re-auction at once. Announcing before the slot is free (from
+    /// the receipt) made them auction into a still-full node.
+    fn drop(&mut self) {
+        drop(self.reservation.take());
+        drop(self.permit.take());
+        if let Some(w) = &self.workload {
+            crate::capabilities::slot_freed(w);
+        }
+    }
 }
 
 impl WorkerLoad {
@@ -70,6 +88,7 @@ impl WorkerLoad {
             recent_job_ms: Arc::new(AtomicU64::new(0)),
             history: None,
             budget: None,
+            workload: None,
         }
     }
 
@@ -89,6 +108,7 @@ impl WorkerLoad {
             "capacity: role slots from the node budget"
         );
         Self::new(Arc::new(Semaphore::new(slots)), slots)
+            .with_workload(workload)
             .with_budget(budget, cost)
             .with_history(
                 crate::config::data_dir()
@@ -96,6 +116,12 @@ impl WorkerLoad {
                     .join("job-times")
                     .join(format!("{workload}.ms")),
             )
+    }
+
+    /// Name the workload, so a freed slot is announced for it.
+    pub fn with_workload(mut self, workload: &str) -> Self {
+        self.workload = Some(Arc::from(workload));
+        self
     }
 
     /// Reserve `cost` from `budget` for every job (see [`Self::acquire`]).
@@ -112,7 +138,7 @@ impl WorkerLoad {
             Some((budget, cost)) => Some(budget.reserve(*cost).await),
             None => None,
         };
-        Some(JobSlot { _permit: permit, _reservation: reservation })
+        Some(JobSlot { permit: Some(permit), reservation, workload: self.workload.clone() })
     }
 
     /// Keep the recent-job average in `path` and start from what it holds.

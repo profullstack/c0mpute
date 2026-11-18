@@ -1682,7 +1682,7 @@ type ResumeTarget = (&'static str, Arc<Semaphore>, fn(&[u8]) -> &'static str);
 /// Sleep up to `pause` (at least `min`), waking early when a node advertising
 /// every one of `required` shows up: a worker that just freed up (busy image
 /// and song workers withdraw their role tags) or a new one joining.
-async fn wait_for_capable(net: &Libp2pNetwork, required: &[String], pause: Duration, min: Duration) {
+pub(crate) async fn wait_for_capable(net: &Libp2pNetwork, required: &[String], pause: Duration, min: Duration) {
     let start = tokio::time::Instant::now();
     let deadline = start + pause;
     let earliest = start + min.min(pause);

@@ -203,6 +203,9 @@ async fn transform_step_round_trips_through_the_bridge() {
         TOKEN,
     )
     .await;
+    // It is requeued at the back each time nobody bids; after the last
+    // requeue the caller is told the network is busy.
     assert_eq!(status, 503, "{body}");
-    assert_eq!(body["error"], "no_bids");
+    assert_eq!(body["error"], "network_busy", "{body}");
+    assert_eq!(body["detail"], c0mpute_core::jobs_gateway::NETWORK_BUSY);
 }

@@ -226,6 +226,6 @@ async fn frames_render_across_workers() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no_bids") || err.contains("timeout"), "{err}");
+        assert!(err.contains("no_bids") || err.contains("timeout") || err.contains("network_busy"), "{err}");
     }
 }
