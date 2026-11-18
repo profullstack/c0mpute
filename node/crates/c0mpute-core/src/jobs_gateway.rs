@@ -170,6 +170,9 @@ pub struct JobsBridge {
     /// Benched workers still win when nobody else bids. Persisted: the bridge
     /// restarts on every auto-update.
     penalties: crate::penalty_box::PenaltyBox,
+    /// Whose turn it is to auction, per queue (workload + tags): oldest
+    /// waiting job first, requeued jobs keep their first enqueue time.
+    turns: crate::buyer_queue::AuctionTurns,
 }
 
 impl JobsBridge {
@@ -201,6 +204,7 @@ impl JobsBridge {
                     .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
                     .join("jobs-bridge-penalties.json"),
             ),
+            turns: crate::buyer_queue::AuctionTurns::default(),
         })
     }
 
@@ -361,19 +365,63 @@ struct JobRequest {
     allow_peers: Option<Vec<String>>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// Answer as NDJSON: `queued` / `running` events while the job waits and
+    /// runs, then one `result` (the usual body) or `error` line. Also chosen
+    /// by `Accept: application/x-ndjson`.
+    #[serde(default)]
+    stream: bool,
 }
 
 async fn submit(State(state): State<JobsBridge>, headers: HeaderMap, body: Bytes) -> Response {
-    match submit_inner(&state, &headers, &body).await {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(e) => e.into_response(),
+    let wants_stream = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/x-ndjson"))
+        || serde_json::from_slice::<Value>(&body).ok().and_then(|v| v.get("stream").and_then(Value::as_bool)) == Some(true);
+    if !wants_stream {
+        return match submit_inner(&state, &headers, &body, None).await {
+            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+            Err(e) => e.into_response(),
+        };
     }
+    // Streaming: refuse bad requests with a plain status, then stream.
+    match check_bearer(&headers, &state.token) {
+        BearerCheck::Ok => {}
+        _ => return ApiError(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })).into_response(),
+    }
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let done = tx.clone();
+    tokio::spawn(async move {
+        let line = match submit_inner(&state, &headers, &body, Some(tx)).await {
+            Ok(v) => json!({"event": "result", "status": 200, "body": v}),
+            Err(ApiError(status, body)) => json!({"event": "error", "status": status.as_u16(), "body": body}),
+        };
+        let _ = done.send(line);
+    });
+    // One JSON object per line; the stream ends after the final line.
+    let lines = futures::stream::unfold((rx, false), |(mut rx, ended)| async move {
+        if ended {
+            return None;
+        }
+        let v = rx.recv().await?;
+        let last = matches!(v.get("event").and_then(Value::as_str), Some("result" | "error"));
+        let mut line = serde_json::to_vec(&v).unwrap_or_default();
+        line.push(b'\n');
+        Some((Ok::<_, std::convert::Infallible>(Bytes::from(line)), (rx, last)))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+        .header(axum::http::header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from_stream(lines))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn submit_inner(
     state: &JobsBridge,
     headers: &HeaderMap,
     body: &[u8],
+    progress: Option<Progress>,
 ) -> Result<Value, ApiError> {
     match check_bearer(headers, &state.token) {
         BearerCheck::Ok => {}
@@ -386,6 +434,8 @@ async fn submit_inner(
     }
     let req: JobRequest =
         serde_json::from_slice(body).map_err(|e| bad_request(format!("invalid request: {e}")))?;
+    // Read by `submit` (it picks the response form before parsing).
+    let _ = req.stream;
     if req.workload == crate::container_run::WORKLOAD {
         return run_container_job(state, req).await;
     }
@@ -416,8 +466,8 @@ async fn submit_inner(
 
     match tokio::time::timeout(
         timeout,
-        run_job(
-            state, workload, req.spec, spec_bytes, max_price, allowed, timeout,
+        run_job_with_progress(
+            state, workload, req.spec, spec_bytes, max_price, allowed, timeout, progress,
         ),
     )
     .await
@@ -472,6 +522,48 @@ fn effective_allow_peers(
     Ok(requested.to_vec())
 }
 
+/// Events a streaming caller sees while its job waits and runs (NDJSON, one
+/// object per line): `queued` (position in the queue, why it waits),
+/// `running` (the worker and its ETA), then one `result` or `error`.
+pub type Progress = tokio::sync::mpsc::UnboundedSender<Value>;
+
+fn emit(progress: Option<&Progress>, event: Value) {
+    if let Some(p) = progress {
+        let _ = p.send(event);
+    }
+}
+
+/// What a waiting job is waiting for, in words a client can show.
+fn waiting_for(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Inference => "waiting for a free GPU slot",
+        _ => "waiting for a free worker slot",
+    }
+}
+
+/// Why one round did not answer the job, and whether it goes back in line.
+#[derive(Debug)]
+enum Round {
+    /// Nobody bid (every capable worker full), or the winner turned it away,
+    /// failed it, went silent or its runtime was busy: back to the head of the
+    /// queue (it keeps its enqueue time), re-auctioned when a slot frees.
+    Requeue(String),
+    /// A final answer for the caller.
+    Done(Result<Value, ApiError>),
+}
+
+/// An inference answer that failed because the worker's runtime was busy or
+/// slow to start, not because of the request: worth another worker.
+pub fn runtime_busy_answer(result: &Value) -> bool {
+    if result.get("ok").and_then(Value::as_bool) != Some(false) {
+        return false;
+    }
+    let e = result.get("error").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    ["timed out", "timeout", "reach the local runtime", "503", "busy", "overloaded", "no model is served", "not served here", "connection refused"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
 async fn run_job(
     state: &JobsBridge,
     workload: Workload,
@@ -481,13 +573,35 @@ async fn run_job(
     allowed: Vec<String>,
     timeout: Duration,
 ) -> Result<Value, ApiError> {
+    run_job_with_progress(state, workload, spec, spec_bytes, max_price, allowed, timeout, None).await
+}
+
+/// Run one job until it is answered or its own deadline passes. A round that
+/// gets no bid, or whose worker turns the job away, puts it back at the head
+/// of its queue (FIFO among waiting jobs by first enqueue time, see
+/// [`crate::buyer_queue::AuctionTurns`]); it is re-auctioned as soon as a
+/// capable worker announces itself (workers re-advertise when a job ends and
+/// frees a slot) or after a short backoff.
+#[allow(clippy::too_many_arguments)]
+async fn run_job_with_progress(
+    state: &JobsBridge,
+    workload: Workload,
+    spec: Value,
+    spec_bytes: Vec<u8>,
+    max_price: f64,
+    allowed: Vec<String>,
+    timeout: Duration,
+    progress: Option<Progress>,
+) -> Result<Value, ApiError> {
     let started = tokio::time::Instant::now();
+    let deadline = started + timeout;
     let _slot = state.slots.clone().acquire_owned().await.map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({ "error": "no_bids", "detail": "bridge is shutting down" }),
         )
     })?;
+    let _ = spec_bytes;
 
     // Routing: a plain-text prompt for a standard model also accepts smaller
     // standard models, so a free worker answers it instead of the job
@@ -501,54 +615,126 @@ async fn run_job(
     let exact_spec = widened.as_ref().map(|_| spec.clone());
     let spec = widened.unwrap_or(spec);
     let required = workload.required_capabilities(&spec);
-    // Kept for checking the result (embeddings: one vector per text).
-    let spec_for_check = spec.clone();
-    // The spec never rides the gossip offer: it is sealed to the winner and
-    // fetched point to point (DIP-0032), whatever its size, so it is never
-    // stored here as a plaintext chunk anyone could fetch by hash.
-    let _ = spec_bytes;
-    let spec_inline = spec;
 
-    let remaining = timeout.saturating_sub(started.elapsed());
-    let auction = JobAuction::new(workload.name(), spec_inline)
-        .with_required_capabilities(required)
-        .with_allowed_bidders(allowed.clone())
-        .with_fallback_bidders(state.penalties.benched())
-        .with_max_price_usd(max_price)
-        .with_bid_window(state.bid_window)
-        .with_deadline(remaining)
-        .with_receipt_timeout(remaining);
-    let outcome = match (run_auction(state.net.clone(), auction).await, exact_spec) {
-        // Nobody that understands alternatives bid (workers older than
-        // 0.3.71): ask again for exactly the model the caller named, so the
-        // widening never costs a request its answer.
-        (Err(error), Some(exact))
-            if !matches!(error.downcast_ref::<AuctionFailure>(), Some(AuctionFailure::NoReceipt(_))) =>
-        {
-            tracing::info!(err = %error, "jobs bridge: no bids on the widened inference offer, retrying with the exact model");
-            let remaining = timeout.saturating_sub(started.elapsed());
-            let auction = JobAuction::new(workload.name(), exact.clone())
-                .with_required_capabilities(workload.required_capabilities(&exact))
-                .with_allowed_bidders(allowed.clone())
-                .with_fallback_bidders(state.penalties.benched())
-                .with_max_price_usd(max_price)
-                .with_bid_window(state.bid_window)
-                .with_deadline(remaining)
-                .with_receipt_timeout(remaining);
-            run_auction(state.net.clone(), auction).await
+    let queued_at_ms = crate::job_progress::now_ms_pub();
+    let key = uuid::Uuid::new_v4().to_string();
+    let queue = crate::buyer_queue::AuctionTurns::queue_of(workload.name(), &required);
+    let mut rounds = 0u32;
+    let mut last_reason = String::new();
+    // Held through no-bid rounds (so a freed slot goes to this, the oldest
+    // job, not a newer one); handed on when a worker accepts.
+    let mut turn: Option<crate::buyer_queue::AuctionTurn> = None;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(gave_up(workload, &spec, &required, &last_reason, timeout));
         }
-        (result, _) => result,
-    }
-    .map_err(|error| match error.downcast_ref::<AuctionFailure>() {
-            Some(AuctionFailure::NoReceipt(_)) => {
-                ApiError(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "timeout" }))
+        // Our turn: the oldest waiting job of this queue auctions first. A job
+        // whose worker turned it away re-enters with its first enqueue time,
+        // so it is next.
+        if turn.is_none() {
+            turn = {
+            let waiting = state.turns.acquire(&queue, &key, queued_at_ms);
+            tokio::pin!(waiting);
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    t = &mut waiting => break Some(t),
+                    _ = tokio::time::sleep_until(deadline) => break None,
+                    _ = tick.tick(), if rounds > 0 || state.turns.waiting(&queue) > 0 => {
+                        let (position, length) = state.turns.position(&queue, &key).unwrap_or((1, 1));
+                        emit(progress.as_ref(), json!({"event": "queued", "position": position, "queue_length": length,
+                            "status": waiting_for(workload), "waited_ms": started.elapsed().as_millis() as u64}));
+                    }
+                }
             }
-            // No bids, or nobody on the topic to publish to.
-            _ => ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({ "error": "no_bids", "detail": error.to_string() }),
-            ),
-        })?;
+            };
+            if turn.is_none() {
+                return Err(gave_up(workload, &spec, &required, &last_reason, timeout));
+            }
+        }
+        match run_round(state, workload, &spec, exact_spec.as_ref(), &required, max_price, &allowed, deadline, started, &mut turn, progress.as_ref()).await {
+            Round::Done(r) => return r,
+            Round::Requeue(reason) => {
+                rounds += 1;
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                tracing::info!(workload = workload.name(), rounds, waited_secs = started.elapsed().as_secs(), left_secs = left.as_secs(),
+                    reason = %reason, "jobs bridge: no free worker; job back at the head of its queue");
+                let (position, length) = state.turns.position(&queue, &key).unwrap_or((1, state.turns.waiting(&queue).max(1)));
+                emit(progress.as_ref(), json!({"event": "queued", "position": position, "queue_length": length,
+                    "status": waiting_for(workload), "reason": reason, "waited_ms": started.elapsed().as_millis() as u64}));
+                last_reason = reason;
+                // Wake on a capable worker's announcement (a slot freed), else
+                // after the backoff; never past the deadline.
+                let pause = requeue_pause(rounds, left);
+                crate::speech_gateway::wait_for_capable(&state.net, &required, pause, Duration::from_millis(250)).await;
+            }
+        }
+    }
+}
+
+/// Fallback pause between rounds when no worker announces a free slot:
+/// 2, 4, 8, then 10 s, never past the deadline.
+fn requeue_pause(rounds: u32, left: Duration) -> Duration {
+    Duration::from_secs(2u64 << rounds.saturating_sub(1).min(3)).min(Duration::from_secs(10)).min(left)
+}
+
+fn gave_up(workload: Workload, spec: &Value, required: &[String], last_reason: &str, waited: Duration) -> ApiError {
+    let model = crate::buyer_queue::model_of(spec, required);
+    let detail = crate::buyer_queue::expired_message(workload.name(), model.as_deref(), waited);
+    if last_reason.is_empty() {
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": detail }))
+    } else {
+        ApiError(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "no_bids", "detail": format!("{detail} ({last_reason})") }))
+    }
+}
+
+/// One auction of the job (the widened spec, then the exact one when nobody
+/// that understands alternatives bid), holding the queue's turn until a
+/// worker accepts.
+#[allow(clippy::too_many_arguments)]
+async fn run_round(
+    state: &JobsBridge,
+    workload: Workload,
+    spec: &Value,
+    exact_spec: Option<&Value>,
+    required: &[String],
+    max_price: f64,
+    allowed: &[String],
+    deadline: tokio::time::Instant,
+    started: tokio::time::Instant,
+    turn: &mut Option<crate::buyer_queue::AuctionTurn>,
+    progress: Option<&Progress>,
+) -> Round {
+    let make = |spec: &Value, required: Vec<String>| {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        JobAuction::new(workload.name(), spec.clone())
+            .with_required_capabilities(required)
+            .with_allowed_bidders(allowed.to_vec())
+            .with_fallback_bidders(state.penalties.benched())
+            .with_max_price_usd(max_price)
+            .with_bid_window(state.bid_window)
+            .with_deadline(remaining)
+            .with_receipt_timeout(remaining)
+    };
+    let mut result = auction_releasing_turn(state, make(spec, required.to_vec()), turn, progress).await;
+    if let (Err(error), Some(exact)) = (&result, exact_spec)
+        && !matches!(error.downcast_ref::<AuctionFailure>(), Some(AuctionFailure::NoReceipt(_)))
+    {
+        // Nobody that understands alternatives bid (workers older than
+        // 0.3.71): ask again for exactly the model the caller named.
+        tracing::info!(err = %error, "jobs bridge: no bids on the widened inference offer, retrying with the exact model");
+        result = auction_releasing_turn(state, make(exact, workload.required_capabilities(exact)), turn, progress).await;
+    }
+    let outcome = match result {
+        Ok(o) => o,
+        Err(error) => {
+            return Round::Requeue(match error.downcast_ref::<AuctionFailure>() {
+                Some(AuctionFailure::NoReceipt(_)) => "the worker did not answer in time".to_string(),
+                _ => "every capable worker is busy".to_string(),
+            });
+        }
+    };
 
     let worker = outcome.accepted_bid.bidder_peer_id.clone();
     // A worker that won and failed (or went silent) loses its turn for a
@@ -559,64 +745,84 @@ async fn run_job(
         let bench = state.penalties.strike(failed);
         tracing::info!(worker = %failed, bench_secs = bench.as_secs(), "jobs bridge: worker failed a job, benched");
     }
-    if outcome.receipt.status == JobStatus::Completed {
-        state.penalties.clear(&worker);
+    if outcome.receipt.status != JobStatus::Completed {
+        // Turned away or failed on the worker: another round, not an error.
+        return Round::Requeue(format!("worker {worker} turned the job away"));
     }
+    state.penalties.clear(&worker);
     let worker_failed = |detail: &str| {
-        ApiError(
+        Round::Done(Err(ApiError(
             StatusCode::BAD_GATEWAY,
             json!({ "error": "worker_failed", "detail": detail, "job_id": outcome.job_id, "worker": worker }),
-        )
+        )))
     };
-    if outcome.receipt.status != JobStatus::Completed {
-        return Err(worker_failed("worker reported the job failed"));
-    }
     let Some(output_hash) = outcome.receipt.output_hash.clone() else {
-        return Err(worker_failed("worker returned no output hash"));
+        return worker_failed("worker returned no output hash");
     };
-    let fetch_budget = timeout
-        .saturating_sub(started.elapsed())
-        .min(Duration::from_secs(10 * 60));
-    let bytes = match fetch_result(
-        &state.net,
-        &outcome,
-        workload.max_result_bytes(),
-        fetch_budget,
-    )
-    .await
-    {
+    let fetch_budget = deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(10 * 60));
+    let bytes = match fetch_result(&state.net, &outcome, workload.max_result_bytes(), fetch_budget).await {
         Ok(bytes) => bytes,
-        Err(FetchError::Invalid(detail)) => return Err(worker_failed(detail)),
+        Err(FetchError::Invalid(detail)) => return worker_failed(detail),
         Err(FetchError::Timeout(detail)) => {
             tracing::warn!(err = %detail, "jobs bridge: timed out fetching result");
-            return Err(ApiError(
-                StatusCode::GATEWAY_TIMEOUT,
-                json!({ "error": "timeout" }),
-            ));
+            return Round::Done(Err(ApiError(StatusCode::GATEWAY_TIMEOUT, json!({ "error": "timeout" }))));
         }
     };
-    let result: Value =
-        serde_json::from_slice(&bytes).map_err(|_| worker_failed("worker result is not JSON"))?;
-    if !workload.valid_result(&spec_for_check, &result) {
-        return Err(worker_failed(
-            "worker result does not match the result schema",
-        ));
+    let Ok(result) = serde_json::from_slice::<Value>(&bytes) else {
+        return worker_failed("worker result is not JSON");
+    };
+    if !workload.valid_result(spec, &result) {
+        return worker_failed("worker result does not match the result schema");
+    }
+    // The worker's runtime was busy or timed out: that is capacity, not the
+    // request. Back in line (unless the deadline is all but spent).
+    if workload == Workload::Inference
+        && runtime_busy_answer(&result)
+        && deadline.saturating_duration_since(tokio::time::Instant::now()) > Duration::from_secs(5)
+    {
+        let e = result.get("error").and_then(Value::as_str).unwrap_or("").chars().take(160).collect::<String>();
+        return Round::Requeue(format!("worker {worker} runtime busy: {e}"));
     }
     let result = if workload == Workload::RenderFrame {
-        let budget = timeout.saturating_sub(started.elapsed());
-        attach_render_frames(state, &spec_for_check, result, &worker, &outcome.result_key, budget)
-            .await
-            .map_err(|error| worker_failed(&format!("{error:#}")))?
+        let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match attach_render_frames(state, spec, result, &worker, &outcome.result_key, budget).await {
+            Ok(r) => r,
+            Err(error) => return worker_failed(&format!("{error:#}")),
+        }
     } else {
         result
     };
-    Ok(json!({
+    let _ = started;
+    Round::Done(Ok(json!({
         "job_id": outcome.job_id,
         "worker": worker,
         "price": outcome.accepted_bid.price_usd,
         "output_hash": output_hash,
         "result": result,
-    }))
+    })))
+}
+
+/// Run `auction`, handing the queue's turn on as soon as a worker accepts
+/// (not when its answer arrives), so the next waiting job auctions while
+/// this one runs.
+async fn auction_releasing_turn(
+    state: &JobsBridge,
+    auction: JobAuction,
+    turn: &mut Option<crate::buyer_queue::AuctionTurn>,
+    progress: Option<&Progress>,
+) -> Result<crate::AuctionOutcome> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = run_auction(state.net.clone(), auction.with_accept_notify(tx));
+    tokio::pin!(run);
+    loop {
+        tokio::select! {
+            r = &mut run => return r,
+            Some((job_id, bid)) = rx.recv() => {
+                turn.take();
+                emit(progress, json!({"event": "running", "job_id": job_id, "worker": bid.bidder_peer_id, "eta_s": bid.eta_seconds}));
+            }
+        }
+    }
 }
 
 // ─── container.run over HTTP (DIP 0033) ──────────────────────────────────
@@ -898,6 +1104,24 @@ mod tests {
         assert_eq!(request_timeout(Some(420_000)), Duration::from_secs(420));
         assert_eq!(request_timeout(Some(10_000_000)), Duration::from_secs(15 * 60));
         assert_eq!(request_timeout(Some(5)), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn busy_runtimes_requeue_and_request_errors_do_not() {
+        // The Vast 3060 failure: the worker's Ollama queued the job past the timeout.
+        let busy = json!({"v": 1, "ok": false, "error": "reach the local runtime: error sending request for url (http://127.0.0.1:11434/v1/chat/completions): operation timed out"});
+        assert!(runtime_busy_answer(&busy));
+        assert!(runtime_busy_answer(&json!({"v": 1, "ok": false, "error": "runtime answered 503 Service Unavailable: server busy"})));
+        assert!(!runtime_busy_answer(&json!({"v": 1, "ok": false, "error": "messages must hold 1..=64 entries"})));
+        assert!(!runtime_busy_answer(&json!({"v": 1, "ok": true, "text": "timed out", "model": "m"})));
+    }
+
+    #[test]
+    fn requeue_pauses_are_short_and_never_pass_the_deadline() {
+        let lots = Duration::from_secs(600);
+        let p: Vec<u64> = (1..=6).map(|r| requeue_pause(r, lots).as_secs()).collect();
+        assert_eq!(p, vec![2, 4, 8, 10, 10, 10]);
+        assert_eq!(requeue_pause(1, Duration::from_millis(300)), Duration::from_millis(300));
     }
 
     #[test]

@@ -525,6 +525,19 @@ impl TagSource {
     }
 }
 
+static READVERTISE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+/// Publish this node's capability ad now instead of at the next tick: a job
+/// just ended and freed a slot, so buyers holding requeued jobs (the jobs
+/// bridge, the speech gateway) re-auction them at once rather than on their
+/// backoff. Rate-limited in the advertise loop.
+pub fn readvertise_now() {
+    READVERTISE.get_or_init(tokio::sync::Notify::new).notify_one();
+}
+
+/// Soonest a triggered re-advertise follows the previous ad.
+const MIN_READVERTISE_GAP: Duration = Duration::from_secs(1);
+
 async fn advertise(
     net: Arc<Libp2pNetwork>,
     tag_source: TagSource,
@@ -547,8 +560,17 @@ async fn advertise(
     );
 
     let mut ticker = tokio::time::interval(interval);
+    let readvertise = READVERTISE.get_or_init(tokio::sync::Notify::new);
+    let mut last = tokio::time::Instant::now() - MIN_READVERTISE_GAP;
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = readvertise.notified() => {
+                tokio::time::sleep_until(last + MIN_READVERTISE_GAP).await;
+                debug!("re-advertising: a job ended and freed a slot");
+            }
+        }
+        last = tokio::time::Instant::now();
         let ad = CapabilityAd::with_score(
             peer_id.clone(),
             tag_source.tags(),

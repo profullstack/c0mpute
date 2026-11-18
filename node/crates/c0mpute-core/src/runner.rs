@@ -780,6 +780,12 @@ pub async fn publish_receipt(
 ) {
     crate::activity::job_finished(&accept.job_id);
     crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
+    // The runner frees the job's slot right after this returns; tell buyers
+    // waiting on a full node once it has (event-driven re-auction).
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        crate::capabilities::readvertise_now();
+    });
     // Its buyer cancelled it: nobody is waiting for a receipt.
     if crate::job_control::cancelled(&accept.job_id) {
         return;

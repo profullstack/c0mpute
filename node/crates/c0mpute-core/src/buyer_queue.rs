@@ -287,6 +287,19 @@ impl AuctionTurns {
         true
     }
 
+    /// `(1-based position, queue length)` of `key` in `queue`: the holder is
+    /// first, then the waiting requests oldest first.
+    pub fn position(&self, queue: &str, key: &str) -> Option<(usize, usize)> {
+        let map = self.inner.lock().ok()?;
+        let q = map.get(queue)?;
+        let held = usize::from(q.holder.is_some());
+        let len = q.waiting.len() + held;
+        if q.holder.as_ref().is_some_and(|(_, k)| k == key) {
+            return Some((1, len));
+        }
+        q.waiting.iter().position(|(_, k)| k == key).map(|i| (held + i + 1, len))
+    }
+
     /// Requests waiting for (or holding) the turn of `queue`.
     pub fn waiting(&self, queue: &str) -> usize {
         self.inner
@@ -340,6 +353,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(turns.waiting(&q), 3);
+        assert_eq!(turns.position(&q, "new"), Some((1, 3)));
+        assert_eq!(turns.position(&q, "old"), Some((2, 3)), "the oldest waiter is next");
+        assert_eq!(turns.position(&q, "mid"), Some((3, 3)));
         drop(newest);
         for t in tasks {
             t.await.unwrap();
