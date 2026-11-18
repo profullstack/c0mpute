@@ -9,6 +9,7 @@ pub mod agent_swarm;
 pub mod apps;
 pub mod ads;
 pub mod auction_stats;
+pub mod autoscale_signal;
 pub mod backoff;
 pub mod budget;
 pub mod buyer;

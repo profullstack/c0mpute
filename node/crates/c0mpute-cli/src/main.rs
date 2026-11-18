@@ -22,6 +22,7 @@
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
 mod apps_mcp;
+mod autoscale;
 mod container_cli;
 mod ai_chat;
 mod chat_connect;
@@ -499,6 +500,12 @@ enum Cmd {
     /// `c0mpute promo https://example.com --style pixar [--vertical]`.
     /// Needs `c0mpute chat login`.
     Promo(promo::PromoArgs),
+
+    /// Stop a RENTED node (Vast.ai, SaladCloud) while nobody needs it and
+    /// start it when the network has jobs for its models. Opt-in; runs on an
+    /// always-on machine you own; provider keys stay there.
+    /// `c0mpute autoscale init|run|once|status|start|stop|reset`.
+    Autoscale(autoscale::AutoscaleArgs),
 
     /// Agent swarms (DIP 0034): post jobs that agents on many nodes split,
     /// claim, do, review and merge; every node is in the public lobby and
@@ -1993,6 +2000,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Chat { args } => ai_chat::run(&args).await,
         Cmd::Promo(args) => promo::run(args).await,
+        Cmd::Autoscale(args) => autoscale::run(args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),

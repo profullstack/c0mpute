@@ -45,7 +45,9 @@ api_key_file = "~/.config/c0mpute/vast.key"
 idle_minutes = 20
 min_run_minutes = 15
 boot_timeout_minutes = 8
-# busy_cmd = "ssh -p 39620 root@ssh3.vast.ai 'nvidia-smi ...'"  # optional: exit 0 = busy, never stop
+# busy_cmd = "~/bin/gpu-busy.sh"   # optional: exit 1 = idle; exit 0 or any failure = busy (never stop)
+# pre_stop_cmd = "~/bin/stop-worker.sh"   # optional: run right before a stop
+# dry_run = true          # watch only: log what it would do, never start/stop/rent
 
 # [node.replace]          # vast only: rent a replacement if a start never comes up
 # max_usd_per_hour = 0.12
@@ -55,7 +57,7 @@ boot_timeout_minutes = 8
 # disk_gb = 60
 # image = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 # onstart_file = "~/.config/c0mpute/vast-onstart.sh"
-# identity_file = "~/.config/c0mpute/node-identity.key"   # keep the node id on the replacement
+# identity_file = "~/.config/c0mpute/node-identity.key"   # keep the node id: sent as $C0MPUTE_IDENTITY_KEY_B64, your onstart writes it
 ```
 
 ## Policy
@@ -65,7 +67,7 @@ boot_timeout_minutes = 8
 - it has had no job (accepted or completed) for `idle_minutes`;
 - nothing is in flight on it;
 - the network has no waiting or recent demand for any of its `models`;
-- `busy_cmd`, if set, says idle (exit 0 means busy: never stop);
+- `busy_cmd`, if set, says idle (exit 1; exit 0 or a failed check keeps it running). Hooks get `$C0MPUTE_AUTOSCALE_NAME`, `$C0MPUTE_AUTOSCALE_INSTANCE` and `$C0MPUTE_AUTOSCALE_NODE`, so one script follows the node across a replacement;
 - it has run at least `min_run_minutes` since it was last started.
 
 **Start** a stopped node at once when the network has offers for its models

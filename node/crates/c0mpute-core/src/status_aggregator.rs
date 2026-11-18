@@ -216,6 +216,9 @@ const MAX_COMPLETED: usize = 200_000;
 struct JobState {
     in_flight: RwLock<HashMap<String, InFlight>>,
     completed: RwLock<VecDeque<Completed>>,
+    /// Offers per model and each worker's last accept/receipt, for
+    /// `GET /autoscale` ([`crate::autoscale_signal`]).
+    demand: RwLock<crate::autoscale_signal::Demand>,
 }
 
 impl JobState {
@@ -945,6 +948,72 @@ async fn jobs_handler(
     Json(JobsPayload { generated_at_ms: now_ms(), next_since, more, jobs })
 }
 
+#[derive(Serialize, Debug)]
+struct AutoscalePayload {
+    now_ms: u64,
+    window_s: u64,
+    node: crate::autoscale_signal::NodeActivity,
+    models: HashMap<String, crate::autoscale_signal::ModelDemand>,
+}
+
+/// `GET /autoscale?node=<peer id or board id>&models=a,b&window_s=1200`: what
+/// an operator's autoscaler needs to stop a rented node nobody is using and to
+/// start it when somebody is: whether the node is online and busy, when it
+/// last took and finished a job, and how many auctions asked for its models
+/// (and found no taker) recently. Counts only.
+async fn autoscale_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<AutoscalePayload>, (axum::http::StatusCode, &'static str)> {
+    use crate::autoscale_signal::{NodeActivity, parse_models, parse_window_ms, valid_node_id};
+    let id = q.get("node").map(|s| s.trim().to_string()).unwrap_or_default();
+    if !valid_node_id(&id) {
+        return Err((axum::http::StatusCode::BAD_REQUEST, "node: a peer id or the 8-character board id"));
+    }
+    let models = parse_models(q.get("models").map(String::as_str));
+    let window_ms = parse_window_ms(q.get("window_s").map(String::as_str));
+    let now = now_ms();
+    state.jobs.evict(now).await;
+    let short = short_id(&id);
+    let mut node = NodeActivity { id: short.clone(), ..Default::default() };
+    for (peer, ad) in state.registry.list().await {
+        let p = peer.to_base58();
+        if p == id || short_id(&p) == short {
+            let seen = now.saturating_sub(ad.published_at_ms) / 1000;
+            node.online = true;
+            node.last_seen_s = Some(node.last_seen_s.map_or(seen, |s: u64| s.min(seen)));
+            node.peer_id = Some(p);
+            for t in &ad.tags {
+                if let Some(m) = t.split(":model:").nth(1)
+                    && !m.is_empty()
+                    && !node.serves.iter().any(|x| x == m)
+                {
+                    node.serves.push(m.to_string());
+                }
+            }
+        }
+    }
+    node.in_flight = state
+        .jobs
+        .in_flight
+        .read()
+        .await
+        .values()
+        .filter(|f| f.worker == id || short_id(&f.worker) == short)
+        .count() as u64;
+    let demand = {
+        let mut d = state.jobs.demand.write().await;
+        d.evict(now);
+        if let Some((peer, accept, receipt)) = d.worker(&id) {
+            node.peer_id.get_or_insert(peer);
+            node.last_accept_ms = accept;
+            node.last_receipt_ms = receipt;
+        }
+        d.models(&models, window_ms, now)
+    };
+    Ok(Json(AutoscalePayload { now_ms: now, window_s: window_ms / 1000, node, models: demand }))
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -989,15 +1058,22 @@ async fn run_job_tracker(net: Arc<Libp2pNetwork>, jobs: Arc<JobState>) {
         // (absent from every other job message), so it parses unambiguously.
         if let Ok(accept) = serde_json::from_slice::<JobAccept>(&msg.data) {
             debug!(job_id = %accept.job_id, "aggregator: job accepted");
+            jobs.demand.write().await.on_accept(&accept.job_id, &accept.winning_bidder_peer_id, now_ms());
             jobs.on_accept(accept).await;
             continue;
         }
         if let Ok(receipt) = serde_json::from_slice::<JobReceipt>(&msg.data) {
             debug!(job_id = %receipt.job_id, status = ?receipt.status, "aggregator: job receipt");
+            if receipt.fault.is_none() {
+                jobs.demand.write().await.on_receipt(&receipt.worker_peer_id, now_ms());
+            }
             jobs.on_receipt(receipt).await;
             continue;
         }
-        // JobOffer / JobBid are ignored — they don't mark work as in flight.
+        // An offer is demand (per model) for autoscalers; bids are ignored.
+        if let Ok(offer) = serde_json::from_slice::<c0mpute_net::topics::JobOffer>(&msg.data) {
+            jobs.demand.write().await.on_offer(&offer, now_ms());
+        }
     }
 }
 
@@ -1084,6 +1160,7 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .route("/", get(status_handler))
         .route("/nodes", get(nodes_handler))
         .route("/jobs", get(jobs_handler))
+        .route("/autoscale", get(autoscale_handler))
         .route("/healthz", get(healthz))
         .with_state(state);
 
