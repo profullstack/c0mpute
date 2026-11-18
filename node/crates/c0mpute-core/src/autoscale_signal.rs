@@ -271,18 +271,18 @@ mod tests {
         let mut d = Demand::default();
         let m = vec!["m:9b".to_string(), "other".to_string()];
         // Taken at once.
-        d.on_offer(&offer("j1", "m:9b", now - 60_000, None), now);
+        d.on_offer(&offer("j1", "m:9b", now - 60_000, None), now - 60_000);
         d.on_accept("j1", "12D3KooWxxxxxxxxsdNT3kCN", now - 59_000);
         // No taker yet, 30 s old: waiting.
-        d.on_offer(&offer("j2", "m:9b", now - 30_000, Some("r2")), now);
+        d.on_offer(&offer("j2", "m:9b", now - 30_000, Some("r2")), now - 30_000);
         // Just published: not waiting yet (still in its bid window).
-        d.on_offer(&offer("j3", "m:9b", now - 2_000, None), now);
+        d.on_offer(&offer("j3", "m:9b", now - 2_000, None), now - 2_000);
         // Requeued job: first auction found nobody, second was taken.
-        d.on_offer(&offer("j4", "m:9b", now - 15 * 60_000, Some("r4")), now);
-        d.on_offer(&offer("j5", "m:9b", now - 14 * 60_000, Some("r4")), now);
+        d.on_offer(&offer("j4", "m:9b", now - 15 * 60_000, Some("r4")), now - 15 * 60_000);
+        d.on_offer(&offer("j5", "m:9b", now - 14 * 60_000, Some("r4")), now - 14 * 60_000);
         d.on_accept("j5", "other-worker", now);
         // Outside a 20 min window.
-        d.on_offer(&offer("j6", "m:9b", now - 30 * 60_000, None), now);
+        d.on_offer(&offer("j6", "m:9b", now - 30 * 60_000, None), now - 30 * 60_000);
         let got = d.models(&m, 20 * 60_000, now);
         let g = &got["m:9b"];
         assert_eq!(g.offers_window, 5);

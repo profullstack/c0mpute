@@ -126,6 +126,10 @@ pub struct NodeCfg {
     pub project: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Watch and log what it would do, never call start/stop/rent (a node
+    /// you want up 24/7 but still want the numbers for).
+    #[serde(default)]
+    pub dry_run: bool,
     #[serde(default)]
     pub replace: Option<ReplaceCfg>,
 }
@@ -784,6 +788,8 @@ struct Ctx {
     site: String,
     http: reqwest::Client,
     dry_run: bool,
+    /// Log every pass (`once`), not only transitions.
+    verbose: bool,
 }
 
 fn now_ms() -> u64 {
@@ -863,6 +869,10 @@ fn transition(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState, phase: Phase, reason: 
 }
 
 async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
+    if n.dry_run && !ctx.dry_run {
+        let dry = Ctx { cfg: ctx.cfg.clone(), site: ctx.site.clone(), http: ctx.http.clone(), dry_run: true, verbose: ctx.verbose };
+        return Box::pin(tick(&dry, n, st)).await;
+    }
     let now = now_ms();
     let instance = st.instance.clone().unwrap_or_else(|| n.instance.clone());
     st.instance = Some(instance.clone());
@@ -914,7 +924,9 @@ async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
     };
     let action = decide(&Inputs { cfg: n, st, provider: ps.state, signal: signal.as_ref(), busy, now });
     if ctx.dry_run {
-        log(ctx, &n.name, &format!("[dry-run] provider {:?} ({}), phase {}, would: {action:?}", ps.state, ps.detail, st.phase.as_str()));
+        if ctx.verbose || action != Action::Nothing {
+            log(ctx, &n.name, &format!("[dry-run] provider {:?} ({}), phase {}, would: {action:?}", ps.state, ps.detail, st.phase.as_str()));
+        }
         return Ok(());
     }
     match action {
@@ -1110,7 +1122,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
         AutoscaleCmd::Start { ref name } | AutoscaleCmd::Stop { ref name } => {
             let on = matches!(args.cmd, AutoscaleCmd::Start { .. });
             let n = find(&name)?;
-            let ctx = Ctx { cfg: cfg.clone(), site, http: http.clone(), dry_run: false };
+            let ctx = Ctx { cfg: cfg.clone(), site, http: http.clone(), dry_run: false, verbose: true };
             let st = states.entry(n.name.clone()).or_default();
             let inst = st.instance.clone().unwrap_or_else(|| n.instance.clone());
             Provider::new(&n, http)?.set_running(&inst, on).await?;
@@ -1126,7 +1138,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
         }
         AutoscaleCmd::Once { dry_run } | AutoscaleCmd::Run { dry_run } => {
             let looping = matches!(args.cmd, AutoscaleCmd::Run { .. });
-            let ctx = Ctx { cfg: cfg.clone(), site, http, dry_run };
+            let ctx = Ctx { cfg: cfg.clone(), site, http, dry_run, verbose: !looping };
             loop {
                 for n in cfg.nodes.iter().filter(|n| n.enabled) {
                     let st = states.entry(n.name.clone()).or_default();
