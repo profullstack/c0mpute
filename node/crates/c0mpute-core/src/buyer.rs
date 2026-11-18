@@ -75,6 +75,11 @@ pub struct JobAuction {
     /// capability ad carries `c0mpute:adult`, on top of the worker-side tag
     /// check, so a modified worker that bids anyway is never awarded one.
     pub bidder_check: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    /// Hand a failed or silent winner's job straight to the next bidder of
+    /// this auction (default). Off for a caller with a queue (the jobs
+    /// bridge): the failure comes back and the job goes through the queue
+    /// again, so no hand-off skips the jobs waiting ahead of it.
+    pub reawards: bool,
 }
 
 impl JobAuction {
@@ -96,7 +101,13 @@ impl JobAuction {
             confidential: false,
             on_accept: None,
             bidder_check: None,
+            reawards: true,
         }
+    }
+
+    pub fn with_reawards(mut self, reawards: bool) -> Self {
+        self.reawards = reawards;
+        self
     }
 
     pub fn with_bidder_check(mut self, check: Arc<dyn Fn(&str) -> bool + Send + Sync>) -> Self {
@@ -541,6 +552,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
                 // and the caller re-auctions at once.
                 retain_live_bids(&mut bids, unix_ms());
                 if receipt.status != JobStatus::Completed
+                    && auction.reawards
                     && should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline)
                 {
                     let failed = awards.swap_remove(i);
@@ -606,7 +618,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
     // No receipt in time from the current winner: the next bidder, if any,
     // while its bid is still live (see the failed-receipt path above).
     retain_live_bids(&mut bids, unix_ms());
-    if should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline) {
+    if auction.reawards && should_reaward(reawards, !bids.is_empty(), awarded_at.elapsed(), auction.deadline) {
         let next = bids.remove(0);
         bids.retain(|b| b.bidder_peer_id != next.bidder_peer_id);
         warn!(

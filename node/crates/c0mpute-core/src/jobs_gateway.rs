@@ -708,9 +708,22 @@ async fn run_round(
     turn: &mut Option<crate::buyer_queue::AuctionTurn>,
     progress: Option<&Progress>,
 ) -> Round {
+    // The awarded job, so a winner that goes silent is told to stop before
+    // the job is auctioned again.
+    let in_flight: Arc<std::sync::Mutex<Option<crate::job_e2e::InFlightJob>>> = Arc::default();
     let make = |spec: &Value, required: Vec<String>| {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let record = in_flight.clone();
         JobAuction::new(workload.name(), spec.clone())
+            .with_on_accept(Arc::new(move |job| {
+                if let Ok(mut j) = record.lock() {
+                    *j = Some(job.clone());
+                }
+            }))
+            // A failed or silent winner's job comes back here and goes
+            // through the queue again (front, by its enqueue time), never
+            // straight to another bidder past the jobs waiting ahead.
+            .with_reawards(false)
             .with_required_capabilities(required)
             .with_allowed_bidders(allowed.to_vec())
             .with_fallback_bidders(state.penalties.benched())
@@ -731,6 +744,10 @@ async fn run_round(
     let outcome = match result {
         Ok(o) => o,
         Err(error) => {
+            if let Some(job) = in_flight.lock().ok().and_then(|mut j| j.take()) {
+                let net = state.net.clone();
+                tokio::spawn(async move { crate::buyer::cancel_job(&net, &job).await });
+            }
             return Round::Requeue(match error.downcast_ref::<AuctionFailure>() {
                 Some(AuctionFailure::NoReceipt(_)) => "the worker did not answer in time".to_string(),
                 _ => "every capable worker is busy".to_string(),
