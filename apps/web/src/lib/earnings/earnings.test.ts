@@ -90,47 +90,84 @@ describe("recordFrom", () => {
 
 describe("report", () => {
   const now = 100 * H + 30 * 60_000; // half past an hour
-  test("earned after fee, power estimate when no cost is set", () => {
+  const node = (o: Partial<{ node: string; class: string; cost_usd_per_hour: number | null }> = {}) => ({
+    node: "A",
+    label: null,
+    class: "cpu",
+    cost_usd_per_hour: null,
+    online: true,
+    via: "web",
+    ...o,
+  });
+  test("auction prices are only 'agreed', never earned; power estimate when no cost is set", () => {
     const r = buildReport({
       range: "3h",
       now,
-      nodes: [{ node: "A", label: null, class: "cpu", cost_usd_per_hour: null, online: true, via: "web" }],
+      nodes: [node()],
       rows: [{ node: "A", type: "tts.synthesize", bucket: Math.floor((now - 10 * 60_000) / 900_000), jobs: 3, busy_s: 3600, paid_usd: 1 }],
     });
     expect(r.buckets.length).toBe(12);
     expect(r.totals.jobs).toBe(3);
-    expect(r.totals.earned_usd).toBeCloseTo(0.95, 6);
+    expect(r.totals.agreed_usd).toBeCloseTo(0.95, 6);
+    expect(r.totals.earned_usd).toBe(0);
     // 65 W for an hour at $0.17/kWh
     expect(r.totals.spend_usd).toBeCloseTo(0.065 * 0.17, 6);
+    expect(r.totals.net_usd).toBeCloseTo(-0.065 * 0.17, 6);
     expect(r.nodes[0].spend_basis).toBe("power-estimate");
     expect(r.nodes[0].utilization).toBeCloseTo(1 / 3, 6);
     expect(r.by_type[0]).toMatchObject({ type: "tts.synthesize", jobs: 3 });
   });
 
   test("a fixed cost accrues over the whole window, busy or not", () => {
-    const r = buildReport({
-      range: "3h",
-      now,
-      nodes: [{ node: "V", label: "vast 3060", class: "gpu:nvidia", cost_usd_per_hour: 0.087, online: true, via: "key" }],
-      rows: [],
-    });
+    const r = buildReport({ range: "3h", now, nodes: [node({ node: "V", class: "gpu:nvidia", cost_usd_per_hour: 0.087 })], rows: [] });
     expect(r.totals.spend_usd).toBeCloseTo(0.087 * 3, 6);
     expect(r.totals.net_usd).toBeCloseTo(-0.087 * 3, 6);
     expect(r.nodes[0].spend_basis).toBe("fixed");
   });
 
-  test("rows for nodes not claimed are ignored; infernet hours spread over buckets", () => {
+  test("settled pay lands on the c0mpute node; self-paid jobs are split out of earned and net", () => {
+    const r = buildReport({
+      range: "3h",
+      now,
+      nodes: [node({ node: "sdNT3kCN" })],
+      rows: [],
+      infernet: {
+        linked: true,
+        providers: [{ id: "pc", name: "c0mpute sdNT3kCN", c0mpute_node: "sdNT3kCN" }],
+        hours: [{ provider_id: "pc", c0mpute_node: "sdNT3kCN", at: 99 * H, jobs: 100, earned_usd: 0.095, own_jobs: 90, own_usd: 0.0855 }],
+      },
+    });
+    expect(r.totals.earned_usd).toBeCloseTo(0.0095, 8);
+    expect(r.totals.own_usd).toBeCloseTo(0.0855, 8);
+    expect(r.totals.paid_jobs).toBe(10);
+    expect(r.totals.own_jobs).toBe(90);
+    expect(r.nodes).toHaveLength(1);
+    expect(r.nodes[0]).toMatchObject({ node: "sdNT3kCN", paid_jobs: 10, own_jobs: 90 });
+    expect(r.totals.net_usd).toBeCloseTo(0.0095, 8);
+  });
+
+  test("Infernet-only providers get their own row when they earned; rows for unclaimed nodes are ignored", () => {
     const r = buildReport({
       range: "1h",
       now,
-      nodes: [{ node: "A", label: null, class: "cpu", cost_usd_per_hour: null, online: false, via: "web" }],
+      nodes: [node({ online: false })],
       rows: [{ node: "Z", type: "t", bucket: Math.floor(now / 300_000), jobs: 9, busy_s: 9, paid_usd: 9 }],
-      infernet: { linked: true, providers: 1, hours: [{ provider_id: "p", at: 100 * H, jobs: 10, earned_usd: 1 }] },
+      infernet: {
+        linked: true,
+        providers: [
+          { id: "p", name: "provider@bonita", c0mpute_node: null },
+          { id: "idle", name: "idle box", c0mpute_node: null },
+        ],
+        hours: [{ provider_id: "p", c0mpute_node: null, at: 100 * H, jobs: 10, earned_usd: 1, own_jobs: 0, own_usd: 0 }],
+      },
     });
-    // Only the half of that hour inside the window (100:30 -> now is 0, the window is 99:30-100:30).
-    expect(r.infernet?.earned_usd).toBeCloseTo(0.5, 6);
+    // The window is 99:30-100:30, so half of that hour counts.
     expect(r.totals.earned_usd).toBeCloseTo(0.5, 6);
-    expect(r.nodes[0].jobs).toBe(0);
+    expect(r.nodes.map((n) => [n.label, n.kind])).toEqual([
+      ["provider@bonita", "infernet"],
+      [null, "c0mpute"],
+    ]);
+    expect(r.nodes.find((n) => n.node === "A")?.jobs).toBe(0);
   });
 
   test("parseCost and parseRange", () => {
