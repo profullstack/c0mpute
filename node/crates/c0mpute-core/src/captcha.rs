@@ -749,7 +749,7 @@ pub fn spawn_captcha_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(32);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
             let net = net.clone();

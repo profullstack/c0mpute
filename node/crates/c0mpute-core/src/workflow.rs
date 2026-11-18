@@ -75,8 +75,9 @@ pub const MAX_TRANSFORM_WORK_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_HTTP_TIMEOUT_MS: u64 = 15_000;
 pub const MAX_HTTP_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_REDIRECTS: usize = 5;
-/// Steps a worker runs at once. They are light (a JMESPath search or a
-/// network wait), so they draw on their own slots, not the node's CPU slots.
+/// Steps queued for the runner at once (how many *run* is the node budget's
+/// call: `budget::profile`). They are light (a JMESPath search or a network
+/// wait).
 pub const MAX_CONCURRENT_STEPS: usize = 16;
 
 const ALLOWED_METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
@@ -685,13 +686,11 @@ pub(crate) async fn resolve_spec(net: &Libp2pNetwork, job: &AcceptedJob) -> Resu
 
 // ─── worker runner ────────────────────────────────────────────────────────
 
-/// The load a `workflow.step` subscriber uses: its own slots, so light steps
-/// neither wait on nor block transcodes holding the node's CPU slots.
+/// The load a `workflow.step` subscriber uses: its own slots, each step
+/// reserving a light share of the node budget (`crate::budget`), so steps
+/// scale with the box and still see the heavy roles' use.
 pub fn worker_load() -> WorkerLoad {
-    WorkerLoad::new(
-        Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_STEPS)),
-        MAX_CONCURRENT_STEPS,
-    )
+    WorkerLoad::for_role(WORKLOAD)
 }
 
 /// Spawn the runner; hand the sender to the dispatch loop. Steps run
@@ -704,7 +703,7 @@ pub fn spawn_workflow_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(MAX_CONCURRENT_STEPS);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
             let net = net.clone();

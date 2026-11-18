@@ -17,8 +17,8 @@
 //! threads (52-93 s per sampling step on dev2 under load, 2026-11-09). So it
 //! is opt-in (see
 //! `config::VideoConfig`), capped at that size, and gated per offer on free
-//! RAM and load exactly like CPU images. One sd-cli job at a time per node,
-//! images and clips together (`diffusion::node_slot`).
+//! RAM and load exactly like CPU images. How many sd-cli jobs run at once,
+//! images and clips together, is the node budget's call (`crate::budget`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -146,9 +146,8 @@ pub fn can_serve(config: &VideoConfig) -> bool {
             diffusion::logical_cpus(),
             config.max_load_per_cpu,
         )
-        && diffusion::node_slot().available_permits() > 0
-        // Never beside a song either (same rule as images).
-        && !crate::music::busy()
+        // Images, clips and songs already running are the node budget's
+        // concern (WorkerLoad bids only while one more fits beside them).
 }
 
 /// Why [`can_serve`] says no right now, or `None` when it would say yes
@@ -494,27 +493,29 @@ pub fn spawn_cpu_video_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let Ok(_node_slot) = diffusion::node_slot().acquire_owned().await else {
-                return;
-            };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            let result = crate::job_control::cancellable(&job.accept.job_id, run_job(&net, &store, &cache_root, &job)).await;
-            cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(hash) => {
-                    load.record_job(started.elapsed());
-                    info!(%job_id, %hash, secs = started.elapsed().as_secs(), "cpu video runner: job complete");
-                    publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+            let (net, store, cache_root, load) = (net.clone(), store.clone(), cache_root.clone(), load.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let _running = diffusion::Running::start();
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_job(&net, &store, &cache_root, &job)).await;
+                cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(hash) => {
+                        load.record_job(started.elapsed());
+                        info!(%job_id, %hash, secs = started.elapsed().as_secs(), "cpu video runner: job complete");
+                        publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+                    }
+                    Err(error) => {
+                        warn!(%job_id, err = %format!("{error:#}"), "cpu video runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(error) => {
-                    warn!(%job_id, err = %format!("{error:#}"), "cpu video runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx

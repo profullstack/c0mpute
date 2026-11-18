@@ -369,10 +369,17 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
 /// [`crate::inference_slots::detect`]; [`slots_loop`] keeps it current).
 pub fn worker_load(slots: usize) -> WorkerLoad {
     let slots = slots.clamp(1, crate::inference_slots::MAX_SLOTS);
+    // The runtime decides how many answers run at once and holds the model's
+    // memory itself; each answer reserves only its small share of the node
+    // budget, so the other roles see it and inference never waits on them
+    // for more than that.
+    let (_, cost) = crate::budget::for_workload(WORKLOAD);
+    let budget = crate::budget::node();
+    tracing::info!(role = "inference", workload = WORKLOAD, slots, cost = %cost, node = ?budget.totals(), "capacity: role slots from the runtime");
     // Job times survive restarts like every other workload's (runner::with_history):
     // without it each update reset every node's ETA to the 60 s placeholder, and
     // the bench score alone picked winners until real jobs finished again.
-    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(slots)), slots).with_history(
+    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(slots)), slots).with_budget(budget, cost).with_history(
         crate::config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("job-times")
@@ -436,7 +443,7 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(crate::inference_slots::MAX_SLOTS * 2);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else { return };
+            let Some(slot) = load.acquire().await else { return };
             let (net, store, base, load) = (net.clone(), store.clone(), base.clone(), load.clone());
             tokio::spawn(async move {
                 let _slot = slot;

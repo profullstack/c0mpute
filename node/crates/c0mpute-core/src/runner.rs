@@ -48,6 +48,18 @@ pub struct WorkerLoad {
     recent_job_ms: Arc<AtomicU64>,
     /// Where the average is kept across restarts (see [`Self::with_history`]).
     history: Option<Arc<std::path::PathBuf>>,
+    /// The node budget each job reserves `cost` from (see [`crate::budget`]):
+    /// a job starts only while the node has room for it beside every other
+    /// role's running jobs. `None`: the slots alone bound this workload.
+    budget: Option<(Arc<crate::budget::Budget>, crate::budget::Cost)>,
+}
+
+/// A running job's hold on its workload's slot and on the node budget; both
+/// are handed back when it drops.
+#[derive(Debug)]
+pub struct JobSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _reservation: Option<crate::budget::Reservation>,
 }
 
 impl WorkerLoad {
@@ -57,7 +69,50 @@ impl WorkerLoad {
             total_slots: Arc::new(AtomicUsize::new(total_slots.max(1))),
             recent_job_ms: Arc::new(AtomicU64::new(0)),
             history: None,
+            budget: None,
         }
+    }
+
+    /// `workload`'s load on this node: as many slots as its jobs fit the node
+    /// budget (or the operator's `C0MPUTE_<ROLE>_CONCURRENCY` /
+    /// `[capacity]`), each job reserving its cost from the shared budget, job
+    /// times kept across restarts. Logs one `capacity:` line per role.
+    pub fn for_role(workload: &str) -> Self {
+        let (slots, cost) = crate::budget::for_workload(workload);
+        let budget = crate::budget::node();
+        info!(
+            role = crate::budget::role_key(workload),
+            workload,
+            slots,
+            cost = %cost,
+            node = ?budget.totals(),
+            "capacity: role slots from the node budget"
+        );
+        Self::new(Arc::new(Semaphore::new(slots)), slots)
+            .with_budget(budget, cost)
+            .with_history(
+                crate::config::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("./c0mpute-data"))
+                    .join("job-times")
+                    .join(format!("{workload}.ms")),
+            )
+    }
+
+    /// Reserve `cost` from `budget` for every job (see [`Self::acquire`]).
+    pub fn with_budget(mut self, budget: Arc<crate::budget::Budget>, cost: crate::budget::Cost) -> Self {
+        self.budget = Some((budget, cost));
+        self
+    }
+
+    /// Wait for a slot, then for room in the node budget; the job runs while
+    /// the returned guard lives. `None` once the slots are closed.
+    pub async fn acquire(&self) -> Option<JobSlot> {
+        let permit = self.compute_slots.clone().acquire_owned().await.ok()?;
+        let reservation = match &self.budget {
+            Some((budget, cost)) => Some(budget.reserve(*cost).await),
+            None => None,
+        };
+        Some(JobSlot { _permit: permit, _reservation: reservation })
     }
 
     /// Keep the recent-job average in `path` and start from what it holds.
@@ -81,9 +136,14 @@ impl WorkerLoad {
         self.compute_slots.clone()
     }
 
-    /// Compute slots not held by a running job right now.
+    /// Jobs this workload could start right now: free slots, and no more
+    /// than the node budget has room for beside what other roles hold.
     pub fn free_slots(&self) -> usize {
-        self.compute_slots.available_permits()
+        let free = self.compute_slots.available_permits();
+        match &self.budget {
+            Some((budget, cost)) => free.min(budget.free_count(*cost)),
+            None => free,
+        }
     }
 
     pub fn total_slots(&self) -> usize {
@@ -232,24 +292,28 @@ pub fn spawn_tts_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            let result = crate::job_control::cancellable(&job.accept.job_id, run_tts_job(&net, &store, &cache_root, &job)).await;
-            cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(hash) => {
-                    load.record_job(started.elapsed());
-                    info!(%job_id, %hash, "tts runner: job complete");
-                    publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+            let (net, store, cache_root, load) = (net.clone(), store.clone(), cache_root.clone(), load.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_tts_job(&net, &store, &cache_root, &job)).await;
+                cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(hash) => {
+                        load.record_job(started.elapsed());
+                        info!(%job_id, %hash, "tts runner: job complete");
+                        publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+                    }
+                    Err(error) => {
+                        warn!(%job_id, err = %error, "tts runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(error) => {
-                    warn!(%job_id, err = %error, "tts runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx
@@ -264,24 +328,28 @@ pub fn spawn_stt_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            let result = crate::job_control::cancellable(&job.accept.job_id, run_stt_job(&net, &store, &cache_root, &job)).await;
-            cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(hash) => {
-                    load.record_job(started.elapsed());
-                    info!(%job_id, %hash, "stt runner: job complete");
-                    publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+            let (net, store, cache_root, load) = (net.clone(), store.clone(), cache_root.clone(), load.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_stt_job(&net, &store, &cache_root, &job)).await;
+                cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(hash) => {
+                        load.record_job(started.elapsed());
+                        info!(%job_id, %hash, "stt runner: job complete");
+                        publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+                    }
+                    Err(error) => {
+                        warn!(%job_id, err = %error, "stt runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(error) => {
-                    warn!(%job_id, err = %error, "stt runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx
@@ -475,37 +543,43 @@ pub fn spawn_transcode_runner(
             }
         };
         info!(?caps.encoders, "transcode runner ready");
+        let caps = Arc::new(caps);
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            let buyer_peer_id = job.accept.buyer_peer_id.clone();
-            let result = crate::job_control::cancellable(
-                &job_id,
-                run_transcode_job(&net, &store, &cache_root, &ffmpeg_bin, &caps, &job),
-            )
-            .await;
-            // The output now lives in the chunk store; the input, the
-            // ffmpeg output file and the directory go, success or not.
-            cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(output_hash) => {
-                    load.record_job(started.elapsed());
-                    info!(
-                        %job_id,
-                        hash = %output_hash,
-                        "transcode runner: job complete, output stored and announced"
-                    );
-                    publish_receipt(&net, &job.accept, Some(output_hash), JobStatus::Completed)
-                        .await;
+            let (net, store, cache_root, load) = (net.clone(), store.clone(), cache_root.clone(), load.clone());
+            let (ffmpeg_bin, caps) = (ffmpeg_bin.clone(), caps.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                let buyer_peer_id = job.accept.buyer_peer_id.clone();
+                let result = crate::job_control::cancellable(
+                    &job_id,
+                    run_transcode_job(&net, &store, &cache_root, &ffmpeg_bin, &caps, &job),
+                )
+                .await;
+                // The output now lives in the chunk store; the input, the
+                // ffmpeg output file and the directory go, success or not.
+                cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(output_hash) => {
+                        load.record_job(started.elapsed());
+                        info!(
+                            %job_id,
+                            hash = %output_hash,
+                            "transcode runner: job complete, output stored and announced"
+                        );
+                        publish_receipt(&net, &job.accept, Some(output_hash), JobStatus::Completed)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(%job_id, %buyer_peer_id, err = %e, "transcode runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(e) => {
-                    warn!(%job_id, %buyer_peer_id, err = %e, "transcode runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx

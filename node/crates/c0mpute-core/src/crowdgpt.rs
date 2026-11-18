@@ -544,7 +544,10 @@ async fn governor(config_path: PathBuf, mut cfg: CrowdgptConfig, load: Option<Wo
             last_blocked_check = Instant::now();
             blocked = blocked_reason(&cfg);
         }
-        let busy = crate::activity::busy() || load.as_ref().is_some_and(|l| l.free_slots() < l.total_slots());
+        let busy = crate::activity::busy()
+            || load.as_ref().is_some_and(|l| l.free_slots() < l.total_slots())
+            // Any paid job holding the node budget (every role reserves from it).
+            || crate::budget::node().jobs() > 0;
         if busy {
             last_busy = Instant::now();
         }

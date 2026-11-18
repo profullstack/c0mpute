@@ -704,7 +704,7 @@ pub fn spawn_runner(net: Arc<Libp2pNetwork>, load: WorkerLoad, guard: Guard) -> 
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(64);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else { return };
+            let Some(slot) = load.acquire().await else { return };
             let net = net.clone();
             let load = load.clone();
             tokio::spawn(async move {

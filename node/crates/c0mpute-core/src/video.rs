@@ -894,25 +894,29 @@ pub fn spawn_video_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            let _long = c0mpute_update::LongJob::start();
-            let result = crate::job_control::cancellable(&job.accept.job_id, run_video_job(&net, &store, &cache_root, &workload, &image, &job)).await;
-            crate::runner::cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(hash) => {
-                    load.record_job(started.elapsed());
-                    info!(%job_id, %hash, elapsed_s = started.elapsed().as_secs(), "video runner: job complete");
-                    publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+            let (net, store, cache_root, workload, image, load) = (net.clone(), store.clone(), cache_root.clone(), workload.clone(), image.clone(), load.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                let _long = c0mpute_update::LongJob::start();
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_video_job(&net, &store, &cache_root, &workload, &image, &job)).await;
+                crate::runner::cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(hash) => {
+                        load.record_job(started.elapsed());
+                        info!(%job_id, %hash, elapsed_s = started.elapsed().as_secs(), "video runner: job complete");
+                        publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+                    }
+                    Err(error) => {
+                        warn!(%job_id, err = %error, "video runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(error) => {
-                    warn!(%job_id, err = %error, "video runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx

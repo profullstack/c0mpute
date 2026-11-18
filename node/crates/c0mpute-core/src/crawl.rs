@@ -29,7 +29,8 @@ pub const WORKLOAD: &str = "crawl.fetch";
 pub const ROLE_TAG: &str = "c0mpute:role:crawl";
 /// User agent robots.txt rules are matched against (besides `*`).
 pub const ROBOTS_AGENT: &str = "c0mpute";
-/// Concurrent fetches per node. Network-bound, so its own slots.
+/// Fetches queued for the runner at once (how many *run* is the node
+/// budget's call: `budget::profile`). Network-bound.
 pub const MAX_CONCURRENT_FETCHES: usize = 8;
 
 /// What a buyer asks for.
@@ -234,11 +235,10 @@ fn pattern_match(pattern: &str, path: &str) -> Option<usize> {
 
 // ─── worker runner ────────────────────────────────────────────────────────
 
+/// Its own slots from the node budget (`crate::budget`): fetches are light,
+/// so many run at once on a big box.
 pub fn worker_load() -> WorkerLoad {
-    WorkerLoad::new(
-        Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FETCHES)),
-        MAX_CONCURRENT_FETCHES,
-    )
+    WorkerLoad::for_role(WORKLOAD)
 }
 
 pub fn spawn_crawl_runner(
@@ -249,7 +249,7 @@ pub fn spawn_crawl_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(MAX_CONCURRENT_FETCHES);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
             let net = net.clone();
