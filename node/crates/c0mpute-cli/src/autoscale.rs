@@ -106,7 +106,8 @@ pub struct NodeCfg {
     pub min_run_minutes: u64,
     #[serde(default = "d_boot")]
     pub boot_timeout_minutes: u64,
-    /// Shell command; exit 0 means the node is busy right now (never stop).
+    /// Shell command: exit 1 means idle; exit 0 (busy) or anything else (the
+    /// check itself failed) keeps the node running.
     #[serde(default)]
     pub busy_cmd: Option<String>,
     /// Shell command run right before a stop (e.g. stop the worker so it
@@ -819,10 +820,13 @@ fn log(ctx: &Ctx, name: &str, msg: &str) {
     }
 }
 
-async fn sh(cmd: &str) -> Option<bool> {
-    let fut = tokio::process::Command::new("sh").arg("-c").arg(cmd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+/// Run an operator hook with `C0MPUTE_AUTOSCALE_{NAME,INSTANCE,NODE}` set, so
+/// one script can follow the node across a replacement.
+async fn sh(cmd: &str, n: &NodeCfg, instance: &str) -> Option<i32> {
+    let fut = tokio::process::Command::new("sh").arg("-c").arg(cmd)
+        .env("C0MPUTE_AUTOSCALE_NAME", &n.name).env("C0MPUTE_AUTOSCALE_INSTANCE", instance).env("C0MPUTE_AUTOSCALE_NODE", &n.node).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     match tokio::time::timeout(Duration::from_secs(60), fut).await {
-        Ok(Ok(s)) => Some(s.success()),
+        Ok(Ok(s)) => s.code(),
         _ => None,
     }
 }
@@ -905,7 +909,7 @@ async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
     }
 
     let busy = match (&n.busy_cmd, ps.state) {
-        (Some(c), PState::Running) if st.phase == Phase::Running => sh(c).await.unwrap_or(true),
+        (Some(c), PState::Running) if st.phase == Phase::Running => sh(c, n, &instance).await != Some(1),
         _ => false,
     };
     let action = decide(&Inputs { cfg: n, st, provider: ps.state, signal: signal.as_ref(), busy, now });
@@ -923,8 +927,8 @@ async fn tick(ctx: &Ctx, n: &NodeCfg, st: &mut NodeState) -> Result<()> {
         }
         Action::Stop(why) => {
             if let Some(c) = &n.pre_stop_cmd {
-                let ok = sh(c).await;
-                log(ctx, &n.name, &format!("pre_stop_cmd: {}", match ok { Some(true) => "ok", Some(false) => "failed", None => "timed out" }));
+                let ok = sh(c, n, &instance).await;
+                log(ctx, &n.name, &format!("pre_stop_cmd: {}", match ok { Some(0) => "ok", Some(_) => "failed", None => "timed out" }));
                 // A job could have landed while the worker wound down: let it finish.
                 if let Ok(s) = fetch_signal(&ctx.http, &ctx.site, n).await
                     && s.node.in_flight > 0
@@ -1103,7 +1107,7 @@ pub async fn run(args: AutoscaleArgs) -> Result<()> {
             println!("{name}: reset");
             Ok(())
         }
-        AutoscaleCmd::Start { name } | AutoscaleCmd::Stop { name } => {
+        AutoscaleCmd::Start { ref name } | AutoscaleCmd::Stop { ref name } => {
             let on = matches!(args.cmd, AutoscaleCmd::Start { .. });
             let n = find(&name)?;
             let ctx = Ctx { cfg: cfg.clone(), site, http: http.clone(), dry_run: false };
