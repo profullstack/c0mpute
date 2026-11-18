@@ -115,6 +115,14 @@ pub struct Config {
     /// node downloads and runs for buyers, and the free disk it keeps.
     #[serde(default)]
     pub text: crate::text::TextConfig,
+    /// Jobs at once per role, overriding what the node's resource budget
+    /// derives (`crate::budget`): `[capacity] diffusion = 2`, `tts = 8`.
+    /// Keys: transcode, tts, stt, workflow, crawl, video, diffusion, music,
+    /// ocr, gameserver, embed, captcha, render, containers, webhook.
+    /// `C0MPUTE_<ROLE>_CONCURRENCY` wins over it; 0 = derive. Inference has
+    /// its own (`[inference] concurrency`, `C0MPUTE_INFERENCE_CONCURRENCY`).
+    #[serde(default)]
+    pub capacity: std::collections::BTreeMap<String, usize>,
 }
 
 /// Adult mode on the buyer side. Every worker serves adult jobs and
@@ -880,6 +888,7 @@ impl Default for Config {
             swarm: Default::default(),
             render: Default::default(),
             text: Default::default(),
+            capacity: Default::default(),
         }
     }
 }

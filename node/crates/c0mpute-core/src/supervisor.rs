@@ -11,7 +11,6 @@ use crate::runner;
 use crate::speech;
 use c0mpute_proto::Hash;
 use c0mpute_store::ChunkStore;
-use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::{Config, config};
@@ -164,40 +163,80 @@ impl Supervisor {
         let cache_root = config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("cache");
-        let total_slots = crate::resources::max_concurrent_cpu_jobs();
-        let compute_slots = Arc::new(Semaphore::new(total_slots));
+        // The node budget (CPU cores, RAM, VRAM) every role's jobs reserve
+        // from; each role gets as many slots as its jobs fit (or the
+        // operator's `[capacity]` / `C0MPUTE_<ROLE>_CONCURRENCY`), and bids
+        // only while one more fits beside every other role's running jobs.
+        crate::budget::configure(&self.config);
         info!(
+            node = ?crate::budget::node().totals(),
             cpu_threads_per_job = crate::resources::cpu_threads_per_job(),
-            max_concurrent_jobs = crate::resources::max_concurrent_cpu_jobs(),
             cuda_devices_per_job = ?crate::resources::cuda_devices_per_job(),
             "node compute budget configured"
         );
         // Idle donation (crowdgpt plugin): off unless the operator turned it
-        // on; runs only while these slots are free and no bid or job is in
+        // on; runs only while no job holds the node budget and no bid is in
         // flight, and is stopped the moment one is. Watches the default
         // config file so `c0mpute crowdgpt on|off` applies without a restart.
-        crate::crowdgpt::spawn_governor(
-            config::default_config_path(),
-            self.config.crowdgpt.clone(),
-            Some(runner::WorkerLoad::new(compute_slots.clone(), total_slots)),
-        );
+        crate::crowdgpt::spawn_governor(config::default_config_path(), self.config.crowdgpt.clone(), None);
         for workload_type in dispatch::workload_types_from_roles(&self.config.roles) {
-            // Node-wide slots, per-workload job timing: the dispatch loop
-            // reads this to stop bidding when full and to quote an ETA.
-            // workflow.step draws on its own light-work slots instead.
-            let load = if workload_type == crate::workflow::WORKLOAD {
-                crate::workflow::worker_load()
-            } else if workload_type == crate::crawl::WORKLOAD {
-                crate::crawl::worker_load()
-            } else {
-                // Job times survive restarts, so ETAs stay real (see `with_history`).
-                runner::WorkerLoad::new(compute_slots.clone(), total_slots).with_history(
-                    config::data_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
-                        .join("job-times")
-                        .join(format!("{workload_type}.ms")),
-                )
-            };
+            // Game servers: pull the pinned images, then subscribe to both
+            // start and stop offers and run the expiry reaper.
+            if workload_type == crate::gameserver::WORKLOAD_START {
+                tokio::spawn(crate::gameserver::run_worker(
+                    net.clone(),
+                    self.store.clone(),
+                    self.config.clone(),
+                    cache_root.join("gameserver"),
+                ));
+                continue;
+            }
+            if workload_type == crate::gameserver::WORKLOAD_STOP {
+                continue;
+            }
+            // Chat completions from the operator's own OpenAI-compatible
+            // runtime, or, on a box without one, from the house llama-server
+            // the worker installs and supervises (`inference_auto`). Probe it
+            // now and every minute; bid only while it lists chat models (the
+            // offer filter re-checks, plus load gates for the house runtime),
+            // advertise likewise. Choosing may install in the background, so
+            // it never blocks the other roles.
+            if workload_type == crate::inference::WORKLOAD {
+                let Some(operator) = crate::inference::runtime_url() else {
+                    info!(%workload_type, "not subscribing: {} is off", crate::inference::RUNTIME_URL_ENV);
+                    continue;
+                };
+                let net = net.clone();
+                let store = self.store.clone();
+                let config = self.config.clone();
+                let tags = tags.clone();
+                tokio::spawn(async move {
+                    let base = crate::inference_auto::choose_runtime(operator, &config.inference).await;
+                    tokio::spawn(crate::inference::refresh_loop(base.clone()));
+                    // As many answers at once as the runtime runs in parallel
+                    // (one on a CPU-only box), re-read every minute.
+                    let slots = crate::inference::detect_slots(&base, &config.inference).await;
+                    let load = crate::inference::worker_load(slots.n);
+                    tokio::spawn(crate::inference::slots_loop(base.clone(), config.inference.clone(), load.clone()));
+                    let runner_tx = crate::inference::spawn_inference_runner(net.clone(), store, base, load.clone());
+                    info!(workload_type = crate::inference::WORKLOAD, "subscribing to job topic");
+                    dispatch::run_worker_subscriber_with_load(
+                        net,
+                        crate::inference::WORKLOAD.to_string(),
+                        tags,
+                        Some(runner_tx),
+                        Some(crate::inference::offer_filter()),
+                        Some(config.pricing.clone()),
+                        Some(load),
+                    );
+                });
+                continue;
+            }
+            // Per-role slots drawn from the shared node budget, per-workload
+            // job timing (kept across restarts): the dispatch loop reads this
+            // to stop bidding when full and to quote an ETA. Inference and
+            // game servers (above) build theirs from the same budget.
+            let load = runner::WorkerLoad::for_role(&workload_type);
             // Speech is the one workload whose runtime we install ourselves.
             // Provision it first, in the background, then subscribe with the
             // tag set that install produced — a node advertising TTS it cannot
@@ -346,20 +385,6 @@ impl Supervisor {
                 );
                 continue;
             }
-            // Game servers: pull the pinned images, then subscribe to both
-            // start and stop offers and run the expiry reaper.
-            if workload_type == crate::gameserver::WORKLOAD_START {
-                tokio::spawn(crate::gameserver::run_worker(
-                    net.clone(),
-                    self.store.clone(),
-                    self.config.clone(),
-                    cache_root.join("gameserver"),
-                ));
-                continue;
-            }
-            if workload_type == crate::gameserver::WORKLOAD_STOP {
-                continue;
-            }
             // container.run (DIP 0033): probe docker + buildx off the async
             // threads, then subscribe with its own job slots and the buyer
             // gate (trusted buyers only unless `[containers] open`).
@@ -387,7 +412,6 @@ impl Supervisor {
                     let policy = crate::container_run::BuyerPolicy::from_config(&cfg, crate::private::local_identities());
                     info!(open = policy.open, trusted_buyers = policy.trusted.len(), work_dir = %cfg.work_dir().display(), "containers: serving container.run");
                     crate::container_run::install_policy(policy);
-                    let load = crate::container_run::worker_load(&cfg);
                     let runner_tx =
                         crate::container_run::spawn_container_runner(net.clone(), store, cfg.clone(), load.clone());
                     dispatch::run_worker_subscriber_with_load(
@@ -437,44 +461,6 @@ impl Supervisor {
                         capabilities::tags_from_config(&config),
                         Some(runner_tx),
                         Some(crate::render::offer_filter()),
-                        Some(config.pricing.clone()),
-                        Some(load),
-                    );
-                });
-                continue;
-            }
-            // Chat completions from the operator's own OpenAI-compatible
-            // runtime, or, on a box without one, from the house llama-server
-            // the worker installs and supervises (`inference_auto`). Probe it
-            // now and every minute; bid only while it lists chat models (the
-            // offer filter re-checks, plus load gates for the house runtime),
-            // advertise likewise. Choosing may install in the background, so
-            // it never blocks the other roles.
-            if workload_type == crate::inference::WORKLOAD {
-                let Some(operator) = crate::inference::runtime_url() else {
-                    info!(%workload_type, "not subscribing: {} is off", crate::inference::RUNTIME_URL_ENV);
-                    continue;
-                };
-                let net = net.clone();
-                let store = self.store.clone();
-                let config = self.config.clone();
-                let tags = tags.clone();
-                tokio::spawn(async move {
-                    let base = crate::inference_auto::choose_runtime(operator, &config.inference).await;
-                    tokio::spawn(crate::inference::refresh_loop(base.clone()));
-                    // As many answers at once as the runtime runs in parallel
-                    // (one on a CPU-only box), re-read every minute.
-                    let slots = crate::inference::detect_slots(&base, &config.inference).await;
-                    let load = crate::inference::worker_load(slots.n);
-                    tokio::spawn(crate::inference::slots_loop(base.clone(), config.inference.clone(), load.clone()));
-                    let runner_tx = crate::inference::spawn_inference_runner(net.clone(), store, base, load.clone());
-                    info!(workload_type = crate::inference::WORKLOAD, "subscribing to job topic");
-                    dispatch::run_worker_subscriber_with_load(
-                        net,
-                        crate::inference::WORKLOAD.to_string(),
-                        tags,
-                        Some(runner_tx),
-                        Some(crate::inference::offer_filter()),
                         Some(config.pricing.clone()),
                         Some(load),
                     );

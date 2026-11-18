@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Semaphore, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 use x25519_dalek::StaticSecret;
 
@@ -85,8 +85,6 @@ pub const ENC_SCHEME: &str = "x25519-hkdf-sha256-aes256gcm-chunked/v1";
 const MANIFEST_KIND: &str = "c0mpute-gameserver-world";
 const MANIFEST_VERSION: u32 = 2;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-/// Start/stop jobs handled at once (the servers themselves are not jobs).
-const JOB_SLOTS: usize = 2;
 /// Stopped-server records (and their backup hash) are kept this long.
 const KEEP_STOPPED_SECS: u64 = 7 * 86_400;
 pub const REAP_EVERY: Duration = Duration::from_secs(30);
@@ -1445,11 +1443,11 @@ impl Worker {
     }
 }
 
-fn spawn_runner(worker: Arc<Worker>, slots: Arc<Semaphore>, stop: bool) -> mpsc::Sender<AcceptedJob> {
+fn spawn_runner(worker: Arc<Worker>, load: WorkerLoad, stop: bool) -> mpsc::Sender<AcceptedJob> {
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(8);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = slots.clone().acquire_owned().await else { return };
+            let Some(slot) = load.acquire().await else { return };
             let w = worker.clone();
             tokio::spawn(async move {
                 let _slot = slot;
@@ -1485,8 +1483,9 @@ pub fn spawn_reaper(worker: Arc<Worker>, every: Duration) -> tokio::task::JoinHa
 
 /// Subscribe a worker to start and stop offers.
 pub fn subscribe(worker: Arc<Worker>, tags: Vec<String>, pricing: Option<crate::pricing::PricingConfig>) {
-    let slots = Arc::new(Semaphore::new(JOB_SLOTS));
-    let load = WorkerLoad::new(slots.clone(), JOB_SLOTS);
+    // Start and stop share one load: as many control jobs at once as the
+    // node budget fits (`[capacity] gameserver`).
+    let load = WorkerLoad::for_role(WORKLOAD_START);
     let w = worker.clone();
     let start_filter: crate::dispatch::OfferFilter = Arc::new(move |o| w.accepts_start(o));
     let w = worker.clone();
@@ -1495,13 +1494,13 @@ pub fn subscribe(worker: Arc<Worker>, tags: Vec<String>, pricing: Option<crate::
         worker.net.clone(),
         WORKLOAD_START.into(),
         tags.clone(),
-        Some(spawn_runner(worker.clone(), slots.clone(), false)),
+        Some(spawn_runner(worker.clone(), load.clone(), false)),
         Some(start_filter),
         pricing,
         Some(load.clone()),
     );
     // Stopping is part of the rent: no price floor.
-    crate::dispatch::run_worker_subscriber_with_load(worker.net.clone(), WORKLOAD_STOP.into(), tags, Some(spawn_runner(worker.clone(), slots, true)), Some(stop_filter), None, Some(load));
+    crate::dispatch::run_worker_subscriber_with_load(worker.net.clone(), WORKLOAD_STOP.into(), tags, Some(spawn_runner(worker.clone(), load.clone(), true)), Some(stop_filter), None, Some(load));
 }
 
 /// Supervisor entry: kill expired leftovers, pull images, then subscribe to

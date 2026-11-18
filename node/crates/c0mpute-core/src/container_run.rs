@@ -89,7 +89,9 @@ pub struct ContainersConfig {
     /// Where per-job scratch (context, outputs, the saved image) goes.
     /// Default `<data dir>/containers`. Put it on the big disk.
     pub work_dir: Option<PathBuf>,
-    /// Jobs at once.
+    /// Jobs at once. Legacy: 0 or 1 (the old default, written into many
+    /// config files) lets the node budget decide; above 1 overrides it, like
+    /// `[capacity] containers = n`.
     pub max_jobs: usize,
     /// Most CPUs / memory one run step may ask for (0 = half the machine).
     pub max_cpus: f64,
@@ -736,10 +738,11 @@ pub fn offer_filter(cfg: ContainersConfig) -> crate::dispatch::OfferFilter {
     )
 }
 
-/// The load a `containers` subscriber uses: its own slots (`max_jobs`).
-pub fn worker_load(cfg: &ContainersConfig) -> WorkerLoad {
-    let n = cfg.max_jobs.max(1);
-    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(n)), n)
+/// The load a `containers` subscriber uses: as many jobs as fit the node
+/// budget (`[capacity] containers`, `C0MPUTE_CONTAINERS_CONCURRENCY`, or a
+/// `max_jobs` above 1 override it; see `budget::configure`).
+pub fn worker_load(_cfg: &ContainersConfig) -> WorkerLoad {
+    WorkerLoad::for_role(WORKLOAD)
 }
 
 // ─── live log ────────────────────────────────────────────────────────────
@@ -1444,7 +1447,7 @@ pub fn spawn_container_runner(
     tokio::spawn(async move {
         sweep_orphans().await;
         while let Some(job) = rx.recv().await {
-            let Ok(slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
             let net = net.clone();

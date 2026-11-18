@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::runner::{AcceptedJob, WorkerLoad, cleanup_job_dir, publish_receipt, safe_job_dir};
@@ -165,11 +165,10 @@ pub fn can_serve(config: &crate::config::DiffusionConfig) -> bool {
         && installed()
         && fast_enough(config)
         && has_headroom_with(config, memory())
+        // A render or song already running here holds CPU: the load-average
+        // gate above sees it live, and the node budget (WorkerLoad) only
+        // lets this bid when another image fits beside them.
         && idle_enough_with(load_avg_1m(), logical_cpus(), config.max_load_per_cpu)
-        && node_slot().available_permits() > 0
-        // A song holds the same CPU: an image taken next to one starves and
-        // misses its receipt deadline (vienna, 2026-11-09).
-        && !crate::music::busy()
 }
 
 /// Busiest a box may be (1-minute load average per logical CPU) and still
@@ -734,19 +733,32 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// sd-cli renders (images and CPU clips) running in this process.
+static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// True while this node is rendering an image or a CPU clip.
 pub fn busy() -> bool {
-    node_slot().available_permits() == 0
+    RUNNING.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
 
-/// One sd-cli job at a time per node: a job holds ~4-9 GB and every core, so a
-/// second concurrent job would only swap.
+/// Marks an sd-cli render (image or CPU clip) as running while it lives.
 ///
-/// Shared with CPU video (`video_cpu`): both are sd-cli, and an image and a
-/// clip at once on one box would only make both miss their deadlines.
-pub(crate) fn node_slot() -> Arc<Semaphore> {
-    static SLOT: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
-    SLOT.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
+/// How many run at once is the node budget's call (`crate::budget`): a
+/// render reserves ~9 GiB and the threads it is given, so a big box runs
+/// several and a small one runs one, beside whatever else fits.
+pub(crate) struct Running(());
+
+impl Running {
+    pub(crate) fn start() -> Self {
+        RUNNING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Running(())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// `/proc/<pid>/stat` -> (state, parent pid). The command name is in
@@ -825,29 +837,31 @@ pub fn spawn_diffusion_runner(
     let (tx, mut rx) = mpsc::channel::<AcceptedJob>(4);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
-            let Ok(_compute_slot) = load.compute_slots().acquire_owned().await else {
+            let Some(slot) = load.acquire().await else {
                 return;
             };
-            let Ok(_node_slot) = node_slot().acquire_owned().await else {
-                return;
-            };
-            let started = Instant::now();
-            let job_id = job.accept.job_id.clone();
-            // An auto-update waits for this to finish instead of killing it.
-            let _long = c0mpute_update::LongJob::start();
-            let result = crate::job_control::cancellable(&job.accept.job_id, run_job(&net, &store, &cache_root, &job)).await;
-            cleanup_job_dir(&cache_root, &job_id).await;
-            match result {
-                Ok(hash) => {
-                    load.record_job(started.elapsed());
-                    info!(%job_id, %hash, secs = started.elapsed().as_secs(), "diffusion runner: job complete");
-                    publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+            let (net, store, cache_root, load) = (net.clone(), store.clone(), cache_root.clone(), load.clone());
+            tokio::spawn(async move {
+                let _slot = slot;
+                let _running = Running::start();
+                let started = Instant::now();
+                let job_id = job.accept.job_id.clone();
+                // An auto-update waits for this to finish instead of killing it.
+                let _long = c0mpute_update::LongJob::start();
+                let result = crate::job_control::cancellable(&job.accept.job_id, run_job(&net, &store, &cache_root, &job)).await;
+                cleanup_job_dir(&cache_root, &job_id).await;
+                match result {
+                    Ok(hash) => {
+                        load.record_job(started.elapsed());
+                        info!(%job_id, %hash, secs = started.elapsed().as_secs(), "diffusion runner: job complete");
+                        publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
+                    }
+                    Err(error) => {
+                        warn!(%job_id, err = %format!("{error:#}"), "diffusion runner: job failed");
+                        publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
+                    }
                 }
-                Err(error) => {
-                    warn!(%job_id, err = %format!("{error:#}"), "diffusion runner: job failed");
-                    publish_receipt(&net, &job.accept, None, JobStatus::Failed).await;
-                }
-            }
+            });
         }
     });
     tx
