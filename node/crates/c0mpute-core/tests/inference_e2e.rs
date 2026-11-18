@@ -247,6 +247,7 @@ async fn a_job_no_node_can_run_fails_at_once() {
 /// job behind it in line is answered as the slot frees.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requeues_run_out_with_network_busy_and_others_proceed() {
+    let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=debug,c0mpute_net=warn").with_test_writer().try_init();
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let base = slow_runtime(Duration::from_secs(4), peak.clone()).await;
