@@ -3,7 +3,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 // Mirrors lib/earnings/server.ts Dashboard (kept loose: this is a client file).
-type Totals = { jobs: number; busy_s: number; earned_usd: number; spend_usd: number; net_usd: number };
+type Totals = {
+  jobs: number;
+  busy_s: number;
+  earned_usd: number;
+  paid_jobs: number;
+  own_usd: number;
+  own_jobs: number;
+  agreed_usd: number;
+  spend_usd: number;
+  net_usd: number;
+};
 type Bucket = Totals & { t: number };
 type NodeOut = Totals & {
   node: string;
@@ -11,7 +21,8 @@ type NodeOut = Totals & {
   class: string;
   online: boolean;
   via: string;
-  spend_basis: "fixed" | "power-estimate";
+  kind: "c0mpute" | "infernet";
+  spend_basis: "fixed" | "power-estimate" | "none";
   cost_usd_per_hour: number | null;
   utilization: number;
 };
@@ -23,8 +34,8 @@ type Dashboard = {
   totals: Totals;
   buckets: Bucket[];
   nodes: NodeOut[];
-  by_type: { type: string; jobs: number; busy_s: number; earned_usd: number }[];
-  infernet: { linked: boolean; earned_usd: number; jobs: number; providers: number } | null;
+  by_type: { type: string; jobs: number; busy_s: number; agreed_usd: number }[];
+  infernet: { linked: boolean; providers: number } | null;
   history_from: number | null;
 };
 
@@ -167,21 +178,35 @@ export function EarningsDashboard() {
 
 function Summary({ data }: { data: Dashboard }) {
   const t = data.totals;
-  const tiles = [
-    { k: "earned", v: usd(t.earned_usd), sub: `${t.jobs.toLocaleString()} jobs` },
-    { k: "spend", v: usd(t.spend_usd), sub: data.nodes.some((n) => n.spend_basis === "fixed") ? "your costs + est. power" : "est. power" },
+  const c0 = data.nodes.filter((n) => n.kind === "c0mpute");
+  const tiles: { k: string; v: string; sub: string; warn?: boolean; dim?: boolean }[] = [
+    { k: "earned from others", v: usd(t.earned_usd), sub: `${t.paid_jobs.toLocaleString()} paid jobs, settled` },
+    {
+      k: "spend",
+      v: usd(t.spend_usd),
+      sub: c0.some((n) => n.spend_basis === "fixed")
+        ? c0.every((n) => n.spend_basis === "fixed")
+          ? "your hosting costs"
+          : "your costs + est. power"
+        : "power estimate only",
+      warn: c0.some((n) => n.spend_basis === "power-estimate"),
+    },
     { k: "net", v: usd(t.net_usd), sub: t.net_usd >= 0 ? "in profit" : "running at a loss", warn: t.net_usd < 0 },
-    { k: "busy", v: duration(t.busy_s), sub: `${data.nodes.length} node${data.nodes.length === 1 ? "" : "s"}` },
+    { k: "your own jobs", v: usd(t.own_usd), sub: `${t.own_jobs.toLocaleString()} jobs you paid for: not profit`, dim: true },
   ];
   return (
     <section className="grid grid-cols-2 sm:grid-cols-4 gap-3" aria-label="totals">
       {tiles.map((x) => (
         <div key={x.k} className="border border-[var(--color-rule)] bg-[var(--color-card)] p-3 space-y-1">
           <div className="text-xs text-[var(--color-dim)]">{x.k}</div>
-          <div className={`text-xl font-bold ${x.warn ? "text-[var(--color-warn)]" : "accent"}`}>{x.v}</div>
-          <div className="text-xs text-[var(--color-dim)]">{x.sub}</div>
+          <div className={`text-xl font-bold ${x.warn && x.k !== "spend" ? "text-[var(--color-warn)]" : x.dim ? "text-[var(--color-fg)]" : "accent"}`}>{x.v}</div>
+          <div className={`text-xs ${x.warn && x.k === "spend" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}`}>{x.sub}</div>
         </div>
       ))}
+      <p className="col-span-2 sm:col-span-4 text-xs text-[var(--color-dim)]">
+        {t.jobs.toLocaleString()} jobs completed on c0mpute, {duration(t.busy_s)} busy. Auction prices agreed for them: {usd(t.agreed_usd)}
+        {" "}(an offer, not what settles).
+      </p>
     </section>
   );
 }
@@ -203,13 +228,13 @@ function Chart({ data }: { data: Dashboard }) {
   const every = Math.ceil(b.length / 6);
   const net = b.map((x, i) => `${i ? "L" : "M"}${x0(i).toFixed(1)},${y(x.net_usd).toFixed(1)}`).join(" ");
   const h = hover !== null ? b[hover] : null;
-  const empty = data.totals.jobs === 0 && data.totals.spend_usd === 0;
+  const empty = data.totals.earned_usd === 0 && data.totals.spend_usd === 0;
 
   return (
     <section className="space-y-2" aria-label="earned vs spend over time">
       <div className="flex flex-wrap items-center gap-4 text-xs text-[var(--color-dim)]">
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: EARNED }} /> earned
+          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: EARNED }} /> earned from others
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-sm" style={{ background: SPEND }} /> spend
@@ -256,14 +281,15 @@ function Chart({ data }: { data: Dashboard }) {
         {h && (
           <div className="absolute top-1 right-1 border border-[var(--color-rule)] bg-[var(--color-panel)] px-3 py-2 text-xs space-y-0.5 pointer-events-none">
             <div className="text-[var(--color-dim)]">{new Date(h.t).toLocaleString()}</div>
-            <div>earned {usd(h.earned_usd)} · {h.jobs} jobs</div>
+            <div>earned from others {usd(h.earned_usd)} · {h.paid_jobs} jobs</div>
+            {h.own_usd > 0 && <div className="text-[var(--color-dim)]">your own jobs {usd(h.own_usd)} · {h.own_jobs}</div>}
             <div>spend {usd(h.spend_usd)}</div>
             <div className={h.net_usd < 0 ? "text-[var(--color-warn)]" : "accent"}>net {usd(h.net_usd)}</div>
           </div>
         )}
         {empty && (
           <p className="absolute inset-0 flex items-center justify-center text-xs text-[var(--color-dim)] pointer-events-none">
-            no jobs and no set costs in this window
+            no settled pay and no costs in this window
           </p>
         )}
       </div>
@@ -274,8 +300,9 @@ function Chart({ data }: { data: Dashboard }) {
             <thead className="text-[var(--color-dim)]">
               <tr>
                 <th className="text-left font-normal py-1">from</th>
-                <th className="text-right font-normal">jobs</th>
-                <th className="text-right font-normal">earned</th>
+                <th className="text-right font-normal">paid jobs</th>
+                <th className="text-right font-normal">earned from others</th>
+                <th className="text-right font-normal">your own jobs</th>
                 <th className="text-right font-normal">spend</th>
                 <th className="text-right font-normal">net</th>
               </tr>
@@ -284,8 +311,9 @@ function Chart({ data }: { data: Dashboard }) {
               {b.map((x) => (
                 <tr key={x.t} className="border-t border-[var(--color-rule)]">
                   <td className="py-1">{new Date(x.t).toLocaleString()}</td>
-                  <td className="text-right">{x.jobs}</td>
+                  <td className="text-right">{x.paid_jobs}</td>
                   <td className="text-right">{usd(x.earned_usd)}</td>
+                  <td className="text-right">{usd(x.own_usd)}</td>
                   <td className="text-right">{usd(x.spend_usd)}</td>
                   <td className="text-right">{usd(x.net_usd)}</td>
                 </tr>
@@ -314,13 +342,15 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
     <section className="space-y-2">
       <h2 className="font-bold">per node</h2>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[620px] text-xs [&_td]:px-1 [&_th]:px-1">
+        <table className="w-full min-w-[760px] text-xs [&_td]:px-1 [&_th]:px-1">
           <thead className="text-[var(--color-dim)]">
             <tr>
               <th className="text-left font-normal py-1">node</th>
               <th className="text-right font-normal">jobs</th>
               <th className="text-right font-normal">busy</th>
-              <th className="text-right font-normal">earned</th>
+              <th className="text-right font-normal">earned from others</th>
+              <th className="text-right font-normal">your own jobs</th>
+              <th className="text-right font-normal">auction (unsettled)</th>
               <th className="text-right font-normal">spend</th>
               <th className="text-right font-normal">net</th>
               <th className="text-left font-normal pl-3">running cost</th>
@@ -337,7 +367,7 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
                     <span>{n.label ?? n.node}</span>
                   </div>
                   <div className="text-[var(--color-dim)]">
-                    {n.node} · {n.class}
+                    {n.kind === "infernet" ? "Infernet provider" : `${n.node} · ${n.class}`}
                     {n.via === "hosting" ? " · hosting link" : n.via === "key" ? " · claimed with API key" : ""}
                   </div>
                 </td>
@@ -346,15 +376,23 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
                   {duration(n.busy_s)}
                   <div className="text-[var(--color-dim)]">{(n.utilization * 100).toFixed(n.utilization < 0.1 ? 1 : 0)}%</div>
                 </td>
-                <td className="text-right">{usd(n.earned_usd)}</td>
                 <td className="text-right">
-                  {usd(n.spend_usd)}
-                  <div className="text-[var(--color-dim)]">{n.spend_basis === "fixed" ? "set" : "est."}</div>
+                  {usd(n.earned_usd)}
+                  <div className="text-[var(--color-dim)]">{n.paid_jobs} jobs</div>
+                </td>
+                <td className="text-right text-[var(--color-dim)]">
+                  {usd(n.own_usd)}
+                  <div>{n.own_jobs} jobs</div>
+                </td>
+                <td className="text-right text-[var(--color-dim)]">{n.kind === "c0mpute" ? usd(n.agreed_usd) : "-"}</td>
+                <td className="text-right">
+                  {n.spend_basis === "none" ? "-" : usd(n.spend_usd)}
+                  <div className={n.spend_basis === "power-estimate" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}>
+                    {n.spend_basis === "fixed" ? "set" : n.spend_basis === "none" ? "" : "est."}
+                  </div>
                 </td>
                 <td className={`text-right ${n.net_usd < 0 ? "text-[var(--color-warn)]" : ""}`}>{usd(n.net_usd)}</td>
-                <td className="pl-3">
-                  <CostEditor node={n} onSaved={onChange} />
-                </td>
+                <td className="pl-3">{n.kind === "c0mpute" ? <CostEditor node={n} onSaved={onChange} /> : <span className="text-[var(--color-dim)]">-</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -384,8 +422,11 @@ function CostEditor({ node, onSaved }: { node: NodeOut; onSaved: () => void }) {
   };
   if (!open) {
     return (
-      <button className="text-left underline decoration-dotted text-[var(--color-dim)]" onClick={() => setOpen(true)}>
-        {node.cost_usd_per_hour != null ? `$${+node.cost_usd_per_hour.toPrecision(3)}/h` : "power est. · set"}
+      <button
+        className={`text-left underline decoration-dotted ${node.cost_usd_per_hour != null ? "text-[var(--color-dim)]" : "text-[var(--color-warn)]"}`}
+        onClick={() => setOpen(true)}
+      >
+        {node.cost_usd_per_hour != null ? `$${+node.cost_usd_per_hour.toPrecision(3)}/h · edit` : "power estimate only: add your hosting cost"}
       </button>
     );
   }
@@ -426,7 +467,7 @@ function CostEditor({ node, onSaved }: { node: NodeOut; onSaved: () => void }) {
 function TypesTable({ data }: { data: Dashboard }) {
   return (
     <section className="space-y-2">
-      <h2 className="font-bold">jobs by type</h2>
+      <h2 className="font-bold">c0mpute jobs by type</h2>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[620px] text-xs [&_td]:px-1 [&_th]:px-1">
           <thead className="text-[var(--color-dim)]">
@@ -435,7 +476,7 @@ function TypesTable({ data }: { data: Dashboard }) {
               <th className="text-right font-normal">jobs</th>
               <th className="text-right font-normal">busy</th>
               <th className="text-right font-normal">avg run</th>
-              <th className="text-right font-normal">earned</th>
+              <th className="text-right font-normal">auction price (unsettled)</th>
             </tr>
           </thead>
           <tbody>
@@ -445,7 +486,7 @@ function TypesTable({ data }: { data: Dashboard }) {
                 <td className="text-right">{t.jobs}</td>
                 <td className="text-right">{t.busy_s ? duration(t.busy_s) : "-"}</td>
                 <td className="text-right">{t.jobs && t.busy_s ? duration(t.busy_s / t.jobs) : "-"}</td>
-                <td className="text-right">{usd(t.earned_usd)}</td>
+                <td className="text-right">{usd(t.agreed_usd)}</td>
               </tr>
             ))}
           </tbody>
@@ -508,15 +549,23 @@ function Notes({ data }: { data: Dashboard }) {
   return (
     <section className="text-xs text-[var(--color-dim)] leading-6 space-y-1">
       <p>
-        <b>earned</b> is what buyers agreed to pay for jobs your nodes completed on the c0mpute market, less the 5% house fee, as the
-        status aggregators heard it on the job topics
-        {data.infernet?.linked ? ", plus your Infernet provider credits (spread evenly over each hour)" : ""}. <b>spend</b> is the running cost
-        you set for a node, accrued for every hour of the window busy or not, or else estimated electricity for its busy time only
-        (65 W CPU, 250 W GPU, 40 W Apple at $0.17/kWh).
+        <b>earned from others</b> is settled pay: the credits in the Infernet ledger for your nodes (a c0mpute node that serves chat
+        is paid through the provider Infernet opened for it), after the 5% house fee, minus anything you paid yourself. It is
+        reported per hour and spread evenly across shorter bars.
       </p>
-      {data.history_from != null && <p>History on file since {new Date(data.history_from).toLocaleString()}.</p>}
-      {data.infernet === null && <p>Infernet provider earnings could not be read right now; they are not included.</p>}
-      {data.infernet && !data.infernet.linked && <p>No Infernet account is linked to this CoinPay sign-in, so only c0mpute market jobs are counted.</p>}
+      <p>
+        <b>your own jobs</b> are settled credits for jobs your own account paid for (for the platform, any admin account): money that
+        went round in a circle, so it is not profit and not in net. <b>auction (unsettled)</b> is the price agreed in the c0mpute
+        auction, as the status aggregators heard it: an offer, not a payment.
+      </p>
+      <p>
+        <b>spend</b> is the hosting cost you set for a node, accrued for every hour of the window busy or not, or else estimated
+        electricity for its busy time only (65 W CPU, 250 W GPU, 40 W Apple at $0.17/kWh). Rented and cloud nodes cost far more
+        than their power: set their hourly or monthly price.
+      </p>
+      {data.history_from != null && <p>c0mpute job history on file since {new Date(data.history_from).toLocaleString()}.</p>}
+      {data.infernet === null && <p className="text-[var(--color-warn)]">Settled pay could not be read from Infernet right now, so earned shows $0.</p>}
+      {data.infernet && !data.infernet.linked && <p>No Infernet account is linked to this CoinPay sign-in yet.</p>}
     </section>
   );
 }

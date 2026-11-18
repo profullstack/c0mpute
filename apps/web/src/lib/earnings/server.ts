@@ -3,7 +3,7 @@
 import "server-only";
 import { infernet, pushStore } from "../chat/server";
 import { getNodesPayload, type NodeRow } from "../nodes";
-import { buildReport, RANGES, type InfernetHour, type RangeKey, type Report, type ReportNode } from "./report";
+import { buildReport, RANGES, type InfernetHour, type InfernetInput, type RangeKey, type Report, type ReportNode } from "./report";
 import { nodeKey, type OperatorNode } from "./store";
 import { earningsStore } from "./recorder";
 
@@ -37,31 +37,46 @@ export async function operatorNodes(userId: string): Promise<OperatorNode[]> {
 // ── Infernet ─────────────────────────────────────────────────────────────────
 
 /**
- * This person's Infernet provider credits per hour since `since`, read through
- * our trusted client key by their CoinPay subject. Null when Infernet is
- * unreachable or does not serve the endpoint yet.
+ * This person's settled Infernet credits per provider and hour since `since`,
+ * read through our trusted client key by their CoinPay subject. `c0mputeNodes`
+ * are the board ids this account claims: Infernet adds the providers it
+ * opened for them (`c0mpute:<peer>`), which is where a bridged job is paid.
+ * Null when Infernet is unreachable.
  */
-export async function infernetHours(subject: string, since: number): Promise<{ linked: boolean; hours: InfernetHour[]; providers: number } | null> {
+export async function infernetHours(subject: string, since: number, c0mputeNodes: string[] = []): Promise<InfernetInput | null> {
   try {
-    const r = await infernet(
-      `/api/v1/billing/node-earnings?since=${encodeURIComponent(new Date(since).toISOString())}`,
-      { signal: AbortSignal.timeout(8_000), cache: "no-store" },
-      { subject },
-    );
+    const q = new URLSearchParams({ since: new Date(since).toISOString() });
+    if (c0mputeNodes.length) q.set("c0mpute_nodes", c0mputeNodes.slice(0, 200).join(","));
+    const r = await infernet(`/api/v1/billing/node-earnings?${q}`, { signal: AbortSignal.timeout(8_000), cache: "no-store" }, { subject });
     if (!r.ok) return null;
     const raw = (await r.json()) as { data?: unknown };
     const d = (raw && typeof raw === "object" && "data" in raw ? raw.data : raw) as Record<string, unknown> | null;
     if (!d || typeof d !== "object") return null;
-    const buckets = Array.isArray(d.buckets) ? d.buckets : [];
+    const providers = (Array.isArray(d.providers) ? d.providers : []).map((p: Record<string, unknown>) => ({
+      id: String(p.id ?? ""),
+      name: typeof p.name === "string" ? p.name : null,
+      c0mpute_node: typeof p.c0mpute_node === "string" ? p.c0mpute_node : null,
+    }));
+    const nodeOf = new Map(providers.map((p) => [p.id, p.c0mpute_node]));
+    const num = (v: unknown) => (Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0);
     const hours: InfernetHour[] = [];
-    for (const b of buckets as Record<string, unknown>[]) {
+    for (const b of (Array.isArray(d.buckets) ? d.buckets : []) as Record<string, unknown>[]) {
       const at = Date.parse(String(b.at ?? ""));
-      // The operator's share: earned_usd when Infernet names it, else amount_usd.
-      const earned = Number(b.earned_usd ?? b.amount_usd);
-      if (!Number.isFinite(at) || !Number.isFinite(earned)) continue;
-      hours.push({ provider_id: String(b.provider_id ?? ""), at, jobs: Number(b.jobs) || 0, earned_usd: Math.max(0, earned) });
+      if (!Number.isFinite(at)) continue;
+      const pid = String(b.provider_id ?? "");
+      // amount_usd is the operator's net (after the house fee).
+      const earned = num(b.amount_usd);
+      hours.push({
+        provider_id: pid,
+        c0mpute_node: nodeOf.get(pid) ?? null,
+        at,
+        jobs: num(b.jobs),
+        earned_usd: earned,
+        own_jobs: num(b.own_jobs),
+        own_usd: Math.min(earned, num(b.own_usd)),
+      });
     }
-    return { linked: d.linked !== false, hours, providers: Array.isArray(d.providers) ? d.providers.length : 0 };
+    return { linked: d.linked !== false, hours, providers };
   } catch {
     return null;
   }
@@ -80,10 +95,14 @@ export async function dashboardFor(user: { id: string; coinpay_sub: string }, ra
   const store = earningsStore();
   const { ms, bucketMs } = RANGES[range];
   const from = now - ms;
-  const [claims, board, inf, historyFrom] = await Promise.all([
-    operatorNodes(user.id),
+  const claims = await operatorNodes(user.id);
+  const [board, inf, historyFrom] = await Promise.all([
     getNodesPayload().catch(() => null),
-    infernetHours(user.coinpay_sub, from),
+    infernetHours(
+      user.coinpay_sub,
+      from,
+      claims.map((c) => c.node),
+    ),
     store.firstJobAt().catch(() => null),
   ]);
   const online = new Map<string, NodeRow>((board?.nodes ?? []).map((n) => [n.id, n]));
