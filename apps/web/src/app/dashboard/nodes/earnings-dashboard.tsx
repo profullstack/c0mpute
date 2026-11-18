@@ -219,8 +219,8 @@ function Chart({ data }: { data: Dashboard }) {
         </span>
         <span className="ml-auto">per {duration(data.bucket_ms / 1000)}</span>
       </div>
-      <div className="relative">
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" role="img" aria-label="earned and spend per time bucket" onMouseLeave={() => setHover(null)}>
+      <div className="relative overflow-x-auto">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto min-w-[560px]" role="img" aria-label="earned and spend per time bucket" onMouseLeave={() => setHover(null)}>
           {[lo, (lo + max) / 2, max].map((v, i) => (
             <g key={i}>
               <line x1={pad.l} x2={W - pad.r} y1={y(v)} y2={y(v)} stroke="var(--color-rule)" strokeWidth={1} />
@@ -314,7 +314,7 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
     <section className="space-y-2">
       <h2 className="font-bold">per node</h2>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full min-w-[620px] text-xs [&_td]:px-1 [&_th]:px-1">
           <thead className="text-[var(--color-dim)]">
             <tr>
               <th className="text-left font-normal py-1">node</th>
@@ -338,7 +338,7 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
                   </div>
                   <div className="text-[var(--color-dim)]">
                     {n.node} · {n.class}
-                    {n.via === "hosting" ? " · hosting link" : n.via === "key" ? " · claimed from node" : ""}
+                    {n.via === "hosting" ? " · hosting link" : n.via === "key" ? " · claimed with API key" : ""}
                   </div>
                 </td>
                 <td className="text-right">{n.jobs}</td>
@@ -385,7 +385,7 @@ function CostEditor({ node, onSaved }: { node: NodeOut; onSaved: () => void }) {
   if (!open) {
     return (
       <button className="text-left underline decoration-dotted text-[var(--color-dim)]" onClick={() => setOpen(true)}>
-        {node.cost_usd_per_hour != null ? `${usd(node.cost_usd_per_hour)}/h` : "power est. · set"}
+        {node.cost_usd_per_hour != null ? `$${+node.cost_usd_per_hour.toPrecision(3)}/h` : "power est. · set"}
       </button>
     );
   }
@@ -428,7 +428,7 @@ function TypesTable({ data }: { data: Dashboard }) {
     <section className="space-y-2">
       <h2 className="font-bold">jobs by type</h2>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full min-w-[620px] text-xs [&_td]:px-1 [&_th]:px-1">
           <thead className="text-[var(--color-dim)]">
             <tr>
               <th className="text-left font-normal py-1">type</th>
@@ -494,8 +494,8 @@ function ClaimForm({ onDone }: { onDone: () => void }) {
       </form>
       {msg && <p className="text-xs text-[var(--color-dim)]">{msg}</p>}
       <p className="text-xs text-[var(--color-dim)] leading-6">
-        Your peer id: <code>c0mpute status --json | jq -r .peer_id</code>. Or claim from the node itself (marked &quot;claimed from node&quot;), signed in
-        with <code>c0mpute chat login</code>:
+        Your peer id: <code>c0mpute status --json | jq -r .peer_id</code>. Or claim from the node itself with its API key, signed in with{" "}
+        <code>c0mpute chat login</code>:
       </p>
       <pre className="text-xs overflow-x-auto bg-[var(--color-card)] p-3">{`curl -sS https://c0mpute.com/api/v1/operator/nodes \\
   -H "authorization: Bearer $(jq -r .key ~/.c0mpute/chat.json)" \\
