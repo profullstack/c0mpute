@@ -45,7 +45,16 @@ pub const RUNTIME_URL_ENV: &str = "C0MPUTE_INFERENCE_URL";
 // Concurrent answers per node follow the runtime's real capacity: see
 // `inference_slots` (detected at start, re-read every minute).
 pub const MAX_MESSAGES: usize = 64;
-pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
+/// Largest prompt (all messages) a chat carries: the house 9B serves 32k
+/// tokens of context (~128 KB of text) per answer, and agent turns reach
+/// 13k+ tokens. Specs above [`LEGACY_PROMPT_BYTES`] ride sealed point to
+/// point like any other (never gossip) and need [`BIG_PROMPT_TAG`].
+pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
+/// The limit before 0.3.86. A worker older than that refuses a bigger spec
+/// once it has won it, so such offers require [`BIG_PROMPT_TAG`].
+pub const LEGACY_PROMPT_BYTES: usize = 64 * 1024;
+/// Workers that take prompts up to [`MAX_PROMPT_BYTES`] (0.3.86+).
+pub const BIG_PROMPT_TAG: &str = "infernet:inference:prompt-256k";
 pub const MAX_TOKENS: u32 = 4096;
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
@@ -200,12 +209,21 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<ChatSpec, String> {
 /// needs a worker that understands them, not one particular model.
 pub fn required_capabilities(spec: &Value) -> Vec<String> {
     let mut t = vec![ROLE_TAG.to_string()];
-    match parse_spec(spec) {
+    let parsed = parse_spec(spec);
+    match &parsed {
         Ok(s) if !s.accept_models.is_empty() => t.push(ACCEPT_TAG.to_string()),
-        Ok(ChatSpec { model: Some(m), .. }) => t.push(model_tag(&m)),
+        Ok(ChatSpec { model: Some(m), .. }) => t.push(model_tag(m)),
         _ => {}
     }
+    if parsed.as_ref().is_ok_and(|s| prompt_bytes(s) > LEGACY_PROMPT_BYTES) {
+        t.push(BIG_PROMPT_TAG.to_string());
+    }
     t
+}
+
+/// Bytes of message content in `s`.
+pub fn prompt_bytes(s: &ChatSpec) -> usize {
+    s.messages.iter().map(|m| m.get("content").and_then(Value::as_str).map_or(0, str::len)).sum()
 }
 
 /// The model to answer `model` / `accept_models` with from `ready`, and
@@ -600,6 +618,20 @@ mod tests {
         assert!(spec(json!({"v": 1, "model": "../etc passwd", "messages": [{"role": "user", "content": "q"}]})).is_err());
         assert!(spec(json!({"v": 1, "max_tokens": 0, "messages": [{"role": "user", "content": "q"}]})).is_err());
         assert!(spec(json!({"v": 1, "temperature": 3.0, "messages": [{"role": "user", "content": "q"}]})).is_err());
+    }
+
+    #[test]
+    fn big_prompts_fit_the_9b_context_and_need_new_workers() {
+        let big = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "x".repeat(100 * 1024)}]});
+        assert!(parse_spec(&big).is_ok(), "a ~100 KB agent turn is accepted");
+        let req = required_capabilities(&big);
+        assert!(req.contains(&BIG_PROMPT_TAG.to_string()), "only 0.3.86+ workers may win it: {req:?}");
+        let small = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "x".repeat(LEGACY_PROMPT_BYTES)}]});
+        assert!(!required_capabilities(&small).contains(&BIG_PROMPT_TAG.to_string()), "old workers still take up to 64 KB");
+        let too_big = json!({"v": 1, "messages": [{"role": "user", "content": "x".repeat(MAX_PROMPT_BYTES + 1)}]});
+        assert!(parse_spec(&too_big).is_err());
+        assert!(MAX_PROMPT_BYTES + 64 * 1024 < crate::workflow::MAX_SPEC_BYTES, "the bridge's spec limit holds it");
+        assert!(MAX_PROMPT_BYTES * 2 < crate::job_e2e::MAX_SEALED_SPEC, "the sealed spec holds it");
     }
 
     #[test]

@@ -703,13 +703,14 @@ pub(crate) fn live_tags(workload_type: &str, advertised: &[String], inference_mo
         let role = crate::inference::ROLE_TAG;
         let model_prefix = crate::inference::model_tag("");
         tags.retain(|t| t.as_str() != role && !t.starts_with(&model_prefix));
-        tags.retain(|t| t.as_str() != crate::inference::ACCEPT_TAG);
+        tags.retain(|t| t.as_str() != crate::inference::ACCEPT_TAG && t.as_str() != crate::inference::BIG_PROMPT_TAG);
         if !inference_models.is_empty() {
             tags.push(role.to_string());
             // Offers that accept alternative models require this tag (0.3.71).
             // It has to be added here: the boot snapshot predates the runtime's
             // model list, so it never carried it and widened offers got no bids.
             tags.push(crate::inference::ACCEPT_TAG.to_string());
+            tags.push(crate::inference::BIG_PROMPT_TAG.to_string());
             tags.extend(inference_models.iter().map(|m| crate::inference::model_tag(m)));
         }
     }

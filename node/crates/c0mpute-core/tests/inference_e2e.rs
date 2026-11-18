@@ -145,6 +145,12 @@ async fn chat_turns_are_answered_peer_to_peer() {
     let named = json!({"v": 1, "model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8});
     let out = bridge.submit_once(inference::WORKLOAD, named, Duration::from_secs(240)).await.expect("named model");
     assert_eq!(out["result"]["model"], model.as_str());
+    // A ~100 KB agent turn (over the old 64 KB limit) rides the sealed spec
+    // point to point and is answered.
+    let long = "word ".repeat(20 * 1024);
+    let big = json!({"v": 1, "model": model, "messages": [{"role": "user", "content": long}], "max_tokens": 8});
+    let out = bridge.submit_once(inference::WORKLOAD, big, Duration::from_secs(240)).await.expect("100 KB prompt answered");
+    assert_eq!(out["result"]["ok"], true, "{}", out["result"]);
     let missing = json!({"v": 1, "model": "not-served:9b", "messages": [{"role": "user", "content": "hi"}]});
     let err = bridge.submit_once(inference::WORKLOAD, missing, Duration::from_secs(8)).await.unwrap_err().to_string();
     assert!(err.contains("no_bids") || err.contains("timeout") || err.contains("network_busy"), "{err}");
