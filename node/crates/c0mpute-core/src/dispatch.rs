@@ -288,12 +288,29 @@ pub fn run_worker_subscriber_with_load(
                 } else {
                     None
                 };
-                let eta = eta_seconds_busy(
+                let mut eta = eta_seconds_busy(
                     capacity.queued,
                     busy,
                     capacity.total_slots,
                     load.as_ref().and_then(WorkerLoad::recent_job_duration),
                 );
+                // A chat must fit the generation timeout once it reaches the
+                // runtime, including requests other local users have queued
+                // there; a node that cannot answer in time does not bid.
+                if offer.workload_type == crate::inference::WORKLOAD {
+                    let per_job = load
+                        .as_ref()
+                        .and_then(WorkerLoad::recent_job_duration)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(DEFAULT_ETA_SECS as f64);
+                    let (wait, fits) = crate::inference::runtime_eta(crate::inference::external_busy(), capacity.total_slots, per_job);
+                    if !fits {
+                        debug!(job_id = %offer.job_id, per_job_secs = per_job as u64, local_queue_secs = wait,
+                            max = crate::inference::MAX_BID_RUNTIME_SECS, "dispatch: this runtime would not answer in time, not bidding");
+                        continue;
+                    }
+                    eta = eta.saturating_add(wait).min(MAX_ETA_SECS);
+                }
                 // Tags that appear after boot (inference models) are read
                 // live, not from the snapshot this subscriber started with.
                 let live = live_tags(&workload_type, &advertised_tags, &crate::inference::ready_models());
