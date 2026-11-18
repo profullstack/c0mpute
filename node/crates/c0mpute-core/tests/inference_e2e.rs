@@ -30,6 +30,16 @@ struct StoreSource(ChunkStore);
 /// freed-slot announcement); run them one at a time.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Keep the worker's job-time history (it sets the ETA, and a chat's ETA now
+/// decides whether it bids) out of the real data dir: on a box that runs a
+/// worker, the live history (~300 s per 9B answer on vienna) stopped the test
+/// worker from bidding at all.
+fn isolate_data_dir() {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| tempdir().unwrap());
+    unsafe { std::env::set_var("XDG_DATA_HOME", dir.path()) };
+}
+
 #[async_trait::async_trait]
 impl ChunkSource for StoreSource {
     async fn read_chunk(&self, hash: &Hash) -> anyhow::Result<Vec<u8>> {
@@ -83,6 +93,7 @@ async fn fake_runtime() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_turns_are_answered_peer_to_peer() {
     let _serial = SERIAL.lock().await;
+    isolate_data_dir();
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
     // Keep the loopback buyer and worker off the live LAN network.
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
@@ -194,6 +205,7 @@ async fn slow_runtime(delay: Duration, peak: Arc<std::sync::atomic::AtomicUsize>
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_full_worker_gets_the_queued_jobs_in_turn() {
     let _serial = SERIAL.lock().await;
+    isolate_data_dir();
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=info,c0mpute_net=warn").with_test_writer().try_init();
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -260,6 +272,7 @@ async fn a_job_no_node_can_run_fails_at_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requeues_run_out_with_network_busy_and_others_proceed() {
     let _serial = SERIAL.lock().await;
+    isolate_data_dir();
     let _ = tracing_subscriber::fmt().with_env_filter("c0mpute_core=debug,c0mpute_net=warn").with_test_writer().try_init();
     unsafe { std::env::set_var("C0MPUTE_DISABLE_MDNS", "1") };
     let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
