@@ -861,7 +861,11 @@ fn spawn_open_e2e(
             }
         };
         warn!(job_id = %accept.job_id, reason = %refused, "dispatch: won e2e job refused");
-        crate::runner::publish_receipt(&net, &accept, None, c0mpute_net::topics::JobStatus::Failed).await;
+        if crate::job_e2e::is_unreachable_buyer(&refused) {
+            crate::runner::publish_unreachable_refusal(&net, &accept).await;
+        } else {
+            crate::runner::publish_receipt(&net, &accept, None, c0mpute_net::topics::JobStatus::Failed).await;
+        }
     });
 }
 

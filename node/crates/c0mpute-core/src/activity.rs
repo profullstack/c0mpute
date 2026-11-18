@@ -127,11 +127,45 @@ fn note_outcome_at(workload: &str, ok: bool, now: u64) {
     let m = g.get_or_insert_with(HashMap::new);
     if ok {
         m.remove(workload);
+        drop(g);
+        if let Some(u) = UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            u.remove(workload);
+        }
         return;
     }
     let fails = m.get(workload).map(|(f, _)| f + 1).unwrap_or(1);
     let until = backoff_for(fails).map(|d| now + d.as_millis() as u64).unwrap_or(0);
     m.insert(workload.to_string(), (fails, until));
+}
+
+/// Won jobs in a row turned away because the buyer was unreachable before a
+/// short pause: a node whose links are down should not keep winning, but
+/// this is the network, not the node, so it pauses minutes, not hours.
+pub const UNREACHABLE_BEFORE_PAUSE: u32 = 3;
+/// First unreachable pause; doubles per further one, up to
+/// [`MAX_UNREACHABLE_PAUSE`].
+pub const FIRST_UNREACHABLE_PAUSE: Duration = Duration::from_secs(60);
+pub const MAX_UNREACHABLE_PAUSE: Duration = Duration::from_secs(10 * 60);
+
+static UNREACHABLE: Mutex<Option<HashMap<String, (u32, u64)>>> = Mutex::new(None);
+
+pub fn unreachable_pause_for(count: u32) -> Option<Duration> {
+    let over = count.checked_sub(UNREACHABLE_BEFORE_PAUSE)?;
+    Some(FIRST_UNREACHABLE_PAUSE.saturating_mul(1u32 << over.min(8)).min(MAX_UNREACHABLE_PAUSE))
+}
+
+/// A won job of `workload` was turned away because its buyer could not be
+/// reached. Not a failure for [`note_outcome`]; a completed job clears it.
+pub fn note_unreachable(workload: &str) {
+    note_unreachable_at(workload, now_ms());
+}
+
+fn note_unreachable_at(workload: &str, now: u64) {
+    let mut g = UNREACHABLE.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    let n = m.get(workload).map(|(n, _)| n + 1).unwrap_or(1);
+    let until = unreachable_pause_for(n).map(|d| now + d.as_millis() as u64).unwrap_or(0);
+    m.insert(workload.to_string(), (n, until));
 }
 
 /// How much longer `workload` should not bid, if it is backing off.
@@ -140,14 +174,43 @@ pub fn bid_paused(workload: &str) -> Option<Duration> {
 }
 
 fn bid_paused_at(workload: &str, now: u64) -> Option<Duration> {
-    let g = OUTCOMES.lock().unwrap_or_else(|e| e.into_inner());
-    let (_, until) = g.as_ref()?.get(workload)?;
-    (*until > now).then(|| Duration::from_millis(until - now))
+    let left = |map: &Mutex<Option<HashMap<String, (u32, u64)>>>| {
+        let g = map.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_ref()?.get(workload).and_then(|(_, until)| (*until > now).then(|| until - now))
+    };
+    left(&OUTCOMES).max(left(&UNREACHABLE)).map(Duration::from_millis)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreachable_buyer_pauses_minutes_not_hours() {
+        let w = "activity-test-unreachable";
+        let now = 1_000_000;
+        // The Vast restart: 7 won chats turned away while links came up.
+        for i in 0..7 {
+            note_unreachable_at(w, now + i);
+        }
+        let left = bid_paused_at(w, now + 7).expect("paused");
+        assert!(left <= MAX_UNREACHABLE_PAUSE, "{left:?}");
+        assert!(bid_paused_at(w, now + 7 + MAX_UNREACHABLE_PAUSE.as_millis() as u64).is_none());
+        // Never counted as compute failures.
+        assert!(OUTCOMES.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(w)));
+        // Two in a row do not pause at all; a success clears the count.
+        let w2 = "activity-test-unreachable-2";
+        note_unreachable_at(w2, now);
+        note_unreachable_at(w2, now);
+        assert!(bid_paused_at(w2, now).is_none());
+        note_outcome_at(w2, true, now);
+        note_unreachable_at(w2, now);
+        assert!(bid_paused_at(w2, now).is_none());
+        assert!(crate::job_e2e::is_unreachable_buyer("fetch the sealed spec from the buyer: rpc failed: Timeout while waiting for a response"));
+        assert!(!crate::job_e2e::is_unreachable_buyer("the sealed spec does not pass this workload's checks"));
+        assert_eq!(unreachable_pause_for(3), Some(FIRST_UNREACHABLE_PAUSE));
+        assert_eq!(unreachable_pause_for(20), Some(MAX_UNREACHABLE_PAUSE));
+    }
 
     #[test]
     fn bids_and_jobs_make_the_node_busy() {

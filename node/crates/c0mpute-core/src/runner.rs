@@ -804,8 +804,28 @@ pub async fn publish_receipt(
     output_hash: Option<String>,
     status: JobStatus,
 ) {
-    crate::activity::job_finished(&accept.job_id);
     crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
+    finish_and_send_receipt(net, accept, output_hash, status).await
+}
+
+/// A won job turned away because this node could not reach its buyer (the
+/// sealed spec did not arrive): a Failed receipt, but not a compute fault, so
+/// it does not count toward [`crate::activity::note_outcome`]'s backoff, only
+/// toward the short [`crate::activity::note_unreachable`] one. After the
+/// 0.3.82 restart the Vast GPU node turned away 7 chats while its relayed
+/// links came up and paused chat bidding for the full 2 h (2026-11-18).
+pub async fn publish_unreachable_refusal(net: &Libp2pNetwork, accept: &JobAccept) {
+    crate::activity::note_unreachable(&accept.workload_type);
+    finish_and_send_receipt(net, accept, None, JobStatus::Failed).await
+}
+
+async fn finish_and_send_receipt(
+    net: &Libp2pNetwork,
+    accept: &JobAccept,
+    output_hash: Option<String>,
+    status: JobStatus,
+) {
+    crate::activity::job_finished(&accept.job_id);
     // Its buyer cancelled it: nobody is waiting for a receipt.
     if crate::job_control::cancelled(&accept.job_id) {
         return;
