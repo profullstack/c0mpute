@@ -740,6 +740,7 @@ async fn run_speech_auction(
     required: Vec<String>,
     excluded_bidders: &[String],
     fallback_bidders: &[String],
+    turn: &mut Option<crate::buyer_queue::AuctionTurn>,
 ) -> Result<crate::AuctionOutcome, (ApiError, Option<String>)> {
     let adult_offer = required.iter().any(|t| t == crate::content_policy::ADULT_TAG);
     // Learn the winner as soon as it is chosen, so a winner that then goes
@@ -788,6 +789,12 @@ async fn run_speech_auction(
         tokio::select! {
             result = &mut auction_run => break result,
             Some((job_id, bid)) = winner_rx.recv() => {
+                // A worker accepted: hand the queue's auction turn to the next
+                // request now, not when this job's receipt arrives. Holding it
+                // through the render made the queue strictly one job at a
+                // time: 2026-11-15/18 every song behind one won by a CPU node
+                // (~12 min) waited, while other workers sat idle.
+                turn.take();
                 crate::job_progress::set_stage("rendering");
                 crate::job_progress::report(|p| {
                     p.worker = Some(bid.bidder_peer_id.clone());
@@ -938,6 +945,7 @@ async fn run_checked_job(
                 .into_iter()
                 .filter(|p| !excluded_bidders.contains(p))
                 .collect::<Vec<_>>(),
+            &mut turn,
         )
         .await
         {
@@ -989,7 +997,8 @@ async fn run_checked_job(
             }
             Err((error, None)) => return Err(last_error.unwrap_or(error)),
         } };
-        // A worker took it: the next request in line may auction now.
+        // Normally handed on when the winner accepted (run_speech_auction);
+        // this covers a resumed job, which never auctioned.
         turn = None;
         let worker = outcome.accepted_bid.bidder_peer_id.clone();
         crate::job_progress::set_stage("fetching_result");
