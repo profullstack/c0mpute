@@ -218,6 +218,8 @@ impl Supervisor {
                     let slots = crate::inference::detect_slots(&base, &config.inference).await;
                     let load = crate::inference::worker_load(slots.n);
                     tokio::spawn(crate::inference::slots_loop(base.clone(), config.inference.clone(), load.clone()));
+                    // How busy the runtime is with other local users, for the ETA.
+                    tokio::spawn(crate::inference::busy_loop(base.clone(), load.clone()));
                     let runner_tx = crate::inference::spawn_inference_runner(net.clone(), store, base, load.clone());
                     info!(workload_type = crate::inference::WORKLOAD, "subscribing to job topic");
                     dispatch::run_worker_subscriber_with_load(

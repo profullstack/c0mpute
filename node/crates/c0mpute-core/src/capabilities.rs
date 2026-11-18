@@ -141,6 +141,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                 if !models.is_empty() {
                     tags.push(crate::inference::ROLE_TAG.to_string());
                     tags.push(crate::inference::ACCEPT_TAG.to_string());
+                    tags.push(crate::inference::BIG_PROMPT_TAG.to_string());
                     tags.extend(models.iter().map(|m| crate::inference::model_tag(m)));
                 }
             }

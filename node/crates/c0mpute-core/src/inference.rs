@@ -45,7 +45,16 @@ pub const RUNTIME_URL_ENV: &str = "C0MPUTE_INFERENCE_URL";
 // Concurrent answers per node follow the runtime's real capacity: see
 // `inference_slots` (detected at start, re-read every minute).
 pub const MAX_MESSAGES: usize = 64;
-pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
+/// Largest prompt (all messages) a chat carries: the house 9B serves 32k
+/// tokens of context (~128 KB of text) per answer, and agent turns reach
+/// 13k+ tokens. Specs above [`LEGACY_PROMPT_BYTES`] ride sealed point to
+/// point like any other (never gossip) and need [`BIG_PROMPT_TAG`].
+pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
+/// The limit before 0.3.86. A worker older than that refuses a bigger spec
+/// once it has won it, so such offers require [`BIG_PROMPT_TAG`].
+pub const LEGACY_PROMPT_BYTES: usize = 64 * 1024;
+/// Workers that take prompts up to [`MAX_PROMPT_BYTES`] (0.3.86+).
+pub const BIG_PROMPT_TAG: &str = "infernet:inference:prompt-256k";
 pub const MAX_TOKENS: u32 = 4096;
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
@@ -54,6 +63,54 @@ pub const MAX_RESULT_BYTES: usize = 256 * 1024;
 /// runtime runs in parallel, so a job is not timed while it waits its turn.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest answer (runtime queue + generation, estimated) a node bids for:
+/// 90% of [`GENERATION_TIMEOUT`], so an estimate near the limit does not bid
+/// and time out (vienna bid 301 s on a 9B chat and timed out at 300 s,
+/// 2026-11-18).
+pub const MAX_BID_RUNTIME_SECS: u64 = GENERATION_TIMEOUT.as_secs() * 9 / 10;
+
+/// Runtime slots busy with requests that are not this worker's (another
+/// local user of the same Ollama), from the last probe.
+static EXTERNAL_BUSY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn external_busy() -> usize {
+    EXTERNAL_BUSY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Seconds a new answer waits inside the runtime behind other local users:
+/// each full round of the runtime's `slots` takes about `per_job` seconds.
+pub fn local_queue_wait_secs(external: usize, slots: usize, per_job: f64) -> u64 {
+    let slots = slots.max(1);
+    if external < slots {
+        return 0;
+    }
+    ((external - slots) / slots + 1) as u64 * per_job.ceil() as u64
+}
+
+/// `(eta to add for the runtime's own queue, whether to bid at all)` for an
+/// answer here: the runtime part (local queue + one answer) must fit
+/// [`MAX_BID_RUNTIME_SECS`].
+pub fn runtime_eta(external: usize, slots: usize, per_job: f64) -> (u64, bool) {
+    let wait = local_queue_wait_secs(external, slots, per_job);
+    (wait, wait + per_job.ceil() as u64 <= MAX_BID_RUNTIME_SECS)
+}
+
+/// Probe how busy the runtime is with other clients every few seconds
+/// (llama-server or the local Ollama's runners: `/slots`).
+pub async fn busy_loop(base: String, load: WorkerLoad) {
+    loop {
+        let external = match crate::inference_slots::runtime_busy(&base).await {
+            Some(busy) => busy.saturating_sub(load.total_slots().saturating_sub(load.free_slots())),
+            None => 0,
+        };
+        let before = EXTERNAL_BUSY.swap(external, std::sync::atomic::Ordering::Relaxed);
+        if before != external {
+            tracing::debug!(runtime = %base, external, "inference: runtime slots busy with other local clients");
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 pub fn model_tag(model: &str) -> String {
@@ -152,12 +209,21 @@ pub fn parse_spec(spec: &Value) -> std::result::Result<ChatSpec, String> {
 /// needs a worker that understands them, not one particular model.
 pub fn required_capabilities(spec: &Value) -> Vec<String> {
     let mut t = vec![ROLE_TAG.to_string()];
-    match parse_spec(spec) {
+    let parsed = parse_spec(spec);
+    match &parsed {
         Ok(s) if !s.accept_models.is_empty() => t.push(ACCEPT_TAG.to_string()),
-        Ok(ChatSpec { model: Some(m), .. }) => t.push(model_tag(&m)),
+        Ok(ChatSpec { model: Some(m), .. }) => t.push(model_tag(m)),
         _ => {}
     }
+    if parsed.as_ref().is_ok_and(|s| prompt_bytes(s) > LEGACY_PROMPT_BYTES) {
+        t.push(BIG_PROMPT_TAG.to_string());
+    }
     t
+}
+
+/// Bytes of message content in `s`.
+pub fn prompt_bytes(s: &ChatSpec) -> usize {
+    s.messages.iter().map(|m| m.get("content").and_then(Value::as_str).map_or(0, str::len)).sum()
 }
 
 /// The model to answer `model` / `accept_models` with from `ready`, and
@@ -552,6 +618,34 @@ mod tests {
         assert!(spec(json!({"v": 1, "model": "../etc passwd", "messages": [{"role": "user", "content": "q"}]})).is_err());
         assert!(spec(json!({"v": 1, "max_tokens": 0, "messages": [{"role": "user", "content": "q"}]})).is_err());
         assert!(spec(json!({"v": 1, "temperature": 3.0, "messages": [{"role": "user", "content": "q"}]})).is_err());
+    }
+
+    #[test]
+    fn big_prompts_fit_the_9b_context_and_need_new_workers() {
+        let big = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "x".repeat(100 * 1024)}]});
+        assert!(parse_spec(&big).is_ok(), "a ~100 KB agent turn is accepted");
+        let req = required_capabilities(&big);
+        assert!(req.contains(&BIG_PROMPT_TAG.to_string()), "only 0.3.86+ workers may win it: {req:?}");
+        let small = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "x".repeat(LEGACY_PROMPT_BYTES)}]});
+        assert!(!required_capabilities(&small).contains(&BIG_PROMPT_TAG.to_string()), "old workers still take up to 64 KB");
+        let too_big = json!({"v": 1, "messages": [{"role": "user", "content": "x".repeat(MAX_PROMPT_BYTES + 1)}]});
+        assert!(parse_spec(&too_big).is_err());
+        assert!(MAX_PROMPT_BYTES + 64 * 1024 < crate::workflow::MAX_SPEC_BYTES, "the bridge's spec limit holds it");
+        assert!(MAX_PROMPT_BYTES * 2 < crate::job_e2e::MAX_SEALED_SPEC, "the sealed spec holds it");
+    }
+
+    #[test]
+    fn slow_runtimes_do_not_bid() {
+        // vienna, 2026-11-18: a 9B chat at ~301 s on its CPU: no bid.
+        assert_eq!(runtime_eta(0, 1, 301.0), (0, false));
+        assert_eq!(runtime_eta(0, 1, 200.0), (0, true));
+        // Another local user holds the only Ollama slot: wait one answer.
+        assert_eq!(runtime_eta(1, 1, 100.0), (100, true));
+        assert_eq!(runtime_eta(1, 1, 150.0), (150, false), "150 s wait + 150 s answer is over the limit");
+        // Two slots, one taken by someone else: no wait.
+        assert_eq!(local_queue_wait_secs(1, 2, 60.0), 0);
+        assert_eq!(local_queue_wait_secs(4, 2, 60.0), 120);
+        assert!(MAX_BID_RUNTIME_SECS < GENERATION_TIMEOUT.as_secs());
     }
 
     #[test]

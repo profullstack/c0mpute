@@ -160,6 +160,93 @@ pub fn local_ollama_parallel() -> Option<(usize, String)> {
     None
 }
 
+/// The `--port` a runner listens on.
+pub fn parse_port(args: &[String]) -> Option<u16> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--port" {
+            return it.next().and_then(|v| v.parse().ok());
+        }
+        if let Some(v) = a.strip_prefix("--port=") {
+            return v.parse().ok();
+        }
+    }
+    None
+}
+
+/// Slots a llama-server `/slots` answer shows working.
+pub fn count_processing(slots: &Value) -> Option<usize> {
+    Some(slots.as_array()?.iter().filter(|s| s.get("is_processing").and_then(Value::as_bool) == Some(true)).count())
+}
+
+/// Loopback ports of the local Ollama's runners (upstream llama-servers it
+/// starts per loaded model; argv is world-readable).
+#[cfg(target_os = "linux")]
+pub fn local_ollama_runner_ports() -> Vec<u16> {
+    let mut ports = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else { return ports };
+    for e in entries.flatten() {
+        if !e.file_name().to_str().is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<String> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+        let Some(argv0) = args.first() else { continue };
+        if argv0.contains("ollama") && (basename(argv0) == "llama-server" || args.iter().any(|a| a == "runner")) {
+            if let Some(p) = parse_port(&args) {
+                ports.push(p);
+            }
+        }
+    }
+    ports
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn local_ollama_runner_ports() -> Vec<u16> {
+    Vec::new()
+}
+
+/// Requests the runtime at `base` is working on right now, from every
+/// client (this worker and anything else on the box using the same Ollama),
+/// when it can be told: llama-server's `/slots`, or for a local Ollama its
+/// runners' `/slots`. None when it cannot.
+pub async fn runtime_busy(base: &str) -> Option<usize> {
+    let base = base.trim_end_matches('/');
+    let c = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+    let slots = |url: String| {
+        let c = c.clone();
+        async move {
+            let r = c.get(url).send().await.ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            count_processing(&r.json::<Value>().await.ok()?)
+        }
+    };
+    if let Some(n) = slots(format!("{base}/slots")).await {
+        return Some(n);
+    }
+    if !is_loopback(base) {
+        return None;
+    }
+    let is_ollama = c.get(format!("{base}/api/version")).send().await.is_ok_and(|r| r.status().is_success());
+    if !is_ollama {
+        return None;
+    }
+    let ports = tokio::task::spawn_blocking(local_ollama_runner_ports).await.ok()?;
+    if ports.is_empty() {
+        // Nothing loaded: nothing running.
+        return Some(0);
+    }
+    let mut busy = None;
+    for p in ports {
+        if let Some(n) = slots(format!("http://127.0.0.1:{p}/slots")).await {
+            busy = Some(busy.unwrap_or(0) + n);
+        }
+    }
+    busy
+}
+
 /// What the runtime at `base` runs in parallel, as far as it can be told.
 pub async fn runtime_parallel(base: &str) -> Option<(usize, String)> {
     let base = base.trim_end_matches('/');
@@ -247,6 +334,17 @@ mod tests {
         assert_eq!(parse_env_parallel(b"HOME=/h\0OLLAMA_HOST=x\0"), Some(1), "unset: Ollama's default of one");
         assert_eq!(parse_env_parallel(b"OLLAMA_NUM_PARALLEL=0\0"), Some(1));
         assert_eq!(parse_env_parallel(b"OLLAMA_NUM_PARALLEL=lots\0"), None);
+    }
+
+    #[test]
+    fn runner_port_and_busy_slots() {
+        let ollama = args("/usr/local/lib/ollama/llama-server --model /x --port 33361 --host 127.0.0.1 -np 2");
+        assert_eq!(parse_port(&ollama), Some(33361));
+        assert_eq!(parse_port(&args("llama-server --port=8080")), Some(8080));
+        assert_eq!(parse_port(&args("llama-server -m x")), None);
+        let slots = serde_json::json!([{"id": 0, "is_processing": true}, {"id": 1, "is_processing": false}]);
+        assert_eq!(count_processing(&slots), Some(1));
+        assert_eq!(count_processing(&serde_json::json!({"error": "x"})), None);
     }
 
     #[test]
