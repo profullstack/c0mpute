@@ -52,11 +52,12 @@ zip = { workspace = true }
 flate2 = "1"
 unicode-normalization = "0.1"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 # Pure-Rust zstd decoder: the official Ollama Linux release is .tar.zst and
 # many hosts have no `zstd` binary.
 ruzstd = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 libp2p = { workspace = true }
