@@ -532,8 +532,13 @@ static READVERTISE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLo
 /// bridge, the speech gateway) re-auction them at once rather than on their
 /// backoff. Rate-limited in the advertise loop.
 pub fn readvertise_now() {
+    READVERTISE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     READVERTISE.get_or_init(tokio::sync::Notify::new).notify_waiters();
 }
+
+/// Bumped by every [`readvertise_now`], so a loop that was busy publishing
+/// when it was called still sees it.
+static READVERTISE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `hardware` field of an ad sent because a job just ended: unix ms.
 pub const SLOT_FREED_FIELD: &str = "slot_freed_at_ms";
@@ -578,15 +583,24 @@ async fn advertise(
     let mut ticker = tokio::time::interval(interval);
     let readvertise = READVERTISE.get_or_init(tokio::sync::Notify::new);
     let mut last = tokio::time::Instant::now() - MIN_READVERTISE_GAP;
+    let mut seen = READVERTISE_GEN.load(std::sync::atomic::Ordering::SeqCst);
     loop {
-        let freed = tokio::select! {
-            _ = ticker.tick() => false,
-            _ = readvertise.notified() => {
-                tokio::time::sleep_until(last + MIN_READVERTISE_GAP).await;
-                debug!("re-advertising: a job ended and freed a slot");
-                true
+        let notified = readvertise.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let freed = if READVERTISE_GEN.load(std::sync::atomic::Ordering::SeqCst) != seen {
+            true
+        } else {
+            tokio::select! {
+                _ = ticker.tick() => false,
+                _ = &mut notified => true,
             }
         };
+        if freed {
+            seen = READVERTISE_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep_until(last + MIN_READVERTISE_GAP).await;
+            debug!("re-advertising: a job ended and freed a slot");
+        }
         last = tokio::time::Instant::now();
         let mut hw = with_instance(hardware.clone(), net.instance_id());
         // Buyers holding queued jobs re-auction only on this marker, not on

@@ -58,8 +58,20 @@ pub struct WorkerLoad {
 /// are handed back when it drops.
 #[derive(Debug)]
 pub struct JobSlot {
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    _reservation: Option<crate::budget::Reservation>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    reservation: Option<crate::budget::Reservation>,
+}
+
+impl Drop for JobSlot {
+    /// Free the slot, then tell buyers holding queued jobs (the jobs bridge)
+    /// that it is free: the capability ad goes out marked `slot_freed_at_ms`
+    /// and they re-auction at once. Announcing before the slot is free (from
+    /// the receipt) made them auction into a still-full node.
+    fn drop(&mut self) {
+        drop(self.reservation.take());
+        drop(self.permit.take());
+        crate::capabilities::readvertise_now();
+    }
 }
 
 impl WorkerLoad {
@@ -112,7 +124,7 @@ impl WorkerLoad {
             Some((budget, cost)) => Some(budget.reserve(*cost).await),
             None => None,
         };
-        Some(JobSlot { _permit: permit, _reservation: reservation })
+        Some(JobSlot { permit: Some(permit), reservation })
     }
 
     /// Keep the recent-job average in `path` and start from what it holds.
@@ -780,12 +792,6 @@ pub async fn publish_receipt(
 ) {
     crate::activity::job_finished(&accept.job_id);
     crate::activity::note_outcome(&accept.workload_type, status == JobStatus::Completed);
-    // The runner frees the job's slot right after this returns; tell buyers
-    // waiting on a full node once it has (event-driven re-auction).
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        crate::capabilities::readvertise_now();
-    });
     // Its buyer cancelled it: nobody is waiting for a receipt.
     if crate::job_control::cancelled(&accept.job_id) {
         return;
