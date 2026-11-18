@@ -48,9 +48,15 @@ use crate::config::InferenceConfig;
 pub const AUTO_PORT: u16 = 11439;
 const GIB: u64 = 1024 * 1024 * 1024;
 const INSTALL_RETRY_BACKOFF_SECS: u64 = 6 * 60 * 60;
-/// Whole context, shared by the slots: 4096 tokens per answer.
-const CTX_TOKENS: u32 = 8192;
-const SLOTS: u32 = crate::inference::MAX_CONCURRENT as u32;
+/// Context per answer; llama-server splits `-c` evenly over its slots.
+const CTX_PER_SLOT: u32 = 4096;
+/// Parallel slots of the house llama-server: one where the pinned build runs
+/// on the CPU (two answers would split the same cores and both finish late,
+/// GPU boxes included: the Linux builds are CPU-only), two on Apple silicon
+/// (Metal). The worker reads it back from `/props` (see `inference_slots`).
+fn house_slots() -> u32 {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) { 2 } else { 1 }
+}
 const MAX_THREADS: usize = 8;
 
 pub fn auto_url() -> String {
@@ -452,7 +458,7 @@ fn server_command(model: &HouseModel) -> Command {
         .arg(model_path(model))
         .args(["--host", "127.0.0.1", "--port", &AUTO_PORT.to_string()])
         .args(["--alias", model.id])
-        .args(["-c", &CTX_TOKENS.to_string(), "-np", &SLOTS.to_string()])
+        .args(["-c", &(CTX_PER_SLOT * house_slots()).to_string(), "-np", &house_slots().to_string()])
         .args(["-t", &threads, "--threads-batch", &threads])
         // Low CPU priority: songs, images and video keep the box.
         .args(["--prio", "-1", "--no-webui"])

@@ -53,6 +53,7 @@ pub mod gpu;
 pub mod inference;
 pub mod inference_auto;
 pub mod inference_gpu;
+pub mod inference_slots;
 #[cfg(unix)]
 pub mod instance;
 #[cfg(not(unix))]

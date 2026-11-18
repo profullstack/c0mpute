@@ -175,6 +175,16 @@ its models. Otherwise it provisions a house runtime in the background:
 `c0mpute status` says which applies and why. Opt out with
 `C0MPUTE_INFERENCE_AUTO=0` or `[inference] auto_install = false`.
 
+A node answers as many chats at once as its runtime really runs in parallel,
+and bids only while one of those slots is free: llama-server's `total_slots`,
+an Ollama's `OLLAMA_NUM_PARALLEL` (read from the local `ollama serve` or its
+runner; Ollama's default is 1), or 1 when that cannot be told. The house GPU
+Ollama runs 2 (4 on 20 GiB+ cards) with flash attention and a q8_0 KV cache,
+and caps a model's context at 32768 tokens (16384 under 10 GiB). CPU-only boxes
+answer one at a time. The worker logs `inference: concurrent answers` with the
+count and where it came from, and re-reads it every minute. Override with
+`C0MPUTE_INFERENCE_CONCURRENCY=N` or `[inference] max_concurrent = N`.
+
 ### CPU speech inference
 
 TTS (`tts.synthesize`) supports Kokoro, Piper, and Pocket on CPU. Pocket uses

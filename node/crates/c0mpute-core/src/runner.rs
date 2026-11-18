@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -42,7 +42,8 @@ pub struct AcceptedJob {
 #[derive(Clone, Debug)]
 pub struct WorkerLoad {
     compute_slots: Arc<Semaphore>,
-    total_slots: usize,
+    /// Shared so [`Self::resize`] reaches every clone (dispatch and runner).
+    total_slots: Arc<AtomicUsize>,
     /// Moving average of recent completed jobs' wall time in ms; 0 = none.
     recent_job_ms: Arc<AtomicU64>,
     /// Where the average is kept across restarts (see [`Self::with_history`]).
@@ -53,7 +54,7 @@ impl WorkerLoad {
     pub fn new(compute_slots: Arc<Semaphore>, total_slots: usize) -> Self {
         Self {
             compute_slots,
-            total_slots: total_slots.max(1),
+            total_slots: Arc::new(AtomicUsize::new(total_slots.max(1))),
             recent_job_ms: Arc::new(AtomicU64::new(0)),
             history: None,
         }
@@ -86,7 +87,29 @@ impl WorkerLoad {
     }
 
     pub fn total_slots(&self) -> usize {
-        self.total_slots
+        self.total_slots.load(Ordering::Relaxed)
+    }
+
+    /// Change the slot count (at least 1) while jobs may be running: growing
+    /// adds permits now; shrinking forgets free ones now and the rest as the
+    /// running jobs hand them back. Returns the previous count.
+    pub fn resize(&self, slots: usize) -> usize {
+        let slots = slots.max(1);
+        let old = self.total_slots.swap(slots, Ordering::Relaxed);
+        if slots > old {
+            self.compute_slots.add_permits(slots - old);
+        } else if slots < old {
+            let owed = (old - slots) - self.compute_slots.forget_permits(old - slots);
+            if owed > 0 {
+                let sem = self.compute_slots.clone();
+                tokio::spawn(async move {
+                    if let Ok(p) = sem.acquire_many_owned(owed as u32).await {
+                        p.forget();
+                    }
+                });
+            }
+        }
+        old
     }
 
     /// Average wall time of recent completed jobs; `None` before the first.
@@ -794,6 +817,36 @@ mod tests {
             hardware_pref: None,
             extra_ffmpeg_args: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn worker_load_resizes_while_jobs_run() {
+        let load = WorkerLoad::new(Arc::new(Semaphore::new(2)), 2);
+        let running = load.compute_slots().acquire_owned().await.unwrap();
+        assert_eq!(load.resize(4), 2);
+        assert_eq!((load.total_slots(), load.free_slots()), (4, 3));
+        // Shrink to 1 with one job running: every free permit goes now...
+        assert_eq!(load.resize(1), 4);
+        assert_eq!((load.total_slots(), load.free_slots()), (1, 0));
+        // ...and the running job's slot is the one that remains.
+        drop(running);
+        tokio::task::yield_now().await;
+        assert_eq!(load.free_slots(), 1);
+        // Shrinking below what runs: the debt is paid as jobs finish.
+        let load = WorkerLoad::new(Arc::new(Semaphore::new(3)), 3);
+        let a = load.compute_slots().acquire_owned().await.unwrap();
+        let b = load.compute_slots().acquire_owned().await.unwrap();
+        load.resize(1);
+        assert_eq!(load.free_slots(), 0);
+        drop(a);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(load.free_slots(), 0, "the first slot back pays the debt");
+        drop(b);
+        tokio::task::yield_now().await;
+        assert_eq!(load.free_slots(), 1);
+        assert_eq!(load.resize(0), 1, "never below one");
+        assert_eq!(load.total_slots(), 1);
     }
 
     #[test]

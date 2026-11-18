@@ -12,6 +12,12 @@
 //! - 6 GiB or more: `qwen2.5:7b`;
 //! - less: `qwen2.5:1.5b`.
 //!
+//! It runs [`parallel_for_vram`] answers at once (`OLLAMA_NUM_PARALLEL`, and
+//! the worker takes that many jobs), with flash attention and a q8_0 KV cache
+//! so the slots' context fits next to the weights, and caps a model whose
+//! Modelfile asks for more context than the card holds (the uncensored 9B
+//! says 65536 = 13.6 GiB) at [`ctx_cap_for_vram`] per answer.
+//!
 //! The worker then serves `infernet.inference` from it exactly as it would
 //! from an operator's own Ollama. Any failure (no Linux x86_64, download,
 //! unpack, serve, pull) backs off for 6 h and the CPU path runs instead.
@@ -70,6 +76,39 @@ pub fn models_for_vram(vram_mib: u64) -> &'static [&'static str] {
     } else {
         &["qwen2.5:1.5b"]
     }
+}
+
+/// Answers the house Ollama runs at once on a card with `vram_mib`: two on
+/// a consumer card (both models' weights plus two contexts fit 10-12 GiB with
+/// a q8_0 KV cache), four on 20 GiB or more.
+pub fn parallel_for_vram(vram_mib: u64) -> usize {
+    if vram_mib >= 20 * 1024 { 4 } else { 2 }
+}
+
+/// Context per answer (tokens) a model may load with on this card. A
+/// Modelfile asking for more is re-created with this `num_ctx` after each
+/// pull. 32768 holds the largest prompt a spec carries (64 KB) plus a full
+/// answer; smaller cards get half.
+pub fn ctx_cap_for_vram(vram_mib: u64) -> u64 {
+    if vram_mib >= 10 * 1024 { 32768 } else { 16384 }
+}
+
+static HOUSE_PARALLEL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `OLLAMA_NUM_PARALLEL` of the house Ollama this worker runs, if it runs one.
+pub fn house_parallel() -> Option<usize> {
+    match HOUSE_PARALLEL.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+/// `num_ctx` in an `/api/show` `parameters` block (`num_ctx  65536`).
+pub fn parse_num_ctx(parameters: &str) -> Option<u64> {
+    parameters.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        (it.next() == Some("num_ctx")).then(|| it.next()?.parse().ok()).flatten()
+    })
 }
 
 /// Free disk (GB) to install Ollama (~5 GB unpacked, plus the archive while
@@ -200,7 +239,7 @@ pub async fn install(kind: GpuKind) -> Result<()> {
     Ok(())
 }
 
-fn serve_command() -> Command {
+fn serve_command(parallel: usize) -> Command {
     let mut cmd = Command::new(ollama_bin());
     cmd.arg("serve")
         .env("OLLAMA_HOST", OLLAMA_HOST)
@@ -209,6 +248,11 @@ fn serve_command() -> Command {
         // not be writable (containers run it as a user with root's HOME).
         .env("HOME", root())
         .env("OLLAMA_KEEP_ALIVE", "30m")
+        // As many answers at once as the worker takes (it reads this back).
+        .env("OLLAMA_NUM_PARALLEL", parallel.to_string())
+        // Smaller KV cache per slot, so parallel contexts fit beside the weights.
+        .env("OLLAMA_FLASH_ATTENTION", "1")
+        .env("OLLAMA_KV_CACHE_TYPE", "q8_0")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     if let Ok(log) = std::fs::File::create(log_path()) {
@@ -222,7 +266,7 @@ fn serve_command() -> Command {
 }
 
 /// Run `ollama serve` forever, restarting it with the same backoff as the CPU runtime.
-async fn supervise() {
+async fn supervise(parallel: usize) {
     let mut backoff = Duration::from_secs(5);
     loop {
         if crate::inference_auto::kill_strays(&ollama_bin()) > 0 {
@@ -230,7 +274,7 @@ async fn supervise() {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         let started = Instant::now();
-        match serve_command().spawn() {
+        match serve_command(parallel).spawn() {
             Ok(mut child) => {
                 info!(pid = ?child.id(), url = OLLAMA_URL, "inference: house Ollama (GPU) started");
                 let status = child.wait().await;
@@ -274,6 +318,36 @@ async fn pull(model: &str) -> Result<()> {
     Ok(())
 }
 
+/// Re-create `model` under its own name with `num_ctx` = `cap` when its
+/// Modelfile asks for more (a pull restores the upstream value, so this runs
+/// after every pull). Ollama reserves `num_ctx` x `OLLAMA_NUM_PARALLEL` of KV
+/// cache when it loads a model; 65536 does not fit a 12 GiB card.
+async fn cap_context(model: &str, cap: u64) -> Result<()> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(120)).build()?;
+    let show: serde_json::Value = client
+        .post(format!("{OLLAMA_URL}/api/show"))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let Some(ctx) = show.get("parameters").and_then(|p| p.as_str()).and_then(parse_num_ctx) else {
+        return Ok(());
+    };
+    if ctx <= cap {
+        return Ok(());
+    }
+    client
+        .post(format!("{OLLAMA_URL}/api/create"))
+        .json(&serde_json::json!({ "model": model, "from": model, "parameters": { "num_ctx": cap }, "stream": false }))
+        .send()
+        .await?
+        .error_for_status()?;
+    info!(model, from = ctx, to = cap, "inference: capped the model's context to fit the GPU");
+    Ok(())
+}
+
 /// Start the house Ollama on this GPU, installing it first, and make sure its
 /// models are pulled. Returns its URL, or None (the CPU path then runs).
 pub async fn start(config: &crate::config::InferenceConfig) -> Option<String> {
@@ -289,22 +363,25 @@ pub async fn start(config: &crate::config::InferenceConfig) -> Option<String> {
         return None;
     }
     let models = models_for_vram(gpu.vram_mib);
-    match setup(gpu, is_installed, models).await {
+    let parallel = parallel_for_vram(gpu.vram_mib);
+    HOUSE_PARALLEL.store(parallel, std::sync::atomic::Ordering::Relaxed);
+    match setup(gpu, is_installed, models, parallel).await {
         Ok(()) => {
             let _ = tokio::fs::remove_file(retry_marker()).await;
-            info!(gpu = gpu.kind.as_str(), vram_mib = gpu.vram_mib, ?models, "inference: serving chat from the house Ollama on the GPU");
+            info!(gpu = gpu.kind.as_str(), vram_mib = gpu.vram_mib, ?models, parallel, "inference: serving chat from the house Ollama on the GPU");
             Some(OLLAMA_URL.to_string())
         }
         Err(e) => {
             let _ = tokio::fs::create_dir_all(root()).await;
             let _ = tokio::fs::write(retry_marker(), now_secs().saturating_add(RETRY_BACKOFF_SECS).to_string()).await;
+            HOUSE_PARALLEL.store(0, std::sync::atomic::Ordering::Relaxed);
             warn!(err = %format!("{e:#}"), "could not set up Ollama on the GPU; falling back to the CPU runtime");
             None
         }
     }
 }
 
-async fn setup(gpu: Gpu, is_installed: bool, models: &[&str]) -> Result<()> {
+async fn setup(gpu: Gpu, is_installed: bool, models: &[&str], parallel: usize) -> Result<()> {
     if !is_installed {
         info!(gpu = gpu.kind.as_str(), version = OLLAMA_VERSION, "installing Ollama so this GPU node can serve infernet.inference");
         install(gpu.kind).await?;
@@ -312,13 +389,18 @@ async fn setup(gpu: Gpu, is_installed: bool, models: &[&str]) -> Result<()> {
     tokio::fs::create_dir_all(models_dir()).await?;
     static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if STARTED.set(()).is_ok() {
-        tokio::spawn(supervise());
+        tokio::spawn(supervise(parallel));
     }
     if !wait_up(Duration::from_secs(60)).await {
         bail!("Ollama did not answer on {OLLAMA_URL} (see {})", log_path().display());
     }
+    let cap = ctx_cap_for_vram(gpu.vram_mib);
     for m in models {
         pull(m).await.with_context(|| format!("pull {m}"))?;
+        // Not fatal: the model still serves, just with a bigger reservation.
+        if let Err(e) = cap_context(m, cap).await {
+            warn!(model = m, err = %format!("{e:#}"), "inference: could not cap the model's context");
+        }
     }
     Ok(())
 }
@@ -335,6 +417,19 @@ mod tests {
         assert_eq!(models_for_vram(8 * 1024), ["qwen2.5:7b"]);
         assert_eq!(models_for_vram(6 * 1024), ["qwen2.5:7b"]);
         assert_eq!(models_for_vram(4 * 1024), ["qwen2.5:1.5b"]);
+    }
+
+    #[test]
+    fn parallel_and_context_by_vram() {
+        assert_eq!(parallel_for_vram(12 * 1024), 2);
+        assert_eq!(parallel_for_vram(8 * 1024), 2);
+        assert_eq!(parallel_for_vram(24 * 1024), 4);
+        assert_eq!(ctx_cap_for_vram(12 * 1024), 32768);
+        assert_eq!(ctx_cap_for_vram(6 * 1024), 16384);
+        // /api/show of the uncensored 9B.
+        assert_eq!(parse_num_ctx("num_ctx                        65536\nstop                           \"<|im_end|>\""), Some(65536));
+        assert_eq!(parse_num_ctx("temperature 0.7\nnum_ctx 4096"), Some(4096));
+        assert_eq!(parse_num_ctx("temperature 0.7"), None);
     }
 
     #[test]
