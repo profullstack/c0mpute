@@ -153,6 +153,28 @@ c0mpute git --help                   # full guide: URLs, push to deploy, gateway
 
 Guide: [docs/git-hosting.md](docs/git-hosting.md).
 
+### LLM inference (automatic)
+
+Every capable worker answers `infernet.inference` (chat) with no setup. If an
+Ollama (or another OpenAI-compatible runtime) already answers on
+`127.0.0.1:11434`, or `C0MPUTE_INFERENCE_URL` points at one, the worker serves
+its models. Otherwise it provisions a house runtime in the background:
+
+- **GPU nodes** (any NVIDIA card, or a discrete AMD card with at least 4 GiB of
+  dedicated VRAM; integrated APUs do not count) get the official Ollama Linux
+  release (pinned, SHA-256 checked, CUDA and ROCm runtimes bundled, no sudo)
+  under the data dir, run `ollama serve` on `127.0.0.1:11434`, and pull models
+  sized to the card: 10 GiB+ gets `qwen2.5:7b` and
+  `eriktonon/qwen3.8-uncensored:9b`, 6 GiB+ gets `qwen2.5:7b`, smaller cards
+  `qwen2.5:1.5b`. If that fails it retries after 6 hours and the CPU runtime
+  runs meanwhile.
+- **CPU nodes** get a pinned llama.cpp `llama-server` with one Qwen2.5 GGUF
+  sized to RAM (7B on 16 GiB+, 1.5B on 8 GiB+, else 0.5B) on
+  `127.0.0.1:11439`, at low priority so songs and images keep the box.
+
+`c0mpute status` says which applies and why. Opt out with
+`C0MPUTE_INFERENCE_AUTO=0` or `[inference] auto_install = false`.
+
 ### CPU speech inference
 
 TTS (`tts.synthesize`) supports Kokoro, Piper, and Pocket on CPU. Pocket uses

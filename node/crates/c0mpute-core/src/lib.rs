@@ -49,8 +49,10 @@ pub mod podcast;
 pub mod pricing;
 pub mod reachability;
 pub mod render;
+pub mod gpu;
 pub mod inference;
 pub mod inference_auto;
+pub mod inference_gpu;
 #[cfg(unix)]
 pub mod instance;
 #[cfg(not(unix))]

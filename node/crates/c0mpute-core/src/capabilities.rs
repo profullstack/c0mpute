@@ -216,15 +216,12 @@ pub fn nvidia_present() -> bool {
         .unwrap_or(false)
 }
 
-/// AMD ROCm GPU present — the KFD device node or a working `rocm-smi`.
+/// A discrete AMD GPU with dedicated VRAM. `/dev/kfd` alone is not enough:
+/// integrated APUs (Barcelo/gfx90c and friends) expose it too, and those boxes
+/// used to advertise `c0mpute:gpu:amd` while every job ran on the CPU. See
+/// [`crate::gpu`].
 fn amd_present() -> bool {
-    if std::path::Path::new("/dev/kfd").exists() {
-        return true;
-    }
-    std::process::Command::new("rocm-smi")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::gpu::amd_discrete_vram_mib().is_some()
 }
 
 /// Where `c0mpute bench` leaves its report for this node.
