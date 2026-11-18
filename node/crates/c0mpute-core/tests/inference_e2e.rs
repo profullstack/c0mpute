@@ -102,7 +102,7 @@ async fn chat_turns_are_answered_peer_to_peer() {
     let model = models[0].clone();
     let (worker, worker_store) = node(&tmp.path().join("w"), vec![]).await;
     let worker_addr = wait_for_listen(&worker).await.with(Protocol::P2p(worker.peer_id()));
-    let load = inference::worker_load();
+    let load = inference::worker_load(1);
     let runner = inference::spawn_inference_runner(worker.clone(), worker_store, base.clone(), load.clone());
     let mut tags = vec![inference::ROLE_TAG.to_string(), "c0mpute:cpu".to_string()];
     tags.extend(models.iter().map(|m| inference::model_tag(m)));

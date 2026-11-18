@@ -462,7 +462,11 @@ impl Supervisor {
                 tokio::spawn(async move {
                     let base = crate::inference_auto::choose_runtime(operator, &config.inference).await;
                     tokio::spawn(crate::inference::refresh_loop(base.clone()));
-                    let load = crate::inference::worker_load();
+                    // As many answers at once as the runtime runs in parallel
+                    // (one on a CPU-only box), re-read every minute.
+                    let slots = crate::inference::detect_slots(&base, &config.inference).await;
+                    let load = crate::inference::worker_load(slots.n);
+                    tokio::spawn(crate::inference::slots_loop(base.clone(), config.inference.clone(), load.clone()));
                     let runner_tx = crate::inference::spawn_inference_runner(net.clone(), store, base, load.clone());
                     info!(workload_type = crate::inference::WORKLOAD, "subscribing to job topic");
                     dispatch::run_worker_subscriber_with_load(

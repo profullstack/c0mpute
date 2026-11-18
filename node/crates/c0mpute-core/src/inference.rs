@@ -42,14 +42,18 @@ pub const WORKLOAD: &str = "infernet.inference";
 pub const ROLE_TAG: &str = "infernet:inference";
 pub const DEFAULT_RUNTIME_URL: &str = "http://127.0.0.1:11434";
 pub const RUNTIME_URL_ENV: &str = "C0MPUTE_INFERENCE_URL";
-/// Concurrent answers per node: the local runtime is usually one GPU or a CPU.
-pub const MAX_CONCURRENT: usize = 2;
+// Concurrent answers per node follow the runtime's real capacity: see
+// `inference_slots` (detected at start, re-read every minute).
 pub const MAX_MESSAGES: usize = 64;
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
 pub const MAX_TOKENS: u32 = 4096;
 pub const DEFAULT_MAX_TOKENS: u32 = 512;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
+/// One answer, from sending it to the runtime to its last byte. The clock
+/// starts only once the job holds a slot, and slots never outnumber what the
+/// runtime runs in parallel, so a job is not timed while it waits its turn.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 pub fn model_tag(model: &str) -> String {
@@ -344,7 +348,7 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
     if let Some(t) = s.temperature {
         body["temperature"] = json!(t);
     }
-    let c = reqwest::Client::builder().timeout(GENERATION_TIMEOUT).build()?;
+    let c = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(GENERATION_TIMEOUT).build()?;
     let resp = c.post(format!("{base}/v1/chat/completions")).json(&body).send().await.context("reach the local runtime")?;
     let status = resp.status();
     let v: Value = resp.json().await.context("runtime answer is not JSON")?;
@@ -361,16 +365,53 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
 
 // ─── worker runner ────────────────────────────────────────────────────────
 
-pub fn worker_load() -> WorkerLoad {
+/// The inference role's slots: `slots` answers at once (see
+/// [`crate::inference_slots::detect`]; [`slots_loop`] keeps it current).
+pub fn worker_load(slots: usize) -> WorkerLoad {
+    let slots = slots.clamp(1, crate::inference_slots::MAX_SLOTS);
     // Job times survive restarts like every other workload's (runner::with_history):
     // without it each update reset every node's ETA to the 60 s placeholder, and
     // the bench score alone picked winners until real jobs finished again.
-    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)), MAX_CONCURRENT).with_history(
+    WorkerLoad::new(Arc::new(tokio::sync::Semaphore::new(slots)), slots).with_history(
         crate::config::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./c0mpute-data"))
             .join("job-times")
             .join(format!("{WORKLOAD}.ms")),
     )
+}
+
+static SLOTS: RwLock<Option<crate::inference_slots::Slots>> = RwLock::new(None);
+
+/// The slot count the worker last decided, and why (None before the first).
+pub fn current_slots() -> Option<crate::inference_slots::Slots> {
+    SLOTS.read().ok().and_then(|s| s.clone())
+}
+
+/// Decide the slot count for `base` and log it (at start, and on a change).
+pub async fn detect_slots(base: &str, config: &crate::config::InferenceConfig) -> crate::inference_slots::Slots {
+    let slots = crate::inference_slots::detect(base, config).await;
+    let changed = current_slots().as_ref() != Some(&slots);
+    if changed {
+        info!(runtime = %base, slots = slots.n, source = %slots.source, "inference: concurrent answers");
+        if let Ok(mut s) = SLOTS.write() {
+            *s = Some(slots.clone());
+        }
+    }
+    slots
+}
+
+/// Re-read the runtime's capacity every minute and resize `load` to it, so
+/// the node never bids for more answers than the runtime runs at once (an
+/// operator restarting Ollama with another `OLLAMA_NUM_PARALLEL`, a runner
+/// loading after the worker started).
+pub async fn slots_loop(base: String, config: crate::config::InferenceConfig, load: WorkerLoad) {
+    loop {
+        tokio::time::sleep(REFRESH_EVERY).await;
+        let slots = detect_slots(&base, &config).await;
+        if slots.n != load.total_slots() {
+            load.resize(slots.n);
+        }
+    }
 }
 
 /// Bid only on valid specs for a model served right now.
@@ -392,7 +433,7 @@ pub fn offer_filter() -> crate::dispatch::OfferFilter {
 }
 
 pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: String, load: WorkerLoad) -> mpsc::Sender<AcceptedJob> {
-    let (tx, mut rx) = mpsc::channel::<AcceptedJob>(MAX_CONCURRENT * 4);
+    let (tx, mut rx) = mpsc::channel::<AcceptedJob>(crate::inference_slots::MAX_SLOTS * 2);
     tokio::spawn(async move {
         while let Some(job) = rx.recv().await {
             let Ok(slot) = load.compute_slots().acquire_owned().await else { return };

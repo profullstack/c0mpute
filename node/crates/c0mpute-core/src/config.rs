@@ -458,6 +458,11 @@ pub struct InferenceConfig {
     /// Busiest the box may be (1-minute load per logical CPU) and still bid.
     #[serde(default = "default_diffusion_max_load_per_cpu")]
     pub max_load_per_cpu: f64,
+    /// Chat answers run at once. Unset (the default): what the runtime runs
+    /// in parallel on a GPU, one on a CPU-only box (see `inference_slots`).
+    /// `C0MPUTE_INFERENCE_CONCURRENCY` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
 }
 
 impl Default for InferenceConfig {
@@ -468,6 +473,7 @@ impl Default for InferenceConfig {
             min_free_ram_gb: default_inference_min_free_ram_gb(),
             min_free_disk_gb: default_inference_min_free_disk_gb(),
             max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+            max_concurrent: None,
         }
     }
 }
