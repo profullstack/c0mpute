@@ -37,7 +37,7 @@ export type Features = {
   reasons: string[];
 };
 
-export type ModelTag = "coder" | "specialist" | "uncensored" | "reasoning" | "tiny";
+export type ModelTag = "coder" | "specialist" | "uncensored" | "reasoning" | "tiny" | "house";
 
 export type ModelProfile = {
   id: string;

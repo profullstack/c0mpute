@@ -8,9 +8,16 @@
 //! sudo is needed) under `<data dir>/inference/`, runs `ollama serve`
 //! supervised on [`OLLAMA_URL`], and pulls chat models sized to the card:
 //!
-//! - 10 GiB of VRAM or more: `qwen2.5:7b` and `eriktonon/qwen3.8-uncensored:9b`;
-//! - 6 GiB or more: `qwen2.5:7b`;
+//! - 8 GiB of VRAM or more: the house default `eriktonon/qwen3.8-uncensored:9b`
+//!   alone (~6.9 GiB resident with its projector). It used to share the card
+//!   with `qwen2.5:7b`; both do not fit 12 GiB, so Ollama evicted and reloaded
+//!   on every switch and jobs timed out (Vast RTX 3060, 2026-11-18);
+//! - 6 GiB or more: `qwen3:4b`;
 //! - less: `qwen2.5:1.5b`.
+//!
+//! Models the house Ollama pulled under older releases and no longer serves
+//! ([`RETIRED_MODELS`]) are deleted from its own store; an operator's Ollama is
+//! never touched.
 //!
 //! It runs [`parallel_for_vram`] answers at once (`OLLAMA_NUM_PARALLEL`, and
 //! the worker takes that many jobs), with flash attention and a q8_0 KV cache
@@ -69,14 +76,18 @@ pub fn assets_for(kind: GpuKind) -> Option<Vec<Asset>> {
 
 /// The chat models a card with `vram_mib` serves, biggest-value first.
 pub fn models_for_vram(vram_mib: u64) -> &'static [&'static str] {
-    if vram_mib >= 10 * 1024 {
-        &["qwen2.5:7b", "eriktonon/qwen3.8-uncensored:9b"]
+    if vram_mib >= 8 * 1024 {
+        &[crate::inference::HOUSE_DEFAULT_MODEL]
     } else if vram_mib >= 6 * 1024 {
-        &["qwen2.5:7b"]
+        &["qwen3:4b"]
     } else {
         &["qwen2.5:1.5b"]
     }
 }
+
+/// Models earlier releases pulled into the house Ollama's store, removed once
+/// the card's current models are in.
+pub const RETIRED_MODELS: &[&str] = &["qwen2.5:7b"];
 
 /// Answers the house Ollama runs at once on a card with `vram_mib`: two on
 /// a consumer card (both models' weights plus two contexts fit 10-12 GiB with
@@ -122,7 +133,7 @@ pub fn disk_needed_gb(kind: GpuKind, models: &[&str]) -> u64 {
         .iter()
         .map(|m| match *m {
             "eriktonon/qwen3.8-uncensored:9b" => 7,
-            "qwen2.5:7b" => 5,
+            "qwen3:4b" => 3,
             _ => 2,
         })
         .sum();
@@ -247,7 +258,8 @@ fn serve_command(parallel: usize) -> Command {
         // Ollama keeps its key pair under $HOME/.ollama; the worker's HOME may
         // not be writable (containers run it as a user with root's HOME).
         .env("HOME", root())
-        .env("OLLAMA_KEEP_ALIVE", "30m")
+        // Never unload: a reload costs a job its deadline.
+        .env("OLLAMA_KEEP_ALIVE", "-1")
         // As many answers at once as the worker takes (it reads this back).
         .env("OLLAMA_NUM_PARALLEL", parallel.to_string())
         // Smaller KV cache per slot, so parallel contexts fit beside the weights.
@@ -316,6 +328,17 @@ async fn pull(model: &str) -> Result<()> {
         bail!("ollama pull {model}: {body}");
     }
     Ok(())
+}
+
+/// Delete `model` from the house Ollama's store; true when it was there.
+async fn remove(model: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(60)).build() else { return false };
+    client
+        .delete(format!("{OLLAMA_URL}/api/delete"))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
 }
 
 /// Re-create `model` under its own name with `num_ctx` = `cap` when its
@@ -402,6 +425,11 @@ async fn setup(gpu: Gpu, is_installed: bool, models: &[&str], parallel: usize) -
             warn!(model = m, err = %format!("{e:#}"), "inference: could not cap the model's context");
         }
     }
+    for m in RETIRED_MODELS.iter().filter(|r| !models.contains(r)) {
+        if remove(m).await {
+            info!(model = m, "inference: removed a model the house Ollama no longer serves");
+        }
+    }
     Ok(())
 }
 
@@ -412,11 +440,15 @@ mod tests {
 
     #[test]
     fn models_by_vram() {
-        assert_eq!(models_for_vram(12 * 1024), ["qwen2.5:7b", "eriktonon/qwen3.8-uncensored:9b"]);
-        assert_eq!(models_for_vram(10 * 1024), ["qwen2.5:7b", "eriktonon/qwen3.8-uncensored:9b"]);
-        assert_eq!(models_for_vram(8 * 1024), ["qwen2.5:7b"]);
-        assert_eq!(models_for_vram(6 * 1024), ["qwen2.5:7b"]);
+        // One model per card: two that do not fit together thrash.
+        assert_eq!(models_for_vram(24 * 1024), ["eriktonon/qwen3.8-uncensored:9b"]);
+        assert_eq!(models_for_vram(12 * 1024), ["eriktonon/qwen3.8-uncensored:9b"]);
+        assert_eq!(models_for_vram(8 * 1024), ["eriktonon/qwen3.8-uncensored:9b"]);
+        assert_eq!(models_for_vram(6 * 1024), ["qwen3:4b"]);
         assert_eq!(models_for_vram(4 * 1024), ["qwen2.5:1.5b"]);
+        for v in [4, 6, 8, 12, 24] {
+            assert!(!models_for_vram(v * 1024).contains(&"qwen2.5:7b"));
+        }
     }
 
     #[test]
@@ -464,6 +496,6 @@ mod tests {
             assert!(url.contains(OLLAMA_VERSION));
             assert_eq!(sha.len(), 64);
         }
-        assert!(disk_needed_gb(GpuKind::Nvidia, models_for_vram(12 * 1024)) >= 20);
+        assert!(disk_needed_gb(GpuKind::Nvidia, models_for_vram(12 * 1024)) >= 15);
     }
 }

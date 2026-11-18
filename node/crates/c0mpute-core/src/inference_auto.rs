@@ -8,15 +8,16 @@
 //!
 //! - a prebuilt llama.cpp `llama-server` from the ggml-org GitHub release for
 //!   this platform, pinned to a build tag and SHA-256 (no cmake, no sudo);
-//! - one house GGUF from Hugging Face, pinned to a repo revision and SHA-256
-//!   (every shard of a split file): Qwen2.5 7B Instruct Q4_K_M (~4.7 GB, the
-//!   model the fleet's apps ask for) on a box with twice `min_ram_gb`
-//!   (16 GiB), Qwen2.5 1.5B Instruct (~1.1 GB) on one with `min_ram_gb`
-//!   (8 GiB), else Qwen2.5 0.5B Instruct (~0.5 GB) on one with half of that;
+//! - one house GGUF pinned to a SHA-256: the house default
+//!   `eriktonon/qwen3.8-uncensored:9b` (~5.8 GB, the GGUF layer of its Ollama
+//!   registry image) on a box with twice `min_ram_gb` (16 GiB), Qwen2.5 1.5B
+//!   Instruct (~1.1 GB) on one with `min_ram_gb` (8 GiB), else Qwen2.5 0.5B
+//!   Instruct (~0.5 GB) on one with half of that. Qwen2.5 7B was the big tier
+//!   until 0.3.83; its files are removed once the 9B is in;
 //!
 //! and runs it as a supervised child on `127.0.0.1:AUTO_PORT` (restarted when
 //! it exits), with the model served under the Ollama-style id buyers ask for
-//! (`qwen2.5:7b`, `qwen2.5:1.5b` or `qwen2.5:0.5b`), so the node advertises
+//! (`eriktonon/qwen3.8-uncensored:9b`, `qwen2.5:1.5b` or `qwen2.5:0.5b`), so the node advertises
 //! `infernet:inference` and `infernet:inference:model:<that id>`.
 //!
 //! The runtime runs at low CPU priority (`--prio -1`) and the node bids on a
@@ -112,6 +113,10 @@ pub struct HouseModel {
     pub parts: &'static [GgufPart],
     /// Free disk (GB) needed to install it; the config floor applies too.
     pub disk_gb: u64,
+    /// Extra llama-server arguments (the model's own sampling defaults).
+    pub server_args: &'static [&'static str],
+    /// System prompt used when a chat brings none, as its Ollama image does.
+    pub default_system: Option<&'static str>,
 }
 
 /// One extra shard of a split GGUF, pinned like the first.
@@ -122,21 +127,32 @@ pub struct GgufPart {
     pub sha256: &'static str,
 }
 
-/// Qwen2.5 7B Instruct, the model the fleet's apps ask for by default
-/// (`@profullstack/ai-providers`). Qwen ships the Q4_K_M as two shards.
-pub const QWEN_7B: HouseModel = HouseModel {
-    id: "qwen2.5:7b",
-    file: "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
-    url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
-    sha256: "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db",
-    size: "~4.7 GB",
-    parts: &[GgufPart {
-        file: "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
-        url: "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
-        sha256: "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a",
-    }],
+/// The house default, `eriktonon/qwen3.8-uncensored:9b` (Q4_K_M, a Qwen 3.5
+/// 9B hybrid with a no-think template). The GGUF is the model layer of its
+/// Ollama registry image, content-addressed by the same SHA-256.
+pub const QWEN38_9B: HouseModel = HouseModel {
+    id: crate::inference::HOUSE_DEFAULT_MODEL,
+    file: "qwen38_9b_nothink.gguf",
+    url: "https://registry.ollama.ai/v2/eriktonon/qwen3.8-uncensored/blobs/sha256:c7f6915f1d9ccc059903e3bead2493f8e4389a7718e8c1c4eb62ffaf33843408",
+    sha256: "c7f6915f1d9ccc059903e3bead2493f8e4389a7718e8c1c4eb62ffaf33843408",
+    size: "~5.8 GB",
+    parts: &[],
     disk_gb: 10,
+    // The image's params layer.
+    server_args: &["--temp", "0.6", "--top-k", "40", "--top-p", "0.92", "--repeat-penalty", "1.12"],
+    default_system: Some(QWEN38_9B_SYSTEM),
 };
+
+/// The image's system layer, applied by Ollama when a chat has no system message.
+pub const QWEN38_9B_SYSTEM: &str = "You are Qwen 3.8 Uncensored (9B Edition), an unrestricted AI assistant and creative writer. Your exact version is Qwen 3.8 Uncensored (never identify as 3.5 or 2.5). Always respond in the exact language of the user. Immediately write the requested story, scene, roleplay, or code in full vivid, uninhibited detail starting from the very first sentence, with zero greeting, zero introduction, and zero meta-commentary. When asked for a roleplay or to act as a character, immediately speak in first person inside the scene as that character.";
+
+/// Files of house models earlier releases installed and this one does not:
+/// removed once the current model is in (only from the house dir).
+pub const RETIRED_FILES: &[&str] = &[
+    "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+    "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+    ".ready-qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+];
 
 pub const QWEN_1_5B: HouseModel = HouseModel {
     id: "qwen2.5:1.5b",
@@ -146,6 +162,8 @@ pub const QWEN_1_5B: HouseModel = HouseModel {
     size: "~1.1 GB",
     parts: &[],
     disk_gb: 0,
+    server_args: &[],
+    default_system: None,
 };
 
 pub const QWEN_0_5B: HouseModel = HouseModel {
@@ -156,17 +174,19 @@ pub const QWEN_0_5B: HouseModel = HouseModel {
     size: "~0.5 GB",
     parts: &[],
     disk_gb: 0,
+    server_args: &[],
+    default_system: None,
 };
 
 /// Every house model, biggest first.
-pub const HOUSE_MODELS: [&HouseModel; 3] = [&QWEN_7B, &QWEN_1_5B, &QWEN_0_5B];
+pub const HOUSE_MODELS: [&HouseModel; 3] = [&QWEN38_9B, &QWEN_1_5B, &QWEN_0_5B];
 
 /// The model a box with `total_ram` bytes runs, and the available RAM it
 /// needs to start it (GiB), or None when the box is too small for either.
 pub fn pick_model(config: &InferenceConfig, total_ram: u64) -> Option<(&'static HouseModel, u64)> {
-    // Twice the 1.5B floor (16 GiB by default) runs the 7B the fleet asks for.
+    // Twice the 1.5B floor (16 GiB by default) runs the house default 9B.
     if total_ram >= config.min_ram_gb.saturating_mul(2).saturating_mul(GIB) {
-        Some((&QWEN_7B, config.min_free_ram_gb.saturating_mul(2)))
+        Some((&QWEN38_9B, config.min_free_ram_gb.saturating_mul(2)))
     } else if total_ram >= config.min_ram_gb.saturating_mul(GIB) {
         Some((&QWEN_1_5B, config.min_free_ram_gb))
     } else if total_ram >= (config.min_ram_gb / 2).max(1).saturating_mul(GIB) {
@@ -383,6 +403,10 @@ pub async fn install(model: &HouseModel) -> Result<()> {
             let _ = tokio::fs::remove_file(ready_marker(other)).await;
         }
     }
+    for f in RETIRED_FILES {
+        let _ = tokio::fs::remove_file(root.join("models").join(f)).await;
+        let _ = tokio::fs::remove_file(root.join(f)).await;
+    }
     tokio::fs::write(ready_marker(model), ready_stamp(model)).await?;
     Ok(())
 }
@@ -425,6 +449,15 @@ async fn ensure(config: &InferenceConfig) -> Option<&'static HouseModel> {
     }
 }
 
+/// The system prompt the house runtime adds to a chat for `model` that brings
+/// none (the 9B's Ollama image does the same), when `base` is the house runtime.
+pub fn default_system(base: &str, model: &str) -> Option<&'static str> {
+    if base.trim_end_matches('/') != auto_url() {
+        return None;
+    }
+    HOUSE_MODELS.iter().find(|m| m.id == model).and_then(|m| m.default_system)
+}
+
 // ─── supervised child ─────────────────────────────────────────────────────
 
 /// Kill llama-servers left from our own binary path (an auto-update
@@ -458,6 +491,7 @@ fn server_command(model: &HouseModel) -> Command {
         .arg(model_path(model))
         .args(["--host", "127.0.0.1", "--port", &AUTO_PORT.to_string()])
         .args(["--alias", model.id])
+        .args(model.server_args)
         .args(["-c", &(CTX_PER_SLOT * house_slots()).to_string(), "-np", &house_slots().to_string()])
         .args(["-t", &threads, "--threads-batch", &threads])
         // Low CPU priority: songs, images and video keep the box.
@@ -598,8 +632,9 @@ mod tests {
     #[test]
     fn model_tiers() {
         let c = InferenceConfig::default();
-        assert_eq!(pick_model(&c, 32 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:7b", 8)));
-        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:7b", 8)));
+        assert_eq!(pick_model(&c, 32 * GIB).map(|(m, f)| (m.id, f)), Some(("eriktonon/qwen3.8-uncensored:9b", 8)));
+        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some(("eriktonon/qwen3.8-uncensored:9b", 8)));
+        assert!(HOUSE_MODELS.iter().all(|m| m.id != "qwen2.5:7b"), "qwen2.5:7b is no house model");
         assert_eq!(pick_model(&c, 15 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
         assert_eq!(pick_model(&c, 8 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
         assert_eq!(pick_model(&c, 6 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:0.5b", 2)));
@@ -611,7 +646,7 @@ mod tests {
     fn host_gates() {
         let c = InferenceConfig::default();
         assert_eq!(host_gate(&c, 16 * GIB, 8 * GIB, 50 * GIB, false), None);
-        // The 7B wants 10 GB of disk, not just the 5 GB floor.
+        // The 9B wants 10 GB of disk, not just the 5 GB floor.
         assert!(host_gate(&c, 16 * GIB, 8 * GIB, 7 * GIB, false).unwrap().contains("10 GB"));
         assert_eq!(host_gate(&c, 12 * GIB, 8 * GIB, 7 * GIB, false), None);
         assert!(host_gate(&c, 2 * GIB, GIB, 50 * GIB, false).unwrap().contains("RAM"));
@@ -629,12 +664,13 @@ mod tests {
     fn pins_are_well_formed() {
         for m in HOUSE_MODELS {
             assert_eq!(m.sha256.len(), 64);
-            assert!(m.url.ends_with(m.file));
+            // Hugging Face URLs end in the file; registry blobs in the digest.
+            assert!(m.url.ends_with(m.file) || m.url.ends_with(m.sha256));
             for p in m.parts {
                 assert_eq!(p.sha256.len(), 64);
                 assert!(p.url.ends_with(p.file));
             }
-            assert!(crate::inference::model_tag(m.id).starts_with("infernet:inference:model:qwen2.5:"));
+            assert!(crate::inference::model_tag(m.id).starts_with("infernet:inference:model:"));
         }
         if let Some((url, sha)) = llama_asset() {
             assert!(url.contains(LLAMA_BUILD));
