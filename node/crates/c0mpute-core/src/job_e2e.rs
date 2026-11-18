@@ -717,6 +717,13 @@ pub fn opened_offer(offer: &JobOffer, spec: Value) -> JobOffer {
 pub const SPEC_KEY_MISMATCH: &str = "sealed spec does not open";
 
 /// Whether an error from opening a won job's spec is a key mismatch.
+/// A refusal because the buyer could not be reached for the sealed spec
+/// (timeout, dial or transport failure), not because of the job or the node.
+pub fn is_unreachable_buyer(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("fetch the sealed spec") && ["timeout", "timed out", "rpc failed", "dial", "connection", "unreachable", "no addresses"].iter().any(|k| r.contains(k))
+}
+
 pub fn is_key_mismatch(err: &str) -> bool {
     err.contains(SPEC_KEY_MISMATCH)
 }
