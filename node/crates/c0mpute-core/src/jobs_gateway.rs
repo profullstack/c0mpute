@@ -533,10 +533,12 @@ fn emit(progress: Option<&Progress>, event: Value) {
     }
 }
 
-/// What a waiting job is waiting for, in words a client can show.
+/// What a waiting job is waiting for, in words a client can show. Any
+/// capable node takes it, GPU or CPU, whichever frees a slot first (bids are
+/// ranked by ETA, so a free GPU wins over a free CPU node).
 fn waiting_for(workload: Workload) -> &'static str {
     match workload {
-        Workload::Inference => "waiting for a free GPU slot",
+        Workload::Inference => "waiting for a free inference slot (GPU or CPU)",
         _ => "waiting for a free worker slot",
     }
 }
