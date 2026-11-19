@@ -375,7 +375,11 @@ pub async fn money(range: &str, json: bool, add: &[String], link: bool) -> Resul
         println!("  none yet: /push hosting in c0mpute.com/chat, or `c0mpute hosting money --link` after `hosting publish`");
     }
     for s in &sites {
-        let price = s["price_per_gib_month"].as_f64().map(|p| format!("{}/GiB-mo", usd(p))).unwrap_or_else(|| "free".into());
+        let price = format!(
+            "${:.4}/GiB-mo{}",
+            s["price_per_gib_month"].as_f64().unwrap_or(0.004),
+            if s["price_floor"].as_bool() == Some(true) { " (floor)" } else { "" }
+        );
         println!(
             "  {:<22} {:>12} {:>2} copies  {:<16} ~{}/mo  spent {}  {}",
             s["name"].as_str().unwrap_or("?"),

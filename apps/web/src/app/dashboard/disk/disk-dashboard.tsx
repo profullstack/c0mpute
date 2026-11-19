@@ -14,7 +14,8 @@ type Site = {
   live: boolean;
   size_bytes: number | null;
   copies: number | null;
-  price_per_gib_month: number | null;
+  price_per_gib_month: number;
+  price_floor: boolean;
   holders: number;
   monthly_usd: number;
   spend_usd: number;
@@ -275,7 +276,8 @@ function SitesTable({ data, onChange }: { data: Dash; onChange: () => void }) {
                   </td>
                   <td className="text-right">{bytes(s.size_bytes)}</td>
                   <td className="text-right">{s.copies ?? "—"}</td>
-                  <td className="text-right">{s.price_per_gib_month == null ? "free" : `${usd(s.price_per_gib_month)}/GiB-mo`}</td>
+                  <td className="text-right">{`$${s.price_per_gib_month.toFixed(4)}/GiB-mo`}
+                    {s.price_floor && <div className="text-xs text-[var(--color-dim)]">floor price</div>}</td>
                   <td className="text-right">{s.holders}</td>
                   <td className="text-right">{usd(s.monthly_usd)}</td>
                   <td className="text-right">
@@ -546,8 +548,8 @@ function Notes({ data }: { data: Dash }) {
     <section className="text-xs text-[var(--color-dim)] space-y-2 leading-6">
       <h2 className="font-bold text-[var(--color-fg)] text-sm">how this is counted</h2>
       <p>
-        A paid site owes each node holding it <code>price × GiB held × time / 30 days × challenges passed / asked</code>. A node that passes fewer than half its availability
-        challenges in an hour is owed nothing for it. Free sites cost nothing and earn nothing.
+        Every site pays at least $0.004 per GiB-month (the floor; a site published without a price pays that). It owes each node holding it <code>price × GiB held × time / 30 days × challenges passed / asked</code>. A node that passes fewer than half its availability
+        challenges in an hour is owed nothing for it.
       </p>
       <p>
         An app is metered by the node running it, about once a minute: CPU-hours, GiB-hours of RAM, GiB-months of disk (what it wrote plus its state) and GiB sent out

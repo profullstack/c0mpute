@@ -165,7 +165,9 @@ describe("buildDiskReport", () => {
     });
     expect(r.sites.map((s) => s.site_id).sort()).toEqual(["11111111111111111111", "22222222222222222222"]);
     expect(r.totals.spend_usd).toBeCloseTo(0.0005, 9);
-    expect(r.sites.find((s) => s.name === "blog")?.price_per_gib_month).toBeNull();
+    const blog = r.sites.find((s) => s.name === "blog")!;
+    expect(blog).toMatchObject({ price_per_gib_month: 0.004, price_floor: true });
+    expect(blog.monthly_usd).toBeCloseTo(((10 * 3) / 2 ** 30) * 0.004, 12); // no dues yet: size x copies x price
   });
 
   test("an hour spreads over 5-minute bars on the 1h range", () => {

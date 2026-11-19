@@ -26,6 +26,18 @@ use super::proof::Receipt;
 use super::site::SiteRecord;
 use crate::payments::{Micros, Payee, Transfer};
 
+/// The lowest price any site settles at: $0.004 per GiB-month, micro-USD.
+/// A site published without terms (the free tier, or before the
+/// marketplace) or at a lower price pays this; its owner is the payer and
+/// every holder is paid for the bytes it holds.
+pub const FLOOR_PER_GIB_MONTH: Micros = 4_000;
+
+/// What `rec` settles at per GiB-month: its agreed price, never below
+/// [`FLOOR_PER_GIB_MONTH`].
+pub fn effective_price(rec: &SiteRecord) -> Micros {
+    rec.terms().map(|t| t.price_per_gib_month).unwrap_or(0).max(FLOOR_PER_GIB_MONTH)
+}
+
 /// The month in GiB-month: 30 days.
 pub const MONTH_SECS: u64 = 30 * 24 * 60 * 60;
 const GIB: u128 = 1024 * 1024 * 1024;
@@ -128,9 +140,10 @@ pub fn dues(
     }
     let mut out = Vec::new();
     for rec in records {
-        let Some(terms) = rec.terms() else {
-            continue;
-        };
+        // No terms (a free-tier site) settles like a paid one at the floor,
+        // with no preferred hosts: every holder is paid for what it holds.
+        let terms = rec.terms().unwrap_or_default();
+        let price = effective_price(rec);
         if rec.payer_key() != payer || !rec.verify() {
             continue;
         }
@@ -164,13 +177,13 @@ pub fn dues(
                     }
                 }
             }
-            let amount = owed(terms.price_per_gib_month, *bytes, to - from, passed, challenged);
+            let amount = owed(price, *bytes, to - from, passed, challenged);
             out.push(Due {
                 site_id: rec.site_id.clone(),
                 holder: holder.clone(),
                 payee: payouts.get(holder).cloned(),
                 bytes: *bytes,
-                price: terms.price_per_gib_month,
+                price,
                 amount,
                 passed,
                 challenged,
@@ -403,5 +416,44 @@ mod tests {
         assert_eq!(dp.amount, 4_000_000, "whole 4 GiB site at $1/GiB-month");
         assert_eq!(dsp.amount, 250_000, "a quarter GiB at $1/GiB-month");
         assert_ne!(dp.key, dsp.key);
+    }
+
+    #[test]
+    fn free_and_underpriced_sites_settle_at_the_floor() {
+        let owner = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let owner_hex = crate::hosting::site::owner_hex(&owner).unwrap();
+        let holder = pid();
+        let free = SiteRecord::sign_with_terms(&owner, "free", &Hash::of(b"m"), 1, 1024 * MIB, vec![], None).unwrap();
+        assert!(free.terms().is_none());
+        assert_eq!(effective_price(&free), FLOOR_PER_GIB_MONTH);
+        let cheap = SiteRecord::sign_with_terms(
+            &owner,
+            "cheap",
+            &Hash::of(b"m2"),
+            1,
+            1024 * MIB,
+            vec![],
+            Some(HostingTerms { preferred_hosts: vec![holder.clone()], price_per_gib_month: 1, payer: None }),
+        )
+        .unwrap();
+        assert_eq!(effective_price(&cheap), FLOOR_PER_GIB_MONTH);
+        let chunk = Hash::of(b"c").to_hex();
+        let r = |rec: &SiteRecord| {
+            Receipt::sign(
+                &owner,
+                Challenge { site_id: &rec.site_id, manifest: &rec.manifest, holder: &holder, chunk: &chunk, ok: true, rtt_ms: 1, at: 10 },
+            )
+            .unwrap()
+        };
+        let receipts = vec![r(&free), r(&cheap)];
+        let mut held = HashMap::new();
+        held.insert((free.site_id.clone(), holder.clone()), 1024 * MIB);
+        held.insert((cheap.site_id.clone(), holder.clone()), 1024 * MIB);
+        let ds = dues(&[free.clone(), cheap.clone()], &receipts, &HashMap::new(), &held, &owner_hex, 0, MONTH_SECS);
+        assert_eq!(ds.len(), 2, "{ds:?}");
+        for d in &ds {
+            assert_eq!(d.amount, 4_000, "1 GiB for a month at the $0.004 floor: {d:?}");
+            assert_eq!(d.price, FLOOR_PER_GIB_MONTH);
+        }
     }
 }

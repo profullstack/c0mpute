@@ -2632,11 +2632,8 @@ impl Hosting {
     pub async fn dues_all(&self, from: u64, to: u64) -> Vec<(String, settle::Due)> {
         let payers: BTreeSet<String> = {
             let map = self.0.map.read().await;
-            map.records
-                .values()
-                .filter(|r| r.terms().is_some())
-                .map(|r| r.payer_key().to_string())
-                .collect()
+            // Every site settles (free-tier ones at the floor price).
+            map.records.values().map(|r| r.payer_key().to_string()).collect()
         };
         let payers: Vec<String> = payers.into_iter().collect();
         self.dues_of(&payers, from, to).await
@@ -2673,7 +2670,8 @@ impl Hosting {
         out
     }
 
-    /// Bytes each hosting peer holds now of the paid sites `payer` pays for,
+    /// Bytes each hosting peer holds now of the sites `payer` pays for (every
+    /// site pays, free-tier ones at the floor),
     /// keyed (site id, peer), leaving out preferred hosts (they are paid
     /// their agreed share). A peer holding a striped site in part holds the
     /// bytes of its groups; one holding it whole holds all of it.
@@ -2682,7 +2680,7 @@ impl Hosting {
             let map = self.0.map.read().await;
             map.records
                 .values()
-                .filter(|r| r.terms().is_some() && r.payer_key() == payer)
+                .filter(|r| r.payer_key() == payer)
                 .map(|r| {
                     let hs = map
                         .peers
