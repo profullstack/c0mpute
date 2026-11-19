@@ -1592,6 +1592,9 @@ export function ChatApp({ error }: { error: string | null }) {
           <button onClick={() => setTab("connect")} className={tab === "connect" ? "accent" : "hover:text-[var(--color-fg)]"}>
             CLI / API / MCP keys
           </button>
+          <a href="/dashboard/disk" className="block !border-0 hover:text-[var(--color-fg)]" title="your sites and apps, what they cost, and what your nodes earn hosting">
+            my hosting
+          </a>
           <p className="break-all" title={me.did}>
             {me.name ? `${me.name} · ` : ""}
             {me.did}

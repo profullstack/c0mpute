@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 const TABS = [
-  { href: "/dashboard/disk", label: "storage: sites + disk" },
+  { href: "/dashboard/disk", label: "hosting: sites, apps, disk" },
   { href: "/dashboard/nodes", label: "nodes: compute" },
 ] as const;
 

@@ -3,9 +3,12 @@
 // "server-only" import so it loads there.
 import { cloudSql } from "../chat/server";
 import { cleanDue, createDiskStore, type DiskStore, type GatewayDue } from "./store";
+import { cleanReport, createAppUsageStore, type AppUsageStore, type UsageReport } from "./apps";
 
 let _store: DiskStore | null = null;
 export const diskStore = () => (_store ??= createDiskStore(cloudSql));
+let _apps: AppUsageStore | null = null;
+export const appUsageStore = () => (_apps ??= createAppUsageStore(cloudSql));
 
 const HOUR_S = 3600;
 /**
@@ -73,8 +76,45 @@ export async function recordFrom(base: string, store: DiskStore = diskStore(), f
   return filed;
 }
 
+/** Gateways keep app usage reports 24 hours; ask for at most 23. */
+export const APPS_LOOKBACK_S = 23 * HOUR_S;
+
+/**
+ * Record every app usage report `base` heard since our cursor for it, in one
+ * call (hours that ended at least SETTLE_LAG_S ago). Returns the reports filed.
+ */
+export async function recordAppsFrom(
+  base: string,
+  store: AppUsageStore = appUsageStore(),
+  cursors: DiskStore = diskStore(),
+  fetcher: typeof fetch = fetch,
+  nowS = Math.floor(Date.now() / 1000),
+): Promise<number> {
+  const key = `apps:${base}`;
+  const to = Math.floor((nowS - SETTLE_LAG_S) / HOUR_S) * HOUR_S;
+  const cursor = await cursors.cursor(key);
+  // Re-read the last two hours: a report gossiped late is still filed (the
+  // key keeps one row per app, holder and hour).
+  const from = Math.max((cursor ?? 0) - 2 * HOUR_S, to - APPS_LOOKBACK_S);
+  if (from >= to) return 0;
+  let body: { usage?: unknown };
+  try {
+    const r = await fetcher(`${base}/apps/v1/usage?from=${from}&to=${to}`, { signal: AbortSignal.timeout(20_000), cache: "no-store" });
+    if (!r.ok) return 0;
+    body = (await r.json()) as typeof body;
+  } catch {
+    return 0;
+  }
+  const reports = (Array.isArray(body.usage) ? body.usage : []).map(cleanReport).filter((x): x is UsageReport => x !== null);
+  if (reports.length) await store.record(reports);
+  await cursors.setCursor(key, to);
+  return reports.length;
+}
+
 export async function recordAll(): Promise<number> {
-  const counts = await Promise.all(gatewayUrls().map((u) => recordFrom(u).catch(() => 0)));
+  const counts = await Promise.all(
+    gatewayUrls().flatMap((u) => [recordFrom(u).catch(() => 0), recordAppsFrom(u).catch(() => 0)]),
+  );
   return counts.reduce((a, b) => a + b, 0);
 }
 

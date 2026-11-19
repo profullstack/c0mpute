@@ -236,6 +236,14 @@ pub struct AppsConfig {
     /// Most disk one app may use, MiB: its state volume plus what it writes
     /// inside its container. An app over it is stopped.
     pub max_disk_mb: u64,
+    /// What this node charges for the apps it runs, USD (blank = the house
+    /// default): per CPU-hour ("0.01"), per GiB-hour of RAM ("0.002"), per
+    /// GiB-month of disk ("0.004") and per GiB sent out ("0.01"). Metered
+    /// hourly and shown to owners on every gateway (`/apps/v1/usage`).
+    pub price_cpu_hour: String,
+    pub price_ram_gib_hour: String,
+    pub price_disk_gib_month: String,
+    pub price_egress_gib: String,
 }
 
 impl Default for AppsConfig {
@@ -247,6 +255,10 @@ impl Default for AppsConfig {
             egress_guard: true,
             require_egress_guard: true,
             max_disk_mb: crate::apps::DEFAULT_MAX_DISK_MB,
+            price_cpu_hour: String::new(),
+            price_ram_gib_hour: String::new(),
+            price_disk_gib_month: String::new(),
+            price_egress_gib: String::new(),
         }
     }
 }

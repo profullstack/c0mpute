@@ -9,6 +9,7 @@
 
 import { RANGES, type RangeKey } from "../earnings/report";
 import type { DueRow } from "./store";
+import { priceParts, type UsageRow } from "./apps";
 
 const HOUR = 3_600_000;
 const GIB = 2 ** 30;
@@ -64,6 +65,42 @@ export interface SiteOut {
   own_usd: number;
 }
 
+/** An app as a gateway's `/apps/v1/apps` lists it. */
+export interface LiveApp {
+  app_id: string;
+  name: string;
+  owner: string;
+  healthy: boolean;
+  holders: string[];
+  primary: string | null;
+  replicas: number;
+}
+
+export interface AppOut {
+  app_id: string;
+  name: string;
+  url: string;
+  via: "claim" | "owner";
+  live: boolean;
+  healthy: boolean | null;
+  holders: number;
+  /** Metered in the window. */
+  hours: number;
+  cpu_hours: number;
+  ram_gib_hours: number;
+  /** Average disk held while running, GiB. */
+  disk_gib: number;
+  egress_bytes: number;
+  ingress_bytes: number;
+  /** What each part cost in the window. */
+  cpu_usd: number;
+  ram_usd: number;
+  disk_usd: number;
+  egress_usd: number;
+  spend_usd: number;
+  own_usd: number;
+}
+
 export interface NodeDiskOut {
   node: string;
   label: string | null;
@@ -77,6 +114,11 @@ export interface NodeDiskOut {
   passed: number;
   challenged: number;
   offer: { free_bytes: number; total_bytes: number; per_gib_month: number } | null;
+  /** Running others' apps: earned, CPU-hours served, apps run in the window. */
+  app_earned_usd: number;
+  app_own_usd: number;
+  app_cpu_hours: number;
+  apps: number;
 }
 
 export interface DiskReport {
@@ -87,7 +129,10 @@ export interface DiskReport {
   totals: DiskTotals;
   buckets: DiskBucket[];
   sites: SiteOut[];
+  apps: AppOut[];
   nodes: NodeDiskOut[];
+  /** The totals split: static storage vs apps. `totals` is their sum. */
+  by_kind: { storage: DiskTotals; apps: DiskTotals };
   /** Newest hour on file in the window, ms. */
   latest_hour: number | null;
 }
@@ -103,6 +148,10 @@ export function buildDiskReport(input: {
   owners: string[];
   live: LiveSite[];
   gateway?: string;
+  appRows?: UsageRow[];
+  liveApps?: LiveApp[];
+  /** App ids this person claimed (a claimed 20-hex id may be a site or an app). */
+  appIds?: string[];
 }): DiskReport {
   const { range, now } = input;
   const { ms, bucketMs } = RANGES[range];
@@ -125,7 +174,22 @@ export function buildDiskReport(input: {
   const nodeOut = new Map<string, NodeDiskOut>(
     input.nodes.map((x) => [
       x.node,
-      { node: x.node, label: x.label, online: x.online, held_bytes: 0, sites: 0, earned_usd: 0, own_usd: 0, passed: 0, challenged: 0, offer: x.offer ?? null },
+      {
+        node: x.node,
+        label: x.label,
+        online: x.online,
+        held_bytes: 0,
+        sites: 0,
+        earned_usd: 0,
+        own_usd: 0,
+        passed: 0,
+        challenged: 0,
+        offer: x.offer ?? null,
+        app_earned_usd: 0,
+        app_own_usd: 0,
+        app_cpu_hours: 0,
+        apps: 0,
+      },
     ]),
   );
   const siteMoney = new Map<string, { spend: number; own: number }>();
@@ -180,11 +244,103 @@ export function buildDiskReport(input: {
     }
   }
 
+  const storage = { ...totals };
+
+  // ── apps ──
+  const appsTotals = zero();
+  const liveApps = new Map((input.liveApps ?? []).map((a) => [a.app_id, a]));
+  const myApps = new Map<string, AppOut["via"]>();
+  for (const id of input.appIds ?? []) myApps.set(id, "claim");
+  for (const a of input.liveApps ?? []) if (owners.has(a.owner) && !myApps.has(a.app_id)) myApps.set(a.app_id, "owner");
+  const appRows = (input.appRows ?? []).filter((r) => r.hour + HOUR > from && r.hour < now);
+  for (const r of appRows) if (owners.has(r.owner) && !myApps.has(r.app_id)) myApps.set(r.app_id, "owner");
+  const appOut = new Map<string, AppOut>();
+  for (const [id, via] of myApps) {
+    const l = liveApps.get(id);
+    // A claimed id that is not an app (a site id) stays off the apps list
+    // unless usage names it.
+    if (via === "claim" && !l && !appRows.some((r) => r.app_id === id)) continue;
+    appOut.set(id, {
+      app_id: id,
+      name: l?.name || id,
+      url: `${gateway}/a/${id}/`,
+      via,
+      live: !!l,
+      healthy: l ? l.healthy : null,
+      holders: l?.holders.length ?? 0,
+      hours: 0,
+      cpu_hours: 0,
+      ram_gib_hours: 0,
+      disk_gib: 0,
+      egress_bytes: 0,
+      ingress_bytes: 0,
+      cpu_usd: 0,
+      ram_usd: 0,
+      disk_usd: 0,
+      egress_usd: 0,
+      spend_usd: 0,
+      own_usd: 0,
+    });
+  }
+  const nodeApps = new Map<string, Set<string>>();
+  const diskGibH = new Map<string, number>();
+  for (const r of appRows) {
+    const nodeMine = myNodes.has(r.node);
+    const app = appOut.get(r.app_id);
+    if (!nodeMine && !app) continue;
+    const kind: keyof DiskTotals = nodeMine && app ? "own_usd" : nodeMine ? "earned_usd" : "spend_usd";
+    const parts = priceParts(r);
+    const usd = parts.total / 1e6;
+    // Only the part of the hour inside the window.
+    let inWindow = 0;
+    for (const b of buckets) {
+      const lo = Math.max(r.hour, b.t, from);
+      const hi = Math.min(r.hour + HOUR, b.t + bucketMs, now);
+      if (hi <= lo) continue;
+      const f = (hi - lo) / HOUR;
+      inWindow += f;
+      b[kind] += usd * f;
+      appsTotals[kind] += usd * f;
+    }
+    if (nodeMine) {
+      const nd = nodeOut.get(r.node)!;
+      if (kind === "own_usd") nd.app_own_usd += usd * inWindow;
+      else nd.app_earned_usd += usd * inWindow;
+      nd.app_cpu_hours += (r.cpu_s / 3600) * inWindow;
+      const set = nodeApps.get(r.node) ?? new Set<string>();
+      set.add(r.app_id);
+      nodeApps.set(r.node, set);
+    }
+    if (app) {
+      app.hours += (r.secs / 3600) * inWindow;
+      app.cpu_hours += (r.cpu_s / 3600) * inWindow;
+      app.ram_gib_hours += r.ram_gib_h * inWindow;
+      diskGibH.set(r.app_id, (diskGibH.get(r.app_id) ?? 0) + r.disk_gib_h * inWindow);
+      app.egress_bytes += r.tx_bytes * inWindow;
+      app.ingress_bytes += r.rx_bytes * inWindow;
+      app.cpu_usd += (parts.cpu / 1e6) * inWindow;
+      app.ram_usd += (parts.ram / 1e6) * inWindow;
+      app.disk_usd += (parts.disk / 1e6) * inWindow;
+      app.egress_usd += (parts.egress / 1e6) * inWindow;
+      if (kind === "own_usd") app.own_usd += usd * inWindow;
+      else app.spend_usd += usd * inWindow;
+    }
+  }
+  for (const [node, set] of nodeApps) nodeOut.get(node)!.apps = set.size;
+  for (const a of appOut.values()) {
+    a.disk_gib = a.hours > 0 ? (diskGibH.get(a.app_id) ?? 0) / a.hours : 0;
+    a.egress_bytes = Math.round(a.egress_bytes);
+    a.ingress_bytes = Math.round(a.ingress_bytes);
+  }
+  for (const k of ["earned_usd", "spend_usd", "own_usd"] as const) totals[k] += appsTotals[k];
+
   const finish = (t: DiskTotals) => {
     t.net_usd = t.earned_usd - t.spend_usd;
   };
   buckets.forEach(finish);
   finish(totals);
+  finish(storage);
+  finish(appsTotals);
 
   const nameFromRows = new Map(rows.map((r) => [r.site_id, r.name]));
   const sites: SiteOut[] = [...mine.values()].map((s) => {
@@ -209,7 +365,22 @@ export function buildDiskReport(input: {
   });
   sites.sort((a, b) => b.spend_usd - a.spend_usd || (b.size_bytes ?? 0) - (a.size_bytes ?? 0) || a.name.localeCompare(b.name));
 
-  const nodes = [...nodeOut.values()].sort((a, b) => b.earned_usd - a.earned_usd || b.held_bytes - a.held_bytes || a.node.localeCompare(b.node));
+  const nodes = [...nodeOut.values()].sort(
+    (a, b) => b.earned_usd + b.app_earned_usd - (a.earned_usd + a.app_earned_usd) || b.held_bytes - a.held_bytes || a.node.localeCompare(b.node),
+  );
+  const apps = [...appOut.values()].sort((a, b) => b.spend_usd - a.spend_usd || b.cpu_hours - a.cpu_hours || a.name.localeCompare(b.name));
 
-  return { range, from, to: now, bucket_ms: bucketMs, totals, buckets, sites, nodes, latest_hour: latest };
+  return {
+    range,
+    from,
+    to: now,
+    bucket_ms: bucketMs,
+    totals,
+    by_kind: { storage, apps: appsTotals },
+    buckets,
+    sites,
+    apps,
+    nodes,
+    latest_hour: latest,
+  };
 }

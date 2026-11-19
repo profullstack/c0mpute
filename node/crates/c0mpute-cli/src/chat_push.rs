@@ -387,15 +387,35 @@ pub async fn money(range: &str, json: bool, add: &[String], link: bool) -> Resul
             s["url"].as_str().unwrap_or("")
         );
     }
+    let apps = v["apps"].as_array().cloned().unwrap_or_default();
+    println!("\nyour apps ({}):", apps.len());
+    if apps.is_empty() {
+        println!("  none yet: `c0mpute apps deploy`, then `c0mpute hosting money --add <app id>` (or --link)");
+    }
+    for a in &apps {
+        println!(
+            "  {:<22} {:>7.2} CPU-h {}  {:>7.2} GiB-h RAM {}  {:>6.2} GiB disk {}  {} out {}  = {}",
+            a["name"].as_str().unwrap_or("?"),
+            f(&a["cpu_hours"]),
+            usd(f(&a["cpu_usd"])),
+            f(&a["ram_gib_hours"]),
+            usd(f(&a["ram_usd"])),
+            f(&a["disk_gib"]),
+            usd(f(&a["disk_usd"])),
+            gib(f(&a["egress_bytes"])),
+            usd(f(&a["egress_usd"])),
+            usd(f(&a["spend_usd"]))
+        );
+    }
     let nodes = v["nodes"].as_array().cloned().unwrap_or_default();
-    println!("\nyour nodes' disk ({}):", nodes.len());
+    println!("\nyour nodes' hosting ({}):", nodes.len());
     if nodes.is_empty() {
         println!("  none on this account: claim them at c0mpute.com/dashboard/nodes");
     }
     for n in &nodes {
         let offer = &n["offer"];
         println!(
-            "  {:<20} offered {:>12}  free {:>12}  holding {:>12} ({} sites)  challenges {}/{}  earned {}",
+            "  {:<20} offered {:>12}  free {:>12}  holding {:>12} ({} sites)  challenges {}/{}  disk earned {}  apps {} ({:.1} CPU-h) earned {}",
             n["label"].as_str().or(n["node"].as_str()).unwrap_or("?"),
             offer["total_bytes"].as_f64().map(gib).unwrap_or_else(|| "-".into()),
             offer["free_bytes"].as_f64().map(gib).unwrap_or_else(|| "-".into()),
@@ -403,9 +423,12 @@ pub async fn money(range: &str, json: bool, add: &[String], link: bool) -> Resul
             n["sites"].as_u64().unwrap_or(0),
             n["passed"].as_u64().unwrap_or(0),
             n["challenged"].as_u64().unwrap_or(0),
-            usd(f(&n["earned_usd"]))
+            usd(f(&n["earned_usd"])),
+            n["apps"].as_u64().unwrap_or(0),
+            f(&n["app_cpu_hours"]),
+            usd(f(&n["app_earned_usd"]))
         );
     }
-    println!("\naccrued by the settlement rule; the site owner's node pays from its own wallet. More: https://c0mpute.com/dashboard/disk");
+    println!("\nsites: accrued by the settlement rule, paid by the owner's node. apps: metered by the node that ran them, not paid out yet.\nMore: https://c0mpute.com/dashboard/disk");
     Ok(())
 }
