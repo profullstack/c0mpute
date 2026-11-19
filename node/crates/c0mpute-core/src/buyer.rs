@@ -23,6 +23,9 @@ use uuid::Uuid;
 pub const DEFAULT_BID_WINDOW: Duration = Duration::from_secs(8);
 /// How long to wait for the winner's receipt before giving up.
 pub const DEFAULT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Price cap on canary probes: high enough for any worker floor, and never paid
+/// since a probe accepts no bid.
+pub const PROBE_CAP_USD: f64 = 1.0;
 
 // Rotate equally priced bids so a burst of parallel chunks does not keep
 // selecting the same earliest bidder when several workers have equal prices.
@@ -995,7 +998,9 @@ pub async fn probe_auction(
         spec_hash: session.spec_hash(),
         spec_inline: None,
         required_capabilities: e2e_required_capabilities(&required_capabilities, false),
-        max_price_usd: 0.0,
+        // Never accepted, so nothing is paid; a 0 cap made every worker with
+        // a price floor skip the probe and the canary counted only free nodes.
+        max_price_usd: PROBE_CAP_USD,
         deadline_unix_ms: now_ms + 10 * 60 * 1000,
         published_at_ms: now_ms,
         external_ref: None,

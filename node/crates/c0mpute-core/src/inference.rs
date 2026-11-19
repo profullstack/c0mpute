@@ -385,6 +385,11 @@ pub async fn refresh_loop(base: String) {
     }
 }
 
+/// True when an [`execute`] result is an answer, not an `ok: false` failure.
+pub fn answer_ok(answer: &Value) -> bool {
+    answer.get("ok").and_then(Value::as_bool) == Some(true)
+}
+
 /// Answer one spec from the runtime at `base`. Never errors: a failure is an
 /// `ok: false` result the buyer can read.
 pub async fn execute(base: &str, spec: &Value, ready: &[String]) -> Value {
@@ -526,9 +531,11 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
                 let _slot = slot;
                 let started = Instant::now();
                 let job_id = job.accept.job_id.clone();
+                let mut answered = false;
                 let result: Result<String> = crate::job_control::cancellable(&job.accept.job_id, async {
                     let spec = crate::workflow::resolve_spec(&net, &job).await?;
                     let answer = execute(&base, &spec, &ready_models()).await;
+                    answered = answer_ok(&answer);
                     let bytes = serde_json::to_vec(&answer)?;
                     // Sealed to the buyer (e2e jobs) before it is stored.
                     crate::pieces::publish_result_bytes(&net, &store, &job.accept, &bytes).await.context("store answer")
@@ -536,7 +543,14 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
                 .await;
                 match result {
                     Ok(hash) => {
-                        load.record_job(started.elapsed());
+                        // Only a real answer says how fast this box answers. A
+                        // timed-out or failed one (`ok: false`) took the whole
+                        // generation timeout: folded in, it pushed the average
+                        // past MAX_BID_RUNTIME_SECS and the node never bid again
+                        // (vienna 2026-11-19: 300431 ms stored, no bids for days).
+                        if answered {
+                            load.record_job(started.elapsed());
+                        }
                         info!(%job_id, %hash, "inference: answered");
                         publish_receipt(&net, &job.accept, Some(hash), JobStatus::Completed).await;
                     }
@@ -554,6 +568,13 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_real_answers_count_toward_job_time() {
+        assert!(answer_ok(&json!({"v": 1, "ok": true, "text": "hi"})));
+        assert!(!answer_ok(&json!({"v": 1, "ok": false, "error": "timed out"})));
+        assert!(!answer_ok(&json!({"v": 1})));
+    }
 
     fn ready(models: &[&str]) -> Vec<String> {
         models.iter().map(|m| m.to_string()).collect()

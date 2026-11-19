@@ -90,6 +90,8 @@ const MAX_SEEN_ACCEPTS: usize = 256;
 
 /// ETA quoted before this workload has completed any job.
 pub const DEFAULT_ETA_SECS: u64 = 60;
+/// A job-time average not refreshed for this long no longer stops a bid.
+pub const STALE_ESTIMATE: Duration = Duration::from_secs(15 * 60);
 
 /// Upper bound on a quoted ETA.
 const MAX_ETA_SECS: u64 = 24 * 60 * 60;
@@ -304,7 +306,17 @@ pub fn run_worker_subscriber_with_load(
                         .map(|d| d.as_secs_f64())
                         .unwrap_or(DEFAULT_ETA_SECS as f64);
                     let (wait, fits) = crate::inference::runtime_eta(crate::inference::external_busy(), capacity.total_slots, per_job);
-                    if !fits {
+                    // The average only moves when a job finishes here, so an
+                    // over-limit one would refuse every offer forever (and is
+                    // kept across restarts). Once it is stale, bid anyway with
+                    // the slow ETA: routing ranks it below every faster node,
+                    // so it only wins when nobody quicker is free, and that job
+                    // measures the box again. Repeated failures still pause
+                    // bidding (`activity::bid_paused`).
+                    let stale = load.as_ref().is_some_and(|l| l.estimate_stale(STALE_ESTIMATE));
+                    if !fits && stale && wait == 0 {
+                        debug!(job_id = %offer.job_id, per_job_secs = per_job as u64, "dispatch: slow job-time estimate is stale, bidding to re-measure");
+                    } else if !fits {
                         debug!(job_id = %offer.job_id, per_job_secs = per_job as u64, local_queue_secs = wait,
                             max = crate::inference::MAX_BID_RUNTIME_SECS, "dispatch: this runtime would not answer in time, not bidding");
                         continue;
