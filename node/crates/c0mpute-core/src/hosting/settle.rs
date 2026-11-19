@@ -85,6 +85,11 @@ pub struct Due {
     pub site_id: String,
     pub holder: String,
     pub payee: Option<Payee>,
+    /// Bytes the holder is paid for: a preferred host's agreed share, or
+    /// what another holder holds now.
+    pub bytes: u64,
+    /// The site's price, micro-USD per GiB-month.
+    pub price: Micros,
     pub amount: Micros,
     pub passed: u64,
     pub challenged: u64,
@@ -164,6 +169,8 @@ pub fn dues(
                 site_id: rec.site_id.clone(),
                 holder: holder.clone(),
                 payee: payouts.get(holder).cloned(),
+                bytes: *bytes,
+                price: terms.price_per_gib_month,
                 amount,
                 passed,
                 challenged,
