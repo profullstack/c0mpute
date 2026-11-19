@@ -30,6 +30,7 @@ pub mod proxy;
 pub mod record;
 pub mod runtime;
 pub mod snapshot;
+pub mod usage;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -118,6 +119,11 @@ pub enum AppsMsg {
         /// Owner keys whose apps this node runs (empty = anyone's).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         owners: Vec<String>,
+    },
+    /// Hours of app use this node metered, priced at its rates ([`usage`]).
+    /// Kept only from the holder itself (the gossip source).
+    Usage {
+        reports: Vec<usage::UsageReport>,
     },
     /// Secrets sealed to one holder (`to`), by the owner or another holder.
     Seal {
@@ -250,6 +256,12 @@ struct Inner {
     state_path: Option<PathBuf>,
     started: Instant,
     stopped: std::sync::atomic::AtomicBool,
+    /// What this node charges for the apps it runs (`[apps] price_*`).
+    rates: usage::Rates,
+    /// Use of the apps this node runs, for the hour in progress.
+    meter: std::sync::Mutex<usage::Meter>,
+    /// Every usage report heard (and this node's own), for `/apps/v1/usage`.
+    book: std::sync::Mutex<usage::Book>,
 }
 
 /// Options for [`Apps::start`].
@@ -434,6 +446,9 @@ impl Apps {
             egress_guard,
             require_egress_guard,
             max_disk_bytes: max_disk_mb.saturating_mul(1 << 20),
+            rates: usage::Rates::from_config(&file.price_cpu_hour, &file.price_ram_gib_hour, &file.price_disk_gib_month, &file.price_egress_gib),
+            meter: Default::default(),
+            book: Default::default(),
             warned_open_egress: std::sync::atomic::AtomicBool::new(open_egress),
             timing: opts.timing,
             x25519,
@@ -614,6 +629,13 @@ impl Apps {
                     .write()
                     .await
                     .insert(src, (view, Instant::now()));
+            }
+            AppsMsg::Usage { reports } => {
+                let now = now_secs();
+                let mut book = self.0.book.lock().expect("book");
+                for r in reports.into_iter().take(usage::REPORTS_PER_MESSAGE) {
+                    book.apply(&src, r, now);
+                }
             }
             AppsMsg::Seal {
                 app_id,
@@ -862,6 +884,7 @@ impl Apps {
             changed |= self.step(&rec, &v).await;
             self.seal_to_holders(&rec, &v).await;
         }
+        self.publish_usage().await;
         // Apps this node holds whose record vanished: nothing to do but wait.
         if changed {
             self.announce().await;
@@ -1302,12 +1325,20 @@ impl Apps {
     fn spawn_disk_check(&self, id: String) {
         let a = self.clone();
         tokio::spawn(async move {
-            let Some(state) = a.0.local.read().await.get(&id).map(|l| l.state_bytes) else {
+            let Some((state, owner)) = a.0.local.read().await.get(&id).map(|l| (l.state_bytes, l.rec.owner.clone())) else {
                 return;
             };
             // A size docker cannot report counts as nothing written: an app
             // is never stopped on a failed measurement.
             let layer = runtime::layer_bytes(&id).await.unwrap_or(0);
+            // Meter it while we are here (once a minute): CPU, RAM and
+            // traffic from docker, disk = what it wrote plus its state.
+            if let Some(st) = runtime::stats(&id).await {
+                a.0.meter
+                    .lock()
+                    .expect("meter")
+                    .sample(&id, &owner, &a.0.me, a.0.rates, st, layer.saturating_add(state), now_secs());
+            }
             let (free, floor) = runtime::host_free().await;
             if let Some(stop) = runtime::disk_verdict(layer, state, a.0.max_disk_bytes, free, floor) {
                 a.stop_for_disk(&id, stop).await;
@@ -1853,8 +1884,38 @@ impl Apps {
         self.forward(env).await
     }
 
+    /// Gossip the hours of use that ended since the last call, and keep them.
+    async fn publish_usage(&self) {
+        let now = now_secs();
+        let done = self.0.meter.lock().expect("meter").take_finished(&self.0.me, self.0.rates, now);
+        if done.is_empty() {
+            return;
+        }
+        {
+            let mut book = self.0.book.lock().expect("book");
+            for r in &done {
+                book.apply(&self.0.me, r.clone(), now);
+            }
+        }
+        for chunk in done.chunks(usage::REPORTS_PER_MESSAGE) {
+            info!(reports = chunk.len(), "apps: usage metered");
+            let msg = AppsMsg::Usage { reports: chunk.to_vec() };
+            if let Ok(bytes) = serde_json::to_vec(&msg)
+                && let Err(e) = self.0.net.publish(TOPIC, bytes).await
+            {
+                debug!(err = %e, "apps: usage gossip failed");
+            }
+        }
+    }
+
+    /// Usage reports for hours starting in `[from, to)`.
+    pub fn usage_between(&self, from: u64, to: u64) -> Vec<usage::UsageReport> {
+        self.0.book.lock().expect("book").between(from, to)
+    }
+
     pub fn router(&self) -> Router {
         Router::new()
+            .route("/apps/v1/usage", get(api_usage))
             .route("/apps/v1/apps", get(api_list))
             .route("/apps/v1/apps/{id}", get(api_get))
             .route("/apps/v1/records", post(api_post_record))
@@ -1863,6 +1924,25 @@ impl Apps {
             .route("/a/{app}/{*path}", any(proxy_path))
             .with_state(self.clone())
     }
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    from: Option<u64>,
+    to: Option<u64>,
+}
+
+/// `GET /apps/v1/usage?from=&to=` (unix seconds, at most 24 h; default the
+/// last full hour): every hour of app use this node heard, as metered and
+/// gossiped (signed) by the node that ran it, priced at that node's rates.
+async fn api_usage(State(a): State<Apps>, axum::extract::Query(q): axum::extract::Query<UsageQuery>) -> Response {
+    let now = now_secs();
+    let to = q.to.unwrap_or(now / usage::HOUR_SECS * usage::HOUR_SECS);
+    let from = q.from.unwrap_or(to.saturating_sub(usage::HOUR_SECS));
+    if from >= to || to - from > usage::KEEP_HOURS * usage::HOUR_SECS {
+        return (StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error": "need from < to and a window of at most 24 h"}))).into_response();
+    }
+    axum::Json(serde_json::json!({ "from": from, "to": to, "usage": a.usage_between(from, to) })).into_response()
 }
 
 async fn api_list(State(a): State<Apps>) -> Response {

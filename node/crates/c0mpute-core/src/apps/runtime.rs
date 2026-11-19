@@ -364,6 +364,19 @@ pub async fn layer_quota_mb(limit_bytes: u64) -> Option<u64> {
     (limit_bytes > 0 && storage().await.quota).then_some((limit_bytes >> 20).max(1))
 }
 
+/// CPU, memory and network counters of the app's container right now
+/// (`docker stats --no-stream`), or None when docker cannot say.
+pub async fn stats(app_id: &str) -> Option<super::usage::Stats> {
+    let out = docker(
+        &["stats".into(), "--no-stream".into(), "--format".into(), "{{json .}}".into(), container_name(app_id)],
+        None,
+        Duration::from_secs(30),
+    )
+    .await
+    .ok()?;
+    super::usage::parse_stats(String::from_utf8_lossy(&out).lines().next()?)
+}
+
 /// Bytes the app has written inside its container (docker's own count of
 /// the writable layer; the state volume is not in it).
 pub async fn layer_bytes(app_id: &str) -> Option<u64> {
