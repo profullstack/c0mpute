@@ -290,6 +290,8 @@ impl SessionStore {
             crate::speech::python_path()
         } else if engine == "chatterbox" {
             crate::speech::chatterbox_python()
+        } else if engine == "qwen3" {
+            crate::speech::qwen3_python()
         } else {
             crate::speech::kokoro_python_installed().unwrap_or_else(crate::speech::kokoro_python)
         };

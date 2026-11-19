@@ -522,6 +522,21 @@ async fn voices() -> Json<VoiceCatalog> {
                     VoiceItem { id: "quill", label: "Quill · GPU", presentation: "masculine" },
                 ],
             },
+            // GPU nodes only: Qwen3-TTS, ten languages (the locale picks it).
+            VoiceEngine {
+                id: "qwen3",
+                voices: vec![
+                    VoiceItem { id: "qwen3-vivian", label: "Vivian · Qwen3 GPU", presentation: "feminine" },
+                    VoiceItem { id: "qwen3-serena", label: "Serena · Qwen3 GPU", presentation: "feminine" },
+                    VoiceItem { id: "qwen3-uncle-fu", label: "Uncle Fu · Qwen3 GPU", presentation: "masculine" },
+                    VoiceItem { id: "qwen3-dylan", label: "Dylan · Qwen3 GPU", presentation: "masculine" },
+                    VoiceItem { id: "qwen3-eric", label: "Eric · Qwen3 GPU", presentation: "masculine" },
+                    VoiceItem { id: "qwen3-ryan", label: "Ryan · Qwen3 GPU", presentation: "masculine" },
+                    VoiceItem { id: "qwen3-aiden", label: "Aiden · Qwen3 GPU", presentation: "masculine" },
+                    VoiceItem { id: "qwen3-ono-anna", label: "Ono Anna · Qwen3 GPU", presentation: "feminine" },
+                    VoiceItem { id: "qwen3-sohee", label: "Sohee · Qwen3 GPU", presentation: "feminine" },
+                ],
+            },
         ],
         agent_profiles: crate::speech_profiles::AGENTS
             .iter()
@@ -1287,6 +1302,7 @@ fn valid_tts_voice(engine: &str, voice: &str) -> bool {
         ]
         .contains(&voice),
         "chatterbox" => crate::speech::CHATTERBOX_VOICES.contains(&voice),
+        "qwen3" => crate::speech::QWEN3_VOICES.contains(&voice),
         _ => false,
     }
 }

@@ -404,7 +404,7 @@ async fn run_tts_job(
     let job_dir = safe_job_dir(cache_root, &job.accept.job_id)?;
     fs::create_dir_all(&job_dir).await?;
     let output_path = job_dir.join("speech.wav");
-    if inline.engine == "pocket" || inline.engine == "chatterbox" {
+    if inline.engine == "pocket" || inline.engine == "chatterbox" || inline.engine == "qwen3" {
         // Model load dominates a one-shot job (Chatterbox ~10-30 s), so these
         // engines speak through a warm worker this node keeps between jobs.
         let spoken = warm_say(&inline).await?;
