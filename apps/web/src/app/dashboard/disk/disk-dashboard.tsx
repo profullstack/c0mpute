@@ -31,6 +31,31 @@ type Node = {
   passed: number;
   challenged: number;
   offer: { free_bytes: number; total_bytes: number; per_gib_month: number } | null;
+  app_earned_usd: number;
+  app_own_usd: number;
+  app_cpu_hours: number;
+  apps: number;
+};
+type App = {
+  app_id: string;
+  name: string;
+  url: string;
+  via: "claim" | "owner";
+  live: boolean;
+  healthy: boolean | null;
+  holders: number;
+  hours: number;
+  cpu_hours: number;
+  ram_gib_hours: number;
+  disk_gib: number;
+  egress_bytes: number;
+  ingress_bytes: number;
+  cpu_usd: number;
+  ram_usd: number;
+  disk_usd: number;
+  egress_usd: number;
+  spend_usd: number;
+  own_usd: number;
 };
 type Claim = { kind: "site" | "owner"; value: string; label: string | null };
 type Dash = {
@@ -41,7 +66,9 @@ type Dash = {
   totals: Totals;
   buckets: Bucket[];
   sites: Site[];
+  apps: App[];
   nodes: Node[];
+  by_kind: { storage: Totals; apps: Totals };
   latest_hour: number | null;
   history_from: number | null;
   claims: Claim[];
@@ -120,7 +147,7 @@ export function DiskDashboard() {
   if (!me) {
     return (
       <div className="space-y-4 text-sm leading-7">
-        <p>Sign in to see your hosted sites, what they cost, and what your nodes earn holding other people&apos;s sites. A CoinPay account with a DID is required.</p>
+        <p>Sign in to see your hosted sites and apps, what they cost, and what your nodes earn hosting other people&apos;s. A CoinPay account with a DID is required.</p>
         <a
           href={`/api/auth/coinpay/login?next=${encodeURIComponent("/dashboard/disk")}`}
           className="inline-block !border border-[var(--color-accent)] px-4 py-2 accent"
@@ -155,6 +182,7 @@ export function DiskDashboard() {
         <>
           <Summary data={data} />
           <SitesTable data={data} onChange={load} />
+          <AppsTable data={data} />
           <Chart data={data} />
           <NodesTable data={data} />
           <AddSite onDone={load} />
@@ -170,11 +198,23 @@ function Summary({ data }: { data: Dash }) {
   const held = data.nodes.reduce((a, n) => a + n.held_bytes, 0);
   const stored = data.sites.reduce((a, s) => a + (s.size_bytes ?? 0), 0);
   const monthly = data.sites.reduce((a, s) => a + s.monthly_usd, 0);
+  const k = data.by_kind;
+  const cpuServed = data.nodes.reduce((a, n) => a + n.app_cpu_hours, 0);
   const tiles = [
-    { k: "disk earned", v: usd(t.earned_usd), sub: `holding ${bytes(held)} of others' sites now`, cls: "accent" },
-    { k: "storage spend", v: usd(t.spend_usd), sub: `${data.sites.length} sites, ${bytes(stored)}; ~${usd(monthly)}/month now`, cls: "accent" },
+    {
+      k: "hosting earned",
+      v: usd(t.earned_usd),
+      sub: `disk ${usd(k.storage.earned_usd)} (holding ${bytes(held)}) · apps ${usd(k.apps.earned_usd)} (${cpuServed.toFixed(1)} CPU-h)`,
+      cls: "accent",
+    },
+    {
+      k: "hosting spend",
+      v: usd(t.spend_usd),
+      sub: `sites ${usd(k.storage.spend_usd)} (${data.sites.length}, ${bytes(stored)}, ~${usd(monthly)}/mo) · apps ${usd(k.apps.spend_usd)} (${data.apps.length})`,
+      cls: "accent",
+    },
     { k: "net", v: usd(t.net_usd), sub: t.net_usd >= 0 ? "earned minus spend" : "spending more than earning", cls: t.net_usd < 0 ? "text-[var(--color-warn)]" : "accent" },
-    { k: "your sites on your nodes", v: usd(t.own_usd), sub: "paid to yourself: neither", cls: "text-[var(--color-fg)]" },
+    { k: "yours on your nodes", v: usd(t.own_usd), sub: "paid to yourself: neither", cls: "text-[var(--color-fg)]" },
   ];
   return (
     <section className="grid grid-cols-2 sm:grid-cols-4 gap-3" aria-label="totals">
@@ -186,7 +226,7 @@ function Summary({ data }: { data: Dash }) {
         </div>
       ))}
       <p className="col-span-2 sm:col-span-4 text-xs text-[var(--color-dim)]">
-        Accrued by the hosting settlement rule over the {data.range} window. The site owner&apos;s node pays its holders from its own wallet each settlement period.
+        Sites: accrued by the hosting settlement rule; the owner&apos;s node pays its holders from its own wallet. Apps: metered by the node that ran them (CPU, RAM, disk, bandwidth) at its rates; not paid out yet. Window: {data.range}.
       </p>
     </section>
   );
@@ -340,17 +380,79 @@ function Chart({ data }: { data: Dash }) {
   );
 }
 
+function AppsTable({ data }: { data: Dash }) {
+  if (data.apps.length === 0) {
+    return (
+      <section className="space-y-2" aria-label="your apps">
+        <h2 className="font-bold">your apps</h2>
+        <p className="text-[var(--color-dim)] leading-7">
+          No apps yet. Deploy a backend with <code>c0mpute apps deploy</code>, then add its app id or your owner key below to see its CPU, RAM, disk and bandwidth bill.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="space-y-2" aria-label="your apps">
+      <h2 className="font-bold">your apps</h2>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[820px]">
+          <thead className="text-xs text-[var(--color-dim)]">
+            <tr>
+              <th className="text-left font-normal py-1">app</th>
+              <th className="text-right font-normal">CPU</th>
+              <th className="text-right font-normal">RAM</th>
+              <th className="text-right font-normal">disk</th>
+              <th className="text-right font-normal">bandwidth</th>
+              <th className="text-right font-normal">spend ({data.range})</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.apps.map((a) => (
+              <tr key={a.app_id} className="border-t border-[var(--color-rule)] align-top">
+                <td className="py-1.5">
+                  <a href={a.url} target="_blank" rel="noopener" className="accent">
+                    {a.name}
+                  </a>
+                  <div className="text-xs text-[var(--color-dim)]">
+                    {a.app_id} · {a.live ? (a.healthy ? "healthy" : "not healthy") : "not seen on the gateway"} · {a.holders} copies · ran {a.hours.toFixed(1)} h
+                  </div>
+                </td>
+                <td className="text-right">
+                  {a.cpu_hours.toFixed(2)} CPU-h<div className="text-xs text-[var(--color-dim)]">{usd(a.cpu_usd)}</div>
+                </td>
+                <td className="text-right">
+                  {a.ram_gib_hours.toFixed(2)} GiB-h<div className="text-xs text-[var(--color-dim)]">{usd(a.ram_usd)}</div>
+                </td>
+                <td className="text-right">
+                  {a.disk_gib.toFixed(2)} GiB<div className="text-xs text-[var(--color-dim)]">{usd(a.disk_usd)}</div>
+                </td>
+                <td className="text-right">
+                  {bytes(a.egress_bytes)} out<div className="text-xs text-[var(--color-dim)]">{bytes(a.ingress_bytes)} in · {usd(a.egress_usd)}</div>
+                </td>
+                <td className="text-right">
+                  {usd(a.spend_usd)}
+                  {a.own_usd > 0 && <div className="text-xs text-[var(--color-dim)]">+{usd(a.own_usd)} to your nodes</div>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function NodesTable({ data }: { data: Dash }) {
   return (
     <section className="space-y-2" aria-label="your nodes' disk">
-      <h2 className="font-bold">your nodes: disk</h2>
+      <h2 className="font-bold">your nodes: hosting</h2>
       {data.nodes.length === 0 ? (
         <p className="text-[var(--color-dim)] leading-7">
-          No nodes on this account. Every node offers disk by default; add yours on <a href="/dashboard/nodes">nodes: compute</a> and its disk earnings show here.
+          No nodes on this account. Every node offers disk by default (and runs apps with the <code>apps</code> role); add yours on <a href="/dashboard/nodes">nodes: compute</a> and its hosting earnings show here.
         </p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px]">
+          <table className="w-full min-w-[820px]">
             <thead className="text-xs text-[var(--color-dim)]">
               <tr>
                 <th className="text-left font-normal py-1">node</th>
@@ -358,7 +460,9 @@ function NodesTable({ data }: { data: Dash }) {
                 <th className="text-right font-normal">free</th>
                 <th className="text-right font-normal">paid data held</th>
                 <th className="text-right font-normal">challenges</th>
-                <th className="text-right font-normal">earned ({data.range})</th>
+                <th className="text-right font-normal">disk earned</th>
+                <th className="text-right font-normal">apps run</th>
+                <th className="text-right font-normal">apps earned</th>
               </tr>
             </thead>
             <tbody>
@@ -383,6 +487,14 @@ function NodesTable({ data }: { data: Dash }) {
                   <td className="text-right">
                     {usd(n.earned_usd)}
                     {n.own_usd > 0 && <div className="text-xs text-[var(--color-dim)]">+{usd(n.own_usd)} your own sites</div>}
+                  </td>
+                  <td className="text-right">
+                    {n.apps}
+                    <div className="text-xs text-[var(--color-dim)]">{n.app_cpu_hours.toFixed(1)} CPU-h</div>
+                  </td>
+                  <td className="text-right">
+                    {usd(n.app_earned_usd)}
+                    {n.app_own_usd > 0 && <div className="text-xs text-[var(--color-dim)]">+{usd(n.app_own_usd)} your own apps</div>}
                   </td>
                 </tr>
               ))}
@@ -409,10 +521,10 @@ function AddSite({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={submit} className="border border-[var(--color-rule)] p-4 space-y-2">
       <label htmlFor="add-site" className="font-bold block">
-        add a site you published from a node
+        add a site or app you published from a node
       </label>
       <p className="text-xs text-[var(--color-dim)]">
-        A site id, its <code>/s/&lt;id&gt;/</code> link, or your 64-character owner key (adds every site you own, now and later). <code>c0mpute hosting ls</code> shows both.
+        A site or app id, its <code>/s/&lt;id&gt;/</code> or <code>/a/&lt;id&gt;/</code> link, or your 64-character owner key (adds every site and app you own, now and later). <code>c0mpute hosting ls</code> and <code>c0mpute apps ls</code> show them.
       </p>
       <div className="flex flex-wrap gap-2">
         <input
@@ -436,6 +548,11 @@ function Notes({ data }: { data: Dash }) {
       <p>
         A paid site owes each node holding it <code>price × GiB held × time / 30 days × challenges passed / asked</code>. A node that passes fewer than half its availability
         challenges in an hour is owed nothing for it. Free sites cost nothing and earn nothing.
+      </p>
+      <p>
+        An app is metered by the node running it, about once a minute: CPU-hours, GiB-hours of RAM, GiB-months of disk (what it wrote plus its state) and GiB sent out
+        (inbound is free), at that node&apos;s <code>[apps] price_*</code> rates (default $0.01/CPU-h, $0.002/GiB-h RAM, $0.004/GiB-mo disk, $0.01/GiB out). The node
+        gossips one signed report per app and hour (<code>GET /apps/v1/usage</code>): its own account, attributable to it. Nothing is paid from it yet.
       </p>
       <p>
         These numbers are worked out from the public, signed receipts every gateway sees (<code>GET /hosting/v1/dues</code>) and recorded hour by hour.

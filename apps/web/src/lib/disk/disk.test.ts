@@ -4,6 +4,8 @@ import type { Sql } from "../chat/store";
 import { cleanDue, createDiskStore, parseSiteClaim, type GatewayDue } from "./store";
 import { hoursToRecord, LOOKBACK_S, recordFrom, SETTLE_LAG_S } from "./recorder";
 import { buildDiskReport } from "./report";
+import { cleanReport, createAppUsageStore, priceParts, type UsageReport } from "./apps";
+import { recordAppsFrom } from "./recorder";
 
 function memSql(): Sql {
   const db = new Database(":memory:");
@@ -171,5 +173,83 @@ describe("buildDiskReport", () => {
     // Only the part of the hour inside the window counts: 30 of 60 minutes.
     expect(r.totals.earned_usd).toBeCloseTo(0.006, 9);
     expect(r.buckets.filter((b) => b.earned_usd > 0).length).toBe(6);
+  });
+});
+
+describe("apps usage", () => {
+  const H = 3_600_000;
+  const now = 1_800_000_000_000 - (1_800_000_000_000 % H) + 30 * 60_000;
+  const h0 = now - 30 * 60_000 - H;
+  const rates = { cpu_hour: 10_000, ram_gib_hour: 2_000, disk_gib_month: 4_000, egress_gib: 10_000 };
+  const report = (o: Partial<UsageReport> = {}): UsageReport => ({
+    app_id: "aaaaaaaaaaaaaaaaaaaa",
+    owner: OWNER_ME,
+    holder: THEIRS,
+    hour: h0 / 1000,
+    secs: 3600,
+    cpu_s: 1800,
+    ram_gib_h: 1,
+    disk_gib_h: 2,
+    rx_bytes: 5,
+    tx_bytes: 2 ** 30,
+    rates,
+    ...o,
+  });
+
+  test("cleanReport + priceParts match the node's rule", () => {
+    const r = cleanReport(report())!;
+    expect(priceParts(r).total).toBe(Math.floor(5_000 + 2_000 + (4_000 * 2) / 720 + 10_000));
+    expect(cleanReport({ ...report(), hour: 7 })).toBeNull();
+    expect(cleanReport({ ...report(), cpu_s: -1 })).toBeNull();
+    expect(cleanReport({ ...report(), holder: "x" })).toBeNull();
+  });
+
+  test("recorder files app usage, re-reads two hours, stores priced rows", async () => {
+    const sql = memSql();
+    const apps = createAppUsageStore(sql);
+    const cursors = createDiskStore(sql);
+    const nowS = 1_800_000_000;
+    const urls: string[] = [];
+    const fetcher = (async (u: string) => {
+      urls.push(u);
+      return new Response(JSON.stringify({ usage: [report({ hour: Math.floor(nowS / 3600) * 3600 - 7200 })] }));
+    }) as unknown as typeof fetch;
+    expect(await recordAppsFrom("https://g", apps, cursors, fetcher, nowS)).toBe(1);
+    expect(await recordAppsFrom("https://g", apps, cursors, fetcher, nowS)).toBe(1); // re-read, same row
+    const rows = await apps.usage({ sinceMs: 0, nodes: [], apps: [], owners: [OWNER_ME] });
+    expect(rows.length).toBe(1);
+    expect(rows[0].amount_micros).toBeGreaterThan(17_000);
+    expect(urls.length).toBe(2);
+  });
+
+  test("report: my app elsewhere is spend, split by part; their app on my node is earned", () => {
+    const row = (o: Partial<UsageReport>) => {
+      const r = report(o);
+      return { ...r, node: r.holder.slice(-8), hour: r.hour * 1000, amount_micros: 0 };
+    };
+    const r = buildDiskReport({
+      range: "24h",
+      now,
+      rows: [],
+      nodes: [{ node: "ffig7P4J", label: null, online: true }],
+      sites: [],
+      owners: [OWNER_ME],
+      live: [],
+      appRows: [row({}), row({ app_id: "bbbbbbbbbbbbbbbbbbbb", owner: OWNER_THEM, holder: MINE, tx_bytes: 0, disk_gib_h: 0, ram_gib_h: 0 })],
+      liveApps: [{ app_id: "aaaaaaaaaaaaaaaaaaaa", name: "api", owner: OWNER_ME, healthy: true, holders: [THEIRS], primary: THEIRS, replicas: 3 }],
+      appIds: [],
+    });
+    expect(r.apps.length).toBe(1);
+    const a = r.apps[0];
+    expect(a).toMatchObject({ name: "api", healthy: true, via: "owner" });
+    expect(a.cpu_hours).toBeCloseTo(0.5, 9);
+    expect(a.cpu_usd).toBeCloseTo(0.005, 9);
+    expect(a.egress_usd).toBeCloseTo(0.01, 9);
+    expect(a.spend_usd).toBeCloseTo(0.017011, 5);
+    expect(r.by_kind.apps.spend_usd).toBeCloseTo(0.017011, 5);
+    expect(r.by_kind.apps.earned_usd).toBeCloseTo(0.005, 9);
+    expect(r.totals.earned_usd).toBeCloseTo(0.005, 9);
+    expect(r.nodes[0]).toMatchObject({ apps: 1 });
+    expect(r.nodes[0].app_cpu_hours).toBeCloseTo(0.5, 9);
   });
 });
