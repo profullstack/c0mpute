@@ -39,6 +39,16 @@ type Dashboard = {
   history_from: number | null;
 };
 
+// The part of /api/v1/disk this page uses: hosting (sites, apps, disk) money.
+type HostingTotals = { earned_usd: number; spend_usd: number; own_usd: number; net_usd: number };
+type Hosting = {
+  totals: HostingTotals;
+  by_kind: { storage: HostingTotals; apps: HostingTotals };
+  sites: unknown[];
+  apps: unknown[];
+  nodes: { node: string; earned_usd: number; own_usd: number; held_bytes: number; app_earned_usd: number; app_own_usd: number; app_cpu_hours: number; apps: number }[];
+};
+
 const RANGES = ["1h", "3h", "24h", "7d", "30d"] as const;
 // Validated pair on the site's dark surface (dataviz validator, CVD ΔE 23):
 // earned = the site's green, spend = violet. Identity also by legend + table.
@@ -84,6 +94,7 @@ export function EarningsDashboard() {
   const [me, setMe] = useState<{ name: string | null; did: string } | null | undefined>(undefined);
   const [range, setRange] = useState<(typeof RANGES)[number]>("24h");
   const [data, setData] = useState<Dashboard | null>(null);
+  const [hosting, setHosting] = useState<Hosting | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -105,6 +116,11 @@ export function EarningsDashboard() {
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error?.message ?? `HTTP ${r.status}`);
       setData(await r.json());
       setErr(null);
+      // Hosting money comes from the hosting dashboard's API; the page works without it.
+      fetch(`/api/v1/disk?range=${range}`, { cache: "no-store" })
+        .then((h) => (h.ok ? h.json() : null))
+        .then((h) => setHosting(h && h.by_kind ? h : null))
+        .catch(() => setHosting(null));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -165,8 +181,9 @@ export function EarningsDashboard() {
       {data && (
         <>
           <Summary data={data} />
+          {hosting && <HostingSummary hosting={hosting} range={data.range} />}
           {data.nodes.length > 0 && <Chart data={data} />}
-          <NodesTable data={data} onChange={load} />
+          <NodesTable data={data} onChange={load} hosting={hosting} />
           <AutoscaleTable />
           {data.by_type.length > 0 && <TypesTable data={data} />}
           <ClaimForm onDone={load} />
@@ -322,7 +339,55 @@ function Chart({ data }: { data: Dashboard }) {
   );
 }
 
-function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void }) {
+function bytesShort(n: number): string {
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(0)} MiB`;
+  if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
+  return `${(n / 1024 ** 4).toFixed(2)} TiB`;
+}
+
+/** Hosting next to compute: disk + app earnings, and what your sites and apps cost. */
+function HostingSummary({ hosting, range }: { hosting: Hosting; range: string }) {
+  const k = hosting.by_kind;
+  const cpu = hosting.nodes.reduce((a, n) => a + n.app_cpu_hours, 0);
+  const held = hosting.nodes.reduce((a, n) => a + n.held_bytes, 0);
+  const apps = hosting.nodes.reduce((a, n) => a + n.apps, 0);
+  const tiles = [
+    { k: "disk earned", v: usd(k.storage.earned_usd), sub: `holding ${bytesShort(held)} of others' sites` },
+    { k: "apps earned", v: usd(k.apps.earned_usd), sub: `${apps} apps run, ${cpu.toFixed(1)} CPU-h served` },
+    { k: "your hosting costs", v: usd(hosting.totals.spend_usd), sub: `sites ${usd(k.storage.spend_usd)} · apps ${usd(k.apps.spend_usd)} (CPU, RAM, disk, bandwidth)` },
+    {
+      k: "hosting net",
+      v: usd(hosting.totals.net_usd),
+      sub: hosting.totals.own_usd > 0 ? `+${usd(hosting.totals.own_usd)} paid to yourself` : "earned minus costs",
+      warn: hosting.totals.net_usd < 0,
+    },
+  ];
+  return (
+    <section className="space-y-2" aria-label="hosting">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="font-bold">hosting: sites, apps, disk</h2>
+        <a href={`/dashboard/disk?range=${range}`} className="text-xs">
+          details →
+        </a>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {tiles.map((x) => (
+          <div key={x.k} className="border border-[var(--color-rule)] bg-[var(--color-card)] p-3 space-y-1">
+            <div className="text-xs text-[var(--color-dim)]">{x.k}</div>
+            <div className={`text-xl font-bold ${x.warn ? "text-[var(--color-warn)]" : "accent"}`}>{x.v}</div>
+            <div className="text-xs text-[var(--color-dim)]">{x.sub}</div>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-[var(--color-dim)]">
+        Not in the compute totals above. Sites: accrued by the hosting settlement rule. Apps: metered by the node that ran them at its <code>[apps] price_*</code> rates, not paid out yet.
+      </p>
+    </section>
+  );
+}
+
+function NodesTable({ data, onChange, hosting }: { data: Dashboard; onChange: () => void; hosting: Hosting | null }) {
+  const hostingOf = new Map((hosting?.nodes ?? []).map((n) => [n.node, n]));
   if (data.nodes.length === 0) {
     return (
       <section className="border border-[var(--color-rule)] p-4 space-y-2 leading-7">
@@ -349,6 +414,7 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
               <th className="text-right font-normal">auction (unsettled)</th>
               <th className="text-right font-normal">spend</th>
               <th className="text-right font-normal">net</th>
+              <th className="text-right font-normal">hosting earned</th>
               <th className="text-left font-normal pl-3">running cost</th>
             </tr>
           </thead>
@@ -385,6 +451,21 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
                   {n.spend_basis === "none" ? "-" : usd(n.spend_usd)}
                 </td>
                 <td className={`text-right ${n.net_usd < 0 ? "text-[var(--color-warn)]" : ""}`}>{usd(n.net_usd)}</td>
+                <td className="text-right">
+                  {(() => {
+                    const h = hostingOf.get(n.node);
+                    if (!h) return <span className="text-[var(--color-dim)]">-</span>;
+                    return (
+                      <>
+                        {usd(h.earned_usd + h.app_earned_usd)}
+                        <div className="text-xs text-[var(--color-dim)]">
+                          disk {usd(h.earned_usd)} · apps {usd(h.app_earned_usd)}
+                          {h.app_cpu_hours > 0 ? ` (${h.app_cpu_hours.toFixed(1)} CPU-h)` : ""}
+                        </div>
+                      </>
+                    );
+                  })()}
+                </td>
                 <td className="pl-3">{n.kind === "c0mpute" ? <CostEditor node={n} onSaved={onChange} /> : <span className="text-[var(--color-dim)]">-</span>}</td>
               </tr>
             ))}
