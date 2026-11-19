@@ -319,6 +319,12 @@ pub struct HostingConfig {
     /// Seconds between challenge rounds.
     #[serde(default = "default_challenge_every")]
     pub challenge_every_secs: u64,
+    /// Identity directories (holding `identity.key`, like `<data_dir>/buyer`)
+    /// of other owners on this machine whose sites this node challenges too:
+    /// a site published with another HOME is otherwise never challenged, so
+    /// its holders are never owed anything.
+    #[serde(default)]
+    pub extra_challengers: Vec<std::path::PathBuf>,
     /// Seconds between settlement rounds (paying preferred holders of the
     /// sites this node pays for). Payments only move when `[payments]` is on.
     #[serde(default = "default_settle_every")]
@@ -344,6 +350,7 @@ impl Default for HostingConfig {
             payout_coin: crate::payments::default_coin(),
             challenge: default_challenge(),
             challenge_every_secs: default_challenge_every(),
+            extra_challengers: Vec::new(),
             settle_every_secs: default_settle_every(),
             git_pushes: default_git_pushes(),
         }

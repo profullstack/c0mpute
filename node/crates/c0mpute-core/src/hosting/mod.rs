@@ -305,6 +305,9 @@ struct Inner {
     /// Signs challenge receipts (and is the payer identity for settlement).
     challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
     challenger_hex: Option<String>,
+    /// More owner keys this node challenges for (`[hosting] extra_challengers`):
+    /// sites published from another identity on this machine.
+    extra_challengers: Vec<(c0mpute_net::libp2p::identity::Keypair, String)>,
     challenge: ChallengeScope,
     challenge_every: Duration,
     price: Option<Micros>,
@@ -340,6 +343,11 @@ impl ChallengeScope {
 /// Most (site, holder) challenges in one round, so a gateway that knows many
 /// sites stays at a few MiB of challenge traffic per round.
 const CHALLENGES_PER_ROUND: usize = 32;
+/// Most challenges of this node's own sites' holders per round. Every holder
+/// of an own site is asked every round up to this; past it a random subset,
+/// so no holder is starved (a holder never asked in an hour is owed nothing
+/// for it).
+const OWN_CHALLENGES_PER_ROUND: usize = 256;
 /// Receipts kept in memory/on disk for settlement.
 const OWN_RECEIPTS_MAX: usize = 200_000;
 
@@ -383,6 +391,8 @@ pub struct Options {
     pub require_proofs: bool,
     /// Key that signs proof-of-storage receipts; no challenges without it.
     pub challenger: Option<c0mpute_net::libp2p::identity::Keypair>,
+    /// More keys whose sites this node challenges the holders of.
+    pub extra_challengers: Vec<c0mpute_net::libp2p::identity::Keypair>,
     pub challenge: ChallengeScope,
     pub challenge_every: Duration,
     /// Hosting price this node asks (micro-USD per GiB-month), gossiped.
@@ -413,6 +423,7 @@ impl Default for Options {
             dns: dns::Verifier::default(),
             require_proofs: false,
             challenger: None,
+            extra_challengers: Vec::new(),
             challenge: ChallengeScope::Own,
             challenge_every: Duration::from_secs(600),
             price: None,
@@ -516,6 +527,11 @@ impl Hosting {
             host_hook: std::sync::OnceLock::new(),
             challenger: opts.challenger,
             challenger_hex,
+            extra_challengers: opts
+                .extra_challengers
+                .into_iter()
+                .filter_map(|k| site::owner_hex(&k).map(|h| (k, h)))
+                .collect(),
             challenge: opts.challenge,
             challenge_every: opts.challenge_every,
             price: opts.price,
@@ -2278,35 +2294,44 @@ impl Hosting {
         if self.0.challenge == ChallengeScope::Off {
             return Vec::new();
         }
-        let (mut own, mut others): (Vec<(SiteRecord, String)>, Vec<(SiteRecord, String)>) = (Vec::new(), Vec::new());
+        // This node's key first, then any extra owner keys it challenges for.
+        let keys: Vec<(c0mpute_net::libp2p::identity::Keypair, String)> =
+            std::iter::once((kp.clone(), me_key)).chain(self.0.extra_challengers.iter().cloned()).collect();
+        type Pick = (SiteRecord, String, c0mpute_net::libp2p::identity::Keypair);
+        let (mut own, mut others): (Vec<Pick>, Vec<Pick>) = (Vec::new(), Vec::new());
         {
             let map = self.0.map.read().await;
             for rec in map.records.values() {
-                let mine = rec.owner == me_key || rec.payer_key() == me_key;
-                if !mine && self.0.challenge != ChallengeScope::All {
+                let signer = keys.iter().find(|(_, h)| rec.owner == *h || rec.payer_key() == h.as_str());
+                if signer.is_none() && self.0.challenge != ChallengeScope::All {
                     continue;
                 }
                 for holder in map.holders(&rec.site_id) {
                     if holder == self.0.me {
                         continue;
                     }
-                    if mine {
-                        own.push((rec.clone(), holder));
-                    } else {
-                        others.push((rec.clone(), holder));
+                    match signer {
+                        Some((k, _)) => own.push((rec.clone(), holder, k.clone())),
+                        None => others.push((rec.clone(), holder, kp.clone())),
                     }
                 }
             }
         }
-        own.sort_by(|a, b| a.0.site_id.cmp(&b.0.site_id).then(a.1.cmp(&b.1)));
-        // Others: a random sample each round.
+        // Every holder of an own site each round (a random subset past the
+        // cap); before, a sorted list cut at the cap asked the same few
+        // holders forever and the rest were never owed anything. Others: a
+        // random sample.
         {
             use rand::seq::SliceRandom;
-            others.shuffle(&mut rand::thread_rng());
+            let mut rng = rand::thread_rng();
+            own.shuffle(&mut rng);
+            others.shuffle(&mut rng);
         }
-        let picks: Vec<(SiteRecord, String)> = own.into_iter().chain(others).take(CHALLENGES_PER_ROUND).collect();
+        own.truncate(OWN_CHALLENGES_PER_ROUND);
+        others.truncate(CHALLENGES_PER_ROUND.saturating_sub(own.len().min(CHALLENGES_PER_ROUND)));
+        let picks: Vec<Pick> = own.into_iter().chain(others).collect();
         let mut out = Vec::new();
-        for (rec, holder) in picks {
+        for (rec, holder, kp) in picks {
             match self.challenge_one(&kp, &rec, &holder).await {
                 Ok(r) => out.push(r),
                 Err(e) => debug!(site = %rec.site_id, %holder, err = %e, "hosting: no challenge"),
