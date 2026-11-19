@@ -433,7 +433,7 @@ mod tests {
             1,
             1024 * MIB,
             vec![],
-            Some(HostingTerms { preferred_hosts: vec![], price_per_gib_month: 1, payer: None }),
+            Some(HostingTerms { preferred_hosts: vec![holder.clone()], price_per_gib_month: 1, payer: None }),
         )
         .unwrap();
         assert_eq!(effective_price(&cheap), FLOOR_PER_GIB_MONTH);
