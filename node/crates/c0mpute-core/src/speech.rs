@@ -111,11 +111,12 @@ pub(crate) const QWEN3_VOICES: &[&str] = &[
     "qwen3-sohee",
 ];
 const QWEN3_PACKAGES: &[&str] = &["qwen-tts==0.1.1"];
-/// The model a GPU with at least this much memory gets: the 1.7B CustomVoice.
-/// Measured on an RTX 3060 shared with a 9B LLM (2026-11-19): 1.7B peaks at
-/// 4.1 GB and is no slower than the 0.6B (2.3 GB), which per-token overhead
-/// dominates, so only small cards get the 0.6B.
-const QWEN3_LARGE_MIN_VRAM_MIB: u64 = 8 * 1024;
+/// The 1.7B CustomVoice goes to a GPU with at least this much memory FREE
+/// when Qwen3-TTS is installed; else the 0.6B. It peaks at 4.1 GB (0.6B:
+/// 2.3 GB) on an RTX 3060. Free, not total: on 2026-11-19 a 12 GB 3060 got
+/// the 1.7B by total size, but its LLM (Ollama, 7.2 GB) left 4.4 GB, and
+/// longer lines died with CUDA out of memory.
+const QWEN3_LARGE_MIN_FREE_VRAM_MIB: u64 = 6 * 1024;
 pub(crate) const QWEN3_MODEL_LARGE: &str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice";
 pub(crate) const QWEN3_MODEL_SMALL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 
@@ -134,10 +135,10 @@ pub fn has_cuda_gpu() -> bool {
     })
 }
 
-/// Total memory of the largest NVIDIA GPU, MiB (None without one).
-fn gpu_total_mib() -> Option<u64> {
+/// Free memory of the GPU with the most free, MiB (None without one).
+fn gpu_free_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
     String::from_utf8_lossy(&out.stdout)
@@ -147,14 +148,15 @@ fn gpu_total_mib() -> Option<u64> {
 }
 
 /// Which Qwen3-TTS model this node installs: `C0MPUTE_QWEN3_TTS_MODEL`, else
-/// the 1.7B on a GPU with 8 GiB or more, else the 0.6B.
+/// the 1.7B when the GPU has 6 GiB or more free (an LLM on the same card
+/// counts), else the 0.6B.
 pub fn qwen3_model_choice() -> String {
     if let Ok(m) = std::env::var("C0MPUTE_QWEN3_TTS_MODEL")
         && (m == QWEN3_MODEL_LARGE || m == QWEN3_MODEL_SMALL)
     {
         return m;
     }
-    if gpu_total_mib().is_some_and(|m| m >= QWEN3_LARGE_MIN_VRAM_MIB) {
+    if gpu_free_mib().is_some_and(|m| m >= QWEN3_LARGE_MIN_FREE_VRAM_MIB) {
         QWEN3_MODEL_LARGE.into()
     } else {
         QWEN3_MODEL_SMALL.into()
