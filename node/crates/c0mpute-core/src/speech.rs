@@ -663,6 +663,12 @@ pub(crate) async fn python_has_pip_at(python: &Path) -> bool {
 }
 
 async fn bootstrap_pip() -> Result<()> {
+    bootstrap_pip_at(&python_path()).await
+}
+
+/// Install the hash-pinned pip wheel into the environment of `python` (a venv
+/// created `--without-pip`).
+pub(crate) async fn bootstrap_pip_at(python: &Path) -> Result<()> {
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?
@@ -677,7 +683,7 @@ async fn bootstrap_pip() -> Result<()> {
 
     let wheel_path = speech_root().join(PIP_BOOTSTRAP_WHEEL);
     tokio::fs::write(&wheel_path, &wheel).await?;
-    let mut locate_site_packages = Command::new(python_path());
+    let mut locate_site_packages = Command::new(python);
     locate_site_packages
         .args([
             "-c",
@@ -697,7 +703,7 @@ async fn bootstrap_pip() -> Result<()> {
     tokio::fs::create_dir_all(&site_packages).await?;
 
     let extract_wheel = "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
-    let mut install = Command::new(python_path());
+    let mut install = Command::new(python);
     install
         .args(["-c", extract_wheel])
         .arg(&wheel_path)
@@ -721,19 +727,41 @@ async fn install_qwen3_engine() -> Result<()> {
     let dir = qwen3_venv_dir();
     if !qwen3_python().is_file() {
         tokio::fs::create_dir_all(&root).await?;
-        if let Some(uv) = find_uv() {
-            let mut command = Command::new(uv);
-            command.args(["venv", "--seed", "--python", "3.12"]).arg(&dir);
-            run_checked(command, "create the Qwen3-TTS Python environment with uv").await?;
-        } else {
-            let interpreter = KOKORO_PYTHONS
-                .iter()
-                .find(|p| python_version(Path::new(p)).is_some_and(|v| v >= (3, 10) && v < (3, 14)))
-                .context("Qwen3-TTS needs Python 3.10 to 3.13, or uv")?;
-            let mut command = Command::new(interpreter);
-            command.args(["-m", "venv"]).arg(&dir);
-            run_checked(command, "create the Qwen3-TTS Python environment").await?;
+        // A Python already on the box first: `uv venv --python 3.12` on a
+        // box without one downloads CPython from GitHub, which a GPU rental
+        // with flaky DNS fails (Vast, 2026-11-19).
+        let system = KOKORO_PYTHONS
+            .iter()
+            .chain(["python3"].iter())
+            .find(|p| python_version(Path::new(p)).is_some_and(|v| v >= (3, 10) && v < (3, 14)));
+        match (system, find_uv()) {
+            (Some(python), Some(uv)) => {
+                let mut command = Command::new(uv);
+                command.args(["venv", "--seed", "--python", python]).arg(&dir);
+                run_checked(command, "create the Qwen3-TTS Python environment with uv").await?;
+            }
+            (Some(python), None) => {
+                let mut command = Command::new(python);
+                command.args(["-m", "venv"]).arg(&dir);
+                if run_checked(command, "create the Qwen3-TTS Python environment").await.is_err() {
+                    // Debian/Ubuntu without python3-venv: no ensurepip. Make
+                    // it without pip, then add the pinned pip wheel.
+                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                    let mut command = Command::new(python);
+                    command.args(["-m", "venv", "--without-pip"]).arg(&dir);
+                    run_checked(command, "create the Qwen3-TTS Python environment without pip").await?;
+                }
+            }
+            (None, Some(uv)) => {
+                let mut command = Command::new(uv);
+                command.args(["venv", "--seed", "--python", "3.12"]).arg(&dir);
+                run_checked(command, "create the Qwen3-TTS Python environment with uv").await?;
+            }
+            (None, None) => bail!("Qwen3-TTS needs Python 3.10 to 3.13, or uv"),
         }
+    }
+    if !python_has_pip_at(&qwen3_python()).await {
+        bootstrap_pip_at(&qwen3_python()).await?;
     }
     pip_install_with(&qwen3_python(), QWEN3_PACKAGES).await?;
     let model = qwen3_model_choice();
