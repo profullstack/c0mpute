@@ -13,7 +13,7 @@
 // - agreed = the price in the c0mpute auction, as the aggregators heard it.
 //   It is an offer, not a payment: shown for reference, never as income.
 
-import { operatorEarnings, powerCostUsd } from "../node-costs";
+import { operatorEarnings } from "../node-costs";
 import type { JobBucketRow } from "./store";
 
 export const RANGES = {
@@ -37,7 +37,7 @@ export interface ReportNode {
   node: string;
   label: string | null;
   class: string;
-  /** What the operator says it costs to run, $/hour. Null: estimate power from busy time. */
+  /** What the operator says it costs to run, $/hour (rent includes power). Null: $0. */
   cost_usd_per_hour: number | null;
   online: boolean;
   via: string;
@@ -94,7 +94,7 @@ export interface NodeOut extends Totals {
   via: string;
   /** "infernet" rows are Infernet providers that are not c0mpute nodes. */
   kind: "c0mpute" | "infernet";
-  spend_basis: "fixed" | "power-estimate" | "none";
+  spend_basis: "fixed" | "none";
   cost_usd_per_hour: number | null;
   /** Busy share of the window, 0..1. */
   utilization: number;
@@ -135,8 +135,8 @@ const zero = (): Totals => ({
  * Build the report for `range` ending at `now`.
  *
  * Spend: a node with a set cost accrues it for every hour of the window (a
- * rented box bills whether it is busy or not); one without accrues estimated
- * electricity for its busy time only.
+ * rented box bills whether it is busy or not, and its price already includes
+ * power); one without a cost accrues nothing.
  */
 export function buildReport(input: { range: RangeKey; now: number; nodes: ReportNode[]; rows: JobBucketRow[]; infernet?: InfernetInput | null }): Report {
   const { range, now, nodes } = input;
@@ -162,7 +162,7 @@ export function buildReport(input: { range: RangeKey; now: number; nodes: Report
       online: nd.online,
       via: nd.via,
       kind: "c0mpute",
-      spend_basis: nd.cost_usd_per_hour != null ? "fixed" : "power-estimate",
+      spend_basis: nd.cost_usd_per_hour != null ? "fixed" : "none",
       cost_usd_per_hour: nd.cost_usd_per_hour,
       utilization: 0,
       ...zero(),
@@ -170,19 +170,17 @@ export function buildReport(input: { range: RangeKey; now: number; nodes: Report
   }
   const byType = new Map<string, TypeOut>();
 
-  // c0mpute auctions: jobs, busy time, power estimate, and the agreed price (reference only).
+  // c0mpute auctions: jobs, busy time, and the agreed price (reference only).
   for (const r of input.rows) {
     const nd = byNode.get(r.node);
     if (!nd) continue;
     const b = bucketAt(r.bucket * bucketMs);
     if (!b) continue;
     const agreed = operatorEarnings(r.paid_usd);
-    const power = nd.cost_usd_per_hour == null ? powerCostUsd(nd.class, r.busy_s) : 0;
     for (const t of [b, nd]) {
       t.jobs += r.jobs;
       t.busy_s += r.busy_s;
       t.agreed_usd += agreed;
-      t.spend_usd += power;
     }
     const ty = byType.get(r.type) ?? { type: r.type, jobs: 0, busy_s: 0, agreed_usd: 0 };
     ty.jobs += r.jobs;

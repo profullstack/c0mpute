@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
  *
  * The signed-in operator's nodes: earned (after the house fee) vs spend vs net,
  * per time bucket, per node and per job type. Spend is the running cost the
- * operator set for a node, else estimated electricity for its busy time.
+ * operator set for a node; a node with no cost set counts $0.
  */
 export async function GET(req: Request) {
   const user = await currentUser(req);
