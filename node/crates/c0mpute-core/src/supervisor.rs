@@ -947,6 +947,21 @@ impl Supervisor {
                 max_bytes: cfg.max_bytes,
                 require_proofs: cfg.require_proofs,
                 catalog_path,
+                // Only identities that exist: never create a key here.
+                extra_challengers: if challenger.is_some() {
+                    cfg.extra_challengers
+                        .iter()
+                        .filter_map(|d| match c0mpute_net::identity::existing_keypair(d) {
+                            Some(k) => Some(k),
+                            None => {
+                                tracing::warn!(dir = %d.display(), "hosting: no identity in [hosting] extra_challengers dir; skipped");
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 challenger,
                 challenge,
                 challenge_every: std::time::Duration::from_secs(cfg.challenge_every_secs.max(30)),

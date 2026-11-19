@@ -93,6 +93,13 @@ pub fn load_or_create_job_secret(dir: &Path) -> Result<zeroize::Zeroizing<[u8; 3
     Ok(b)
 }
 
+/// The identity already stored in `<dir>/identity.key`, without generating
+/// one. `None` when there is no (readable) key.
+pub fn existing_keypair(dir: &Path) -> Option<Keypair> {
+    let bytes = std::fs::read(dir.join(KEY_FILE)).ok()?;
+    Keypair::from_protobuf_encoding(&bytes).ok()
+}
+
 /// The peer-id of the identity already stored in `<dir>/identity.key`,
 /// without generating one. `None` when there is no (readable) key.
 pub fn existing_peer_id(dir: &Path) -> Option<libp2p::PeerId> {
