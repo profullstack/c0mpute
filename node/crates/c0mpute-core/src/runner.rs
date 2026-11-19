@@ -46,6 +46,9 @@ pub struct WorkerLoad {
     total_slots: Arc<AtomicUsize>,
     /// Moving average of recent completed jobs' wall time in ms; 0 = none.
     recent_job_ms: Arc<AtomicU64>,
+    /// Unix ms of the last job folded into the average by this process; 0 =
+    /// none yet (a value read from history is not a fresh measurement).
+    measured_at_ms: Arc<AtomicU64>,
     /// Where the average is kept across restarts (see [`Self::with_history`]).
     history: Option<Arc<std::path::PathBuf>>,
     /// The node budget each job reserves `cost` from (see [`crate::budget`]):
@@ -86,6 +89,7 @@ impl WorkerLoad {
             compute_slots,
             total_slots: Arc::new(AtomicUsize::new(total_slots.max(1))),
             recent_job_ms: Arc::new(AtomicU64::new(0)),
+            measured_at_ms: Arc::new(AtomicU64::new(0)),
             history: None,
             budget: None,
             workload: None,
@@ -208,7 +212,23 @@ impl WorkerLoad {
 
     /// Fold a completed job's wall time into the average (weight 0.3 on the
     /// newest, so one outlier does not swing the quote).
+    /// True when no job was measured within `within` (or none since start):
+    /// the average may describe a slowness that is long gone.
+    pub fn estimate_stale(&self, within: Duration) -> bool {
+        let at = self.measured_at_ms.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        at == 0 || now.saturating_sub(at) > within.as_millis() as u64
+    }
+
     pub fn record_job(&self, took: Duration) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
+        self.measured_at_ms.store(now.max(1), Ordering::Relaxed);
         let ms = (took.as_millis() as u64).max(1);
         let _ = self
             .recent_job_ms
@@ -924,6 +944,14 @@ async fn send_receipt(net: &Libp2pNetwork, accept: &JobAccept, receipt: &JobRece
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_history_estimate_is_stale_until_a_job_is_measured() {
+        let load = super::WorkerLoad::new(std::sync::Arc::new(tokio::sync::Semaphore::new(1)), 1);
+        assert!(load.estimate_stale(std::time::Duration::from_secs(900)), "nothing measured yet");
+        load.record_job(std::time::Duration::from_secs(5));
+        assert!(!load.estimate_stale(std::time::Duration::from_secs(900)));
+    }
+
     use super::*;
     use c0mpute_proto::Codec;
 
