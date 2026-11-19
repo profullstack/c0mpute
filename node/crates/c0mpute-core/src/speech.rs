@@ -111,9 +111,11 @@ pub(crate) const QWEN3_VOICES: &[&str] = &[
     "qwen3-sohee",
 ];
 const QWEN3_PACKAGES: &[&str] = &["qwen-tts==0.1.1"];
-/// The model a GPU with at least this much memory gets: the 1.7B CustomVoice
-/// (best quality). Smaller cards, or a card shared with an LLM, get the 0.6B.
-const QWEN3_LARGE_MIN_VRAM_MIB: u64 = 16 * 1024;
+/// The model a GPU with at least this much memory gets: the 1.7B CustomVoice.
+/// Measured on an RTX 3060 shared with a 9B LLM (2026-11-19): 1.7B peaks at
+/// 4.1 GB and is no slower than the 0.6B (2.3 GB), which per-token overhead
+/// dominates, so only small cards get the 0.6B.
+const QWEN3_LARGE_MIN_VRAM_MIB: u64 = 8 * 1024;
 pub(crate) const QWEN3_MODEL_LARGE: &str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice";
 pub(crate) const QWEN3_MODEL_SMALL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 
@@ -145,7 +147,7 @@ fn gpu_total_mib() -> Option<u64> {
 }
 
 /// Which Qwen3-TTS model this node installs: `C0MPUTE_QWEN3_TTS_MODEL`, else
-/// the 1.7B on a GPU with 16 GiB or more, else the 0.6B.
+/// the 1.7B on a GPU with 8 GiB or more, else the 0.6B.
 pub fn qwen3_model_choice() -> String {
     if let Ok(m) = std::env::var("C0MPUTE_QWEN3_TTS_MODEL")
         && (m == QWEN3_MODEL_LARGE || m == QWEN3_MODEL_SMALL)
@@ -784,7 +786,8 @@ async fn install_qwen3_engine() -> Result<()> {
                  attn_implementation='sdpa')",
             )
             .arg(&model)
-            .env("HF_HOME", &cache);
+            .env("HF_HOME", &cache)
+            .env("TORCH_DISABLE_NATIVE_JIT", "1");
         match run_checked(command, "download and load the Qwen3-TTS weights on the GPU").await {
             Ok(()) => {
                 last = None;
