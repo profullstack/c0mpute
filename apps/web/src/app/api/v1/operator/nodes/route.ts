@@ -59,8 +59,8 @@ export async function POST(req: Request) {
 
 /**
  * PATCH /api/v1/operator/nodes {node, cost, per: "hour"|"month", label?}
- * What the node costs to run (rent, or power you measured). cost null or ""
- * goes back to the power estimate.
+ * What the node costs to run, $/hour or $/month (a rented GPU's price already
+ * includes its power). cost null or "" clears it: spend counts $0.
  */
 export async function PATCH(req: Request) {
   const user = await currentUser(req);

@@ -1,13 +1,10 @@
 import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
 import {
-  BUSY_WATTS,
   duration,
   getNodesPayload,
   NODE_GOAL,
   operatorEarnings,
-  POWER_USD_PER_KWH,
-  powerCostUsd,
   summarizeByType,
   usd,
 } from "@/lib/nodes";
@@ -15,7 +12,7 @@ import { MARKET_FEE_PCT } from "@/lib/market";
 import { pageOg } from "@/lib/og";
 
 const DESCRIPTION =
-  "Every c0mpute node online right now: jobs each one ran in the last 24 hours by type, how long they took, what they earned against the power they used, who runs each node and who invited them. The goal is 100,000 nodes.";
+  "Every c0mpute node online right now: jobs each one ran in the last 24 hours by type, how long they took, what they earned, who runs each node and who invited them. The goal is 100,000 nodes.";
 
 export const metadata = {
   title: "nodes — c0mpute",
@@ -149,11 +146,7 @@ export default async function NodesPage() {
           credited to a node only when its receipt comes from the peer the buyer
           accepted. Run time is accept to receipt. Price is what the buyer agreed
           to before the {MARKET_FEE_PCT}% house fee; the node keeps the rest. Free
-          jobs count at $0. Est. power on the board below assumes{" "}
-          {BUSY_WATTS.cpu} W for a CPU node and {BUSY_WATTS["gpu:nvidia"]} W for a
-          GPU node while busy, at ${POWER_USD_PER_KWH}/kWh; it is a typical
-          figure, not a measurement, and an idle node costs close to nothing
-          extra. Demand is early: these are real numbers, not a promise.
+          jobs count at $0. Demand is early: these are real numbers, not a promise.
         </p>
       </section>
 
@@ -174,8 +167,6 @@ export default async function NodesPage() {
                   <th className="py-2 pr-3" title="Completed jobs in the last 24h, by type">jobs 24h</th>
                   <th className="py-2 pr-3" title="Accept-to-receipt time summed over those jobs">busy</th>
                   <th className="py-2 pr-3" title={`What buyers paid, minus the ${MARKET_FEE_PCT}% fee`}>earned</th>
-                  <th className="py-2 pr-3" title="Estimated electricity for the busy time">est. power</th>
-                  <th className="py-2 pr-3">net</th>
                   <th className="py-2 pr-3">version</th>
                   <th className="py-2 pr-3">invited by</th>
                   <th className="py-2">seen</th>
@@ -221,8 +212,6 @@ export default async function NodesPage() {
                       (() => {
                         const j = n.jobs_24h;
                         const earned = operatorEarnings(j.paid_usd);
-                        const power = powerCostUsd(n.class, j.busy_s);
-                        const net = earned - power;
                         return (
                           <>
                             <td className="py-2 pr-3">
@@ -238,16 +227,12 @@ export default async function NodesPage() {
                             </td>
                             <td className="py-2 pr-3">{duration(j.busy_s)}</td>
                             <td className="py-2 pr-3 accent">{usd(earned)}</td>
-                            <td className="py-2 pr-3 text-[var(--color-dim)]">{usd(power)}</td>
-                            <td className={`py-2 pr-3 ${net >= 0 ? "accent" : "text-red-500"}`}>{usd(net)}</td>
                           </>
                         );
                       })()
                     ) : (
                       <>
                         <td className="py-2 pr-3 text-[var(--color-dim)]">0</td>
-                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
-                        <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
                         <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
                         <td className="py-2 pr-3 text-[var(--color-dim)]">-</td>
                       </>

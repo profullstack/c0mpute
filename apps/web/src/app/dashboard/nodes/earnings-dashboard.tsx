@@ -22,7 +22,7 @@ type NodeOut = Totals & {
   online: boolean;
   via: string;
   kind: "c0mpute" | "infernet";
-  spend_basis: "fixed" | "power-estimate" | "none";
+  spend_basis: "fixed" | "none";
   cost_usd_per_hour: number | null;
   utilization: number;
 };
@@ -185,12 +185,7 @@ function Summary({ data }: { data: Dashboard }) {
     {
       k: "spend",
       v: usd(t.spend_usd),
-      sub: c0.some((n) => n.spend_basis === "fixed")
-        ? c0.every((n) => n.spend_basis === "fixed")
-          ? "your hosting costs"
-          : "your costs + est. power"
-        : "power estimate only",
-      warn: c0.some((n) => n.spend_basis === "power-estimate"),
+      sub: c0.some((n) => n.spend_basis === "fixed") ? "your hosting costs" : "no hosting cost set",
     },
     { k: "net", v: usd(t.net_usd), sub: t.net_usd >= 0 ? "in profit" : "running at a loss", warn: t.net_usd < 0 },
     { k: "your own jobs", v: usd(t.own_usd), sub: `${t.own_jobs.toLocaleString()} jobs you paid for: not profit`, dim: true },
@@ -388,9 +383,6 @@ function NodesTable({ data, onChange }: { data: Dashboard; onChange: () => void 
                 <td className="text-right text-[var(--color-dim)]">{n.kind === "c0mpute" ? usd(n.agreed_usd) : "-"}</td>
                 <td className="text-right">
                   {n.spend_basis === "none" ? "-" : usd(n.spend_usd)}
-                  <div className={n.spend_basis === "power-estimate" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}>
-                    {n.spend_basis === "fixed" ? "set" : n.spend_basis === "none" ? "" : "est."}
-                  </div>
                 </td>
                 <td className={`text-right ${n.net_usd < 0 ? "text-[var(--color-warn)]" : ""}`}>{usd(n.net_usd)}</td>
                 <td className="pl-3">{n.kind === "c0mpute" ? <CostEditor node={n} onSaved={onChange} /> : <span className="text-[var(--color-dim)]">-</span>}</td>
@@ -424,10 +416,10 @@ function CostEditor({ node, onSaved }: { node: NodeOut; onSaved: () => void }) {
   if (!open) {
     return (
       <button
-        className={`text-left underline decoration-dotted ${node.cost_usd_per_hour != null ? "text-[var(--color-dim)]" : "text-[var(--color-warn)]"}`}
+        className="text-left underline decoration-dotted text-[var(--color-dim)]"
         onClick={() => setOpen(true)}
       >
-        {node.cost_usd_per_hour != null ? `$${+node.cost_usd_per_hour.toPrecision(3)}/h · edit` : "power estimate only: add your hosting cost"}
+        {node.cost_usd_per_hour != null ? `$${+node.cost_usd_per_hour.toPrecision(3)}/h · edit` : "add hosting cost"}
       </button>
     );
   }
@@ -453,7 +445,7 @@ function CostEditor({ node, onSaved }: { node: NodeOut; onSaved: () => void }) {
       </select>
       <button className="border border-[var(--color-accent)] px-2 py-1 accent">save</button>
       <button type="button" className="px-2 py-1 text-[var(--color-dim)]" onClick={() => send("PATCH", { node: node.node, cost: null })}>
-        use power est.
+        clear cost
       </button>
       {node.via !== "hosting" && (
         <button type="button" className="px-2 py-1 text-[var(--color-dim)]" onClick={() => send("DELETE")}>
@@ -560,9 +552,8 @@ function Notes({ data }: { data: Dashboard }) {
         auction, as the status aggregators heard it: an offer, not a payment.
       </p>
       <p>
-        <b>spend</b> is the hosting cost you set for a node, accrued for every hour of the window busy or not, or else estimated
-        electricity for its busy time only (65 W CPU, 250 W GPU, 40 W Apple at $0.17/kWh). Rented and cloud nodes cost far more
-        than their power: set their hourly or monthly price.
+        <b>spend</b> is the hosting cost you set for a node (for example $0.087/hour for a rented GPU, power included), accrued for
+        every hour of the window busy or not. A node with no cost set counts $0.
       </p>
       {data.history_from != null && <p>c0mpute job history on file since {new Date(data.history_from).toLocaleString()}.</p>}
       {data.infernet === null && <p className="text-[var(--color-warn)]">Settled pay could not be read from Infernet right now, so earned shows $0.</p>}

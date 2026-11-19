@@ -94,7 +94,7 @@ export function priceLabel(p: Pricing | null | undefined): string {
   return p.min_usd > 0 ? `dynamic · min ${usd(p.min_usd)}` : "dynamic";
 }
 
-export { BUSY_WATTS, POWER_USD_PER_KWH, powerCostUsd, operatorEarnings } from "./node-costs";
+export { operatorEarnings } from "./node-costs";
 
 /** One row of the network-wide "by job type" table. */
 export interface WorkloadSummary extends WorkloadJobs {

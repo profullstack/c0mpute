@@ -8,7 +8,7 @@
 // once: the job id is the primary key.
 //
 // Operators say which nodes are theirs (operator_nodes) and what a node costs
-// them to run; the dashboard prices spend from that, or from a power estimate.
+// them to run; the dashboard prices spend from that ($0 when unset).
 
 import type { Row, Sql } from "../chat/store";
 

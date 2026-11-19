@@ -99,7 +99,7 @@ describe("report", () => {
     via: "web",
     ...o,
   });
-  test("auction prices are only 'agreed', never earned; power estimate when no cost is set", () => {
+  test("auction prices are only 'agreed', never earned; no cost set means $0 spend", () => {
     const r = buildReport({
       range: "3h",
       now,
@@ -110,10 +110,9 @@ describe("report", () => {
     expect(r.totals.jobs).toBe(3);
     expect(r.totals.agreed_usd).toBeCloseTo(0.95, 6);
     expect(r.totals.earned_usd).toBe(0);
-    // 65 W for an hour at $0.17/kWh
-    expect(r.totals.spend_usd).toBeCloseTo(0.065 * 0.17, 6);
-    expect(r.totals.net_usd).toBeCloseTo(-0.065 * 0.17, 6);
-    expect(r.nodes[0].spend_basis).toBe("power-estimate");
+    expect(r.totals.spend_usd).toBe(0);
+    expect(r.totals.net_usd).toBe(0);
+    expect(r.nodes[0].spend_basis).toBe("none");
     expect(r.nodes[0].utilization).toBeCloseTo(1 / 3, 6);
     expect(r.by_type[0]).toMatchObject({ type: "tts.synthesize", jobs: 3 });
   });
