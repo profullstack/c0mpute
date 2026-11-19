@@ -802,7 +802,22 @@ async fn install_qwen3_engine() -> Result<()> {
         return Err(e);
     }
     tokio::fs::create_dir_all(root.join("models/qwen3")).await?;
-    tokio::fs::write(root.join("models/qwen3/MODEL"), format!("{model}\n")).await?;
+    // Record the local snapshot directory rather than the repo id: loading by
+    // id still asks huggingface.co, and a GPU rental with flaky DNS then
+    // could not load a model it already had (Vast, 2026-11-19).
+    let local = Command::new(qwen3_python())
+        .arg("-c")
+        .arg("import sys; from huggingface_hub import snapshot_download as s; print(s(sys.argv[1], local_files_only=True))")
+        .arg(&model)
+        .env("HF_HOME", &cache)
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| Path::new(p).join("config.json").is_file());
+    let recorded = local.unwrap_or_else(|| model.clone());
+    tokio::fs::write(root.join("models/qwen3/MODEL"), format!("{recorded}\n")).await?;
     tokio::fs::write(root.join(".qwen3-ready"), format!("qwen-tts 0.1.1 {model} cuda\n")).await?;
     Ok(())
 }
