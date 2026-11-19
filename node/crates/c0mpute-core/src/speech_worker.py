@@ -7,6 +7,12 @@ import time
 import wave
 from pathlib import Path
 
+# torch 2.14+ routes some plain eager ops (a RoPE matmul in Qwen3-TTS) through
+# Triton kernels that are compiled on first use with a C compiler. GPU rental
+# images ship without gcc, so the first word died with "Failed to find C
+# compiler" (Vast RTX 3060, 2026-11-19). Off: the eager ops need no compiler.
+os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
+
 
 def available_cpu_capacity() -> float:
     quota_capacity = None

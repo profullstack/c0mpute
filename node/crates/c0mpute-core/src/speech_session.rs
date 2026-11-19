@@ -57,6 +57,27 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for one utterance before giving up on the worker.
 const SAY_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long one utterance may take: [`SAY_TIMEOUT`], plus time per character
+/// for Qwen3-TTS, which runs about 6-7x slower than realtime on a consumer
+/// GPU (RTX 3060, 2026-11-19; ~15 characters per second of speech).
+pub fn say_timeout(voice: &str, text: &str) -> Duration {
+    if crate::speech::engine_for_voice(voice) == "qwen3" {
+        SAY_TIMEOUT + Duration::from_millis(600 * text.chars().count() as u64)
+    } else {
+        SAY_TIMEOUT
+    }
+}
+
+#[cfg(test)]
+mod say_timeout_tests {
+    #[test]
+    fn qwen3_gets_time_per_character_others_the_fixed_timeout() {
+        let text = "x".repeat(1000);
+        assert_eq!(super::say_timeout("am_michael", &text), super::SAY_TIMEOUT);
+        assert_eq!(super::say_timeout("qwen3-ryan", &text), super::SAY_TIMEOUT + std::time::Duration::from_secs(600));
+    }
+}
+
 /// What the worker prints once its model is in memory.
 #[derive(Debug, Deserialize)]
 struct ReadyLine {
@@ -193,7 +214,7 @@ impl WarmWorker {
         )?;
         self.stdin.flush().await?;
 
-        let answer = tokio::time::timeout(SAY_TIMEOUT, self.stdout.next_line())
+        let answer = tokio::time::timeout(say_timeout(voice, text), self.stdout.next_line())
             .await
             .context("the warm speech worker did not answer in time")?
             .context("reading from the warm speech worker")?

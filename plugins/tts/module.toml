@@ -15,7 +15,7 @@
 # GPU nodes (NVIDIA) also install two GPU engines in their own venvs:
 # Chatterbox (Resemble AI, MIT) for the agents' cloned voices, and Qwen3-TTS
 # (Qwen, Apache-2.0 code and weights; qwen-tts 0.1.1, the 1.7B CustomVoice on
-# GPUs with 16 GiB or more, else the 0.6B) for nine preset speakers in ten
+# GPUs with 8 GiB or more, else the 0.6B) for nine preset speakers in ten
 # languages (voices qwen3-*; the job locale picks the language).
 
 [module]
