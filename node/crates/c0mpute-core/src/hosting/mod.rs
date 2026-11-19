@@ -423,6 +423,7 @@ impl Default for Options {
             dns: dns::Verifier::default(),
             require_proofs: false,
             challenger: None,
+            extra_challengers: Vec::new(),
             challenge: ChallengeScope::Own,
             challenge_every: Duration::from_secs(600),
             price: None,
