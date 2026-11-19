@@ -308,3 +308,104 @@ mod tests {
         assert_eq!(line(&json!({"status": "queued"})), "queued: waiting for the node");
     }
 }
+
+// ── hosting money: c0mpute.com/dashboard/disk in a terminal ────────────────
+
+fn usd(n: f64) -> String {
+    if n == 0.0 {
+        "$0".into()
+    } else if n.abs() < 0.01 {
+        format!("${n:.6}")
+    } else {
+        format!("${n:.2}")
+    }
+}
+
+fn gib(b: f64) -> String {
+    format!("{:.2} GiB", b / (1u64 << 30) as f64)
+}
+
+/// `c0mpute hosting money`: your hosted sites and what they cost, and what
+/// your nodes earn holding other people's sites (accrued by the settlement
+/// rule), from c0mpute.com with your API key. `add` claims site ids or owner
+/// keys first; `link` claims this machine's owner key and, when it can be
+/// unlocked, your account's, so every site you publish from here shows up.
+pub async fn money(range: &str, json: bool, add: &[String], link: bool) -> Result<()> {
+    let h = Http { base: base_url(None), key: require_key()?, http: client()? };
+    let mut claims: Vec<String> = add.to_vec();
+    if link {
+        if let Ok(m) = crate::site_owner::machine() {
+            claims.push(m.owner_hex);
+        }
+        match crate::site_owner::account() {
+            Ok(Ok(a)) => claims.push(a.owner_hex),
+            Ok(Err(_)) => eprintln!("(account key not unlocked: set C0MPUTE_DM_PASSWORD or run on a terminal to link it too)"),
+            Err(e) => eprintln!("(account key: {e})"),
+        }
+    }
+    for c in &claims {
+        let (code, v) = h.send(reqwest::Method::POST, "/api/v1/disk/sites", Some(serde_json::json!({ "site": c }))).await?;
+        if code >= 300 {
+            bail!("could not add {c}: {}", v["error"]["message"].as_str().unwrap_or("not found"));
+        }
+        if !json {
+            println!("added {} {}", v["claim"]["kind"].as_str().unwrap_or("site"), c);
+        }
+    }
+    let (code, v) = h.send(reqwest::Method::GET, &format!("/api/v1/disk?range={range}"), None).await?;
+    if code >= 300 {
+        bail!("c0mpute.com has no storage dashboard yet (HTTP {code})");
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let t = &v["totals"];
+    let f = |x: &Value| x.as_f64().unwrap_or(0.0);
+    println!(
+        "last {range}: disk earned {}  storage spend {}  net {}  (to yourself {})",
+        usd(f(&t["earned_usd"])),
+        usd(f(&t["spend_usd"])),
+        usd(f(&t["net_usd"])),
+        usd(f(&t["own_usd"]))
+    );
+    let sites = v["sites"].as_array().cloned().unwrap_or_default();
+    println!("\nyour hosted sites ({}):", sites.len());
+    if sites.is_empty() {
+        println!("  none yet: /push hosting in c0mpute.com/chat, or `c0mpute hosting money --link` after `hosting publish`");
+    }
+    for s in &sites {
+        let price = s["price_per_gib_month"].as_f64().map(|p| format!("{}/GiB-mo", usd(p))).unwrap_or_else(|| "free".into());
+        println!(
+            "  {:<22} {:>12} {:>2} copies  {:<16} ~{}/mo  spent {}  {}",
+            s["name"].as_str().unwrap_or("?"),
+            s["size_bytes"].as_f64().map(gib).unwrap_or_else(|| "-".into()),
+            s["copies"].as_u64().unwrap_or(0),
+            price,
+            usd(f(&s["monthly_usd"])),
+            usd(f(&s["spend_usd"])),
+            s["url"].as_str().unwrap_or("")
+        );
+    }
+    let nodes = v["nodes"].as_array().cloned().unwrap_or_default();
+    println!("\nyour nodes' disk ({}):", nodes.len());
+    if nodes.is_empty() {
+        println!("  none on this account: claim them at c0mpute.com/dashboard/nodes");
+    }
+    for n in &nodes {
+        let offer = &n["offer"];
+        println!(
+            "  {:<20} offered {:>12}  free {:>12}  holding {:>12} ({} sites)  challenges {}/{}  earned {}",
+            n["label"].as_str().or(n["node"].as_str()).unwrap_or("?"),
+            offer["total_bytes"].as_f64().map(gib).unwrap_or_else(|| "-".into()),
+            offer["free_bytes"].as_f64().map(gib).unwrap_or_else(|| "-".into()),
+            gib(f(&n["held_bytes"])),
+            n["sites"].as_u64().unwrap_or(0),
+            n["passed"].as_u64().unwrap_or(0),
+            n["challenged"].as_u64().unwrap_or(0),
+            usd(f(&n["earned_usd"]))
+        );
+    }
+    println!("\naccrued by the settlement rule; the site owner's node pays from its own wallet. More: https://c0mpute.com/dashboard/disk");
+    Ok(())
+}

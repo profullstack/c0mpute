@@ -53,6 +53,8 @@ export interface NodeRow {
    * aggregators older than this field.
    */
   jobs_24h?: NodeJobs | null;
+  /** The node's disk offer (OpenDisk): free and total bytes, $/GiB-month. Absent when it offers none. */
+  storage?: { free_bytes: number; total_bytes: number; per_gib_month: number } | null;
 }
 
 export interface WorkloadJobs {

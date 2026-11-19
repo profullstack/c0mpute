@@ -1063,6 +1063,26 @@ enum HostingCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Your hosted sites and what they cost, and what your nodes earn holding
+    /// other people's sites, from c0mpute.com (same as /dashboard/disk).
+    /// Needs your API key (`c0mpute chat login`). Accrued by the settlement
+    /// rule: the site owner's node pays its holders from its own wallet.
+    Money {
+        /// 1h, 3h, 24h, 7d or 30d.
+        #[arg(long, default_value = "24h")]
+        range: String,
+        /// Print the API's JSON.
+        #[arg(long)]
+        json: bool,
+        /// Add a site to your dashboard first: site id, /s/<id>/ link, or a
+        /// 64-hex owner key (every site of that key). Repeatable.
+        #[arg(long)]
+        add: Vec<String>,
+        /// Add this machine's and your account's owner keys, so every site
+        /// published from here shows up.
+        #[arg(long)]
+        link: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -4947,6 +4967,7 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             }
             Ok(())
         }
+        HostingCmd::Money { range, json, add, link } => chat_push::money(&range, json, &add, link).await,
         HostingCmd::Ls { gateway, mine, json } => {
             let url = format!("{}/hosting/v1/sites", gateway.trim_end_matches('/'));
             let mut v: serde_json::Value = reqwest::get(&url)

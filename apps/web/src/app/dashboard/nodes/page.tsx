@@ -1,3 +1,4 @@
+import { DashboardTabs } from "@/components/dashboard-tabs";
 import { EarningsDashboard } from "./earnings-dashboard";
 
 export const metadata = {
@@ -14,6 +15,7 @@ export default function NodeEarningsPage() {
       <header className="space-y-2">
         <h1 className="text-2xl font-bold accent">my nodes</h1>
         <p className="comment">// what your nodes earned against what they cost to run</p>
+        <DashboardTabs active="/dashboard/nodes" />
       </header>
       <EarningsDashboard />
     </div>
