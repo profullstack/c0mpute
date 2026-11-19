@@ -767,18 +767,35 @@ async fn install_qwen3_engine() -> Result<()> {
     let model = qwen3_model_choice();
     let cache = root.join("cache/huggingface");
     tokio::fs::create_dir_all(&cache).await?;
-    let mut command = Command::new(qwen3_python());
-    command
-        .arg("-c")
-        .arg(
-            "import sys, torch; from qwen_tts import Qwen3TTSModel; \
-             Qwen3TTSModel.from_pretrained(sys.argv[1], device_map='cuda:0', \
-             dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, \
-             attn_implementation='sdpa')",
-        )
-        .arg(&model)
-        .env("HF_HOME", &cache);
-    run_checked(command, "download and load the Qwen3-TTS weights on the GPU").await?;
+    // A few tries: GPU rentals often have flaky DNS to huggingface.co, and a
+    // failed download here would otherwise wait for the next install round.
+    let mut last = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+        let mut command = Command::new(qwen3_python());
+        command
+            .arg("-c")
+            .arg(
+                "import sys, torch; from qwen_tts import Qwen3TTSModel; \
+                 Qwen3TTSModel.from_pretrained(sys.argv[1], device_map='cuda:0', \
+                 dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, \
+                 attn_implementation='sdpa')",
+            )
+            .arg(&model)
+            .env("HF_HOME", &cache);
+        match run_checked(command, "download and load the Qwen3-TTS weights on the GPU").await {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    if let Some(e) = last {
+        return Err(e);
+    }
     tokio::fs::create_dir_all(root.join("models/qwen3")).await?;
     tokio::fs::write(root.join("models/qwen3/MODEL"), format!("{model}\n")).await?;
     tokio::fs::write(root.join(".qwen3-ready"), format!("qwen-tts 0.1.1 {model} cuda\n")).await?;
