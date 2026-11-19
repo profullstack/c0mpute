@@ -11,6 +11,12 @@
 # carries: a worker provisions it in the background until it succeeds, giving
 # it its own virtualenv when the box's Python is too new for kokoro-onnx.
 # `c0mpute tts auto off` opts out.
+#
+# GPU nodes (NVIDIA) also install two GPU engines in their own venvs:
+# Chatterbox (Resemble AI, MIT) for the agents' cloned voices, and Qwen3-TTS
+# (Qwen, Apache-2.0 code and weights; qwen-tts 0.1.1, the 1.7B CustomVoice on
+# GPUs with 16 GiB or more, else the 0.6B) for nine preset speakers in ten
+# languages (voices qwen3-*; the job locale picks the language).
 
 [module]
 id          = "tts"
@@ -20,10 +26,10 @@ kind        = "workload"
 category    = "ai"
 status      = "available"
 builtin     = true
-description = "CPU text-to-speech inference over c0mpute using Piper, Kokoro, or Pocket TTS."
+description = "Text-to-speech over c0mpute: Piper, Kokoro and Pocket TTS on CPU; Chatterbox and multilingual Qwen3-TTS on NVIDIA GPUs."
 author      = "Profullstack"
 license     = "MIT"
-keywords    = ["tts", "piper", "kokoro", "pocket-tts", "synthesis", "audio"]
+keywords    = ["tts", "piper", "kokoro", "pocket-tts", "chatterbox", "qwen3-tts", "multilingual", "synthesis", "audio"]
 
 [module.requirements]
 c0mpute      = ">=0.1.0"

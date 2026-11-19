@@ -138,6 +138,15 @@ def tts(root: Path, output: Path, request: dict) -> None:
         pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
         wavfile.write(str(output), model.sample_rate, pcm)
         return
+    if engine == "qwen3":
+        import soundfile as sf
+
+        audio, sample_rate = Qwen3Speaker(root).create(
+            text, voice=voice, lang=str(request.get("locale", "en-US")).lower(),
+            instruct=request.get("instruct"),
+        )
+        sf.write(str(output), audio, sample_rate, subtype="PCM_16")
+        return
     if engine == "chatterbox":
         import soundfile as sf
 
@@ -222,6 +231,58 @@ class PocketSpeaker:
         return np.clip(audio, -1.0, 1.0).astype(np.float32), self.model.sample_rate
 
 
+QWEN3_LANGUAGES = {
+    "en": "English", "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+    "de": "German", "fr": "French", "ru": "Russian", "pt": "Portuguese",
+    "es": "Spanish", "it": "Italian",
+}
+
+# Our voice ids -> Qwen3-TTS CustomVoice speaker names.
+QWEN3_SPEAKERS = {
+    "qwen3-vivian": "Vivian", "qwen3-serena": "Serena", "qwen3-uncle-fu": "Uncle_Fu",
+    "qwen3-dylan": "Dylan", "qwen3-eric": "Eric", "qwen3-ryan": "Ryan",
+    "qwen3-aiden": "Aiden", "qwen3-ono-anna": "Ono_Anna", "qwen3-sohee": "Sohee",
+}
+
+
+class Qwen3Speaker:
+    """Qwen3-TTS (Qwen, Apache-2.0) CustomVoice on the GPU: nine preset
+    speakers, ten languages. The job's locale picks the language ("Auto"
+    for anything else); an optional `instruct` sets the delivery ("calm",
+    "excited, a little faster").
+    """
+
+    def __init__(self, root: Path) -> None:
+        import torch
+        from qwen_tts import Qwen3TTSModel
+
+        model_id = os.environ.get("C0MPUTE_QWEN3_TTS_MODEL") or (
+            root / "models" / "qwen3" / "MODEL").read_text(encoding="utf-8").strip()
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.model = Qwen3TTSModel.from_pretrained(
+            model_id, device_map="cuda:0", dtype=dtype, attn_implementation="sdpa")
+
+    def create(self, text: str, voice: str, speed: float = 1.0, lang: str = "en-us",
+               instruct=None):
+        import numpy as np
+
+        speaker = QWEN3_SPEAKERS.get(voice)
+        if speaker is None:
+            raise ValueError(f"unknown Qwen3-TTS voice {voice}")
+        language = QWEN3_LANGUAGES.get(lang.split("-", 1)[0], "Auto")
+        kwargs = {"text": text, "language": language, "speaker": speaker}
+        if instruct:
+            kwargs["instruct"] = str(instruct)[:300]
+        wavs, sample_rate = self.model.generate_custom_voice(**kwargs)
+        audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+        if not np.isfinite(audio).all() or np.abs(audio).max() <= 1e-4:
+            raise RuntimeError("Qwen3-TTS produced non-finite or silent audio")
+        peak = float(np.abs(audio).max())
+        if peak > 0.97:  # never hand back a clipped line
+            audio = audio * (0.97 / peak)
+        return audio, int(sample_rate)
+
+
 class ChatterboxSpeaker:
     """Chatterbox (Resemble AI, MIT) on the GPU: the expressive voices.
 
@@ -300,6 +361,8 @@ def serve(root: Path, engine: str = "kokoro") -> None:
             kokoro = PocketSpeaker()
         elif engine == "chatterbox":
             kokoro = ChatterboxSpeaker(root)
+        elif engine == "qwen3":
+            kokoro = Qwen3Speaker(root)
         else:
             kokoro = load_kokoro(root)
     except Exception as error:  # noqa: BLE001 - tell the caller why, then stop
@@ -324,9 +387,11 @@ def serve(root: Path, engine: str = "kokoro") -> None:
         try:
             output = Path(request["out"])
             extra = {"exaggeration": float(request.get("exaggeration", 0.6))} if engine == "chatterbox" else {}
+            if engine == "qwen3" and request.get("instruct"):
+                extra = {"instruct": str(request["instruct"])}
             audio, sample_rate = kokoro.create(
                 request["text"],
-                voice=request.get("voice", "bill_boerst" if engine == "pocket" else "am_michael"),
+                voice=request.get("voice", {"pocket": "bill_boerst", "qwen3": "qwen3-ryan"}.get(engine, "am_michael")),
                 speed=float(request.get("speed", 1.0)),
                 lang=str(request.get("locale", "en-US")).lower(),
                 **extra,

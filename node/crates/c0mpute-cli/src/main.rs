@@ -5882,7 +5882,7 @@ fn effective_worker_roles(cfg: &mut Config, roles: Option<&[String]>, gpu: bool,
     }
     // Every NVIDIA node serves the expressive GPU voices, even with an explicit
     // --roles list (Anthony 2026-11-11: "install on all gpus by default").
-    // `worker start` then provisions Chatterbox; C0MPUTE_TTS_GPU=0 opts out.
+    // `worker start` then provisions Chatterbox and Qwen3-TTS; C0MPUTE_TTS_GPU=0 opts out.
     if c0mpute_core::speech::has_cuda_gpu() && !cfg.roles.contains(&Role::Tts) {
         cfg.roles.push(Role::Tts);
     }

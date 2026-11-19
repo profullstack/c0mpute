@@ -93,6 +93,30 @@ const CHATTERBOX_REFERENCES: &[(&str, &[u8])] = &[
     ("quill", include_bytes!("../../../../plugins/tts/chatterbox-voices/quill.wav")),
 ];
 
+/// Multilingual GPU voices: Qwen3-TTS (Qwen, Apache-2.0 code and weights),
+/// the nine preset speakers of its CustomVoice models. Ten languages
+/// (English, Chinese, Japanese, Korean, German, French, Russian, Portuguese,
+/// Spanish, Italian): the job's locale picks the language, any speaker can
+/// speak any of them. Ids carry the `qwen3-` prefix so they never collide
+/// with another engine's voice names.
+pub(crate) const QWEN3_VOICES: &[&str] = &[
+    "qwen3-vivian",
+    "qwen3-serena",
+    "qwen3-uncle-fu",
+    "qwen3-dylan",
+    "qwen3-eric",
+    "qwen3-ryan",
+    "qwen3-aiden",
+    "qwen3-ono-anna",
+    "qwen3-sohee",
+];
+const QWEN3_PACKAGES: &[&str] = &["qwen-tts==0.1.1"];
+/// The model a GPU with at least this much memory gets: the 1.7B CustomVoice
+/// (best quality). Smaller cards, or a card shared with an LLM, get the 0.6B.
+const QWEN3_LARGE_MIN_VRAM_MIB: u64 = 16 * 1024;
+pub(crate) const QWEN3_MODEL_LARGE: &str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice";
+pub(crate) const QWEN3_MODEL_SMALL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
+
 /// True when this box has an NVIDIA GPU the CUDA build of torch can use.
 /// Checked once: a node does not grow a GPU while it runs.
 pub fn has_cuda_gpu() -> bool {
@@ -106,6 +130,50 @@ pub fn has_cuda_gpu() -> bool {
             .output()
             .is_ok_and(|out| out.status.success() && !out.stdout.is_empty())
     })
+}
+
+/// Total memory of the largest NVIDIA GPU, MiB (None without one).
+fn gpu_total_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u64>().ok())
+        .max()
+}
+
+/// Which Qwen3-TTS model this node installs: `C0MPUTE_QWEN3_TTS_MODEL`, else
+/// the 1.7B on a GPU with 16 GiB or more, else the 0.6B.
+pub fn qwen3_model_choice() -> String {
+    if let Ok(m) = std::env::var("C0MPUTE_QWEN3_TTS_MODEL")
+        && (m == QWEN3_MODEL_LARGE || m == QWEN3_MODEL_SMALL)
+    {
+        return m;
+    }
+    if gpu_total_mib().is_some_and(|m| m >= QWEN3_LARGE_MIN_VRAM_MIB) {
+        QWEN3_MODEL_LARGE.into()
+    } else {
+        QWEN3_MODEL_SMALL.into()
+    }
+}
+
+fn qwen3_venv_dir() -> PathBuf {
+    speech_root().join("qwen3-venv")
+}
+
+/// The interpreter Qwen3-TTS runs under (its own venv: it pins transformers
+/// and pulls CUDA torch, which must not disturb the other engines).
+pub fn qwen3_python() -> PathBuf {
+    venv_python(&qwen3_venv_dir())
+}
+
+fn qwen3_ready() -> bool {
+    has_cuda_gpu()
+        && speech_root().join(".qwen3-ready").is_file()
+        && speech_root().join("models/qwen3/MODEL").is_file()
+        && qwen3_python().is_file()
 }
 
 fn chatterbox_venv_dir() -> PathBuf {
@@ -212,6 +280,8 @@ pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
 pub fn engine_for_voice(voice: &str) -> &'static str {
     if CHATTERBOX_VOICES.contains(&voice) {
         "chatterbox"
+    } else if QWEN3_VOICES.contains(&voice) {
+        "qwen3"
     } else if POCKET_VOICES.contains(&voice) {
         "pocket"
     } else if PIPER_VOICES.contains(&voice) {
@@ -223,6 +293,10 @@ pub fn engine_for_voice(voice: &str) -> &'static str {
 
 pub fn tts_voice_available(engine: &str, voice: &str) -> bool {
     let root = speech_root();
+    // Qwen3-TTS: its own CUDA venv, GPU nodes only; every speaker is built in.
+    if engine == "qwen3" {
+        return QWEN3_VOICES.contains(&voice) && qwen3_ready();
+    }
     // Chatterbox lives in its own CUDA venv and only on GPU nodes.
     if engine == "chatterbox" {
         return CHATTERBOX_VOICES.contains(&voice)
@@ -297,6 +371,9 @@ pub fn available_tts_engines() -> Vec<&'static str> {
     {
         engines.push("chatterbox");
     }
+    if qwen3_ready() {
+        engines.push("qwen3");
+    }
     engines
 }
 
@@ -328,11 +405,24 @@ fn pocket_ready() -> bool {
 }
 
 pub async fn setup_tts(engine: &str) -> Result<()> {
-    if !["piper", "kokoro", "pocket", "chatterbox", "all"].contains(&engine) {
-        bail!("engine must be piper, kokoro, pocket, chatterbox, or all");
+    if !["piper", "kokoro", "pocket", "chatterbox", "qwen3", "all"].contains(&engine) {
+        bail!("engine must be piper, kokoro, pocket, chatterbox, qwen3, or all");
     }
     if engine == "chatterbox" && !has_cuda_gpu() {
         bail!("Chatterbox needs an NVIDIA GPU (nvidia-smi found none); CPU nodes serve Pocket and Kokoro");
+    }
+    if engine == "qwen3" && !has_cuda_gpu() {
+        bail!("Qwen3-TTS needs an NVIDIA GPU (nvidia-smi found none); CPU nodes serve Pocket and Kokoro");
+    }
+    // Like Chatterbox: every GPU node gets it with "all".
+    let install_qwen3 = (engine == "qwen3" || (engine == "all" && has_cuda_gpu())) && !qwen3_ready();
+    if install_qwen3 {
+        if let Err(error) = install_qwen3_engine().await {
+            if engine == "qwen3" {
+                return Err(error);
+            }
+            warn!(err = %error, "Qwen3-TTS unavailable on this GPU node; serving the other voices");
+        }
     }
     // "all" adds the GPU voices only where there is a GPU to run them.
     let install_chatterbox =
@@ -623,6 +713,50 @@ async fn bootstrap_pip() -> Result<()> {
 /// gets Kokoro its own venv instead — built from an older interpreter when the
 /// box has one, else by `uv`, which fetches a managed CPython itself. Piper,
 /// Pocket and Whisper keep the shared venv either way.
+/// Install Qwen3-TTS into its own venv (Python 3.12 via uv when there is one)
+/// and prefetch the chosen model's weights on the GPU, so the first job is
+/// not the one that downloads them.
+async fn install_qwen3_engine() -> Result<()> {
+    let root = speech_root();
+    let dir = qwen3_venv_dir();
+    if !qwen3_python().is_file() {
+        tokio::fs::create_dir_all(&root).await?;
+        if let Some(uv) = find_uv() {
+            let mut command = Command::new(uv);
+            command.args(["venv", "--seed", "--python", "3.12"]).arg(&dir);
+            run_checked(command, "create the Qwen3-TTS Python environment with uv").await?;
+        } else {
+            let interpreter = KOKORO_PYTHONS
+                .iter()
+                .find(|p| python_version(Path::new(p)).is_some_and(|v| v >= (3, 10) && v < (3, 14)))
+                .context("Qwen3-TTS needs Python 3.10 to 3.13, or uv")?;
+            let mut command = Command::new(interpreter);
+            command.args(["-m", "venv"]).arg(&dir);
+            run_checked(command, "create the Qwen3-TTS Python environment").await?;
+        }
+    }
+    pip_install_with(&qwen3_python(), QWEN3_PACKAGES).await?;
+    let model = qwen3_model_choice();
+    let cache = root.join("cache/huggingface");
+    tokio::fs::create_dir_all(&cache).await?;
+    let mut command = Command::new(qwen3_python());
+    command
+        .arg("-c")
+        .arg(
+            "import sys, torch; from qwen_tts import Qwen3TTSModel; \
+             Qwen3TTSModel.from_pretrained(sys.argv[1], device_map='cuda:0', \
+             dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, \
+             attn_implementation='sdpa')",
+        )
+        .arg(&model)
+        .env("HF_HOME", &cache);
+    run_checked(command, "download and load the Qwen3-TTS weights on the GPU").await?;
+    tokio::fs::create_dir_all(root.join("models/qwen3")).await?;
+    tokio::fs::write(root.join("models/qwen3/MODEL"), format!("{model}\n")).await?;
+    tokio::fs::write(root.join(".qwen3-ready"), format!("qwen-tts 0.1.1 {model} cuda\n")).await?;
+    Ok(())
+}
+
 /// Install Chatterbox into its own venv, write the agents' reference clips and
 /// prefetch the weights, so the first job is not the one that downloads 2 GB.
 async fn install_chatterbox_engine() -> Result<()> {
@@ -958,6 +1092,8 @@ async fn run_worker(action: &str, args: &[&str], request: &serde_json::Value) ->
         kokoro_python_installed().unwrap_or_else(kokoro_python)
     } else if action == "tts" && engine == Some("chatterbox") {
         chatterbox_python()
+    } else if action == "tts" && engine == Some("qwen3") {
+        qwen3_python()
     } else {
         python_path()
     };
