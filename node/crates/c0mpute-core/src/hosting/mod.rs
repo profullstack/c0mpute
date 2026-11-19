@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path as AxPath, State};
+use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -2619,7 +2619,37 @@ impl Hosting {
         let Some(payer) = self.0.challenger_hex.clone() else {
             return Vec::new();
         };
-        let held = self.held_by_others(&payer).await;
+        self.dues_of(&[payer], from, to).await.into_iter().map(|(_, d)| d).collect()
+    }
+
+    /// What every payer this node knows of owes the holders of its paid
+    /// sites for `[from, to)`, by the same rule each payer settles with
+    /// ([`settle::dues`]), from the records, receipts and holdings gossiped
+    /// here. Paired with the payer's key. For the public ledger
+    /// (`GET /hosting/v1/dues`): it says what is owed, not whether the payer
+    /// has paid (that is in the payer's own ledger, and a payer with
+    /// `[payments]` off only logs it).
+    pub async fn dues_all(&self, from: u64, to: u64) -> Vec<(String, settle::Due)> {
+        let payers: BTreeSet<String> = {
+            let map = self.0.map.read().await;
+            map.records
+                .values()
+                .filter(|r| r.terms().is_some())
+                .map(|r| r.payer_key().to_string())
+                .collect()
+        };
+        let payers: Vec<String> = payers.into_iter().collect();
+        self.dues_of(&payers, from, to).await
+    }
+
+    async fn dues_of(&self, payers: &[String], from: u64, to: u64) -> Vec<(String, settle::Due)> {
+        if payers.is_empty() {
+            return Vec::new();
+        }
+        let mut held = HashMap::new();
+        for payer in payers {
+            held.extend(self.held_by_others(payer).await);
+        }
         let (records, payouts, mut receipts) = {
             let map = self.0.map.read().await;
             let records: Vec<SiteRecord> = map.records.values().cloned().collect();
@@ -2632,7 +2662,15 @@ impl Hosting {
             (records, payouts, receipts)
         };
         receipts.extend(self.own_receipts().await);
-        settle::dues(&records, &receipts, &payouts, &held, &payer, from, to)
+        let mut out = Vec::new();
+        for payer in payers {
+            out.extend(
+                settle::dues(&records, &receipts, &payouts, &held, payer, from, to)
+                    .into_iter()
+                    .map(|d| (payer.clone(), d)),
+            );
+        }
+        out
     }
 
     /// Bytes each hosting peer holds now of the paid sites `payer` pays for,
@@ -3302,6 +3340,7 @@ impl Hosting {
     pub fn router(&self) -> Router {
         Router::new()
             .route("/hosting/v1/sites", get(list_sites))
+            .route("/hosting/v1/dues", get(list_dues))
             .route("/hosting/v1/sites/{site}/resolve", get(edge_api::resolve))
             .route("/hosting/v1/sites/{site}/chunks/{hash}", get(edge_api::chunk))
             .route("/s/{site}", get(redirect_site_root))
@@ -3623,6 +3662,63 @@ pub(crate) fn jitter(d: Duration) -> Duration {
         .map(|t| t.subsec_nanos() as u64)
         .unwrap_or(0);
     Duration::from_millis(ms - spread + if spread == 0 { 0 } else { nanos % (2 * spread) })
+}
+
+/// Longest window `GET /hosting/v1/dues` prices in one call. Receipts are
+/// kept [`proof::KEEP_PER_HOLDER`] per holder, a few hours at the default
+/// challenge rate, so a longer window would only undercount.
+const DUES_MAX_WINDOW_SECS: u64 = 6 * 60 * 60;
+
+#[derive(serde::Deserialize)]
+struct DuesQuery {
+    from: Option<u64>,
+    to: Option<u64>,
+}
+
+/// `GET /hosting/v1/dues?from=&to=` (unix seconds; default the last full
+/// hour): what every paid site's payer owes each holder for the window, by
+/// the settlement rule ([`settle::dues`]), from what this gateway has
+/// gossiped. Public, like the receipts it is computed from. Amounts are
+/// micro-USD; `paid` is not known here (it is in the payer's ledger).
+async fn list_dues(State(h): State<Hosting>, Query(q): Query<DuesQuery>) -> Response {
+    let now = crate::payments::now_secs();
+    let to = q.to.unwrap_or(now / 3600 * 3600).min(now);
+    let from = q.from.unwrap_or(to.saturating_sub(3600));
+    if from >= to || to - from > DUES_MAX_WINDOW_SECS {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": format!("need from < to <= now and a window of at most {DUES_MAX_WINDOW_SECS} s") })),
+        )
+            .into_response();
+    }
+    let names: HashMap<String, (String, String)> = h
+        .sites()
+        .await
+        .into_iter()
+        .map(|(r, _)| (r.site_id.clone(), (r.name.clone(), r.owner.clone())))
+        .collect();
+    let dues: Vec<serde_json::Value> = h
+        .dues_all(from, to)
+        .await
+        .into_iter()
+        .map(|(payer, d)| {
+            let (name, owner) = names.get(&d.site_id).cloned().unwrap_or_default();
+            serde_json::json!({
+                "site_id": d.site_id,
+                "name": name,
+                "owner": owner,
+                "payer": payer,
+                "holder": d.holder,
+                "bytes": d.bytes,
+                "price_per_gib_month_micros": d.price,
+                "amount_micros": d.amount,
+                "passed": d.passed,
+                "challenged": d.challenged,
+                "payout": d.payee.as_ref().is_some_and(|p| p.valid()),
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "from": from, "to": to, "dues": dues })).into_response()
 }
 
 async fn list_sites(State(h): State<Hosting>) -> Response {

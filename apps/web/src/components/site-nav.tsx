@@ -8,6 +8,7 @@ const LINKS: { href: string; label: string; accent?: boolean }[] = [
   { href: "/getting-started", label: "getting-started" },
   { href: "/protocol", label: "protocol" },
   { href: "/chat", label: "chat", accent: true },
+  { href: "/dashboard", label: "my dashboard", accent: true },
   { href: "/train", label: "train an AI agent", accent: true },
   { href: "/apps", label: "apps" },
   { href: "/providers", label: "run a node", accent: true },

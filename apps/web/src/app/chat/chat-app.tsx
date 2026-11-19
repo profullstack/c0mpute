@@ -1104,7 +1104,8 @@ export function ChatApp({ error }: { error: string | null }) {
               (p) =>
                 `${p.name.padEnd(24)} ${p.status.padEnd(10)} ${String(p.files.length).padStart(3)} files  ${p.node ?? "?"}  ${p.url ?? p.progress ?? ""}${p.error ? `\n${" ".repeat(25)}! ${p.error}` : ""}`,
             )
-            .join("\n"),
+            .join("\n") +
+          "\n\n// sizes, copies and what each costs: https://c0mpute.com/dashboard/disk",
       );
     }
 

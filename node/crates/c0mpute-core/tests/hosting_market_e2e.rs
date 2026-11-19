@@ -303,7 +303,23 @@ async fn preferred_hosts_hold_pass_challenges_and_get_paid() {
     for d in &dues {
         assert_eq!((d.passed, d.challenged), (1, 1), "gateway receipts do not count: {d:?}");
         assert_eq!(d.amount, expected);
+        assert_eq!(d.bytes, rec.size, "{d:?}");
+        assert_eq!(d.price, 1_000_000);
     }
+
+    // Anyone can price it: the gateway's public ledger (`GET /hosting/v1/dues`)
+    // works out the same dues from gossip alone.
+    wait_for("the same dues on the gateway", 20, || {
+        let (g, payer, want) = (gateway.clone(), owner_key.clone(), dues.clone());
+        async move {
+            let mut got: Vec<_> = g.dues_all(from, to).await.into_iter().filter(|(p, _)| *p == payer).map(|(_, d)| d).collect();
+            got.sort_by(|a, b| a.holder.cmp(&b.holder));
+            let mut want = want;
+            want.sort_by(|a, b| a.holder.cmp(&b.holder));
+            got.iter().map(|d| (&d.holder, d.amount, d.bytes)).eq(want.iter().map(|d| (&d.holder, d.amount, d.bytes)))
+        }
+    })
+    .await;
     assert_eq!(outcomes.len(), holders.len());
     assert!(outcomes.iter().all(|(_, o)| matches!(o, Outcome::Paid(_))), "{outcomes:?}");
     let idx = |peer: &str| hosts.iter().position(|h| h.peer_id() == peer).unwrap();

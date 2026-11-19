@@ -17,4 +17,12 @@ export async function register() {
   } catch (e) {
     console.error("node earnings: could not start the recorder", e);
   }
+  // Disk (hosting) dues for /dashboard/disk: copy each finished hour out of
+  // the gateways before their receipts age out.
+  try {
+    const { startDiskRecorder } = await import("./lib/disk/recorder");
+    startDiskRecorder();
+  } catch (e) {
+    console.error("disk dues: could not start the recorder", e);
+  }
 }
