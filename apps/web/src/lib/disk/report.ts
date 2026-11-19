@@ -12,6 +12,8 @@ import type { DueRow } from "./store";
 import { priceParts, type UsageRow } from "./apps";
 
 const HOUR = 3_600_000;
+/** Lowest price any site settles at, $/GiB-month (settle.rs FLOOR_PER_GIB_MONTH). */
+export const FLOOR_PER_GIB_MONTH = 0.004;
 const GIB = 2 ** 30;
 
 export interface DiskTotals {
@@ -55,8 +57,10 @@ export interface SiteOut {
   live: boolean;
   size_bytes: number | null;
   copies: number | null;
-  /** $/GiB-month, null for a free site. */
-  price_per_gib_month: number | null;
+  /** $/GiB-month it settles at: its price, never below the floor. */
+  price_per_gib_month: number;
+  /** The floor applies (published without a price, or below it). */
+  price_floor: boolean;
   /** Nodes paid for holding it in the newest recorded hour. */
   holders: number;
   /** What it costs a month at the newest hour's rate (accrued). */
@@ -345,7 +349,9 @@ export function buildDiskReport(input: {
   const nameFromRows = new Map(rows.map((r) => [r.site_id, r.name]));
   const sites: SiteOut[] = [...mine.values()].map((s) => {
     const l = live.get(s.site_id);
-    const price = l?.price_per_gib_month != null ? Number(l.price_per_gib_month) : NaN;
+    const asked = l?.price_per_gib_month != null ? Number(l.price_per_gib_month) : NaN;
+    const floored = !Number.isFinite(asked) || asked < FLOOR_PER_GIB_MONTH;
+    const price = floored ? FLOOR_PER_GIB_MONTH : asked;
     const m = siteMoney.get(s.site_id) ?? { spend: 0, own: 0 };
     return {
       site_id: s.site_id,
@@ -356,9 +362,11 @@ export function buildDiskReport(input: {
       live: !!l,
       size_bytes: l ? l.size : null,
       copies: l ? l.copies : null,
-      price_per_gib_month: Number.isFinite(price) ? price : null,
+      price_per_gib_month: price,
+      price_floor: floored,
       holders: latestHolders.get(s.site_id)?.size ?? 0,
-      monthly_usd: latestMonthly.get(s.site_id) ?? 0,
+      // Until an hour of dues is on file: its size x copies at its price.
+      monthly_usd: latestMonthly.get(s.site_id) ?? (l ? ((l.size * Math.max(1, l.copies)) / GIB) * price : 0),
       spend_usd: m.spend,
       own_usd: m.own,
     };
