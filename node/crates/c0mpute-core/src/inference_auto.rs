@@ -9,15 +9,15 @@
 //! - a prebuilt llama.cpp `llama-server` from the ggml-org GitHub release for
 //!   this platform, pinned to a build tag and SHA-256 (no cmake, no sudo);
 //! - one house GGUF pinned to a SHA-256: the house default
-//!   `eriktonon/qwen3.8-uncensored:9b` (~5.8 GB, the GGUF layer of its Ollama
-//!   registry image) on a box with twice `min_ram_gb` (16 GiB), Qwen2.5 1.5B
-//!   Instruct (~1.1 GB) on one with `min_ram_gb` (8 GiB), else Qwen2.5 0.5B
-//!   Instruct (~0.5 GB) on one with half of that. Qwen2.5 7B was the big tier
-//!   until 0.3.83; its files are removed once the 9B is in;
+//!   `huihui_ai/qwen3.5-abliterated:4b` (~2.7 GB Q4_K_M, thinking off) on a
+//!   box with `min_ram_gb` (8 GiB), else Qwen2.5 0.5B Instruct (~0.5 GB) on
+//!   one with half of that. The 9B (until 0.3.96, 16 GiB boxes) and 1.5B
+//!   (8-16 GiB) tiers are gone: CPU nodes could not serve the default, so a
+//!   GPU took every chat. Their files are removed once the 4B is in;
 //!
 //! and runs it as a supervised child on `127.0.0.1:AUTO_PORT` (restarted when
 //! it exits), with the model served under the Ollama-style id buyers ask for
-//! (`eriktonon/qwen3.8-uncensored:9b`, `qwen2.5:1.5b` or `qwen2.5:0.5b`), so the node advertises
+//! (`huihui_ai/qwen3.5-abliterated:4b` or `qwen2.5:0.5b`), so the node advertises
 //! `infernet:inference` and `infernet:inference:model:<that id>`.
 //!
 //! The runtime runs at low CPU priority (`--prio -1`) and the node bids on a
@@ -127,11 +127,29 @@ pub struct GgufPart {
     pub sha256: &'static str,
 }
 
-/// The house default, `eriktonon/qwen3.8-uncensored:9b` (Q4_K_M, a Qwen 3.5
-/// 9B hybrid with a no-think template). The GGUF is the model layer of its
-/// Ollama registry image, content-addressed by the same SHA-256.
-pub const QWEN38_9B: HouseModel = HouseModel {
+/// The house default, `huihui_ai/qwen3.5-abliterated:4b`, as mradermacher's
+/// llama.cpp quant of the same huihui-ai weights: the GGUF inside the Ollama
+/// image does not load in llama.cpp (`qwen35.rope.dimension_sections has
+/// wrong array length; expected 4, got 3`). Qwen 3.5 thinks by default, which
+/// took 35-58 s per answer on 8 CPU threads; `--reasoning-budget 0` answers
+/// in 3-10 s at ~10 tok/s. Sampling is Qwen's non-thinking recommendation.
+pub const QWEN35_4B: HouseModel = HouseModel {
     id: crate::inference::HOUSE_DEFAULT_MODEL,
+    file: "Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
+    url: "https://huggingface.co/mradermacher/Huihui-Qwen3.5-4B-abliterated-GGUF/resolve/9d3aebb998fcf084086a3d1c60c31035fcfbf8e1/Huihui-Qwen3.5-4B-abliterated.Q4_K_M.gguf",
+    sha256: "423f10b6ec2d99c3378143d7cd3b80eb4887b3ed92103103ac59173b404f4f7c",
+    size: "~2.7 GB",
+    parts: &[],
+    disk_gb: 0,
+    server_args: &["--reasoning-budget", "0", "--temp", "0.7", "--top-k", "20", "--top-p", "0.8"],
+    default_system: None,
+};
+
+/// The house GPU model, `eriktonon/qwen3.8-uncensored:9b` (Q4_K_M, a Qwen 3.5
+/// 9B hybrid with a no-think template), the CPU big tier until 0.3.96. Kept
+/// so its files are cleaned up and its system prompt still applies.
+pub const QWEN38_9B: HouseModel = HouseModel {
+    id: crate::inference::HOUSE_GPU_MODEL,
     file: "qwen38_9b_nothink.gguf",
     url: "https://registry.ollama.ai/v2/eriktonon/qwen3.8-uncensored/blobs/sha256:c7f6915f1d9ccc059903e3bead2493f8e4389a7718e8c1c4eb62ffaf33843408",
     sha256: "c7f6915f1d9ccc059903e3bead2493f8e4389a7718e8c1c4eb62ffaf33843408",
@@ -178,17 +196,16 @@ pub const QWEN_0_5B: HouseModel = HouseModel {
     default_system: None,
 };
 
-/// Every house model, biggest first.
-pub const HOUSE_MODELS: [&HouseModel; 3] = [&QWEN38_9B, &QWEN_1_5B, &QWEN_0_5B];
+/// Every house model this or an earlier release installed, biggest first.
+pub const HOUSE_MODELS: [&HouseModel; 4] = [&QWEN38_9B, &QWEN35_4B, &QWEN_1_5B, &QWEN_0_5B];
 
 /// The model a box with `total_ram` bytes runs, and the available RAM it
 /// needs to start it (GiB), or None when the box is too small for either.
 pub fn pick_model(config: &InferenceConfig, total_ram: u64) -> Option<(&'static HouseModel, u64)> {
-    // Twice the 1.5B floor (16 GiB by default) runs the house default 9B.
-    if total_ram >= config.min_ram_gb.saturating_mul(2).saturating_mul(GIB) {
-        Some((&QWEN38_9B, config.min_free_ram_gb.saturating_mul(2)))
-    } else if total_ram >= config.min_ram_gb.saturating_mul(GIB) {
-        Some((&QWEN_1_5B, config.min_free_ram_gb))
+    // `min_ram_gb` (8 GiB by default) runs the house default 4B (~3.5 GiB
+    // resident with one 4K context).
+    if total_ram >= config.min_ram_gb.saturating_mul(GIB) {
+        Some((&QWEN35_4B, config.min_free_ram_gb))
     } else if total_ram >= (config.min_ram_gb / 2).max(1).saturating_mul(GIB) {
         Some((&QWEN_0_5B, (config.min_free_ram_gb / 2).max(1)))
     } else {
@@ -632,11 +649,12 @@ mod tests {
     #[test]
     fn model_tiers() {
         let c = InferenceConfig::default();
-        assert_eq!(pick_model(&c, 32 * GIB).map(|(m, f)| (m.id, f)), Some(("eriktonon/qwen3.8-uncensored:9b", 8)));
-        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some(("eriktonon/qwen3.8-uncensored:9b", 8)));
+        // Every 8 GiB+ CPU box serves the house default, big boxes included.
+        assert_eq!(pick_model(&c, 96 * GIB).map(|(m, f)| (m.id, f)), Some(("huihui_ai/qwen3.5-abliterated:4b", 4)));
+        assert_eq!(pick_model(&c, 16 * GIB).map(|(m, f)| (m.id, f)), Some((crate::inference::HOUSE_DEFAULT_MODEL, 4)));
         assert!(HOUSE_MODELS.iter().all(|m| m.id != "qwen2.5:7b"), "qwen2.5:7b is no house model");
-        assert_eq!(pick_model(&c, 15 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
-        assert_eq!(pick_model(&c, 8 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:1.5b", 4)));
+        assert_eq!(pick_model(&c, 15 * GIB).map(|(m, f)| (m.id, f)), Some((crate::inference::HOUSE_DEFAULT_MODEL, 4)));
+        assert_eq!(pick_model(&c, 8 * GIB).map(|(m, f)| (m.id, f)), Some((crate::inference::HOUSE_DEFAULT_MODEL, 4)));
         assert_eq!(pick_model(&c, 6 * GIB).map(|(m, f)| (m.id, f)), Some(("qwen2.5:0.5b", 2)));
         assert_eq!(pick_model(&c, 4 * GIB).map(|(m, _)| m.id), Some("qwen2.5:0.5b"));
         assert!(pick_model(&c, 3 * GIB).is_none());
@@ -646,8 +664,9 @@ mod tests {
     fn host_gates() {
         let c = InferenceConfig::default();
         assert_eq!(host_gate(&c, 16 * GIB, 8 * GIB, 50 * GIB, false), None);
-        // The 9B wants 10 GB of disk, not just the 5 GB floor.
-        assert!(host_gate(&c, 16 * GIB, 8 * GIB, 7 * GIB, false).unwrap().contains("10 GB"));
+        // The 4B needs only the 5 GB disk floor.
+        assert_eq!(host_gate(&c, 16 * GIB, 8 * GIB, 7 * GIB, false), None);
+        assert!(host_gate(&c, 16 * GIB, 8 * GIB, 4 * GIB, false).unwrap().contains("5 GB"));
         assert_eq!(host_gate(&c, 12 * GIB, 8 * GIB, 7 * GIB, false), None);
         assert!(host_gate(&c, 2 * GIB, GIB, 50 * GIB, false).unwrap().contains("RAM"));
         assert!(host_gate(&c, 16 * GIB, 8 * GIB, GIB, false).unwrap().contains("disk"));

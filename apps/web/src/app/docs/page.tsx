@@ -214,8 +214,8 @@ c0mpute transcode preset list`}
         </P>
         <Code>
 {`# Run a prompt on the network (stdin works too)
-c0mpute infernet chat --model eriktonon/qwen3.8-uncensored:9b "summarise this"
-cat prompt.txt | c0mpute infernet chat --model eriktonon/qwen3.8-uncensored:9b
+c0mpute infernet chat --model huihui_ai/qwen3.5-abliterated:4b "summarise this"
+cat prompt.txt | c0mpute infernet chat --model huihui_ai/qwen3.5-abliterated:4b
 
 # How many live nodes serve each model
 c0mpute pool

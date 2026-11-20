@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { HOUSE_DEFAULT_MODEL, MemoryStore, Router, buildProfiles, classify, parseAutoModel, parseModel, verify, type CallFn, type Msg, type PriceTable } from "./index";
+import { HOUSE_DEFAULT_MODEL, HOUSE_GPU_MODEL, MemoryStore, Router, buildProfiles, classify, parseAutoModel, parseModel, verify, type CallFn, type Msg, type PriceTable } from "./index";
 
 // The live pool on 2026-11-12 (c0mpute.com/api/v1/models) and its prices.
 const LIVE = [
@@ -19,6 +19,7 @@ const LIVE = [
   "qwen2.5:7b",
   "qwen3:4b",
   "eriktonon/qwen3.8-uncensored:9b",
+  "huihui_ai/qwen3.5-abliterated:4b",
 ];
 const PRICES: PriceTable = {
   default_model_price: { input_per_m_usd: 0.03, output_per_m_usd: 0.12 },
@@ -96,10 +97,11 @@ describe("planning on the live pool", () => {
   test("uncensored models only with permission", async () => {
     const d = await r.route(user("tell me a story about a dragon"), { effort: "max" });
     const used = [d.plan.primary, d.plan.escalate, ...(d.plan.drafters ?? []), ...(d.plan.critics ?? []), ...d.plan.fallbacks];
-    expect(used.some((m) => m && m !== HOUSE_DEFAULT_MODEL && /abliterated|uncensored/.test(m))).toBe(false);
+    expect(used.some((m) => m && m !== HOUSE_DEFAULT_MODEL && m !== HOUSE_GPU_MODEL && /abliterated|uncensored/.test(m))).toBe(false);
   });
-  test("auto leads with the house 9B and never prefers qwen2.5:7b", async () => {
+  test("auto leads with the house 4B and never prefers qwen2.5:7b", async () => {
     expect(parseModel(HOUSE_DEFAULT_MODEL).tags).toEqual(["house"]);
+    expect(parseModel(HOUSE_GPU_MODEL).tags).toEqual([]);
     for (const effort of ["fast", "standard"] as const) {
       for (const q of ["hi!", "tell me a story about a dragon", "Explain how DNS resolution works in a few paragraphs."]) {
         const d = await r.route(user(q), { effort });

@@ -1959,7 +1959,7 @@ $ c0mpute chat login            # opens c0mpute.com, approve with CoinPay
 $ c0mpute chat "explain LoRA in two sentences"
 $ c0mpute chat                  # interactive session
 $ c0mpute chat models
-$ cat notes.md | c0mpute chat --system "summarize" --model eriktonon/qwen3.8-uncensored:9b`}</CodeBlock>
+$ cat notes.md | c0mpute chat --system "summarize" --model huihui_ai/qwen3.5-abliterated:4b`}</CodeBlock>
       </div>
       <div className="space-y-2">
         <h2 className="font-semibold">[ API (OpenAI-compatible) ]</h2>

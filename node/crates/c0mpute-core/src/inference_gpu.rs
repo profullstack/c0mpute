@@ -8,7 +8,8 @@
 //! sudo is needed) under `<data dir>/inference/`, runs `ollama serve`
 //! supervised on [`OLLAMA_URL`], and pulls chat models sized to the card:
 //!
-//! - 8 GiB of VRAM or more: the house default `eriktonon/qwen3.8-uncensored:9b`
+//! - 8 GiB of VRAM or more: the house GPU model `eriktonon/qwen3.8-uncensored:9b`
+//!   (plain-text chats for the 4B house default accept it as an upgrade)
 //!   alone (~6.9 GiB resident with its projector). It used to share the card
 //!   with `qwen2.5:7b`; both do not fit 12 GiB, so Ollama evicted and reloaded
 //!   on every switch and jobs timed out (Vast RTX 3060, 2026-11-18);
@@ -77,7 +78,7 @@ pub fn assets_for(kind: GpuKind) -> Option<Vec<Asset>> {
 /// The chat models a card with `vram_mib` serves, biggest-value first.
 pub fn models_for_vram(vram_mib: u64) -> &'static [&'static str] {
     if vram_mib >= 8 * 1024 {
-        &[crate::inference::HOUSE_DEFAULT_MODEL]
+        &[crate::inference::HOUSE_GPU_MODEL]
     } else if vram_mib >= 6 * 1024 {
         &["qwen3:4b"]
     } else {

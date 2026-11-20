@@ -16,7 +16,7 @@ import { EFFORTS, type CallFn, type Effort, type Features, type ModelProfile, ty
 
 export * from "./types";
 export { classify } from "./classify";
-export { HOUSE_DEFAULT_MODEL, buildProfiles, parseModel, prior, type PriceTable } from "./registry";
+export { HOUSE_DEFAULT_MODEL, HOUSE_GPU_MODEL, buildProfiles, parseModel, prior, type PriceTable } from "./registry";
 export { verify } from "./verify";
 export { Stats, MemoryStore, type StatsStore, type Snapshot } from "./stats";
 
