@@ -401,26 +401,26 @@ fn default_settle_every() -> u64 {
 /// The roles a node runs when its config does not list any.
 pub fn default_roles() -> Vec<Role> {
     vec![
-            Role::Storage,
-            Role::Gateway,
-            Role::Verifier,
-            Role::Tts,
-            Role::Stt,
-            Role::WorkflowStep,
-            Role::Diffusion,
-            Role::Music,
-            // Subscribes only where it can serve: a ready GPU runner, or
-            // CPU video the operator opted into.
-            Role::Video,
-            Role::Crawl,
-            Role::Hosting,
-            Role::Ocr,
-            Role::Embed,
-            Role::Captcha,
-            Role::LiveStream,
-            Role::Render,
-            Role::Inference,
-            Role::Mailbox,
+        Role::Storage,
+        Role::Gateway,
+        Role::Verifier,
+        Role::Tts,
+        Role::Stt,
+        Role::WorkflowStep,
+        Role::Diffusion,
+        Role::Music,
+        // Subscribes only where it can serve: a ready GPU runner, or
+        // CPU video the operator opted into.
+        Role::Video,
+        Role::Crawl,
+        Role::Hosting,
+        Role::Ocr,
+        Role::Embed,
+        Role::Captcha,
+        Role::LiveStream,
+        Role::Render,
+        Role::Inference,
+        Role::Mailbox,
     ]
 }
 
