@@ -4286,7 +4286,8 @@ mod tests {
         assert_eq!(retry_wait(1, base, cap), base);
         assert_eq!(retry_wait(2, base, cap), base * 2);
         assert_eq!(retry_wait(4, base, cap), base * 8);
-        assert_eq!(retry_wait(10, base, cap), cap);
+        assert_eq!(retry_wait(10, base, cap), base * 512);
+        assert_eq!(retry_wait(11, base, cap), cap);
         assert_eq!(retry_wait(u32::MAX, base, cap), cap);
     }
 
