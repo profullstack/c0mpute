@@ -1420,7 +1420,7 @@ impl Hosting {
             let id = rec.site_id.clone();
             match h.replicate(&rec).await {
                 Ok(()) => {
-                    h.note_replicate(&rec, true, Instant::now());
+                    let _ = h.note_replicate(&rec, true, Instant::now());
                     info!(site = %id, name = %rec.name, seq = rec.seq, "hosting: holding a copy");
                     h.announce_holding().await;
                 }
@@ -1488,10 +1488,12 @@ impl Hosting {
             let id = rec.site_id.clone();
             match h.replicate_groups(&rec, &groups).await {
                 Ok(n) if n > 0 => {
-                    h.note_replicate(&rec, true, Instant::now());
+                    let _ = h.note_replicate(&rec, true, Instant::now());
                     info!(site = %id, name = %rec.name, groups = n, "hosting: holding groups of a striped site");
                 }
-                Ok(_) => h.note_replicate(&rec, true, Instant::now()),
+                Ok(_) => {
+                    let _ = h.note_replicate(&rec, true, Instant::now());
+                }
                 Err(e) => h.replicate_failed(&rec, &e),
             }
             h.announce_holding().await;
