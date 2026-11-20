@@ -400,6 +400,12 @@ pub fn answer_ok(answer: &Value) -> bool {
 
 /// Answer one spec from the runtime at `base`. Never errors: a failure is an
 /// `ok: false` result the buyer can read.
+/// Qwen 3.5 models (the house default 4B among them) think before answering
+/// unless told not to. The 9B house GPU model's image is no-think already.
+pub fn thinks_by_default(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("qwen3.5")
+}
+
 pub async fn execute(base: &str, spec: &Value, ready: &[String]) -> Value {
     let started = Instant::now();
     let blob = match run(base, spec, ready).await {
@@ -437,6 +443,12 @@ async fn run(base: &str, spec: &Value, ready: &[String]) -> Result<Value> {
     });
     if let Some(t) = s.temperature {
         body["temperature"] = json!(t);
+    }
+    // Hybrid-thinking models reason before every answer on Ollama: the 4B
+    // house default took 272 s for a haiku on a CPU Ollama, 10 s with this.
+    // The house llama-server already runs them with --reasoning-budget 0.
+    if thinks_by_default(&model) && base.trim_end_matches('/') != crate::inference_auto::auto_url() {
+        body["reasoning_effort"] = json!("none");
     }
     let c = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).timeout(GENERATION_TIMEOUT).build()?;
     let resp = c.post(format!("{base}/v1/chat/completions")).json(&body).send().await.context("reach the local runtime")?;
@@ -576,6 +588,14 @@ pub fn spawn_inference_runner(net: Arc<Libp2pNetwork>, store: ChunkStore, base: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qwen35_models_answer_without_thinking() {
+        assert!(thinks_by_default(HOUSE_DEFAULT_MODEL));
+        assert!(thinks_by_default("huihui_ai/qwen3.5-abliterated:0.8b"));
+        assert!(!thinks_by_default(HOUSE_GPU_MODEL), "the 9B image is no-think");
+        assert!(!thinks_by_default("qwen2.5:1.5b"));
+    }
 
     #[test]
     fn only_real_answers_count_toward_job_time() {
