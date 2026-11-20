@@ -263,6 +263,9 @@ struct Inner {
     /// loads only the parts requests touch).
     parts: RwLock<HashMap<String, Arc<ManifestPart>>>,
     replicating: RwLock<HashSet<String>>,
+    /// Sites whose copy keeps failing: (record seq, failures in a row, not
+    /// before). See [`retry_wait`].
+    retry_at: std::sync::Mutex<HashMap<String, (u64, u32, Instant)>>,
     turn: AtomicUsize,
     stopped: std::sync::atomic::AtomicBool,
     fetch_slots: Semaphore,
@@ -506,6 +509,7 @@ impl Hosting {
             manifests: RwLock::new(HashMap::new()),
             parts: RwLock::new(HashMap::new()),
             replicating: RwLock::new(HashSet::new()),
+            retry_at: std::sync::Mutex::new(HashMap::new()),
             turn: AtomicUsize::new(0),
             stopped: std::sync::atomic::AtomicBool::new(false),
             fetch_slots: Semaphore::new(128),
@@ -1402,6 +1406,9 @@ impl Hosting {
     }
 
     fn spawn_replicate(&self, rec: SiteRecord) {
+        if self.retry_held_back(&rec, Instant::now()) {
+            return;
+        }
         let h = self.clone();
         tokio::spawn(async move {
             {
@@ -1413,13 +1420,50 @@ impl Hosting {
             let id = rec.site_id.clone();
             match h.replicate(&rec).await {
                 Ok(()) => {
+                    let _ = h.note_replicate(&rec, true, Instant::now());
                     info!(site = %id, name = %rec.name, seq = rec.seq, "hosting: holding a copy");
                     h.announce_holding().await;
                 }
-                Err(e) => warn!(site = %id, err = %e, "hosting: replicate failed"),
+                Err(e) => h.replicate_failed(&rec, &e),
             }
             h.0.replicating.write().await.remove(&id);
         });
+    }
+
+    /// Whether a site whose copy keeps failing is still waiting out its
+    /// backoff (see [`retry_wait`]). A new version of the site starts over.
+    fn retry_held_back(&self, rec: &SiteRecord, now: Instant) -> bool {
+        let map = self.0.retry_at.lock().expect("retry_at");
+        matches!(map.get(&rec.site_id), Some((seq, _, at)) if *seq == rec.seq && now < *at)
+    }
+
+    /// Record how a copy of `rec` went: a success clears its backoff, a
+    /// failure lengthens it. Returns the failures in a row.
+    fn note_replicate(&self, rec: &SiteRecord, ok: bool, now: Instant) -> u32 {
+        let mut map = self.0.retry_at.lock().expect("retry_at");
+        if ok {
+            map.remove(&rec.site_id);
+            return 0;
+        }
+        let fails = match map.get(&rec.site_id) {
+            Some((seq, n, _)) if *seq == rec.seq => n.saturating_add(1),
+            _ => 1,
+        };
+        let wait = retry_wait(fails, self.0.timing.repair_every, self.proof_ttl());
+        map.insert(rec.site_id.clone(), (rec.seq, fails, now + wait));
+        fails
+    }
+
+    /// A failed copy: back off, and warn only on the first failure and then
+    /// every tenth, so a site nobody holds any more (0 copies: "no holders")
+    /// stops filling the log every repair round.
+    fn replicate_failed(&self, rec: &SiteRecord, e: &anyhow::Error) {
+        let fails = self.note_replicate(rec, false, Instant::now());
+        if fails == 1 || fails % 10 == 0 {
+            warn!(site = %rec.site_id, fails, err = %e, "hosting: replicate failed");
+        } else {
+            debug!(site = %rec.site_id, fails, err = %e, "hosting: replicate failed");
+        }
     }
 
     /// True when this node cannot take another copy: what it may still take
@@ -1430,6 +1474,9 @@ impl Hosting {
     }
 
     fn spawn_replicate_groups(&self, rec: SiteRecord, groups: Vec<u32>) {
+        if self.retry_held_back(&rec, Instant::now()) {
+            return;
+        }
         let h = self.clone();
         tokio::spawn(async move {
             {
@@ -1441,10 +1488,13 @@ impl Hosting {
             let id = rec.site_id.clone();
             match h.replicate_groups(&rec, &groups).await {
                 Ok(n) if n > 0 => {
+                    let _ = h.note_replicate(&rec, true, Instant::now());
                     info!(site = %id, name = %rec.name, groups = n, "hosting: holding groups of a striped site");
                 }
-                Ok(_) => {}
-                Err(e) => warn!(site = %id, err = %e, "hosting: replicate failed"),
+                Ok(_) => {
+                    let _ = h.note_replicate(&rec, true, Instant::now());
+                }
+                Err(e) => h.replicate_failed(&rec, &e),
             }
             h.announce_holding().await;
             h.0.replicating.write().await.remove(&id);
@@ -3635,6 +3685,16 @@ fn holds_each_group_on_arrival(previous: Option<&SiteRecord>, rec: &SiteRecord) 
     previous.is_none_or(|p| p.manifest == rec.manifest)
 }
 
+/// How long a site waits before its next copy attempt after `fails` failures
+/// in a row: one repair round after the first, doubling each time, up to
+/// `cap`. A site whose every holder is gone ("no holders") was retried every
+/// round for good; 35 such dead sites logged ~70 warnings a minute on one
+/// node (11-20).
+fn retry_wait(fails: u32, base: Duration, cap: Duration) -> Duration {
+    let shift = fails.saturating_sub(1).min(20);
+    base.saturating_mul(1u32 << shift).min(cap.max(base))
+}
+
 pub fn auto_budget(held: u64, disk_free: u64, disk_total: u64) -> u64 {
     if disk_total == 0 {
         return held + 5 * GIB_BYTES;
@@ -4217,6 +4277,18 @@ mod tests {
             }
             assert_eq!(out, file[a as usize..=b as usize].to_vec(), "{a}-{b}");
         }
+    }
+
+    #[test]
+    fn retry_wait_doubles_to_the_cap() {
+        let base = Duration::from_secs(30);
+        let cap = Duration::from_secs(6 * 3600);
+        assert_eq!(retry_wait(1, base, cap), base);
+        assert_eq!(retry_wait(2, base, cap), base * 2);
+        assert_eq!(retry_wait(4, base, cap), base * 8);
+        assert_eq!(retry_wait(10, base, cap), base * 512);
+        assert_eq!(retry_wait(11, base, cap), cap);
+        assert_eq!(retry_wait(u32::MAX, base, cap), cap);
     }
 
     #[test]

@@ -18,7 +18,11 @@ pub struct Config {
     pub storage: StorageConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
-    #[serde(default)]
+    /// Base roles. Absent from a config file means the built-in defaults
+    /// ([`default_roles`]), not none: before 0.3.95 a config.toml written
+    /// only to set e.g. `[hosting] max_bytes` silently dropped gateway and
+    /// verifier.
+    #[serde(default = "default_roles")]
     pub roles: Vec<Role>,
     #[serde(default = "default_update_channel")]
     pub update_channel: String,
@@ -288,7 +292,7 @@ pub struct HostingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Most bytes of other people's sites this node will hold. `0` (the
-    /// default) follows the disk: what it holds plus a quarter of the free
+    /// default) follows the disk: what it holds plus half of the free
     /// space above the free-disk floor (see `hosting::auto_budget`).
     #[serde(default = "default_hosting_max_bytes")]
     pub max_bytes: u64,
@@ -392,6 +396,32 @@ fn default_challenge_every() -> u64 {
 
 fn default_settle_every() -> u64 {
     24 * 60 * 60
+}
+
+/// The roles a node runs when its config does not list any.
+pub fn default_roles() -> Vec<Role> {
+    vec![
+        Role::Storage,
+        Role::Gateway,
+        Role::Verifier,
+        Role::Tts,
+        Role::Stt,
+        Role::WorkflowStep,
+        Role::Diffusion,
+        Role::Music,
+        // Subscribes only where it can serve: a ready GPU runner, or
+        // CPU video the operator opted into.
+        Role::Video,
+        Role::Crawl,
+        Role::Hosting,
+        Role::Ocr,
+        Role::Embed,
+        Role::Captcha,
+        Role::LiveStream,
+        Role::Render,
+        Role::Inference,
+        Role::Mailbox,
+    ]
 }
 
 fn default_hosting_max_bytes() -> u64 {
@@ -859,28 +889,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             storage: StorageConfig::default(),
             gateway: GatewayConfig::default(),
-            roles: vec![
-                Role::Storage,
-                Role::Gateway,
-                Role::Verifier,
-                Role::Tts,
-                Role::Stt,
-                Role::WorkflowStep,
-                Role::Diffusion,
-                Role::Music,
-                // Subscribes only where it can serve: a ready GPU runner, or
-                // CPU video the operator opted into.
-                Role::Video,
-                Role::Crawl,
-                Role::Hosting,
-                Role::Ocr,
-                Role::Embed,
-                Role::Captcha,
-                Role::LiveStream,
-                Role::Render,
-                Role::Inference,
-                Role::Mailbox,
-            ],
+            roles: default_roles(),
             update_channel: default_update_channel(),
             update_auto: default_auto_update(),
             update_interval_secs: default_update_interval_secs(),
@@ -1256,6 +1265,17 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link survives");
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "roles = [\"gateway\"]\n");
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_config_without_roles_keeps_the_default_roles() {
+        // vienna2 11-20: a config.toml written only for [hosting] max_bytes
+        // dropped gateway and verifier.
+        let cfg: Config = toml::from_str("[hosting]\nmax_bytes = 1\n").unwrap();
+        assert_eq!(cfg.roles, default_roles());
+        assert!(cfg.roles.contains(&Role::Gateway) && cfg.roles.contains(&Role::Verifier));
+        let none: Config = toml::from_str("roles = []\n").unwrap();
+        assert!(none.roles.is_empty(), "an explicit empty list is still honored");
     }
 
     #[test]
