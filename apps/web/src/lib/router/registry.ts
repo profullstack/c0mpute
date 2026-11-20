@@ -19,12 +19,15 @@ export type PriceRow = {
 export type PriceTable = { default_model_price?: { input_per_m_usd: number; output_per_m_usd: number }; models?: PriceRow[] };
 
 /**
- * The network's default chat model: house runtimes (GPU Ollama, 16 GiB CPU
- * nodes) and Infernet serve it first, so the router leads with it. Its image
- * is a no-think template, so it is not a "reasoning" model, and as the house
- * default it is not gated behind adult mode like other uncensored models.
+ * The network's default chat model: every 8 GiB CPU node's house runtime
+ * serves it (thinking off), so the router leads with it and chats spread over
+ * the network instead of all landing on the one GPU that ran the 9B. As a
+ * house model it is not a "reasoning" model and not gated behind adult mode.
  */
-export const HOUSE_DEFAULT_MODEL = "eriktonon/qwen3.8-uncensored:9b";
+export const HOUSE_DEFAULT_MODEL = "huihui_ai/qwen3.5-abliterated:4b";
+
+/** The bigger house model GPU nodes serve: ungated like the default, no lead bonus. */
+export const HOUSE_GPU_MODEL = "eriktonon/qwen3.8-uncensored:9b";
 
 /** No longer a house model: never the router's first choice. */
 const RETIRED_DEFAULTS = new Set(["qwen2.5:7b"]);
@@ -55,8 +58,8 @@ export function parseModel(id: string): Omit<ModelProfile, "priceIn" | "priceOut
   const tags: ModelTag[] = [];
   let specialty: Category | undefined;
   if (/coder|code/.test(name)) tags.push("coder");
-  const house = id === HOUSE_DEFAULT_MODEL;
-  if (house) tags.push("house");
+  const house = id === HOUSE_DEFAULT_MODEL || id === HOUSE_GPU_MODEL;
+  if (id === HOUSE_DEFAULT_MODEL) tags.push("house");
   if (!house && /abliterated|uncensored|nsfw/.test(lower)) tags.push("uncensored");
   if (!house && /qwen3|deepseek-r1|reasoning|thinking|qwq/.test(name)) tags.push("reasoning");
   if (paramsB !== null && paramsB < 1.6) tags.push("tiny");

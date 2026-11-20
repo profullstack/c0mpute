@@ -125,16 +125,24 @@ pub const ACCEPT_TAG: &str = "infernet:inference:accept";
 pub const MAX_ACCEPT: usize = 8;
 
 /// The network's default chat model: what house runtimes serve first and
-/// what the router leads with.
-pub const HOUSE_DEFAULT_MODEL: &str = "eriktonon/qwen3.8-uncensored:9b";
+/// what the router leads with. A 4B so every 8 GiB CPU node serves it (~10
+/// tok/s on 8 cores, no thinking); the 9B ran only on GPUs and 16 GiB boxes,
+/// so one rented GPU took every default chat (2026-11-20).
+pub const HOUSE_DEFAULT_MODEL: &str = "huihui_ai/qwen3.5-abliterated:4b";
+
+/// The bigger uncensored house model GPU nodes serve. Plain-text chats for
+/// the default accept it as an upgrade, so GPUs still compete for them.
+pub const HOUSE_GPU_MODEL: &str = "eriktonon/qwen3.8-uncensored:9b";
 
 /// Smaller standard models a plain-text prompt for the key model may take
 /// when every worker serving the key model is busy, best first. 0.5b is left
 /// out on purpose: it parrots the conversation back.
 pub const FALLBACK_LADDER: &[(&str, &[&str])] = &[
-    // The house default (GPU and 16 GiB+ CPU nodes serve it). qwen2.5:7b is
-    // no key and no alternative: it is not a house model any more.
-    (HOUSE_DEFAULT_MODEL, &["huihui_ai/qwen3.5-abliterated:4b", "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
+    // The house default (every 8 GiB+ CPU node serves it); the GPU 9B takes
+    // it as an upgrade. qwen2.5:7b is no key and no alternative: it is not a
+    // house model any more.
+    (HOUSE_DEFAULT_MODEL, &[HOUSE_GPU_MODEL, "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
+    (HOUSE_GPU_MODEL, &[HOUSE_DEFAULT_MODEL, "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
     ("qwen3:4b", &["qwen2.5:3b", "qwen2.5:1.5b"]),
     ("gemma3:4b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
 ];
@@ -594,7 +602,7 @@ mod tests {
     fn plain_text_prompts_get_smaller_alternatives_and_agent_or_json_ones_do_not() {
         let plain = json!({"v": 1, "model": HOUSE_DEFAULT_MODEL, "messages": [{"role": "user", "content": "write a haiku about rain"}]});
         let widened = with_alternatives(&plain).expect("plain text is widened");
-        assert_eq!(widened["accept_models"], json!(["huihui_ai/qwen3.5-abliterated:4b", "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]));
+        assert_eq!(widened["accept_models"], json!([HOUSE_GPU_MODEL, "qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]));
         assert_eq!(widened["model"], HOUSE_DEFAULT_MODEL, "the asked-for model stays first");
         assert_eq!(required_capabilities(&widened), vec![ROLE_TAG.to_string(), ACCEPT_TAG.to_string()]);
         assert_eq!(required_capabilities(&without_alternatives(&widened)), vec![ROLE_TAG.to_string(), model_tag(HOUSE_DEFAULT_MODEL)]);
