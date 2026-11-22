@@ -16,6 +16,7 @@ const NAV_GROUPS: NavGroup[] = [
     links: [
       { href: "/chat", label: "chat", desc: "open models on the network" },
       { href: "/gallery", label: "gallery", desc: "what people built on c0mpute" },
+      { href: "/gallery/submit", label: "get listed", desc: "add your build to the gallery" },
       { href: "/train", label: "train an AI agent", desc: "fine-tune on rented nodes" },
       { href: "/apps", label: "apps & hosting", desc: "sites and backends, 3 copies" },
       { href: "/market", label: "market", desc: "rent GPU and CPU time" },
@@ -189,6 +190,9 @@ export function SiteNav() {
               >
                 <span className="accent font-bold">gallery</span>
                 <span className="block text-xs text-[var(--color-dim)] mt-1">what people built on c0mpute: apps, music, podcasts, models</span>
+              </Link>
+              <Link href="/gallery/submit" className="block text-sm -mt-6 px-4">
+                <span aria-hidden="true">→ </span>get listed: add your build
               </Link>
               {NAV_GROUPS.map((g) => (
                 <section key={g.id} aria-labelledby={`nav-m-${g.id}`}>

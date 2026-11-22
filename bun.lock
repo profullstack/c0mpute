@@ -50,10 +50,12 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.3.94",
+      "version": "0.3.98",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
         "@profullstack/chat-plugins": "^0.1.0",
+        "@profullstack/coinpay-onboard": "^0.5.1",
+        "@profullstack/cross-promo": "^0.2.0",
         "@profullstack/footer": "latest",
         "@profullstack/modern-css": "0.2.0",
         "@profullstack/x402-gateway": "^0.18.2",
@@ -298,7 +300,11 @@
 
     "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.1.0", "", {}, "sha512-V6KwXpevLQFExiGwl3PlvX82s0GWae4VnajVOAeTF7+rl/ODfS+Yawmcf10VtjOdnK+JM45NRy0l95t8kX9jsg=="],
 
-    "@profullstack/footer": ["@profullstack/footer@0.6.20", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-JEB1hZCKSKRro6EI95JMUM4lBX39DUKk6i5ukcKpgeCo+jxwBYcUGiHBrDTdd0/n46M1ECOG4IrDHjgFNGmvGQ=="],
+    "@profullstack/coinpay-onboard": ["@profullstack/coinpay-onboard@0.5.1", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.32.2", "zod": "^4.6.7" }, "bin": { "coinpay-onboard": "bin/coinpay-onboard" } }, "sha512-vuM/1vYvkXP2E/tBcTBZ8JY4K49qtSPPY1N9XRQvIlcy0Sezr+spOf6vYBkRPhasKcFqda44MRLgxPseG9Kvdg=="],
+
+    "@profullstack/cross-promo": ["@profullstack/cross-promo@0.2.0", "", { "bin": { "cross-promo": "bin/cross-promo.js" } }, "sha512-+9o0utY0e10bhuwZ6bZp5wnsgnINBgwluMOkO5lDNfiMYrhLzUgeqQLdrmOuCxl4KysOBF14QIYNwZbPlNxa2w=="],
+
+    "@profullstack/footer": ["@profullstack/footer@0.7.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-Xvisf7+VTTy7VsX7UTY0VijybHr+Cx3hxlnNT0ExOHq6i1sUxQ1yM1wjYQJumP86oan93vgBODR6DQ0uZKINoA=="],
 
     "@profullstack/hqtui": ["@profullstack/hqtui@0.12.0", "", { "bin": { "hqtui": "bin/hqtui.mjs" } }, "sha512-THxKKus56d44HeBpb9Kx7LENG9fAgqrl84tgyfv5ZHztJ2sSSRvjGeyD9G2dXNG8fY7s7CLyoz+00wQ63mQfHQ=="],
 

@@ -12,6 +12,8 @@
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
     "@profullstack/chat-plugins": "^0.1.0",
+    "@profullstack/coinpay-onboard": "^0.5.1",
+    "@profullstack/cross-promo": "^0.2.0",
     "@profullstack/footer": "latest",
     "@profullstack/modern-css": "0.2.0",
     "@profullstack/x402-gateway": "^0.18.2",

@@ -1,5 +1,11 @@
 import Link from "next/link";
-import { GALLERY, GALLERY_CATEGORIES, SUBMIT_URL, type GalleryCategory } from "@/lib/gallery";
+import { GALLERY_CATEGORIES, type GalleryCategory } from "@/lib/gallery";
+import { GALLERY_CONFIG } from "@/lib/gallery/config";
+import { galleryEntries } from "@/lib/gallery/server";
+import { normalizeUrl } from "@/lib/gallery/url";
+
+// Listings change without a deploy (submissions, badge checks).
+export const dynamic = "force-dynamic";
 
 export const metadata = {
   title: "gallery: built on c0mpute — c0mpute",
@@ -13,10 +19,16 @@ const host = (u: string) => new URL(u).host + (new URL(u).pathname === "/" ? "" 
 
 // Filtering is a plain link with ?category=, so it works with JS off and the
 // filtered view has its own URL to share.
-export default async function GalleryPage({ searchParams }: { searchParams: Promise<{ category?: string }> }) {
-  const { category } = await searchParams;
+export default async function GalleryPage({ searchParams }: { searchParams: Promise<{ category?: string; ref?: string }> }) {
+  const { category, ref } = await searchParams;
+  const { entries: all } = await galleryEntries();
+  // Featured first, then newest (the feed's order).
+  const GALLERY = [...all.filter((e) => e.featured), ...all.filter((e) => !e.featured)];
   const active = GALLERY_CATEGORIES.some((c) => c.id === category) ? (category as GalleryCategory) : null;
   const entries = active ? GALLERY.filter((e) => e.category === active) : GALLERY;
+  // Arrived from a site's badge (?ref=<its url>): point at its card.
+  const refKey = ref ? normalizeUrl(ref)?.key : null;
+  const from = refKey ? GALLERY.find((e) => normalizeUrl(e.url)?.key === refKey) : undefined;
 
   const pill = (on: boolean) =>
     `!border px-3 py-1 rounded-full whitespace-nowrap ${
@@ -34,6 +46,20 @@ export default async function GalleryPage({ searchParams }: { searchParams: Prom
           Each card links to the live site and, when it is hosted on c0mpute, to its copy on a gateway. The same list is
           public JSON at <a href="/api/v1/gallery">/api/v1/gallery</a>.
         </p>
+        <p className="flex flex-wrap gap-3 pt-1 text-sm">
+          <Link href="/gallery/submit" className="!border px-4 py-2 rounded !border-[var(--color-accent)] hover:bg-[var(--color-accent-dim)]/30">
+            get listed
+          </Link>
+          <span className="py-2 text-[var(--color-dim)]">free with our badge, or ${GALLERY_CONFIG.priorityPriceUsd} for priority review</span>
+        </p>
+        {from && (
+          <p className="text-sm">
+            <a href={`#${from.slug}`}>
+              <span aria-hidden="true">→ </span>
+              {from.name} is listed here
+            </a>
+          </p>
+        )}
       </header>
 
       <nav aria-label="Filter by category" className="flex flex-wrap gap-2 text-sm">
@@ -59,7 +85,7 @@ export default async function GalleryPage({ searchParams }: { searchParams: Prom
 
       <ul className="gallery-grid subgrid-cards" style={{ ["--card-rows" as string]: 4 }}>
         {entries.map((e) => (
-          <li key={e.slug} id={e.slug} className="gallery-card subgrid-card squircle">
+          <li key={e.slug} id={e.slug} className="gallery-card subgrid-card squircle" data-featured={e.featured ? "" : undefined}>
             <a href={e.url} className="gallery-shot !border-0" tabIndex={-1} aria-hidden="true">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={e.image} alt="" width={1280} height={800} loading="lazy" decoding="async" />
@@ -71,7 +97,8 @@ export default async function GalleryPage({ searchParams }: { searchParams: Prom
                 </a>
               </h2>
               <p className="text-xs text-[var(--color-dim)]">
-                {LABEL[e.category]} · live since {e.added_at}
+                {e.featured && <span className="accent">featured · </span>}
+                {LABEL[e.category] ?? e.category} · live since {e.added_at}
               </p>
             </div>
             <p className="text-sm leading-6">{e.tagline}</p>
@@ -103,13 +130,14 @@ export default async function GalleryPage({ searchParams }: { searchParams: Prom
         <h2 id="submit" className="font-semibold text-[var(--color-fg)]">[ built something on c0mpute? ]</h2>
         <p>
           Host a site with <code>c0mpute hosting publish</code>, call models from the{" "}
-          <Link href="/docs">API</Link>, or <Link href="/train">fine-tune an agent</Link>, then tell us about it. We add
-          entries that are live and use the network for real.
+          <Link href="/docs">API</Link>, or <Link href="/train">fine-tune an agent</Link>, then get it listed. Free: put our
+          badge on your site and it goes live as soon as we see it (or after a {GALLERY_CONFIG.freeQueueDays}-day queue
+          without it). Priority: ${GALLERY_CONFIG.priorityPriceUsd} once, live as soon as the automated checks pass.
         </p>
         <p className="flex flex-wrap gap-3">
-          <a href={SUBMIT_URL} className="!border px-4 py-2 rounded !border-[var(--color-accent)] hover:bg-[var(--color-accent-dim)]/30">
+          <Link href="/gallery/submit" className="!border px-4 py-2 rounded !border-[var(--color-accent)] hover:bg-[var(--color-accent-dim)]/30">
             submit your build
-          </a>
+          </Link>
           <a href="mailto:hello@c0mpute.com?subject=Gallery%20submission" className="px-1 py-2">
             or email hello@c0mpute.com
           </a>

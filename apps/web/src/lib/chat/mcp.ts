@@ -9,6 +9,8 @@ import { CONVO_ID, type ConvoStore } from "./convo-store";
 import type { PushStore } from "./push";
 import { describeSteps, PLUGIN_TOOL_NAMES, PLUGIN_TOOLS, pluginTool, type PluginMcpDeps } from "./plugin-mcp";
 import type { PluginEvent } from "./plugin-shared";
+import { GALLERY_TOOL_NAMES, GALLERY_TOOLS, galleryTool } from "../gallery/mcp";
+import type { GalleryService } from "../gallery/service";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -99,6 +101,8 @@ export type McpCtx = {
   convos?: ConvoStore;
   /** Who started which generation job (media-owners.ts), when wired. */
   jobs?: { record: (userId: string, kind: "promo", jobId: unknown) => Promise<void>; owns: (userId: string, jobId: string) => Promise<boolean> };
+  /** The gallery ("Get listed"), when wired: gallery_submit, gallery_status, gallery_list. */
+  gallery?: GalleryService;
 };
 
 export const CONVO_TOOLS = [
@@ -146,7 +150,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "c0mpute", title: "c0mpute", version: "1.1.0" },
         instructions:
-          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first); with chat plugins on (chat_plugins_list / chat_plugins_add: any remote MCP server, sign-in by link) those models can use the plugins' tools. promo_video makes a promo video of a website; poll promo_status.",
+          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first); with chat plugins on (chat_plugins_list / chat_plugins_add: any remote MCP server, sign-in by link) those models can use the plugins' tools. promo_video makes a promo video of a website; poll promo_status. gallery_submit lists something built on c0mpute in the c0mpute gallery (free with the badge or after a 30-day queue, or priority via a CoinPay checkout link); gallery_status follows it.",
       });
     case "ping":
       return ok(id, {});
@@ -156,7 +160,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return null;
     }
     case "tools/list":
-      return ok(id, { tools: [...TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : [])] });
+      return ok(id, { tools: [...TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -182,6 +186,11 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         if (HOSTING_TOOL_NAMES.has(name)) {
           if (!ctx.push) return fail(id, -32602, `unknown tool: ${name}`);
           const r = await hostingTool(name, args, ctx.user.id, ctx.push);
+          return ok(id, text(r.text, r.isError));
+        }
+        if (GALLERY_TOOL_NAMES.has(name)) {
+          if (!ctx.gallery) return fail(id, -32602, `unknown tool: ${name}`);
+          const r = await galleryTool(name, args, ctx.gallery);
           return ok(id, text(r.text, r.isError));
         }
         if (PLUGIN_TOOL_NAMES.has(name)) {

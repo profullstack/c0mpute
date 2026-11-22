@@ -136,7 +136,7 @@ pub(crate) fn base_url(flag: Option<&str>) -> String {
         .to_string()
 }
 
-fn api_key() -> Option<String> {
+pub(crate) fn api_key() -> Option<String> {
     std::env::var("C0MPUTE_API_KEY")
         .ok()
         .filter(|s| !s.is_empty())

@@ -1,6 +1,7 @@
 import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
 import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
+import { gallery } from "@/lib/gallery/server";
 import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -42,7 +43,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob } })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery() })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }
