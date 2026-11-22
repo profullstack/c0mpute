@@ -4,6 +4,8 @@ import { EarningsEstimator, type ObservedEarnings } from "@/components/earnings-
 import { getStatusPayload } from "@/lib/status";
 import { getGpuModelPrice, getNetworkEarnings } from "@/lib/earnings/network-server";
 import type { NetworkEarnings } from "@/lib/earnings/network";
+import { networkObserved } from "@/lib/earnings/server";
+import { liveRates } from "@/lib/r4ck-rates-server";
 
 export const metadata: Metadata = {
   title: "Compute earnings estimates — c0mpute",
@@ -36,6 +38,7 @@ export default async function EstimatesPage() {
     getNetworkEarnings().catch(() => null),
     getGpuModelPrice().catch(() => null),
   ]);
+  const [rates, byClass] = await Promise.all([liveRates(), networkObserved()]);
   const jobsCompleted24h = status.source === "aggregator" ? status.network.jobs_completed_24h : null;
   const online = status.source === "aggregator" ? status.network.workers_online : null;
   const cpuWorkersOnline = status.source === "aggregator"
@@ -52,12 +55,12 @@ export default async function EstimatesPage() {
         {observed && (
           <p className="text-sm leading-6 text-[var(--color-fg)]">
             Node operators earned <strong className="accent">{usd(observed.earned30d)}</strong> in the last 30 days
-            ({usd(observed.earnedAll)} all time) across {observed.earningNodes30d.toLocaleString()} nodes.{" "}
+            ({usd(observed.earnedAll)} all time) across {observed.earningNodes30d.toLocaleString()} nodes: settled chat pay from the Infernet ledger plus c0mpute-native jobs from the c0mpute job ledger, each dollar counted once.{" "}
             <Link href="/status#earnings">Real ledger numbers</Link>.
           </p>
         )}
         <p className="text-sm leading-6 text-[var(--color-fg)]">
-          Choose a CPU or GPU reference to compare its rental price at different paid-use levels, and see how much work a
+          Choose a CPU or GPU reference to compare its current rental price (live from r4ck.dev) at different paid-use levels, and see how much work a
           rented GPU has to sell to pay its own rent, or to pay for four more.
         </p>
         <p className="text-xs text-[var(--color-dim)]">
@@ -70,6 +73,8 @@ export default async function EstimatesPage() {
         cpuWorkersOnline={cpuWorkersOnline}
         observed={observed}
         gpuPrice={gpuPrice}
+        liveRates={rates}
+        observedByClass={byClass ? { history_from: byClass.history_from, windows: byClass.windows } : null}
       />
 
       <p className="text-xs text-[var(--color-dim)]">

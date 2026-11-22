@@ -214,15 +214,17 @@ export default async function StatusPage() {
           </>
         )}
         <p className="text-xs text-[var(--color-dim)] leading-6">
-          Real money, not estimates. c0mpute jobs come from the signed accept and
+          Real money, not estimates. c0mpute jobs (speech, images, music and other
+          c0mpute-native work) come from the signed accept and
           receipt each node gossips, copied into our ledger so history outlives the
           aggregator&apos;s 24h window
           {earnings?.history_from ? ` (on file since ${new Date(earnings.history_from).toISOString().slice(0, 10)})` : ""};
           shown after the {MARKET_FEE_PCT}% fee, as on <Link href="/nodes#jobs">/nodes</Link>. Infernet
           inference is the operator&apos;s net from the{" "}
           <a href="https://infernetprotocol.com/api/v1/network/earnings">Infernet earnings ledger</a>, with
-          house subsidies and voided jobs left out. An inference job a c0mpute node serves is
-          paid through Infernet only, so nothing is counted twice. Referral commissions come
+          house subsidies and voided jobs left out. Chat inference a c0mpute node serves for
+          Infernet is counted from that ledger only: its auction record on c0mpute is left out,
+          so each dollar is counted once. Referral commissions come
           out of the house commission. No node, account or wallet is named. Demand is early:
           these are real numbers, not a promise.
         </p>

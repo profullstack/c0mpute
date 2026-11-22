@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import type { Sql } from "../chat/store";
 import { createEarningsStore } from "./store";
-import { parseInfernetEarnings, summariseNodeTotals } from "./network";
+import { splitPrice } from "../market";
+import { SETTLED_IN_INFERNET_TYPES, parseInfernetEarnings, summariseNodeTotals } from "./network";
 
 function memSql(): Sql {
   const db = new Database(":memory:");
@@ -68,5 +69,29 @@ describe("store.nodeTotals", () => {
     expect(all.find((r) => r.node === "aaaaaaaa")).toEqual({ node: "aaaaaaaa", jobs: 2, paid_usd: 0.30000000000000004 });
     const recent = await store.nodeTotals(4_000);
     expect(recent.map((r) => [r.node, r.jobs]).sort()).toEqual([["aaaaaaaa", 1], ["bbbbbbbb", 1]]);
+  });
+});
+
+describe("no double count between node_jobs and the Infernet ledger", () => {
+  test("bridged Infernet chat is counted from the ledger only", async () => {
+    const store = createEarningsStore(memSql());
+    // The same chat work filed twice: node_jobs at the bridge's agreed auction
+    // price, and the Infernet ledger at what was actually settled.
+    await store.recordJobs([
+      { job_id: "c1", node: "aaaaaaaa", type: "infernet.inference", completed_at_ms: 1_000, seen_at_ms: 1_000, busy_s: 5, paid_usd: 0.0099 },
+      { job_id: "c2", node: "aaaaaaaa", type: "infernet.inference", completed_at_ms: 2_000, seen_at_ms: 2_000, busy_s: 5, paid_usd: 0.0099 },
+      { job_id: "t1", node: "aaaaaaaa", type: "tts.synthesize", completed_at_ms: 3_000, seen_at_ms: 3_000, busy_s: 5, paid_usd: 0.1 },
+      { job_id: "i1", node: "bbbbbbbb", type: "diffusion.txt2img", completed_at_ms: 3_000, seen_at_ms: 3_000, busy_s: 5, paid_usd: 0.2 },
+    ]);
+    const ledger = parseInfernetEarnings({ all_time: { earned_usd: 0.004, earning_nodes: 1, jobs: 2 }, windows: {} });
+    const c0 = summariseNodeTotals(await store.nodeTotals(0, SETTLED_IN_INFERNET_TYPES));
+    expect(c0.jobs).toBe(2); // tts + image only
+    expect(c0.gross_usd).toBeCloseTo(0.3, 6);
+    const total = c0.earned_usd + (ledger?.all.earned_usd ?? 0);
+    expect(c0.earned_usd).toBe(splitPrice(0.3).operator);
+    expect(total).toBeCloseTo(splitPrice(0.3).operator + 0.004, 9);
+    // Without the exclusion the chat would be counted again at its auction price.
+    const naive = summariseNodeTotals(await store.nodeTotals(0)).earned_usd + (ledger?.all.earned_usd ?? 0);
+    expect(naive).toBeGreaterThan(total);
   });
 });

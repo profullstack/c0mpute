@@ -6,6 +6,7 @@ import { getNodesPayload, type NodeRow } from "../nodes";
 import { buildReport, RANGES, type InfernetHour, type InfernetInput, type RangeKey, type Report, type ReportNode } from "./report";
 import { nodeKey, type OperatorNode } from "./store";
 import { earningsStore } from "./recorder";
+import { buildObserved, type ObservedWindow } from "./network-by-class";
 
 export { earningsStore };
 
@@ -134,4 +135,39 @@ export async function dashboardFor(user: { id: string; coinpay_sub: string }, ra
     history_from: historyFrom,
     claims: claims.map((c) => ({ ...c, online: online.has(c.node), on_board_name: online.get(c.node)?.name ?? null })),
   };
+}
+
+// ── job prices by hardware class, for /estimates ────────────────────────────────────────
+
+export interface NetworkObserved {
+  generated_at: string;
+  history_from: number | null;
+  windows: ObservedWindow[];
+}
+
+/** Observed agreed prices across every node over the last 7 and 30 days. Null when the history is unreadable. */
+export async function networkObserved(now = Date.now()): Promise<NetworkObserved | null> {
+  try {
+    const store = earningsStore();
+    const [rows30, rows7, claimed, board, historyFrom] = await Promise.all([
+      store.networkSince(now - 30 * 86_400_000),
+      store.networkSince(now - 7 * 86_400_000),
+      store.claimedClasses().catch(() => new Map<string, string>()),
+      getNodesPayload().catch(() => null),
+      store.firstJobAt().catch(() => null),
+    ]);
+    const online = new Map<string, string>((board?.nodes ?? []).map((n) => [n.id, n.class]));
+    const classOf = (node: string) => online.get(node) ?? claimed.get(node) ?? null;
+    return {
+      generated_at: new Date(now).toISOString(),
+      history_from: historyFrom,
+      windows: [
+        buildObserved({ days: 7, rows: rows7, classOf, historyFrom, now }),
+        buildObserved({ days: 30, rows: rows30, classOf, historyFrom, now }),
+      ],
+    };
+  } catch (e) {
+    console.error("estimates: network history failed", e);
+    return null;
+  }
 }

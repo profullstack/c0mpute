@@ -3,7 +3,7 @@
 import "server-only";
 import { infernet } from "../chat/server";
 import { earningsStore } from "./recorder";
-import { WINDOWS, parseInfernetEarnings, summariseNodeTotals, type C0mputeEarnings, type NetworkEarnings, type WindowKey } from "./network";
+import { SETTLED_IN_INFERNET_TYPES, WINDOWS, parseInfernetEarnings, summariseNodeTotals, type C0mputeEarnings, type NetworkEarnings, type WindowKey } from "./network";
 
 let cache: { at: number; value: NetworkEarnings } | null = null;
 
@@ -36,7 +36,7 @@ export async function getNetworkEarnings(now = Date.now()): Promise<NetworkEarni
     const out = {} as Record<WindowKey, C0mputeEarnings>;
     for (const k of keys) {
       const since = k === "all" ? 0 : now - WINDOWS[k];
-      out[k] = summariseNodeTotals(await store.nodeTotals(since));
+      out[k] = summariseNodeTotals(await store.nodeTotals(since, SETTLED_IN_INFERNET_TYPES));
     }
     return out;
   })().catch(() => null);
