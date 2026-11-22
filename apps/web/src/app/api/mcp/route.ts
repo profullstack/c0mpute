@@ -2,6 +2,9 @@ import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
 import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
 import { gallery } from "@/lib/gallery/server";
+import { experts } from "@/lib/experts/catalog";
+import { expertPriceUsd, expertsConfig } from "@/lib/experts/config";
+import { expertAnswer, expertsService } from "@/lib/experts/server";
 import { accountStore, fleetFor, fleetService } from "@/lib/accounts/server";
 import { isFleetAction, runAction, selectNodes } from "@/lib/accounts/fleet";
 import { alertsView, saveAlerts, testAlert } from "@/lib/accounts/alerts-api";
@@ -50,7 +53,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery(), fleet: fleetDeps(user), live: { store: liveStore(), site: siteUrl() } })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery(), experts: { list: () => experts(), price: (m) => expertPriceUsd(m.pricing.monthly_usd, expertsConfig()), ask: expertAnswer, status: (u) => expertsService().status(u), startTrial: (u) => expertsService().startTrial(u) }, fleet: fleetDeps(user), live: { store: liveStore(), site: siteUrl() } })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }

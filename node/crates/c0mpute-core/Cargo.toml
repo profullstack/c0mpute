@@ -47,6 +47,11 @@ hmac = { workspace = true }
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
+# RTMP handshake and chunk stream for the hosted live ingest (`live::ingest`).
+# Pure Rust (bytes, byteorder, hmac, sha2, rand), so it builds for every
+# release target.
+rml_rtmp = "0.8"
 sysinfo = { workspace = true }
 zip = { workspace = true }
 flate2 = "1"

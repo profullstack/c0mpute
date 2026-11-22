@@ -14,6 +14,7 @@ import type { GalleryService } from "../gallery/service";
 import { REFERRAL_TOOL_NAMES, REFERRAL_TOOLS, referralTool } from "../referrals-mcp";
 import { LIVE_TOOL_NAMES, LIVE_TOOLS, liveTool, type LiveMcpDeps } from "../live/mcp";
 import { FLEET_TOOL_NAMES, FLEET_TOOLS, fleetTool, type FleetMcpDeps } from "../accounts/mcp";
+import { EXPERTS_TOOL_NAMES, EXPERTS_TOOLS, expertsTool, type ExpertsMcpDeps } from "../experts/mcp";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -110,6 +111,8 @@ export type McpCtx = {
   gallery?: GalleryService;
   /** Fleet management (list_my_nodes, my_earnings, fleet_*), when wired. */
   fleet?: FleetMcpDeps;
+  /** The Experts store (list_experts, ask_expert, experts_status), when wired. */
+  experts?: ExpertsMcpDeps;
 };
 
 export const CONVO_TOOLS = [
@@ -157,7 +160,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "c0mpute", title: "c0mpute", version: "1.1.0" },
         instructions:
-          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first); with chat plugins on (chat_plugins_list / chat_plugins_add: any remote MCP server, sign-in by link) those models can use the plugins' tools. promo_video makes a promo video of a website; poll promo_status. gallery_submit lists something built on c0mpute in the c0mpute gallery (free with the badge or after a 30-day queue, or priority via a CoinPay checkout link); gallery_status follows it. live_stream_create makes a live stream (RTMP server + key for OBS or PairUX, and a watch link); live_streams lists them; live_stream_end deletes one.",
+          "c0mpute is a peer-to-peer network of everyday computers. hosting_push publishes a website (inline HTML/CSS/JS files) on the network with at least three self-healing copies, free through the shared cloud node when the person has no node of their own; poll hosting_push_status until it is live and give them the url (https://gateway.c0mpute.com/s/<site_id>/). hosting_pushes lists their sites, hosting_push_rm takes one down. chat asks open models on the network (list_models first); with chat plugins on (chat_plugins_list / chat_plugins_add: any remote MCP server, sign-in by link) those models can use the plugins' tools. promo_video makes a promo video of a website; poll promo_status. gallery_submit lists something built on c0mpute in the c0mpute gallery (free with the badge or after a 30-day queue, or priority via a CoinPay checkout link); gallery_status follows it. live_stream_create makes a live stream (RTMP server + key for OBS or PairUX, and a watch link); live_streams lists them; live_stream_end deletes one. list_experts / ask_expert reach the c0mpute Experts (security analyst, sales coach, automation engineer, legal info, tax info): the first question starts a 90-day free trial per CoinPay account.",
       });
     case "ping":
       return ok(id, {});
@@ -167,7 +170,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return null;
     }
     case "tools/list":
-      return ok(id, { tools: [...TOOLS, ...REFERRAL_TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : []), ...(ctx.fleet ? FLEET_TOOLS : []), ...(ctx.live ? LIVE_TOOLS : [])] });
+      return ok(id, { tools: [...TOOLS, ...REFERRAL_TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : []), ...(ctx.fleet ? FLEET_TOOLS : []), ...(ctx.live ? LIVE_TOOLS : []), ...(ctx.experts ? EXPERTS_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -208,6 +211,11 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         if (LIVE_TOOL_NAMES.has(name)) {
           if (!ctx.live) return fail(id, -32602, `unknown tool: ${name}`);
           const r = await liveTool(name, args, { id: ctx.user.id, coinpay_sub: ctx.user.coinpay_sub ?? null }, ctx.live);
+          return ok(id, text(r.text, r.isError));
+        }
+        if (EXPERTS_TOOL_NAMES.has(name)) {
+          if (!ctx.experts) return fail(id, -32602, `unknown tool: ${name}`);
+          const r = await expertsTool(name, args, { id: ctx.user.id, coinpay_sub: ctx.user.coinpay_sub ?? null }, ctx.experts, signal);
           return ok(id, text(r.text, r.isError));
         }
         if (REFERRAL_TOOL_NAMES.has(name)) {

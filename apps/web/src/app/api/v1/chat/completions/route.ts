@@ -8,6 +8,8 @@ import { toolChatResponse } from "@/lib/chat/tools-http";
 import { houseLaneChat, wantsHouseLane } from "@/lib/chat/house-lane";
 import { balanceFor, currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, siteUrl, unauthorized } from "@/lib/chat/server";
 import { recordUsage } from "@/lib/leaderboard/server";
+import { expertSlugOf } from "@/lib/experts/chat";
+import { expertChatResponse } from "@/lib/experts/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -26,7 +28,8 @@ const err = (status: number, message: string, headers: Record<string, string> = 
  * results and assistant tool_calls are accepted in history. Only
  * tool-capable models take them (lib/chat/tools.ts); others get a 400.
  *
- * `model`: a model id goes straight to that model. "auto" (or absent),
+ * `model`: "expert:<slug>" asks a c0mpute Expert (GET /api/v1/experts; trial,
+ * then subscription). A model id goes straight to that model. "auto" (or absent),
  * "auto:fast" | "auto:standard" | "auto:high" | "auto:max" goes through the
  * model router; `router: { effort?, max_cost_usd?, max_latency_ms? }` refines
  * it. Routed answers carry `x-c0mpute-route` and (JSON / last SSE chunk) the
@@ -70,16 +73,17 @@ export async function POST(req: Request) {
   // plugins (their connected tools) nor a stored, resumable run.
   const appKey = user.token_kind === "oauth";
 
+  // An Expert (model "expert:<slug>"): the signed manifest applied to this
+  // turn, behind the Experts trial / subscription gate (lib/experts).
+  const expert = expertSlugOf(raw?.model);
+  if (expert) {
+    if (parsed.tooling) return err(400, "experts do not take client tools; drop `tools` or use a model id");
+    return expertChatResponse({ user, slug: expert, req: parsed, signal: req.signal });
+  }
+
   // OpenAI tool calling (`tools`, tool_choice not "none"): the client runs its
   // own tool loop, so server-side plugins, resumable runs and the multi-step
   // router stay out of it. Only tool-capable models take it; never dropped.
-  if (parsed.tooling) {
-    return toolChatResponse({ upstream: infernetFor(user.coinpay_sub), req: parsed, rawModel: raw?.model, signal: req.signal });
-  }
-
-  // OpenAI tool calling (`tools` with tool_choice other than "none"): the
-  // client runs its own tools, so server-side plugins, resumable runs and the
-  // multi-model router stay out of it (lib/chat/tools.ts).
   if (parsed.tooling) {
     return toolChatResponse({ upstream: infernetFor(user.coinpay_sub), req: parsed, rawModel: raw?.model, signal: req.signal });
   }

@@ -1,6 +1,7 @@
 import { readWebhook, verifyWebhook } from "@profullstack/coinpay-onboard";
 import { env } from "@/lib/chat/server";
 import { gallery } from "@/lib/gallery/server";
+import { expertsService } from "@/lib/experts/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -9,7 +10,8 @@ const j = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
 /**
- * POST /api/v1/gallery/webhook: CoinPay events for the c0mpute.com business.
+ * POST /api/v1/gallery/webhook: CoinPay events for the c0mpute.com business
+ * (gallery priority listings and Experts subscriptions).
  * Unsigned or wrongly signed calls get 401 and change nothing
  * (X-CoinPay-Signature: t=<unix>,v1=<hmac-sha256 of "t.body">, 5-minute window).
  */
@@ -26,6 +28,9 @@ export async function POST(req: Request) {
   }
   const ev = readWebhook(payload);
   try {
+    // One webhook URL for the c0mpute.com business: Experts subscriptions carry metadata.kind "experts_subscription".
+    const x = await expertsService().onPaid(ev);
+    if (x.handled) return j({ received: true, action: x.action });
     const r = await gallery().onPaid(ev);
     return j({ received: true, action: r.action, listing: r.listing?.id ?? null });
   } catch (e) {

@@ -1,6 +1,6 @@
 {
   "name": "c0mpute",
-  "version": "0.3.106",
+  "version": "0.3.107",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@c0mpute/shared": "workspace:*",
-    "@profullstack/chat-plugins": "^0.2.0",
+    "@profullstack/chat-plugins": "^0.3.0",
     "@profullstack/checkout": "^0.1.0",
     "@profullstack/coinpay-onboard": "^0.5.1",
     "@profullstack/cross-promo": "^0.2.0",

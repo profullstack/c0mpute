@@ -41,4 +41,11 @@ export async function register() {
   } catch (e) {
     console.error("gallery: could not start the ticker", e);
   }
+  // Experts store: run the signed manifests past the DIP-0036 labeler once.
+  try {
+    const { startExpertsModeration } = await import("./lib/experts/server");
+    startExpertsModeration();
+  } catch (e) {
+    console.error("experts: could not start the moderation pass", e);
+  }
 }

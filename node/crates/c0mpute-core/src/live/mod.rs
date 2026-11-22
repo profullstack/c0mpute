@@ -16,10 +16,19 @@
 //! * Streams with active viewers get their newest segments prefetched as each
 //!   record arrives, so playback does not wait on the first fetch.
 //!
+//! * Every node counts the bytes it serves per stream (HTTP to viewers,
+//!   chunks to other nodes) and gossips a signed receipt per stream every
+//!   minute; status aggregators turn those into `live.relay` jobs credited
+//!   to the node ([`meter`]). An account-bound stream that is not paid is
+//!   served to at most its viewer cap of clients per gateway; a stream with
+//!   no binding (`c0mpute stream go`) has no cap.
+//!
 //! No coordinator: records are self-certifying, holders are learned from
 //! gossip, and every byte is checked against its blake3 hash.
 
 pub mod broadcast;
+pub mod ingest;
+pub mod meter;
 pub mod playlist;
 pub mod record;
 
@@ -31,8 +40,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path as AxPath, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, Path as AxPath, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use c0mpute_net::{GossipMessage, Libp2pNetwork};
@@ -222,6 +231,48 @@ struct Inner {
     turn: AtomicUsize,
     stopped: AtomicBool,
     fetch_slots: Semaphore,
+    /// Bytes served per stream since the last receipt.
+    served: meter::Served,
+    /// Highest whole-stream bitrate seen per stream (bounds receipts).
+    peak_bps: std::sync::Mutex<HashMap<String, u64>>,
+    /// stream -> client -> last request, for streams with a viewer cap.
+    clients: std::sync::Mutex<HashMap<String, HashMap<String, Instant>>>,
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Who a request is from, for the viewer cap: the connecting address, or,
+/// when that is a local or private proxy (or unknown), the client address
+/// the proxy passed on (`cf-connecting-ip`, `x-real-ip`, the first
+/// `x-forwarded-for` hop).
+pub fn client_key(headers: &HeaderMap, direct: Option<std::net::IpAddr>) -> String {
+    let local = |ip: &std::net::IpAddr| match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    };
+    if let Some(ip) = &direct
+        && !local(ip)
+    {
+        return ip.to_string();
+    }
+    for name in ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] {
+        if let Some(v) = headers.get(name).and_then(|v| v.to_str().ok())
+            && let Some(first) = v.split(',').next().map(str::trim).filter(|s| !s.is_empty() && s.len() <= 64)
+        {
+            return first.to_string();
+        }
+    }
+    direct.map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".to_string())
+}
+
+fn request_client(req: &Request) -> String {
+    let direct = req.extensions().get::<ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip());
+    client_key(req.headers(), direct)
 }
 
 /// The live-stream service: one per node. Cheap to clone.
@@ -242,6 +293,12 @@ pub struct StreamInfo {
     pub holders: usize,
     pub fetched_from: HashMap<String, u64>,
     pub renditions: Vec<serde_json::Value>,
+    /// The c0mpute.com account the stream is bound to, when it is.
+    pub account: Option<String>,
+    /// Relays of this stream are paid per GB.
+    pub paid: bool,
+    /// Viewers per gateway (`None`: no cap, a paid stream).
+    pub max_viewers: Option<u32>,
 }
 
 impl LiveStream {
@@ -260,11 +317,147 @@ impl LiveStream {
             turn: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
             fetch_slots: Semaphore::new(16),
+            served: meter::Served::default(),
+            peak_bps: std::sync::Mutex::new(HashMap::new()),
+            clients: std::sync::Mutex::new(HashMap::new()),
         }));
         net.subscribe(TOPIC).await.context("subscribe to live topic")?;
+        // Relay receipts travel on their own topic; being in its mesh lets
+        // them reach an aggregator this node is not directly connected to.
+        if let Err(e) = net.subscribe(&meter::topic()).await {
+            debug!(err = %e, "live: receipt topic subscribe failed");
+        }
         ls.spawn_gossip_reader();
         ls.spawn_loops();
+        ls.spawn_metering();
         Ok(ls)
+    }
+
+    // ── metering ─────────────────────────────────────────────────────────
+
+    /// Credit chunks this node serves over libp2p to the live streams they
+    /// belong to. Call once, with the tap the node's chunk source reports to.
+    pub fn attach_tap(&self, tap: &meter::Tap) {
+        let Some(mut rx) = tap.attach() else { return };
+        let ls = self.clone();
+        tokio::spawn(async move {
+            while let Some((hash, len)) = rx.recv().await {
+                if ls.is_stopped() {
+                    return;
+                }
+                ls.count_chunk(&hash.to_hex(), len).await;
+            }
+        });
+    }
+
+    /// `bytes` of `stream_id` left this node (to a viewer or another node).
+    pub fn count_served(&self, stream_id: &str, bytes: u64) {
+        self.0.served.add(stream_id, bytes);
+    }
+
+    /// A chunk left this node over libp2p: credit the live stream it is
+    /// part of, if any. Returns the stream.
+    pub async fn count_chunk(&self, chunk_hex: &str, bytes: u64) -> Option<String> {
+        let id = {
+            let streams = self.0.streams.read().await;
+            streams
+                .iter()
+                .find(|(_, s)| s.segs.values().any(|k| k.seg.chunks.iter().any(|c| c == chunk_hex)))
+                .map(|(id, _)| id.clone())
+        }?;
+        self.0.served.add(&id, bytes);
+        Some(id)
+    }
+
+    /// Bytes of `stream_id` served since the last receipt.
+    pub fn served_bytes(&self, stream_id: &str) -> u64 {
+        self.0.served.peek(stream_id)
+    }
+
+    /// The most bytes this node may claim for each stream in one epoch.
+    async fn receipt_bounds(&self) -> HashMap<String, u64> {
+        let streams = self.0.streams.read().await;
+        let peaks = self.0.peak_bps.lock().unwrap_or_else(|e| e.into_inner());
+        streams
+            .iter()
+            .map(|(id, s)| {
+                let bps = peaks.get(id).copied().unwrap_or(0).max(meter::bitrate_bps(&s.record));
+                (id.clone(), meter::max_epoch_bytes(bps, meter::viewer_bound(&s.record)))
+            })
+            .collect()
+    }
+
+    /// Sign and gossip one receipt per stream served since the last call,
+    /// for `epoch`. Returns what was signed.
+    pub async fn publish_receipts(&self, epoch: u64) -> Vec<meter::RelayReceipt> {
+        let served = self.0.served.take();
+        if served.is_empty() {
+            return Vec::new();
+        }
+        let bounds = self.receipt_bounds().await;
+        let receipts = meter::receipts_for(&self.0.net, served, &bounds, epoch);
+        let topic = meter::topic();
+        for r in &receipts {
+            if let Ok(bytes) = serde_json::to_vec(r)
+                && let Err(e) = self.0.net.publish(&topic, bytes).await
+            {
+                debug!(err = %e, stream = %r.stream_id, "live: receipt not published (no aggregator in reach?)");
+            }
+        }
+        receipts
+    }
+
+    fn spawn_metering(&self) {
+        let ls = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let now = unix_ms();
+                let epoch = meter::epoch_of(now);
+                let next = (epoch + 1) * meter::EPOCH_SECS * 1000;
+                tokio::time::sleep(Duration::from_millis(next.saturating_sub(now) + 50)).await;
+                if ls.is_stopped() {
+                    return;
+                }
+                let sent = ls.publish_receipts(epoch).await;
+                if !sent.is_empty() {
+                    debug!(epoch, receipts = sent.len(), "live: relay receipts sent");
+                }
+            }
+        });
+    }
+
+    /// May `client` watch `stream_id` here? Always for a paid stream and for
+    /// a stream with no account binding. An account-bound stream that is
+    /// not paid has a viewer cap per gateway: a client seen
+    /// within `viewer_ttl` keeps its place, a new one gets in while fewer
+    /// than the cap are active.
+    pub async fn admit_viewer(&self, stream_id: &str, client: &str) -> bool {
+        let Some(cap) = self.record(stream_id).await.and_then(|r| r.viewer_cap()) else {
+            return true;
+        };
+        let now = Instant::now();
+        let ttl = self.0.timing.viewer_ttl;
+        let mut clients = self.0.clients.lock().unwrap_or_else(|e| e.into_inner());
+        let set = clients.entry(stream_id.to_string()).or_default();
+        set.retain(|_, seen| now.duration_since(*seen) <= ttl);
+        if set.contains_key(client) || set.len() < cap as usize {
+            set.insert(client.to_string(), now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clients counted against `stream_id`'s viewer cap right now.
+    pub fn active_viewers(&self, stream_id: &str) -> usize {
+        let now = Instant::now();
+        let ttl = self.0.timing.viewer_ttl;
+        self.0
+            .clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(stream_id)
+            .map_or(0, |m| m.values().filter(|seen| now.duration_since(**seen) <= ttl).count())
     }
 
     pub fn peer_id(&self) -> &str {
@@ -331,6 +524,11 @@ impl LiveStream {
             let cur = streams.get(&id).map(|s| &s.record);
             if !record::supersedes(cur, &record) {
                 return false;
+            }
+            {
+                let mut peaks = self.0.peak_bps.lock().unwrap_or_else(|e| e.into_inner());
+                let e = peaks.entry(id.clone()).or_insert(0);
+                *e = (*e).max(meter::bitrate_bps(&record));
             }
             match streams.get_mut(&id) {
                 Some(s) => {
@@ -496,6 +694,16 @@ impl LiveStream {
                 }
                 keep
             });
+            self.0
+                .peak_bps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|id, _| streams.contains_key(id));
+            self.0
+                .clients
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|id, _| streams.contains_key(id));
             for s in streams.values_mut() {
                 s.holders.retain(|_, (_, seen)| now.duration_since(*seen) <= t.holder_ttl);
                 let current: HashSet<&str> = s.record.segments().map(|g| g.hash.as_str()).collect();
@@ -700,6 +908,9 @@ impl LiveStream {
                 held: s.held.len(),
                 holders: s.holders.len(),
                 fetched_from: s.fetched_from.clone(),
+                account: s.record.account.clone(),
+                paid: s.record.is_paid(),
+                max_viewers: s.record.viewer_cap(),
                 renditions: s
                     .record
                     .body
@@ -738,17 +949,24 @@ impl LiveStream {
     /// Gateway routes: `/live/v1/streams`, `/live/{id}/index.m3u8`,
     /// `/live/{id}/{hash}.ts`, and per rendition `/live/{id}/{r}/...`.
     pub fn router(&self) -> Router {
+        // Every answer (errors too) carries `access-control-allow-origin: *`
+        // and OPTIONS is answered, so a browser player on another origin
+        // (hls.js on c0mpute.com against a gateway) can fetch all of it.
         Router::new()
-            .route("/live/v1/streams", get(list_streams))
-            .route("/live/{id}/{file}", get(serve_top))
-            .route("/live/{id}/{rendition}/{file}", get(serve_rendition))
+            .route("/live/v1/streams", get(list_streams).options(preflight))
+            .route("/live/{id}/{file}", get(serve_top).options(preflight))
+            .route("/live/{id}/{rendition}/{file}", get(serve_rendition).options(preflight))
+            .layer(axum::middleware::map_response(cors))
             .with_state(self.clone())
     }
 
-    async fn serve_playlist(&self, stream_id: &str, rendition: Option<&str>) -> Response {
+    async fn serve_playlist(&self, stream_id: &str, rendition: Option<&str>, client: &str) -> Response {
         let Some(rec) = self.record(stream_id).await else {
             return not_found("no such live stream on the network (yet)");
         };
+        if !self.admit_viewer(stream_id, client).await {
+            return viewer_limit();
+        }
         let text = match rendition {
             None => {
                 if let [only] = rec.body.renditions.as_slice() {
@@ -772,15 +990,19 @@ impl LiveStream {
         resp
     }
 
-    async fn serve_segment(&self, stream_id: &str, file: &str) -> Response {
+    async fn serve_segment(&self, stream_id: &str, file: &str, client: &str) -> Response {
         let Some(hash) = file.strip_suffix(&format!(".{}", playlist::SEGMENT_EXT)) else {
             return not_found("not found");
         };
         if Hash::from_hex(hash).is_err() {
             return not_found("not found");
         }
+        if !self.admit_viewer(stream_id, client).await {
+            return viewer_limit();
+        }
         match self.segment_bytes(stream_id, hash).await {
             Ok(bytes) => {
+                self.count_served(stream_id, bytes.len() as u64);
                 let mut resp = (StatusCode::OK, Body::from(bytes)).into_response();
                 let h = resp.headers_mut();
                 h.insert(header::CONTENT_TYPE, HeaderValue::from_static(playlist::SEGMENT_CONTENT_TYPE));
@@ -806,6 +1028,37 @@ fn not_found(msg: &'static str) -> Response {
     (StatusCode::NOT_FOUND, msg).into_response()
 }
 
+/// A bound, unpaid stream already has its viewer cap of clients here.
+fn viewer_limit() -> Response {
+    let mut resp = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "this stream is on the free tier and has reached its viewer limit on this gateway; try again shortly",
+    )
+        .into_response();
+    resp.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("15"));
+    resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+async fn cors(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    h.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("content-length, content-type, retry-after"),
+    );
+    resp
+}
+
+async fn preflight() -> Response {
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, HEAD, OPTIONS"));
+    h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("*"));
+    h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+    resp
+}
+
 async fn list_streams(State(ls): State<LiveStream>) -> Response {
     let streams: Vec<serde_json::Value> = ls
         .streams()
@@ -823,28 +1076,35 @@ async fn list_streams(State(ls): State<LiveStream>) -> Response {
     resp
 }
 
-async fn serve_top(State(ls): State<LiveStream>, AxPath((id, file)): AxPath<(String, String)>) -> Response {
+async fn serve_top(
+    State(ls): State<LiveStream>,
+    AxPath((id, file)): AxPath<(String, String)>,
+    req: Request,
+) -> Response {
     if !record::valid_stream_id(&id) {
         return not_found("not found");
     }
+    let client = request_client(&req);
     if file == "index.m3u8" {
-        ls.serve_playlist(&id, None).await
+        ls.serve_playlist(&id, None, &client).await
     } else {
-        ls.serve_segment(&id, &file).await
+        ls.serve_segment(&id, &file, &client).await
     }
 }
 
 async fn serve_rendition(
     State(ls): State<LiveStream>,
     AxPath((id, rendition, file)): AxPath<(String, String, String)>,
+    req: Request,
 ) -> Response {
     if !record::valid_stream_id(&id) || !record::valid_rendition_name(&rendition) {
         return not_found("not found");
     }
+    let client = request_client(&req);
     if file == "index.m3u8" {
-        ls.serve_playlist(&id, Some(&rendition)).await
+        ls.serve_playlist(&id, Some(&rendition), &client).await
     } else {
-        ls.serve_segment(&id, &file).await
+        ls.serve_segment(&id, &file, &client).await
     }
 }
 
@@ -897,6 +1157,22 @@ mod tests {
         // equal relays take turns
         let peers = [c("a", Some(10.0), false), c("b", Some(12.0), false)];
         assert_ne!(source_order(&peers, 0)[0], source_order(&peers, 1)[0]);
+    }
+
+    #[test]
+    fn the_viewer_is_the_client_behind_a_local_proxy() {
+        let mut h = HeaderMap::new();
+        let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(client_key(&h, ip("203.0.113.9")), "203.0.113.9");
+        assert_eq!(client_key(&h, ip("127.0.0.1")), "127.0.0.1");
+        assert_eq!(client_key(&h, None), "unknown");
+        h.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.4, 10.0.0.1"));
+        assert_eq!(client_key(&h, ip("127.0.0.1")), "198.51.100.4", "a local proxy's header counts");
+        assert_eq!(client_key(&h, ip("10.1.2.3")), "198.51.100.4");
+        assert_eq!(client_key(&h, None), "198.51.100.4");
+        assert_eq!(client_key(&h, ip("203.0.113.9")), "203.0.113.9", "a public client cannot pick its own key");
+        h.insert("cf-connecting-ip", HeaderValue::from_static("192.0.2.77"));
+        assert_eq!(client_key(&h, ip("::1")), "192.0.2.77");
     }
 
     #[test]

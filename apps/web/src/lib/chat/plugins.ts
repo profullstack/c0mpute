@@ -12,7 +12,7 @@ import { chatText, type ChatRequest, type Upstream } from "./completions";
 import { checkPluginUrl, pluginGuard, PluginUrlError } from "./plugin-net";
 import { PluginError, type ChatPlugin, type PluginAuth, type PluginStoreDb, type PluginTokens } from "./plugin-store";
 import type { PluginEvent } from "./plugin-shared";
-import { applyPolicy, describeAction, FINANCE_CATALOG, policyFor, redactLog } from "./plugin-policy";
+import { applyPolicy, describeAction, DOCS_CATALOG, FINANCE_CATALOG, policyFor, redactLog } from "./plugin-policy";
 import { env, json, pluginStore, siteUrl } from "./server";
 
 export const CALLBACK_PATH = "/api/v1/chat/plugins/callback";
@@ -62,7 +62,7 @@ const isOwnHost = (u: string) => {
  * c0mpute.com/api/mcp, whose hosting tools are already native in c0mpute chat.
  */
 export function catalogFor(_site = siteUrl()): CatalogEntry[] {
-  const money: CatalogEntry[] = FINANCE_CATALOG.map((e) => ({ slug: e.slug, name: e.name, title: e.name, description: e.description, url: e.url, icon: e.icon, default: e.default }));
+  const money: CatalogEntry[] = [...FINANCE_CATALOG, ...DOCS_CATALOG].map((e) => ({ slug: e.slug, name: e.name, title: e.name, description: e.description, url: e.url, icon: e.icon, default: e.default }));
   const taken = new Set(money.map((e) => e.slug));
   const pkg = cp.CATALOG.filter((e) => e.url.startsWith("https://") && !isOwnHost(e.url) && !taken.has(e.slug)).map((e) => ({
     slug: e.slug,

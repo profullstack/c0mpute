@@ -21,8 +21,10 @@ async function ollama(model: string, messages: ChatMessage[]): Promise<string> {
     // Streamed: a busy CPU node can take minutes, and a silent response trips
     // the runtime's idle timeout (Bun: 300 s) before the first byte.
     body: JSON.stringify({ model, messages, stream: true, options: { temperature: 0 } }),
-    signal: AbortSignal.timeout(900_000),
-  });
+    signal: AbortSignal.timeout(1_800_000),
+    // Bun aborts a fetch after 300 s of silence unless told not to.
+    timeout: false,
+  } as RequestInit & { timeout: boolean });
   if (!res.ok || !res.body) throw new Error(`ollama HTTP ${res.status}: ${await res.text()}`);
   let text = "";
   let buf = "";
@@ -78,7 +80,7 @@ describe.skipIf(!OLLAMA)("real tool round-trip on a node", () => {
         expect(step2.calls).toHaveLength(0);
         expect(step2.content ?? "").toMatch(/17|rain/i);
       },
-      1_200_000,
+      Number(process.env.TOOL_TEST_TIMEOUT_MS ?? 2_400_000),
     );
   }
 });

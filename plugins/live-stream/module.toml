@@ -27,19 +27,37 @@
 #     Streams with viewers get their newest segments prefetched.
 #   - `c0mpute stream watch <id>` prints the gateway URL and plays it in mpv
 #     or ffplay; `c0mpute stream ls` lists streams a gateway knows.
+#   - Every node relays, also one started with an explicit --roles list. Opt
+#     out: `worker start --no-live`, `[live] enabled = false`, C0MPUTE_LIVE=0.
+#   - Relays are paid: each node counts the bytes it serves per stream (HTTP
+#     to viewers, libp2p to other nodes) and gossips one signed receipt per
+#     stream per minute on c0mpute/jobs/live.relay. Status aggregators bound
+#     it (bitrate x 60 s x viewer cap) and credit it as a `live.relay` job:
+#     $0.01 per GB (10^9 bytes) of a paid stream, nothing for a free one.
+#   - Hosted RTMP ingest: `c0mpute stream ingest --listen 0.0.0.0:1935` with
+#     C0MPUTE_LIVE_INGEST_SECRET set accepts rtmp://<host>/live/<stream_key>,
+#     checks the key with c0mpute.com before taking media, runs one ffmpeg per
+#     publisher and signs the stream's account (and whether it is paid) into
+#     its records. Not a default role: public port and ffmpeg.
+#   - Free tier (a hosted-ingest stream whose account has no balance): 25
+#     viewers per gateway, 720p, relays unpaid. Paid streams have no viewer
+#     cap. A stream published with `stream go` (no account) has no viewer cap
+#     either, as before; its relays earn nothing.
+#   - Gateways answer the /live routes with access-control-allow-origin: *
+#     (and OPTIONS), so a browser player on another origin can play them.
 #
-# Not yet (DIP-0019): fMP4/LL-HLS, DVR/replay, per-GB CoinPay settlement, an
-# in-browser player page. Free while in beta.
+# Not yet (DIP-0019): fMP4/LL-HLS, DVR/replay, SRT on the hosted ingest,
+# gateway-side cross-checks of relay receipts.
 
 [module]
 id          = "live-stream"
 name        = "Live Stream — p2p HLS live streaming"
-version     = "0.3.106"
+version     = "0.3.107"
 kind        = "service"
 category    = "media"
 status      = "available"
 builtin     = true
-description = "Peer-to-peer HLS live streaming: broadcast a file, RTMP/SRT feed or stdin with `c0mpute stream go` (needs ffmpeg), and every gateway serves /live/<stream_id>/index.m3u8 to any HLS player. Signed live windows over gossip; relays swarm segments from each other instead of the broadcaster. No coordinator, no CDN. Free in beta."
+description = "Peer-to-peer HLS live streaming: push RTMP to a hosted ingest with a stream key, or broadcast a file, RTMP/SRT feed or stdin with `c0mpute stream go` (needs ffmpeg), and every gateway serves /live/<stream_id>/index.m3u8 to any HLS player. Signed live windows over gossip; relays swarm segments from each other instead of the broadcaster. Every node relays by default and earns $0.01 per GB served of paid streams; streams without a balance run on a free tier (720p, 25 viewers per gateway). No coordinator, no CDN."
 author      = "Profullstack"
 license     = "MIT"
 source      = "https://github.com/profullstack/c0mpute/tree/master/node/crates/c0mpute-core/src/live"
@@ -54,7 +72,9 @@ arch         = ["x86_64", "aarch64"]
 capabilities = ["network:egress", "network:ingress?", "ffmpeg?"]
 
 [module.workloads]
-# None: live-stream is a continuous gossip service, not a dispatched job.
+# None dispatched: live-stream is a continuous gossip service. Relay pay is
+# reported as credited jobs of type `live.relay` (one per stream per minute
+# per relay), from signed receipts rather than an auction.
 
 [module.dispatch]
 mode = "in-process"
@@ -67,3 +87,6 @@ segment_duration_secs = 4
 window_segments       = 6
 renditions            = ["src", "480p (--low)"]
 segment_container     = "mpegts"
+relay_usd_per_gb      = 0.01
+free_tier_max_height  = 720
+free_tier_viewers     = 25

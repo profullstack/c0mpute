@@ -21,6 +21,9 @@ pub struct Supervisor {
     pub net: Arc<dyn Network>,
     pub libp2p: Arc<Libp2pNetwork>,
     pub registry: Registry,
+    /// Reports chunks served over libp2p to the live-stream service, which
+    /// meters the ones that belong to a live stream (`live::meter`).
+    pub live_tap: Arc<crate::live::meter::Tap>,
 }
 
 impl Supervisor {
@@ -62,7 +65,11 @@ impl Supervisor {
 
         // Real libp2p network. The identity persists in `identity_dir`.
 
-        let local_source: Arc<dyn ChunkSource> = Arc::new(StoreSource(store.clone()));
+        let live_tap = Arc::new(crate::live::meter::Tap::default());
+        let local_source: Arc<dyn ChunkSource> = Arc::new(MeteredSource {
+            inner: StoreSource(store.clone()),
+            tap: live_tap.clone(),
+        });
 
         // Fetch bootstrap list from c0mpute.com (best-effort) and merge
         // with the hardcoded fallback list. mDNS handles LAN discovery
@@ -104,6 +111,7 @@ impl Supervisor {
             net,
             libp2p: libp2p_net,
             registry,
+            live_tap,
         })
     }
 
@@ -762,7 +770,11 @@ impl Supervisor {
             )
             .await
             {
-                Ok(l) => Some(l),
+                Ok(l) => {
+                    // Chunks served to other nodes count toward relay pay.
+                    l.attach_tap(&self.live_tap);
+                    Some(l)
+                }
                 Err(e) => {
                     tracing::warn!(err = %e, "live-stream: not started");
                     None
@@ -1228,6 +1240,22 @@ impl ChunkSource for StoreSource {
             // A site being published is served straight from its files.
             Err(e) => crate::hosting::seed::read_async(hash).await.ok_or(e),
         }
+    }
+}
+
+/// [`StoreSource`] that reports every chunk it serves to the live-stream
+/// meter. Only chunks other peers fetch over libp2p pass through here.
+pub struct MeteredSource {
+    pub inner: StoreSource,
+    pub tap: Arc<crate::live::meter::Tap>,
+}
+
+#[async_trait::async_trait]
+impl ChunkSource for MeteredSource {
+    async fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>> {
+        let bytes = self.inner.read_chunk(hash).await?;
+        self.tap.served(hash, bytes.len());
+        Ok(bytes)
     }
 }
 

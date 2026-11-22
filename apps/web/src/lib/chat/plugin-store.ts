@@ -9,7 +9,7 @@
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { CLAIMS_SCHEMA, claimOnce, type Row, type Sql } from "./store";
-import { FINANCE_CATALOG, policyFor } from "./plugin-policy";
+import { DOCS_CATALOG, FINANCE_CATALOG, policyFor } from "./plugin-policy";
 
 export const PLUGIN_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS chat_plugins (
@@ -75,7 +75,8 @@ export type PluginAuth =
     };
 
 /** A catalog plugin every account starts with: listed and on, never signed in for them. */
-export type DefaultPlugin = { slug: string; name: string; url: string };
+/** `auth: "none"`: the server needs no sign-in, so the seeded row is ready to use. */
+export type DefaultPlugin = { slug: string; name: string; url: string; auth?: "none" };
 
 /** The package's token record (access + refresh + what refresh needs), sealed as one JSON. */
 export type PluginTokens = {
@@ -236,7 +237,8 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
 
   /**
    * Default plugins, once per account: a row that is on and not signed in
-   * (auth discovered at the first sign-in, so this makes no network call).
+   * (auth discovered at the first sign-in, so this makes no network call),
+   * or on and ready to use for a server that needs no sign-in (auth "none").
    * Marked "seeded" so a person who removes one does not get it back, and
    * skipped when the account already has that server or is at the limit.
    */
@@ -254,7 +256,7 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
       const t = now();
       for (const d of todo) {
         if (!urls.has(d.url) && !slugs.has(d.slug) && count < MAX_PLUGINS) {
-          const auth: PluginAuth = { issuer: "", authorization_endpoint: "", token_endpoint: "", required: true, deferred: true };
+          const auth: PluginAuth = d.auth === "none" ? "none" : { issuer: "", authorization_endpoint: "", token_endpoint: "", required: true, deferred: true };
           await sql.run(
             `INSERT OR IGNORE INTO chat_plugins (user_id, slug, url, name, title, instructions, auth, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, ?)`,
             [userId, d.slug, d.url, d.name.slice(0, 120), d.name.slice(0, 120), JSON.stringify(auth), t, t],
@@ -446,7 +448,7 @@ export function publicPlugin(p: ChatPlugin, site: string) {
   const needsAuth = offersAuth && (p.auth as Exclude<PluginAuth, "none">).required !== false;
   const connected = !needsAuth || !!p.token;
   const policy = policyFor(p.url);
-  const entry = FINANCE_CATALOG.find((e) => e.url === p.url);
+  const entry = FINANCE_CATALOG.find((e) => e.url === p.url) ?? DOCS_CATALOG.find((e) => e.url === p.url);
   return {
     slug: p.slug,
     url: p.url,
