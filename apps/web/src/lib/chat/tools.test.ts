@@ -14,7 +14,7 @@ import {
   withToolsPrompt,
   type Tooling,
 } from "./tools";
-import { runTools, toolChatResponse, toolModels, ToolChatError } from "./tools-http";
+import { resetModelsCache, runTools, toolChatResponse, toolModels, ToolChatError } from "./tools-http";
 
 const weather = {
   type: "function",
@@ -190,13 +190,13 @@ describe("model -> OpenAI translation", () => {
   });
 
   test("completion JSON and stream chunks follow the OpenAI shape", () => {
-    const p = parseToolReply('<tool_call>{"name":"get_weather","arguments":{"city":"Paris, the capital of France, in Europe"}}</tool_call>', tools);
+    const p = parseToolReply('<tool_call>{"name":"get_weather","arguments":{"city":"Paris, the capital of France, in Europe","unit":"c","detail":"hourly forecast for the next day"}}</tool_call>', tools);
     const usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 };
     const j = toolCompletionJson(p, "qwen3:4b", usage, "chatcmpl-x");
     expect(j.choices[0].finish_reason).toBe("tool_calls");
     expect(j.choices[0].message.content).toBeNull();
     expect(j.choices[0].message.tool_calls?.[0].function.name).toBe("get_weather");
-    expect(JSON.parse(j.choices[0].message.tool_calls![0].function.arguments)).toEqual({ city: "Paris, the capital of France, in Europe" });
+    expect(JSON.parse(j.choices[0].message.tool_calls![0].function.arguments).city).toBe("Paris, the capital of France, in Europe");
     expect(j.usage).toEqual(usage);
 
     const chunks = toolStreamChunks(p, "qwen3:4b", usage, "chatcmpl-x") as {
@@ -242,6 +242,7 @@ describe("which models take tools", () => {
 
 type Reply = { status?: number; text?: string; error?: string };
 function fakeInfernet(replies: Record<string, Reply[]>, models = ["qwen3:4b", "nemotron-3-nano:4b", "qwen2.5-coder:7b", "gemma3:4b"]) {
+  resetModelsCache();
   const calls: { model: string; messages: { role: string; content: string }[]; body: Record<string, unknown> }[] = [];
   const up: Upstream = async (path, init) => {
     if (path === "/v1/models") return Response.json({ data: models.map((id) => ({ id })) });

@@ -51,6 +51,10 @@ export async function callModel(upstream: Upstream, model: string, messages: Cha
 }
 
 let modelsCache: { at: number; ids: string[] } | null = null;
+/** Tests: forget the cached model list. */
+export function resetModelsCache() {
+  modelsCache = null;
+}
 async function liveModels(upstream: Upstream): Promise<string[]> {
   if (modelsCache && Date.now() - modelsCache.at < 60_000) return modelsCache.ids;
   const ids = await listModels(upstream);
