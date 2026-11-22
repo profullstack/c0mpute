@@ -97,7 +97,12 @@ test("isValidDid / normalizeUserCode", () => {
 describe("parseChatRequest", () => {
   test("validates and strips", () => {
     expect(parseChatRequest({})).toBe("messages[] is required");
-    expect(parseChatRequest({ messages: [{ role: "tool", content: "x" }] })).toMatch(/role/);
+    expect(parseChatRequest({ messages: [{ role: "robot", content: "x" }] })).toMatch(/role/);
+    // A tool result is accepted now, rendered as a <tool_response> user turn (lib/chat/tools.ts).
+    expect(parseChatRequest({ messages: [{ role: "tool", tool_call_id: "c1", content: "x" }] })).toEqual({
+      messages: [{ role: "user", content: '<tool_response>\n{"content":"x"}\n</tool_response>' }],
+      stream: false,
+    });
     const r = parseChatRequest({
       model: "auto",
       messages: [{ role: "user", content: "hi", extra: 1 }],
