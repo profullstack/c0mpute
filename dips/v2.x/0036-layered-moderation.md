@@ -97,6 +97,16 @@ Alternatives):
 }
 ```
 
+- **Signature (v1):** ed25519 over the UTF-8 bytes of a line-framed string,
+  so any language can rebuild it without a JSON canonicaliser:
+  `c0mpute-label-v1\n<src>\n<uri>\n<val>\n<0|1>\n<cts>\n<exp>`. `src`,
+  `uri` and `val` are printable ASCII with no spaces (so no field can smuggle
+  a newline); `cts`/`exp` are RFC 3339 UTC to the second
+  (`2026-11-22T00:00:00Z`). `sig` is base64url; the labeler's manifest gives
+  its raw 32-byte public key in base64url. `evidence` is not signed and is
+  display-only.
+- A verifier must also check that `uri` names a subject it asked about. A
+  valid label for someone else's file must never be replayed onto yours.
 - `neg: true` retracts an earlier label with the same `src`/`uri`/`val`.
 - `exp` is required for every value except the ones a labeler marks
   `permanent` in its manifest. Reputation goes stale, so labels expire.

@@ -13,6 +13,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { Row, Sql } from "./store";
+import type { Verdict } from "./moderation";
 import { CLAIM_TIMEOUT_MS, MAX_NODES, MAX_PUSHES, NODE_NAME, ONLINE_MS, SITE_NAME, type PushFile, type Target } from "./push-shared";
 
 export * from "./push-shared";
@@ -230,7 +231,14 @@ export class PushError extends Error {
   }
 }
 
-export function createPushStore(sql: Sql, opts: { cloudNodeId?: string } = {}) {
+export function createPushStore(
+  sql: Sql,
+  opts: {
+    cloudNodeId?: string;
+    /** DIP-0036 operator policy for the cloud node: refuse flagged files before queueing. */
+    moderate?: (files: PushFile[]) => Promise<Verdict>;
+  } = {},
+) {
   const cloudId = opts.cloudNodeId || "";
   let ready: Promise<void> | null = null;
   const init = () =>
@@ -404,6 +412,11 @@ export function createPushStore(sql: Sql, opts: { cloudNodeId?: string } = {}) {
           userId,
         ]);
         if (taken) throw new PushError(`${p.name} is taken on the c0mpute cloud node; pick another name`, 409);
+        if (opts.moderate) {
+          const v = await opts.moderate(p.files);
+          if (v.verdict === "refused") throw new PushError(v.message, 451);
+          if (v.verdict === "unchecked") console.warn(`[moderation] cloud push ${p.name} not checked: ${v.reason}`);
+        }
         if (!existing || existing.node_id !== p.node.id) {
           const mine = await one(`SELECT COUNT(*) AS n FROM chat_pushes WHERE node_id = ? AND user_id = ?`, [p.node.id, userId]);
           if (Number(mine?.n ?? 0) >= CLOUD_MAX_PUSHES)
