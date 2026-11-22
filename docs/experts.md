@@ -49,8 +49,15 @@ Experts service before the gallery.
 ## How an expert answers
 
 The manifest is applied to an ordinary chat turn: its `system_prompt` replaces any caller system
-prompt, its `model.prefer` list is tried in order (fail over on 5xx, 404 or an nginx page; a
-4xx stops), and `model.max_tokens` caps the answer. When the person has connected a chat plugin
+prompt, its `model.prefer` list is tried in order within one 280 s budget (fail over on 5xx,
+404, an nginx page or an empty answer; a 4xx stops), and `model.max_tokens` caps the answer.
+Upstream calls are always non-streaming so the answer can be checked (and a leaked `<think>`
+block stripped) before anyone sees it; a `stream: true` caller gets it as one SSE chunk.
+Model choice (2026-11-22): `qwen2.5-coder:7b` answered general security and sales questions
+in 11-21 s on the live network, `qwen3:4b` returned empty content (its thinking used the budget),
+`qwen2.5:3b` and `gemma3:4b` had no live node, and the house fine-tunes
+(not-a-lawyer-agent, tax-guy-agent) invented case law, so strong general models with strict
+prompts are used instead of them. When the person has connected a chat plugin
 whose host matches one of the manifest's `tools.mcp` URLs, the plugin tool loop runs with only
 those plugins. Prompts require staying in scope, saying when unsure and never inventing
 citations, CVE ids, statutes or numbers.
@@ -71,7 +78,7 @@ The same signed format the open p2p app store will use. An expert is `kind: "exp
   "summary": "...", "description": "...",
   "publisher": { "id": "profullstack", "name": "Profullstack", "did": "did:web:profullstack.com",
                  "key": "ed25519:<base64url raw 32-byte public key>" },
-  "model": { "prefer": ["qwen3:4b", "nemotron-3-nano:4b", "qwen2.5:3b"], "temperature": 0.3, "max_tokens": 1400 },
+  "model": { "prefer": ["qwen2.5-coder:7b", "qwen3:4b", "nemotron-3-nano:4b"], "temperature": 0.3, "max_tokens": 1400 },
   "system_prompt": "...",
   "skills": ["CVE triage", "..."],
   "tools": { "mcp": [{ "id": "threatcrush", "url": "https://threatcrush.com/api/mcp", "why": "..." }] },

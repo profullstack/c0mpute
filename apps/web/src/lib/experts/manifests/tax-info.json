@@ -16,9 +16,9 @@
   },
   "model": {
     "prefer": [
+      "qwen2.5-coder:7b",
       "qwen3:4b",
-      "nemotron-3-nano:4b",
-      "qwen2.5:3b"
+      "nemotron-3-nano:4b"
     ],
     "temperature": 0.2,
     "max_tokens": 1200
@@ -53,6 +53,6 @@
   "signature": {
     "alg": "ed25519",
     "key": "ed25519:0xbJbY50-amlN6iMvvDBpZ3N-txwRVofz6YSCCUs4PM",
-    "sig": "e5Ey1X6AWa2TvgP3lEDmsNufNwBkZopdLB3T-x6ZWjvTDrwM19vJU-4Tg74d2dxtIkdn0ellJLT5gNP37AjMBw"
+    "sig": "YYohCOL4LzZfF12CvW2g8hfhHK9JGyxyWkP0wNe_5nfvhWikSnmtFHTZ5BorlB1zcbabrG26BjV_at7UMgpECw"
   }
 }

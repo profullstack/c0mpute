@@ -4,7 +4,7 @@ import { generateKeyPairSync } from "node:crypto";
 import type { Sql } from "../chat/store";
 import { handleRpc } from "../chat/mcp";
 import { BUNDLED_MANIFESTS, FIRST_PARTY_PUBLISHERS, _resetCatalog, experts, publisherAllowlist } from "./catalog";
-import { expertMessages, expertRequest, expertSlugOf, forwardExpert, pluginAllowed, stripThinking } from "./chat";
+import { expertComplete, expertMessages, expertRequest, expertSlugOf, ExpertUnavailable, pluginAllowed, stripThinking } from "./chat";
 import { expertPriceUsd, expertsConfig } from "./config";
 import { admitManifest, canonicalJson, publicKeyString, signManifest, validateManifest, verifySignature, type ExpertManifest } from "./manifest";
 import { EXPERTS_TOOLS } from "./mcp";
@@ -298,23 +298,36 @@ describe("expert chat", () => {
     expect(expertRequest(legal, { messages: msgs, max_tokens: 100 }, "qwen3:4b").max_tokens).toBe(100);
   });
 
-  test("fails over to the next preferred model on 503 / an HTML page, stops on a 4xx", async () => {
+  test("fails over on an HTML page, a 503 and an empty answer; stops on a 4xx", async () => {
     const seen: string[] = [];
+    const ok = (content: string) => new Response(JSON.stringify({ model: "x", choices: [{ message: { content } }] }), { headers: { "content-type": "application/json" } });
     const up = async (_p: string, init?: RequestInit) => {
-      const model = JSON.parse(String(init?.body)).model as string;
-      seen.push(model);
-      if (model === security.model.prefer[0]) return new Response("<html>busy</html>", { status: 502, headers: { "content-type": "text/html" } });
-      if (model === security.model.prefer[1]) return new Response(JSON.stringify({ error: { message: "no node" } }), { status: 503, headers: { "content-type": "application/json" } });
-      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { headers: { "content-type": "application/json" } });
+      const body = JSON.parse(String(init?.body));
+      seen.push(body.model);
+      expect(body.stream).toBe(false);
+      if (body.model === security.model.prefer[0]) return new Response("<html>busy</html>", { status: 502, headers: { "content-type": "text/html" } });
+      if (body.model === security.model.prefer[1]) return ok("<think>long reasoning</think>");
+      return ok("<think>x</think>Patch it.");
     };
-    const r = await forwardExpert(up, security, { messages: [{ role: "user", content: "hi" }] });
-    expect(r.model).toBe(security.model.prefer[2]);
+    const r = await expertComplete(up, security, { messages: [{ role: "user", content: "hi" }], stream: true });
+    expect(r.text).toBe("Patch it.");
     expect(seen).toEqual(security.model.prefer.slice(0, 3));
+    expect(r.attempts.map((a) => a.error ?? a.status)).toEqual(["not JSON (network restarting)", "empty answer", 200]);
 
-    const stop = async () => new Response(JSON.stringify({ error: { message: "bad" } }), { status: 400, headers: { "content-type": "application/json" } });
-    const s = await forwardExpert(stop, security, { messages: [{ role: "user", content: "hi" }] });
-    expect(s.res.status).toBe(400);
-    expect(s.attempts.length).toBe(1);
+    let calls = 0;
+    const stop = async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400, headers: { "content-type": "application/json" } });
+    };
+    const e = await expertComplete(stop, security, { messages: [{ role: "user", content: "hi" }] }).catch((x) => x);
+    expect(e).toBeInstanceOf(ExpertUnavailable);
+    expect(e.status).toBe(400);
+    expect(calls).toBe(1);
+
+    const down = async () => new Response(JSON.stringify({ error: { message: "no node" } }), { status: 503, headers: { "content-type": "application/json" } });
+    const d = await expertComplete(down, security, { messages: [{ role: "user", content: "hi" }] }).catch((x) => x);
+    expect(d.status).toBe(503);
+    expect(d.attempts.length).toBe(3);
   });
 
   test("only plugins on the expert's allowed hosts are used", () => {

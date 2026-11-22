@@ -63,46 +63,86 @@ function retryable(status: number, type: string): boolean {
 
 export type ExpertAttempt = { model: string; status: number | "error"; error?: string };
 
+export class ExpertUnavailable extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public attempts: ExpertAttempt[],
+  ) {
+    super(message);
+  }
+}
+
 /**
- * Forward to the expert's preferred models in order and hand back the first
- * answer (JSON or SSE, untouched) plus which model gave it. Throws only when
- * every model failed.
+ * The whole answer, non-streaming, with failover across the preferred models:
+ * a busy/absent model (5xx, 404, an nginx page) AND an empty answer (qwen3
+ * spending the whole budget thinking) both move on to the next model. A 4xx
+ * stops. Every surface (web, API, SSE, MCP, CLI) goes through this, so the
+ * answer can be checked before anyone sees it.
  */
-export async function forwardExpert(upstream: Upstream, m: ExpertManifest, req: ChatRequest, signal?: AbortSignal): Promise<{ res: Response; model: string; attempts: ExpertAttempt[] }> {
+export async function expertComplete(
+  upstream: Upstream,
+  m: ExpertManifest,
+  req: ChatRequest,
+  signal?: AbortSignal,
+  budgetMs = 280_000,
+): Promise<{ text: string; model: string; usage?: unknown; attempts: ExpertAttempt[] }> {
   const attempts: ExpertAttempt[] = [];
-  let last: Response | null = null;
+  // Every try fits in one route's 300 s: the first model gets most of it, a fallback what is left.
+  const deadline = Date.now() + budgetMs;
   const models = m.model.prefer.slice(0, 3);
-  for (const [i, model] of models.entries()) {
+  let lastStatus = 503;
+  let lastError = "";
+  for (const model of models) {
     if (signal?.aborted) throw new Error("cancelled");
+    const left = deadline - Date.now();
+    if (left < 15_000) break;
+    const timeout = AbortSignal.timeout(Math.min(left, attempts.length === 0 ? 200_000 : left));
+    const sig = signal ? AbortSignal.any([timeout, signal]) : timeout;
     let res: Response;
     try {
-      res = await forwardChat(upstream, expertRequest(m, req, model), signal);
+      res = await forwardChat(upstream, expertRequest(m, { ...req, stream: false }, model), sig);
     } catch (e) {
       if (signal?.aborted) throw e;
-      attempts.push({ model, status: "error", error: e instanceof Error ? e.message : String(e) });
+      attempts.push({ model, status: "error", error: e instanceof Error ? (e.name === "TimeoutError" ? "timed out" : e.message) : String(e) });
       continue;
     }
     const type = res.headers.get("content-type") ?? "";
-    if (res.ok) return { res, model, attempts: [...attempts, { model, status: res.status }] };
-    attempts.push({ model, status: res.status });
-    if (!retryable(res.status, type) || i === models.length - 1) {
-      last = res;
-      break;
+    if (!type.includes("json")) {
+      await res.body?.cancel().catch(() => {});
+      attempts.push({ model, status: res.status, error: "not JSON (network restarting)" });
+      lastStatus = 503;
+      continue;
     }
-    await res.body?.cancel().catch(() => {});
+    const body = (await res.json().catch(() => ({}))) as { model?: string; usage?: unknown; choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+    if (!res.ok) {
+      attempts.push({ model, status: res.status, error: body.error?.message });
+      lastStatus = res.status;
+      lastError = body.error?.message ?? "";
+      if (!retryable(res.status, type)) break;
+      continue;
+    }
+    const text = stripThinking(body.choices?.[0]?.message?.content ?? "");
+    if (!text) {
+      attempts.push({ model, status: res.status, error: "empty answer" });
+      lastStatus = 503;
+      continue;
+    }
+    attempts.push({ model, status: res.status });
+    return { text, model: body.model ?? model, usage: body.usage, attempts };
   }
-  if (last) return { res: last, model: attempts[attempts.length - 1].model, attempts };
-  throw new Error(`no node answered for this expert (${attempts.map((a) => `${a.model}: ${a.status}`).join(", ")})`);
+  const tried = attempts.map((a) => `${a.model}: ${a.error ?? a.status}`).join("; ");
+  throw new ExpertUnavailable(
+    lastStatus >= 400 && lastStatus < 500 && lastError ? lastError : `no node could answer right now (${tried}); try again in a minute`,
+    lastStatus >= 400 && lastStatus < 500 ? lastStatus : 503,
+    attempts,
+  );
 }
 
-/** Non-streaming answer text, with the same failover (MCP, /ask, CLI). */
+/** Non-streaming answer text, with the same failover (MCP, CLI). */
 export async function expertText(upstream: Upstream, m: ExpertManifest, req: ChatRequest, signal?: AbortSignal): Promise<{ text: string; model: string }> {
-  const timeout = AbortSignal.timeout(300_000);
-  const sig = signal ? AbortSignal.any([timeout, signal]) : timeout;
-  const { res, model } = await forwardExpert(upstream, m, { ...req, stream: false }, sig);
-  const body = (await res.json().catch(() => ({}))) as { model?: string; choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-  if (!res.ok) throw new Error(body.error?.message || `the network could not answer (HTTP ${res.status}); try again in a minute`);
-  return { text: stripThinking(body.choices?.[0]?.message?.content ?? ""), model: body.model ?? model };
+  const r = await expertComplete(upstream, m, req, signal);
+  return { text: r.text, model: r.model };
 }
 
 /** qwen3 sometimes leaks a <think> block into content: never show it as the answer. */

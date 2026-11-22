@@ -11,7 +11,7 @@ import { hasEnabledPlugins, runPluginChat } from "../chat/plugins";
 import { cloudSql, env, infernetFor, json, pluginStore, rateLimit, siteUrl } from "../chat/server";
 import { coinpayBase } from "../gallery/server";
 import { expertBySlug, experts, moderateCatalog } from "./catalog";
-import { completionBody, completionStream, expertHeaders, expertRequest, expertText, forwardExpert, pluginAllowed, stripThinking } from "./chat";
+import { completionBody, completionStream, expertComplete, expertHeaders, expertRequest, expertText, ExpertUnavailable, pluginAllowed, stripThinking } from "./chat";
 import { expertsConfig } from "./config";
 import type { ExpertManifest } from "./manifest";
 import { createExpertsService, ExpertsError, type Asker, type CheckoutOpener, type ExpertsService } from "./service";
@@ -85,27 +85,18 @@ export async function expertChatResponse(o: { user: User; slug: string; req: Cha
     console.warn(`experts: plugin path failed for ${m.slug}, answering without tools:`, e instanceof Error ? e.message : e);
   }
 
-  let r: Awaited<ReturnType<typeof forwardExpert>>;
+  let r: Awaited<ReturnType<typeof expertComplete>>;
   try {
-    r = await forwardExpert(infernetFor(o.user.coinpay_sub), m, o.req, o.signal);
+    r = await expertComplete(infernetFor(o.user.coinpay_sub), m, o.req, o.signal);
   } catch (e) {
-    return json({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_experts", code: 503 } }, 503, { "retry-after": "30", ...expertHeaders(m) });
+    if (o.signal?.aborted) throw e;
+    const status = e instanceof ExpertUnavailable ? e.status : 503;
+    if (e instanceof ExpertUnavailable) console.warn(`experts: ${m.slug} unanswered: ${JSON.stringify(e.attempts)}`);
+    return json({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_experts", code: status } }, status, status === 503 ? { "retry-after": "30", ...expertHeaders(m) } : expertHeaders(m));
   }
-  const type = r.res.headers.get("content-type") ?? "";
-  if (!type.includes("json") && !type.includes("event-stream")) {
-    await r.res.body?.cancel().catch(() => {});
-    return json({ error: { message: `the c0mpute network is restarting or busy (upstream HTTP ${r.res.status}); try again in a minute`, type: "c0mpute_experts", code: 503 } }, 503, { "retry-after": "30", ...expertHeaders(m) });
-  }
-  if (!r.res.ok || o.req.stream) {
-    return new Response(r.res.body, {
-      status: r.res.status,
-      headers: { "content-type": type || "application/json", "cache-control": "no-store", "x-accel-buffering": "no", ...expertHeaders(m, r.model) },
-    });
-  }
-  const body = (await r.res.json().catch(() => null)) as { choices?: { message?: { content?: string } }[]; model?: string } | null;
-  const text = stripThinking(body?.choices?.[0]?.message?.content ?? "");
-  const out = { ...(body ?? {}), ...completionBody(m, text, body?.model ?? r.model), ...(body && "usage" in body ? { usage: (body as { usage: unknown }).usage } : {}) };
-  return json(out, 200, expertHeaders(m, r.model));
+  const headers = { ...expertHeaders(m, r.model), "cache-control": "no-store" };
+  if (o.req.stream) return new Response(completionStream(m, r.text, r.model), { headers: { ...headers, "content-type": "text/event-stream", "x-accel-buffering": "no" } });
+  return json({ ...completionBody(m, r.text, r.model), ...(r.usage ? { usage: r.usage } : {}) }, 200, headers);
 }
 
 /**
