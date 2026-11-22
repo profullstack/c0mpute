@@ -33,7 +33,7 @@ export async function fileReceipts(jobs: AggregatorJob[], store: LiveStore): Pro
     const stream = await store.byNetworkId(id.network_id);
     if (!stream) continue;
     const cost = Math.min(j.paid_usd, MAX_RECEIPT_USD);
-    if (await store.fileUsage({ job_id: j.job_id, stream_id: stream.id, user_id: stream.user_id, node: j.node, bytes: bytesForUsd(cost), cost_usd: cost, at: j.completed_at_ms })) filed++;
+    if (await store.fileUsage({ job_id: j.job_id, stream_id: stream.id, user_id: stream.user_id, node: j.node, peer: j.peer ?? null, bytes: bytesForUsd(cost), cost_usd: cost, at: j.completed_at_ms })) filed++;
   }
   return filed;
 }
@@ -50,7 +50,8 @@ export async function settlePass(store: LiveStore, charge: Charge, now = Date.no
   for (const u of await store.uncharged()) {
     const stream = await store.publicGet(u.stream_id);
     const subject = stream?.coinpay_sub ?? null;
-    if (!subject || (await store.spentSince(u.user_id, now - 3_600_000)) + u.cost_usd > MAX_SPEND_USD_PER_HOUR) {
+    // Infernet credits the node by its full peer id; a receipt without one cannot be paid.
+    if (!subject || !u.peer || (await store.spentSince(u.user_id, now - 3_600_000)) + u.cost_usd > MAX_SPEND_USD_PER_HOUR) {
       await store.settle(u.job_id, 2);
       if (stream) await store.setPaid(stream.id, false);
       out.unpaid++;
@@ -58,7 +59,7 @@ export async function settlePass(store: LiveStore, charge: Charge, now = Date.no
     }
     let res: ChargeResult;
     try {
-      res = await charge(subject, { idem_key: u.job_id, kind: LIVE_RELAY_TYPE, cost_usd: u.cost_usd, provider: `c0mpute:${u.node}`, meta: { stream: u.stream_id, bytes: u.bytes } });
+      res = await charge(subject, { idem_key: u.job_id, kind: LIVE_RELAY_TYPE, cost_usd: u.cost_usd, provider: `c0mpute:${u.peer}`, meta: { stream: u.stream_id, bytes: u.bytes } });
     } catch {
       out.retry++;
       continue;

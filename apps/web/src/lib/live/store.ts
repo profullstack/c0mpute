@@ -50,6 +50,7 @@ export const LIVE_SCHEMA = [
      stream_id  TEXT NOT NULL,
      user_id    TEXT NOT NULL,
      node       TEXT NOT NULL,
+     peer       TEXT,
      bytes      INTEGER NOT NULL,
      cost_usd   REAL NOT NULL,
      charged    INTEGER NOT NULL DEFAULT 0,
@@ -270,15 +271,16 @@ export function createLiveStore(sql: Sql, opts: { now?: () => number; newId?: ()
     },
 
     /** File one relay receipt. False when it was already filed: a receipt settles once. */
-    async fileUsage(u: { job_id: string; stream_id: string; user_id: string; node: string; bytes: number; cost_usd: number; at: number }): Promise<boolean> {
+    async fileUsage(u: { job_id: string; stream_id: string; user_id: string; node: string; peer: string | null; bytes: number; cost_usd: number; at: number }): Promise<boolean> {
       await init();
       const [seen] = await sql.all(`SELECT job_id FROM live_usage WHERE job_id = ?`, [u.job_id]);
       if (seen) return false;
-      await sql.run(`INSERT INTO live_usage (job_id, stream_id, user_id, node, bytes, cost_usd, charged, at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`, [
+      await sql.run(`INSERT INTO live_usage (job_id, stream_id, user_id, node, peer, bytes, cost_usd, charged, at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`, [
         u.job_id,
         u.stream_id,
         u.user_id,
         u.node,
+        u.peer,
         u.bytes,
         u.cost_usd,
         u.at,
@@ -292,13 +294,14 @@ export function createLiveStore(sql: Sql, opts: { now?: () => number; newId?: ()
     },
 
     /** Receipts filed and not yet charged, oldest first (a charge that failed is retried). */
-    async uncharged(limit = 200): Promise<{ job_id: string; stream_id: string; user_id: string; node: string; bytes: number; cost_usd: number; at: number }[]> {
+    async uncharged(limit = 200): Promise<{ job_id: string; stream_id: string; user_id: string; node: string; peer: string | null; bytes: number; cost_usd: number; at: number }[]> {
       await init();
-      return (await sql.all(`SELECT job_id, stream_id, user_id, node, bytes, cost_usd, at FROM live_usage WHERE charged = 0 AND cost_usd > 0 ORDER BY at ASC LIMIT ?`, [limit])).map((r) => ({
+      return (await sql.all(`SELECT job_id, stream_id, user_id, node, peer, bytes, cost_usd, at FROM live_usage WHERE charged = 0 AND cost_usd > 0 ORDER BY at ASC LIMIT ?`, [limit])).map((r) => ({
         job_id: String(r.job_id),
         stream_id: String(r.stream_id),
         user_id: String(r.user_id),
         node: String(r.node),
+        peer: r.peer == null ? null : String(r.peer),
         bytes: Number(r.bytes),
         cost_usd: Number(r.cost_usd),
         at: Number(r.at),

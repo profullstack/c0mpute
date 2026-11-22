@@ -57,6 +57,8 @@ export const liveCharge: Charge = async (subject, body) => {
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) },
     { subject },
   );
+  // A request Infernet will never accept (bad amount, a reused key) is closed unpaid, not retried forever.
+  if (r.status === 400 || r.status === 409) return { charged: false, reason: `rejected_${r.status}` };
   if (!r.ok) throw new Error(`infernet usage-charge: ${r.status}`);
   const d = (await r.json()) as Record<string, unknown>;
   const data = (d.data && typeof d.data === "object" ? d.data : d) as Record<string, unknown>;

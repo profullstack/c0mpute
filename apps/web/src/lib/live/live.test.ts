@@ -15,7 +15,8 @@ function mem(): Sql {
 
 const user = { id: "u1", coinpay_sub: "sub-1" };
 const NET = "a".repeat(64);
-const job = (over: Partial<AggregatorJob> = {}): AggregatorJob => ({ job_id: `live:${NET}:12D3KooWabc:100`, node: "12D3KooWabc", type: "live.relay", completed_at_ms: 1_000, seen_at_ms: 1_000, busy_s: 60, paid_usd: 0.02, ...over });
+const PEER = "12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo";
+const job = (over: Partial<AggregatorJob> = {}): AggregatorJob => ({ job_id: `live:${NET}:12D3KooWabc:100`, node: "12D3KooWabc", type: "live.relay", completed_at_ms: 1_000, seen_at_ms: 1_000, busy_s: 60, paid_usd: 0.02, peer: PEER, ...over });
 
 async function onAir(now = () => 5_000) {
   const store = createLiveStore(mem(), { now });
@@ -123,7 +124,7 @@ describe("settlement", () => {
     };
     expect(await settlePass(store, charge, 2_000)).toEqual({ charged: 1, unpaid: 0, retry: 0 });
     expect(await settlePass(store, charge, 2_000)).toEqual({ charged: 0, unpaid: 0, retry: 0 });
-    expect(calls).toEqual([{ subject: "sub-1", idem_key: job().job_id, kind: "live.relay", cost_usd: 0.02, provider: "c0mpute:12D3KooWabc", meta: { stream: stream.id, bytes: 2e9 } }]);
+    expect(calls).toEqual([{ subject: "sub-1", idem_key: job().job_id, kind: "live.relay", cost_usd: 0.02, provider: `c0mpute:${PEER}`, meta: { stream: stream.id, bytes: 2e9 } }]);
     expect((await store.usage(stream.id)).charged_usd).toBeCloseTo(0.02);
   });
 
@@ -158,6 +159,12 @@ describe("settlement", () => {
     };
     expect(await settlePass(store, count, 2_000)).toEqual({ charged: 0, unpaid: 1, retry: 0 });
     expect(asked).toBe(0);
+  });
+
+  test("a receipt with no full peer id (an old aggregator) is never charged", async () => {
+    const { store } = await onAir();
+    await fileReceipts([job({ peer: undefined })], store);
+    expect(await settlePass(store, ok, 2_000)).toEqual({ charged: 0, unpaid: 1, retry: 0 });
   });
 
   test("the hourly cap stops charging", async () => {
