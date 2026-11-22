@@ -18,11 +18,25 @@ async function ollama(model: string, messages: ChatMessage[]): Promise<string> {
   const res = await fetch(`${OLLAMA}/api/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0 } }),
-    signal: AbortSignal.timeout(600_000),
+    // Streamed: a busy CPU node can take minutes, and a silent response trips
+    // the runtime's idle timeout (Bun: 300 s) before the first byte.
+    body: JSON.stringify({ model, messages, stream: true, options: { temperature: 0 } }),
+    signal: AbortSignal.timeout(900_000),
   });
-  if (!res.ok) throw new Error(`ollama HTTP ${res.status}: ${await res.text()}`);
-  return ((await res.json()) as { message: { content: string } }).message.content;
+  if (!res.ok || !res.body) throw new Error(`ollama HTTP ${res.status}: ${await res.text()}`);
+  let text = "";
+  let buf = "";
+  const dec = new TextDecoder();
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    buf += dec.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) text += (JSON.parse(line) as { message?: { content?: string } }).message?.content ?? "";
+    }
+  }
+  return text;
 }
 
 const weather = {
