@@ -76,7 +76,10 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sites_replicate_to_three_heal_and_serve_from_any_gateway() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("c0mpute_core=info,c0mpute_net=warn")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "c0mpute_core=info,c0mpute_net=warn".into()),
+        )
         .with_test_writer()
         .try_init();
     // The integration test runs beside live dev2 workers, so keep its local
