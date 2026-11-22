@@ -13,6 +13,7 @@ import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
 import { createStorageStore, type StorageStore } from "./storage";
 import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
+import { DEFAULT_PLUGINS } from "./plugin-policy";
 import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
 import { createShareStore, type ShareStore } from "./share-store";
 import { createMediaStore, type MediaKind, type MediaStore } from "./media-owners";
@@ -144,7 +145,8 @@ export async function ownsJob(userId: string, jobId: string): Promise<boolean> {
 
 let _pluginStore: PluginStoreDb | null = null;
 /** Chat plugins (remote MCP servers) per account, tokens sealed with C0MPUTE_PLUGIN_KEY. */
-export const pluginStore = () => (_pluginStore ??= createPluginStore(cloudSql, { key: pluginKey(env("C0MPUTE_PLUGIN_KEY")) }));
+export const pluginStore = () =>
+  (_pluginStore ??= createPluginStore(cloudSql, { key: pluginKey(env("C0MPUTE_PLUGIN_KEY")), defaults: DEFAULT_PLUGINS }));
 
 // ── request auth ─────────────────────────────────────────────────────────────
 export const SESSION_COOKIE = "c0_session";

@@ -6,19 +6,23 @@
 // Everything a plugin returns is untrusted: it is rendered as text only.
 
 import { useCallback, useEffect, useState } from "react";
+import { MODEL_CAN_BE_WRONG, type ActionSummary } from "@/lib/chat/plugin-policy";
 
 export type PluginRow = {
   slug: string;
   url: string;
   name: string;
   title: string | null;
+  icon?: string | null;
+  kind?: "banking" | "crypto" | "trading" | null;
+  trading_mode?: "paper" | "live";
   enabled: boolean;
   auth: "oauth" | "none";
   connected: boolean;
   status: "on" | "off" | "needs_sign_in";
   tools: { name: string; description: string; destructive: boolean }[];
 };
-export type CatalogRow = { slug: string; name: string; title: string; description: string; url: string; added: boolean };
+export type CatalogRow = { slug: string; name: string; title: string; description: string; url: string; added: boolean; icon?: string; default?: boolean };
 
 /** One tool step of an assistant turn. */
 export type ToolView = {
@@ -29,6 +33,8 @@ export type ToolView = {
   status: "running" | "ok" | "error" | "approval" | "approved" | "denied";
   text?: string;
   approval?: string;
+  /** Money plugins: the exact action, in words. */
+  summary?: ActionSummary;
 };
 
 /**
@@ -96,6 +102,11 @@ export const pluginsApi = {
       body: JSON.stringify(/^https?:\/\//i.test(target) ? { url: target } : { slug: target }),
     }),
   remove: (slug: string) => api<{ ok: boolean }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}`, { method: "DELETE" }),
+  mode: (slug: string, mode: "paper" | "live") =>
+    api<{ plugin: PluginRow }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}/mode`, {
+      method: "POST",
+      body: JSON.stringify(mode === "live" ? { mode, confirm: true } : { mode }),
+    }),
   toggle: (slug: string, enabled?: boolean) =>
     api<{ plugin: PluginRow }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}/toggle`, {
       method: "POST",
@@ -179,6 +190,7 @@ export function PluginsPanel() {
           {plugins.map((p) => (
             <li key={p.slug} className="border border-[var(--color-rule)] p-2 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
+                {p.icon && <img src={p.icon} alt="" width={16} height={16} className="w-4 h-4" referrerPolicy="no-referrer" />}
                 <span className="accent">{p.slug}</span>
                 <span className="text-[var(--color-dim)] truncate">{p.title || p.name}</span>
                 <span className="ml-auto flex items-center gap-2 text-xs">
@@ -206,6 +218,29 @@ export function PluginsPanel() {
                 </span>
               </div>
               <p className="text-xs text-[var(--color-dim)] break-all">{p.url}</p>
+              {p.status === "needs_sign_in" && p.kind && (
+                <p className="text-xs text-[var(--color-dim)]">on, not connected: sign in with your own account the first time you use it. Anything that moves money asks you first.</p>
+              )}
+              {p.kind === "trading" && (
+                <div className="text-xs flex flex-wrap items-center gap-2">
+                  <span className={p.trading_mode === "live" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}>
+                    {p.trading_mode === "live" ? "LIVE account: orders use real money" : "paper trading (simulated)"}
+                  </span>
+                  <button
+                    disabled={busy === p.slug}
+                    className="border border-[var(--color-rule)] px-2"
+                    onClick={() =>
+                      p.trading_mode === "live"
+                        ? act(p.slug, () => pluginsApi.mode(p.slug, "paper"))
+                        : window.confirm(`Switch ${p.slug} to your LIVE account? Orders will use real money. Every order still asks you first.\n\n${MODEL_CAN_BE_WRONG}`) &&
+                          act(p.slug, () => pluginsApi.mode(p.slug, "live"))
+                    }
+                  >
+                    {p.trading_mode === "live" ? "back to paper" : "switch to live"}
+                  </button>
+                  <span className="text-[var(--color-dim)] w-full">{MODEL_CAN_BE_WRONG}</span>
+                </div>
+              )}
               {p.tools.length > 0 && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-[var(--color-dim)]">{p.tools.length} tools</summary>
@@ -231,7 +266,10 @@ export function PluginsPanel() {
           <ul className="grid gap-2 sm:grid-cols-2">
             {addable.map((c) => (
               <li key={c.slug} className="border border-[var(--color-rule)] p-2 flex flex-col gap-1">
-                <span className="accent">{c.title || c.name}</span>
+                <span className="accent flex items-center gap-2">
+                  {c.icon && <img src={c.icon} alt="" width={16} height={16} className="w-4 h-4" referrerPolicy="no-referrer" />}
+                  {c.title || c.name}
+                </span>
                 <span className="text-xs text-[var(--color-dim)] flex-1">{c.description}</span>
                 <button disabled={!!busy} className="self-start border border-[var(--color-accent)] px-3 py-1 accent hover:bg-[var(--color-accent-dim)]" onClick={() => add(c.slug)}>
                   {busy === c.slug ? "adding…" : "add"}
@@ -294,7 +332,31 @@ export function ToolCard({ t, onApprove, onDeny }: { t: ToolView; onApprove?: ()
         </span>
         <span className={t.status === "error" || t.status === "denied" ? "text-[var(--color-warn)]" : "text-[var(--color-dim)]"}>{label}</span>
       </div>
-      {Object.keys(t.arguments ?? {}).length > 0 && <p className="text-[var(--color-dim)] break-all">{short(t.arguments)}</p>}
+      {t.summary && (
+        <div className="mt-1 space-y-0.5">
+          <p className="accent">{t.summary.title}</p>
+          <table className="text-xs">
+            <tbody>
+              {t.summary.lines.map((l, i) => (
+                <tr key={i}>
+                  <td className="pr-3 text-[var(--color-dim)] align-top whitespace-nowrap">{l.label}</td>
+                  <td className={`break-all ${l.label === "Account" && t.summary?.account === "live" ? "text-[var(--color-warn)]" : ""}`}>{l.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {t.summary.note && <p className="text-[var(--color-dim)]">{t.summary.note}</p>}
+        </div>
+      )}
+      {Object.keys(t.arguments ?? {}).length > 0 &&
+        (t.summary ? (
+          <details>
+            <summary className="cursor-pointer text-[var(--color-dim)]">exact arguments</summary>
+            <pre className="whitespace-pre-wrap break-all">{JSON.stringify(t.arguments, null, 2)}</pre>
+          </details>
+        ) : (
+          <p className="text-[var(--color-dim)] break-all">{short(t.arguments)}</p>
+        ))}
       {t.status === "approval" && (
         <div className="flex gap-2 mt-1">
           <button className="border border-[var(--color-accent)] px-2 accent" onClick={onApprove}>
