@@ -1,14 +1,20 @@
 /**
  * The c0mpute gallery: things built with, or hosted on, the c0mpute network.
  *
- * This list is the single source of truth for both c0mpute.com/gallery and the
- * public GET /api/v1/gallery (which infernetprotocol.com/gallery reads). The
- * response shape is documented in docs/gallery-api.md and is versioned: add
+ * Listings live in the site database (lib/gallery/store.ts, table
+ * gallery_listings) and are what c0mpute.com/gallery and the public
+ * GET /api/v1/gallery (read by infernetprotocol.com/gallery) show. GALLERY
+ * below is the editorial seed: written into the table as approved on first
+ * start, and served as-is if the database cannot be read. People add their own
+ * through /gallery/submit (free with the badge or after the queue, or priority).
+ *
+ * The response shape is documented in docs/gallery-api.md and is versioned: add
  * fields freely, never rename or remove one without bumping GALLERY_SCHEMA_VERSION.
  *
- * Rules for an entry: it must answer 200 at `url` when added, the c0mpute part
- * must be true (verified from code, receipts or deploy notes), and no invented
- * numbers or users. Screenshots live in public/gallery/<slug>.png.
+ * Rules for a seed entry: it must answer 200 at `url` when added, the c0mpute
+ * part must be true (verified from code, receipts or deploy notes), and no
+ * invented numbers or users. Seed screenshots live in public/gallery/<slug>.png;
+ * submitted listings get a generated card at /gallery/card/<slug>.
  */
 
 export const GALLERY_SCHEMA_VERSION = 1;
@@ -39,7 +45,13 @@ export type GalleryEntry = {
   image: string;
   /** Date it went live on c0mpute (YYYY-MM-DD). */
   added_at: string;
+  /** Picked out by the editors (shown first on c0mpute.com/gallery). */
+  featured?: boolean;
+  /** How it got listed: "editorial" (seed), "badge", "queue", "priority" or "admin". */
+  listed_via?: ListedVia;
 };
+
+export type ListedVia = "editorial" | "badge" | "queue" | "priority" | "admin";
 
 export const GALLERY: GalleryEntry[] = [
   {
@@ -141,18 +153,38 @@ export const GALLERY: GalleryEntry[] = [
 ];
 
 /** The public JSON shape served at /api/v1/gallery. */
-export function galleryResponse(origin = "https://c0mpute.com") {
-  const data = GALLERY.map((e) => ({ ...e, image: new URL(e.image, origin).toString() }));
+export function galleryResponse(entries: GalleryEntry[] = GALLERY, origin = "https://c0mpute.com") {
+  const data = entries.map((e) => ({
+    ...e,
+    image: new URL(e.image, origin).toString(),
+    featured: e.featured ?? false,
+    listed_via: e.listed_via ?? "editorial",
+  }));
   return {
     object: "list" as const,
     schema_version: GALLERY_SCHEMA_VERSION,
-    updated_at: GALLERY.reduce((a, e) => (e.added_at > a ? e.added_at : a), ""),
+    updated_at: entries.reduce((a, e) => (e.added_at > a ? e.added_at : a), ""),
     count: data.length,
-    categories: GALLERY_CATEGORIES.map((c) => ({ ...c, count: GALLERY.filter((e) => e.category === c.id).length })),
+    categories: GALLERY_CATEGORIES.map((c) => ({ ...c, count: entries.filter((e) => e.category === c.id).length })),
     submit_url: SUBMIT_URL,
     data,
   };
 }
 
-export const SUBMIT_URL =
-  "https://github.com/profullstack/c0mpute/issues/new?labels=gallery&title=Gallery%3A+";
+/** Where people get listed ("Get listed": free with the badge, or priority). */
+export const SUBMIT_URL = "https://c0mpute.com/gallery/submit";
+
+/** c0mpute features a submitter can tick; the field stays an open vocabulary. */
+export const BUILT_WITH = [
+  "c0mpute hosting",
+  "c0mpute chat API",
+  "Infernet chat",
+  "c0mpute jobs",
+  "c0mpute music",
+  "c0mpute speech",
+  "c0mpute images",
+  "c0mpute video",
+  "fine-tune",
+  "model router",
+  "c0mpute apps",
+] as const;

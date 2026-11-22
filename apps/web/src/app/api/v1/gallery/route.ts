@@ -1,7 +1,9 @@
 import { galleryResponse } from "@/lib/gallery";
+import { galleryEntries } from "@/lib/gallery/server";
 
-// Static list, so cache it at the edge for an hour; it changes only on deploy.
-export const revalidate = 3600;
+// Listings now change without a deploy (submissions, badge checks), so this is
+// rendered per request and cached briefly at the edge instead of for an hour.
+export const dynamic = "force-dynamic";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -14,9 +16,10 @@ const CORS = {
  * Public, CORS-open list of things built with or hosted on c0mpute.
  * Shape: docs/gallery-api.md. Read by c0mpute.com/gallery and infernetprotocol.com/gallery.
  */
-export function GET() {
-  return Response.json(galleryResponse(), {
-    headers: { ...CORS, "Cache-Control": "public, max-age=300, s-maxage=3600" },
+export async function GET() {
+  const { entries } = await galleryEntries();
+  return Response.json(galleryResponse(entries), {
+    headers: { ...CORS, "Cache-Control": "public, max-age=60, s-maxage=300, stale-while-revalidate=3600" },
   });
 }
 

@@ -37,6 +37,7 @@ mod git_cli;
 mod peers;
 mod private_storage;
 mod promo;
+mod gallery_cli;
 mod site_owner;
 mod storage;
 mod swarm_cli;
@@ -500,6 +501,15 @@ enum Cmd {
     /// `c0mpute promo https://example.com --style pixar [--vertical]`.
     /// Needs `c0mpute chat login`.
     Promo(promo::PromoArgs),
+
+    /// Get a site listed in the c0mpute gallery (c0mpute.com/gallery):
+    /// `c0mpute gallery submit <url> [--priority]`, `status <url> [--check]`,
+    /// `list`. Free with the badge (or after a 30-day queue), or priority
+    /// through one CoinPay payment. No sign-in needed.
+    Gallery {
+        #[command(subcommand)]
+        cmd: gallery_cli::GalleryCmd,
+    },
 
     /// Stop a RENTED node (Vast.ai, SaladCloud) while nobody needs it and
     /// start it when the network has jobs for its models. Opt-in; runs on an
@@ -2020,6 +2030,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Chat { args } => ai_chat::run(&args).await,
         Cmd::Promo(args) => promo::run(args).await,
+        Cmd::Gallery { cmd } => gallery_cli::run(cmd).await,
         Cmd::Autoscale(args) => autoscale::run(args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,

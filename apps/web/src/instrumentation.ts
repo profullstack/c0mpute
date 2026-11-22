@@ -25,4 +25,12 @@ export async function register() {
   } catch (e) {
     console.error("disk dues: could not start the recorder", e);
   }
+  // Gallery "Get listed": badge hit counts, the 30-day free queue and the
+  // weekly badge re-checks.
+  try {
+    const { startGalleryTicker } = await import("./lib/gallery/server");
+    startGalleryTicker();
+  } catch (e) {
+    console.error("gallery: could not start the ticker", e);
+  }
 }
