@@ -5,8 +5,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * Token endpoint: authorization_code + PKCE in, a c0k_ key out. The key
- * carries the "mcp" scope only (it works on /api/mcp, nowhere else) and does
- * not expire; the person revokes it with their other keys in c0mpute chat.
+ * carries only the consented scopes ("mcp": /api/mcp; "storage:write": the
+ * /api/v1/storage upload routes) and does not expire; the person revokes it
+ * with their other keys in c0mpute chat.
  */
 export async function POST(req: Request) {
   if (!rateLimit(`oauth-token:${clientIp(req)}`, 120).ok) return json({ error: "slow_down" }, 429, CORS);
@@ -21,7 +22,7 @@ export async function POST(req: Request) {
     const oauth = oauthStore();
     const r = await oauth.redeemCode(p.code, { client_id: p.client_id, redirect_uri: p.redirect_uri, code_verifier: p.code_verifier });
     const client = await oauth.client(r.client_id);
-    const key = await store().createOAuthKey(r.user_id, `${client?.name ?? "MCP client"} (OAuth)`);
+    const key = await store().createOAuthKey(r.user_id, `${client?.name ?? "MCP client"} (OAuth)`, r.scope);
     return json({ access_token: key, token_type: "Bearer", scope: r.scope }, 200, { ...CORS, pragma: "no-cache" });
   } catch (e) {
     if (e instanceof OAuthError) return json({ error: e.code, error_description: e.message }, e.status, CORS);

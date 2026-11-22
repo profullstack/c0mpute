@@ -399,8 +399,16 @@ pub fn ls() -> Result<()> {
 }
 
 /// `c0mpute storage key ...`.
-pub fn key(cmd: KeyCmd) -> Result<()> {
+pub async fn key(cmd: KeyCmd) -> Result<()> {
     match cmd {
+        KeyCmd::Link { status, url } => {
+            if status {
+                link_status(url.as_deref()).await
+            } else {
+                link_account(url.as_deref()).await
+            }
+        }
+        KeyCmd::Unlink { url } => unlink_account(url.as_deref()).await,
         KeyCmd::Init { backup_to } => {
             init_identity(backup_to.as_deref())?;
             Ok(())
@@ -445,6 +453,121 @@ pub enum KeyCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Link this storage identity to your c0mpute.com account (the CoinPay
+    /// sign-in), so apps you authorize can upload encrypted files into your
+    /// private storage. Proves you hold the storage key; c0mpute.com stores
+    /// only the public `c0ps1...` identity. Signs in first if needed.
+    Link {
+        /// Show what your account is linked to instead (no password needed).
+        #[arg(long)]
+        status: bool,
+        /// c0mpute site (default https://c0mpute.com, or $C0MPUTE_URL).
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Remove the storage identity from your c0mpute.com account. Apps can
+    /// no longer upload for you; objects already uploaded stay yours.
+    Unlink {
+        #[arg(long)]
+        url: Option<String>,
+    },
+}
+
+async fn api_key_or_login(url: &str) -> Result<String> {
+    if let Some(k) = crate::ai_chat::api_key() {
+        return Ok(k);
+    }
+    eprintln!("not signed in to {url} yet: signing in first (CoinPay)");
+    crate::ai_chat::login(&["--url".to_string(), url.to_string()]).await?;
+    crate::ai_chat::require_key()
+}
+
+async fn api_call(method: reqwest::Method, url: &str, key: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let http = crate::ai_chat::client()?;
+    let mut req = http.request(method, url).bearer_auth(key).timeout(Duration::from_secs(60));
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let res = req.send().await.with_context(|| format!("could not reach {url}"))?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(crate::ai_chat::api_error(status, &text));
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+}
+
+/// `c0mpute storage key link`: prove possession of the storage key to
+/// c0mpute.com (an X25519 challenge, see `StorageSecret::link_proof`) and
+/// record the public identity on the signed-in account.
+async fn link_account(url_flag: Option<&str>) -> Result<()> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let url = crate::ai_chat::base_url(url_flag);
+    let secret = load_identity(false, None)?;
+    let identity = secret.public().to_share_string();
+    let key = api_key_or_login(&url).await?;
+    let ch = api_call(reqwest::Method::POST, &format!("{url}/api/v1/storage/link/challenge"), &key, Some(serde_json::json!({}))).await?;
+    let challenge_id = ch["challenge_id"].as_str().context("no challenge_id in the reply")?;
+    let nonce = ch["nonce"].as_str().context("no nonce in the reply")?;
+    let server_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(ch["server_key"].as_str().context("no server_key in the reply")?)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .context("server_key is not a 32-byte X25519 key")?;
+    let context = format!("{challenge_id}\n{nonce}\n{identity}");
+    let proof = secret.link_proof(&server_key, context.as_bytes())?;
+    let done = api_call(
+        reqwest::Method::POST,
+        &format!("{url}/api/v1/storage/link"),
+        &key,
+        Some(serde_json::json!({ "challenge_id": challenge_id, "identity": identity, "proof": URL_SAFE_NO_PAD.encode(proof), "fingerprint": secret.public().fingerprint() })),
+    )
+    .await?;
+    println!("linked: {identity}");
+    println!("fingerprint: {}", secret.public().fingerprint());
+    if let Some(name) = done["account"].as_str() {
+        println!("account: {name}");
+    }
+    eprintln!(
+        "  apps you authorize with the storage:write scope can now upload files sealed to\n  \
+         this identity. They cannot read them, and neither can c0mpute.com. Read them with\n  \
+         `c0mpute storage get c0p1:...`; undo with `c0mpute storage key unlink`."
+    );
+    Ok(())
+}
+
+async fn link_status(url_flag: Option<&str>) -> Result<()> {
+    let url = crate::ai_chat::base_url(url_flag);
+    let key = crate::ai_chat::require_key()?;
+    let v = api_call(reqwest::Method::GET, &format!("{url}/api/v1/storage/link"), &key, None).await?;
+    if v["linked"].as_bool() != Some(true) {
+        println!("not linked: run `c0mpute storage key link`");
+        return Ok(());
+    }
+    println!("linked:      {}", v["identity"].as_str().unwrap_or("?"));
+    println!("fingerprint: {}", v["fingerprint"].as_str().unwrap_or("?"));
+    println!("since:       {}", v["linked_at"].as_str().unwrap_or("?"));
+    // Compare with this machine's identity only when it opens without a prompt.
+    if std::env::var("C0MPUTE_DM_PASSWORD").is_ok_and(|p| !p.is_empty())
+        && let Ok(secret) = load_identity(false, None)
+    {
+        let mine = secret.public().to_share_string();
+        if v["identity"].as_str() == Some(mine.as_str()) {
+            println!("this machine: same identity");
+        } else {
+            println!("this machine: a DIFFERENT identity ({mine}); run `c0mpute storage key link` to switch");
+        }
+    }
+    Ok(())
+}
+
+async fn unlink_account(url_flag: Option<&str>) -> Result<()> {
+    let url = crate::ai_chat::base_url(url_flag);
+    let key = crate::ai_chat::require_key()?;
+    api_call(reqwest::Method::DELETE, &format!("{url}/api/v1/storage/link"), &key, None).await?;
+    println!("unlinked: apps can no longer upload into your private storage");
+    Ok(())
 }
 
 /// `c0mpute hosting publish DIR --name N --private`.

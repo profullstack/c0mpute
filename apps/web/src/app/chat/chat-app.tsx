@@ -1944,8 +1944,89 @@ function Connect() {
           {keys.length === 0 && <li className="text-xs text-[var(--color-dim)]">no keys yet</li>}
         </ul>
       </div>
+      <PrivateStorage />
       <Surfaces />
     </section>
+  );
+}
+
+type StorageLink = { linked: boolean; identity?: string; fingerprint?: string | null; linked_at?: string };
+type StorageUpload = { id: string; ref: string | null; app: string | null; bytes: number; objects: number; created_at: string };
+
+/**
+ * The storage identity linked to this account (apps with the storage:write
+ * scope seal uploads to it), with unlink, and what apps have uploaded.
+ */
+function PrivateStorage() {
+  const [link, setLink] = useState<StorageLink | null>(null);
+  const [uploads, setUploads] = useState<StorageUpload[]>([]);
+  const refresh = () => {
+    fetch("/api/v1/storage/link")
+      .then((r) => r.json())
+      .then((j) => setLink(j))
+      .catch(() => setLink({ linked: false }));
+    fetch("/api/v1/storage/uploads")
+      .then((r) => r.json())
+      .then((j) => setUploads(j.uploads ?? []))
+      .catch(() => {});
+  };
+  useEffect(() => {
+    refresh();
+  }, []);
+  const mib = (n: number) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GiB` : `${(n / 1024 ** 2).toFixed(1)} MiB`);
+  return (
+    <div className="space-y-3">
+      <h2 className="font-semibold">[ private storage ]</h2>
+      <p className="text-[var(--color-dim)]">
+        Apps you connect with the <code>storage:write</code> scope (PairUX, for one) can upload files into your c0mpute private
+        storage. They encrypt on your device to your storage identity: neither the app nor c0mpute.com can read them. Read them
+        with <code>c0mpute storage get c0p1:…</code>.
+      </p>
+      {link === null ? (
+        <p className="text-xs text-[var(--color-dim)]">loading…</p>
+      ) : link.linked ? (
+        <div className="space-y-1 text-xs">
+          <p className="break-all">
+            linked: <code>{link.identity}</code>
+          </p>
+          {link.fingerprint && (
+            <p>
+              fingerprint: <code>{link.fingerprint}</code>
+            </p>
+          )}
+          <p className="text-[var(--color-dim)]">since {link.linked_at ? new Date(link.linked_at).toLocaleString() : "?"}</p>
+          <button
+            className="text-[var(--color-dim)] hover:text-[var(--color-warn)]"
+            onClick={async () => {
+              if (!confirm("Unlink your storage identity? Apps can no longer upload for you; what they uploaded stays yours.")) return;
+              await fetch("/api/v1/storage/link", { method: "DELETE" });
+              refresh();
+            }}
+          >
+            unlink
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <p className="text-xs">Not linked. On the computer that holds your c0mpute identity:</p>
+          <CodeBlock>{`$ c0mpute storage key link        # proves you hold the key; stores only the public c0ps1... identity
+$ c0mpute storage key link --status`}</CodeBlock>
+        </div>
+      )}
+      {uploads.length > 0 && (
+        <ul className="space-y-1">
+          {uploads.map((u) => (
+            <li key={u.id} className="flex flex-wrap items-center gap-3 text-xs">
+              <code>{u.ref}</code>
+              <span>{u.app ?? "app"}</span>
+              <span className="text-[var(--color-dim)]">
+                {mib(u.bytes)} · {new Date(u.created_at).toLocaleDateString()}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

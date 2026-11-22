@@ -79,6 +79,9 @@ const SCHEMA = [
 const MIGRATIONS = [
   // Adult mode: the 18+ attestation (checkbox + confirm), with its time.
   `ALTER TABLE chat_users ADD COLUMN adult_verified_at TEXT`,
+  // OAuth scopes on a key ("mcp", "storage:write", space-separated). NULL on
+  // keys from before scopes existed: an OAuth key then means "mcp".
+  `ALTER TABLE chat_tokens ADD COLUMN scope TEXT`,
 ];
 
 export const SESSION_PREFIX = "c0s_";
@@ -150,12 +153,12 @@ export function createStore(sql: Sql) {
     return (rows[0] as T) ?? null;
   }
 
-  async function issue(userId: string, kind: TokenKind, label: string | null, prefix: string, ttlMs: number | null) {
+  async function issue(userId: string, kind: TokenKind, label: string | null, prefix: string, ttlMs: number | null, scope: string | null = null) {
     const token = newSecret(prefix);
     await sql.run(
-      `INSERT INTO chat_tokens (token_hash, user_id, kind, label, prefix, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [hashToken(token), userId, kind, label, token.slice(0, 8), now(), ttlMs ? plus(ttlMs) : null],
+      `INSERT INTO chat_tokens (token_hash, user_id, kind, label, prefix, created_at, expires_at, scope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [hashToken(token), userId, kind, label, token.slice(0, 8), now(), ttlMs ? plus(ttlMs) : null, scope],
     );
     return token;
   }
@@ -210,16 +213,22 @@ export function createStore(sql: Sql) {
     createKey: (userId: string, label: string) =>
       init().then(() => issue(userId, "key", label.slice(0, 80) || "key", KEY_PREFIX, null)),
 
-    /** A key for an MCP client that signed in through OAuth: scope "mcp" only. */
-    createOAuthKey: (userId: string, label: string) =>
-      init().then(() => issue(userId, "oauth", label.slice(0, 80) || "MCP client (OAuth)", KEY_PREFIX, null)),
+    /**
+     * A key for an app that signed in through OAuth. It carries only the
+     * scopes the person consented to ("mcp", "storage:write"); see
+     * scopedUser in server.ts for where each is accepted.
+     */
+    createOAuthKey: (userId: string, label: string, scope = "mcp") =>
+      init().then(() => issue(userId, "oauth", label.slice(0, 80) || "MCP client (OAuth)", KEY_PREFIX, null, scope)),
 
     /** The user behind a session cookie or API key, or null. Touches last_used_at. */
-    async userForToken(token: string | null | undefined): Promise<(User & { token_kind: TokenKind }) | null> {
+    async userForToken(
+      token: string | null | undefined,
+    ): Promise<(User & { token_kind: TokenKind; token_scope?: string | null; token_label?: string | null }) | null> {
       if (!token || !(token.startsWith(SESSION_PREFIX) || token.startsWith(KEY_PREFIX))) return null;
       const h = hashToken(token);
-      const row = await one<User & { token_kind: TokenKind; expires_at: string | null }>(
-        `SELECT u.*, t.kind AS token_kind, t.expires_at
+      const row = await one<User & { token_kind: TokenKind; token_scope: string | null; token_label: string | null; expires_at: string | null }>(
+        `SELECT u.*, t.kind AS token_kind, t.scope AS token_scope, t.label AS token_label, t.expires_at
            FROM chat_tokens t JOIN chat_users u ON u.id = t.user_id
           WHERE t.token_hash = ?`,
         [h],

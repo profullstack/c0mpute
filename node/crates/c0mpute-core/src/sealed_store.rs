@@ -169,7 +169,12 @@ pub fn built_site(name: &str, blob: &[u8]) -> BuiltSite {
 
 /// Sign the hosting record for object `name` with its per-object key.
 pub fn sign_record(owner: &StorageSecret, name: &str, built: &BuiltSite, seq: u64) -> Result<SiteRecord> {
-    let mut seed = owner.object_signing_seed(name);
+    sign_record_with_seed(owner.object_signing_seed(name), name, built, seq)
+}
+
+/// Sign the hosting record for object `name` with the per-object key whose
+/// 32-byte seed is `seed` (derived, or unwrapped from custody).
+pub fn sign_record_with_seed(mut seed: Zeroizing<[u8; 32]>, name: &str, built: &BuiltSite, seq: u64) -> Result<SiteRecord> {
     // ed25519_from_bytes zeroizes the buffer it is given.
     let keypair = c0mpute_net::libp2p::identity::Keypair::ed25519_from_bytes(seed.as_mut())
         .map_err(|e| anyhow::anyhow!("object key: {e}"))?;
@@ -188,8 +193,14 @@ pub fn sign_record(owner: &StorageSecret, name: &str, built: &BuiltSite, seq: u6
 /// Where sealed blobs live. Everything passed in is already ciphertext.
 #[async_trait::async_trait]
 pub trait BlobStore: Send + Sync {
-    /// Publish `blob` as object `name` (a new version if it exists).
-    async fn put(&self, owner: &StorageSecret, name: &str, blob: Vec<u8>) -> Result<String>;
+    /// Publish `blob` as object `name` (a new version if it exists), signed
+    /// by the per-object key derived from `owner` and `name`.
+    async fn put(&self, owner: &StorageSecret, name: &str, blob: Vec<u8>) -> Result<String> {
+        self.put_signed(owner.object_signing_seed(name), name, blob).await
+    }
+    /// Publish `blob` as object `name`, signed by the per-object key with
+    /// this seed (objects an app sealed for the owner: see [`object_seed`]).
+    async fn put_signed(&self, seed: Zeroizing<[u8; 32]>, name: &str, blob: Vec<u8>) -> Result<String>;
     /// Fetch the current blob of a site; `Ok(None)` when it does not exist
     /// (as opposed to an error reaching it).
     async fn try_get(&self, site_id: &str) -> Result<Option<Vec<u8>>>;
@@ -205,9 +216,8 @@ pub struct DirStore(pub PathBuf);
 
 #[async_trait::async_trait]
 impl BlobStore for DirStore {
-    async fn put(&self, owner: &StorageSecret, name: &str, blob: Vec<u8>) -> Result<String> {
-        let owner_hex = hex::encode(owner.object_signing_key(name).verifying_key().as_bytes());
-        let site_id = site::site_id_for(&owner_hex, name);
+    async fn put_signed(&self, seed: Zeroizing<[u8; 32]>, name: &str, blob: Vec<u8>) -> Result<String> {
+        let site_id = site::site_id_for(&c0mpute_sealed::object_owner_hex(&seed), name);
         tokio::fs::create_dir_all(&self.0).await?;
         let tmp = self.0.join(format!("{site_id}.tmp"));
         tokio::fs::write(&tmp, &blob).await?;
@@ -325,12 +335,9 @@ impl NetworkStore {
 
 #[async_trait::async_trait]
 impl BlobStore for NetworkStore {
-    async fn put(&self, owner: &StorageSecret, name: &str, blob: Vec<u8>) -> Result<String> {
+    async fn put_signed(&self, seed: Zeroizing<[u8; 32]>, name: &str, blob: Vec<u8>) -> Result<String> {
         let built = built_site(name, &blob);
-        let site_id = {
-            let owner_hex = hex::encode(owner.object_signing_key(name).verifying_key().as_bytes());
-            site::site_id_for(&owner_hex, name)
-        };
+        let site_id = site::site_id_for(&c0mpute_sealed::object_owner_hex(&seed), name);
         // Strictly newer than any version this session or the network has.
         let mut seq = now_millis();
         if let Some(prev) = self.hosting.record_for(&site_id).await {
@@ -339,7 +346,7 @@ impl BlobStore for NetworkStore {
         if let Some(prev) = self.published.lock().await.get(&site_id) {
             seq = seq.max(prev.seq + 1);
         }
-        let record = sign_record(owner, name, &built, seq)?;
+        let record = sign_record_with_seed(seed, name, &built, seq)?;
         self.hosting.publish_site(&built, record.clone()).await?;
         self.published.lock().await.insert(site_id.clone(), record);
         Ok(site_id)
@@ -382,7 +389,7 @@ impl GatewayStore {
 
 #[async_trait::async_trait]
 impl BlobStore for GatewayStore {
-    async fn put(&self, _owner: &StorageSecret, _name: &str, _blob: Vec<u8>) -> Result<String> {
+    async fn put_signed(&self, _seed: Zeroizing<[u8; 32]>, _name: &str, _blob: Vec<u8>) -> Result<String> {
         bail!("a gateway is read-only; publishing needs a network client")
     }
 
@@ -573,32 +580,57 @@ pub async fn get(store: &dyn BlobStore, r: &ObjectRef, secret: Option<&StorageSe
     Ok(Fetched { opened, dek })
 }
 
-/// Fetch an object the caller owns, checking that it does: the per-object
-/// key derived from the owner's secret and the object's name must be the
-/// key the object was signed with.
-async fn get_owned(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str) -> Result<(Vec<u8>, Opened, DataKey)> {
+/// The per-object signing seed of an object `owner` controls: derived from
+/// the owner's secret and the object's name when the owner sealed it, or
+/// unwrapped from the object's custody blob ([`c0mpute_sealed::Meta::custody`])
+/// when an app sealed it into the owner's storage. Either way it must be the
+/// key the object is signed with.
+pub fn object_seed(owner: &StorageSecret, meta: &c0mpute_sealed::Meta) -> Result<Zeroizing<[u8; 32]>> {
+    let derived = owner.object_signing_seed(&meta.name);
+    if c0mpute_sealed::object_owner_hex(&derived) == meta.owner {
+        return Ok(derived);
+    }
+    if meta.custody.is_some()
+        && let Ok(seed) = c0mpute_sealed::unwrap_custody(meta, owner)
+    {
+        return Ok(seed);
+    }
+    bail!("you can read this object but you do not own it, so you cannot change who it is shared with or delete it")
+}
+
+/// Who an object is wrapped to, for its owner. Objects an app sealed carry
+/// an owner-only roster the app could not write (it has no owner secret):
+/// those are wrapped to the owner alone, which is all an app may do.
+fn roster_of(blob: &[u8], owner: &StorageSecret, meta: &c0mpute_sealed::Meta) -> Result<Vec<StoragePublic>> {
+    match c0mpute_sealed::roster(blob, owner) {
+        Ok(r) => Ok(r),
+        Err(_) if meta.custody.is_some() => Ok(vec![owner.public()]),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Fetch an object the caller owns, checking that it does (see
+/// [`object_seed`]). Returns the per-object signing seed with it.
+async fn get_owned(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str) -> Result<(Vec<u8>, Opened, DataKey, Zeroizing<[u8; 32]>)> {
     let blob = store.get(site_id).await?;
     let (opened, dek) = c0mpute_sealed::open_with_secret(&blob, owner, Some(site_id))?;
-    let mine = hex::encode(owner.object_signing_key(&opened.meta.name).verifying_key().as_bytes());
-    if mine != opened.meta.owner {
-        bail!("you can read this object but you do not own it, so you cannot change who it is shared with");
-    }
+    let seed = object_seed(owner, &opened.meta)?;
     check_fresh(site_id, opened.meta.version)?;
-    Ok((blob, opened, dek))
+    Ok((blob, opened, dek, seed))
 }
 
 /// Add readers. Rewraps the key only; the ciphertext and every part stay
 /// as they are, so this republishes one small header change.
 pub async fn share(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str, add: &[StoragePublic]) -> Result<Vec<StoragePublic>> {
-    let (blob, opened, dek) = get_owned(store, owner, site_id).await?;
-    let mut roster = c0mpute_sealed::roster(&blob, owner)?;
+    let (blob, opened, dek, seed) = get_owned(store, owner, site_id).await?;
+    let mut roster = roster_of(&blob, owner, &opened.meta)?;
     for r in add {
         if !roster.contains(r) {
             roster.push(*r);
         }
     }
     let new = c0mpute_sealed::rewrap(&blob, &dek, owner, &roster)?;
-    store.put(owner, &opened.meta.name, new).await?;
+    store.put_signed(seed, &opened.meta.name, new).await?;
     Ok(roster)
 }
 
@@ -606,8 +638,8 @@ pub async fn share(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str, 
 /// keys and publish the new version, so the old keys open nothing current.
 /// Anyone removed may still have kept a copy of what they could read before.
 pub async fn revoke(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str, remove: &[StoragePublic]) -> Result<(Vec<StoragePublic>, PutResult)> {
-    let (blob, opened, _old) = get_owned(store, owner, site_id).await?;
-    let roster: Vec<StoragePublic> = c0mpute_sealed::roster(&blob, owner)?
+    let (blob, opened, _old, seed) = get_owned(store, owner, site_id).await?;
+    let roster: Vec<StoragePublic> = roster_of(&blob, owner, &opened.meta)?
         .into_iter()
         .filter(|r| !remove.contains(r))
         .collect();
@@ -624,31 +656,36 @@ pub async fn revoke(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str,
     } else {
         (opened.content, Vec::new())
     };
-    let sealed = c0mpute_sealed::seal(
-        &content,
-        &SealParams {
-            kind: meta.kind,
-            name: &meta.name,
-            owner,
-            file_name: meta.file_name.clone(),
-            content_type: meta.content_type.clone(),
-            files: meta.files.clone(),
-            parts,
-            recipients: &roster,
-            created: meta.created,
-            version: next_version(meta.version),
-        },
-    )?;
+    let params = SealParams {
+        kind: meta.kind,
+        name: &meta.name,
+        owner,
+        file_name: meta.file_name.clone(),
+        content_type: meta.content_type.clone(),
+        files: meta.files.clone(),
+        parts,
+        recipients: &roster,
+        created: meta.created,
+        version: next_version(meta.version),
+    };
+    // An object an app sealed keeps its signing key (and so its site id and
+    // its custody blob); one the owner sealed re-derives it.
+    let sealed = if meta.custody.is_some() {
+        c0mpute_sealed::seal_custodial(&content, &params, &seed, meta.custody.clone(), None)?
+    } else {
+        c0mpute_sealed::seal(&content, &params)?
+    };
     stored += sealed.blob.len() as u64;
-    let id = store.put(owner, &meta.name, sealed.blob).await?;
+    let id = store.put_signed(seed, &meta.name, sealed.blob).await?;
     published.push(id.clone());
     note_version(&id, next_version(meta.version));
     for p in &meta.parts {
         if let Ok(pblob) = store.get(&p.site_id).await
             && let Ok(pkey) = DataKey::from_link_secret(&p.key)
             && let Ok(part) = c0mpute_sealed::open(&pblob, &pkey, Some(&p.site_id))
+            && let Ok(pseed) = object_seed(owner, &part.meta)
         {
-            let _ = store.put(owner, &part.meta.name, tombstone()).await;
+            let _ = store.put_signed(pseed, &part.meta.name, tombstone()).await;
         }
     }
     Ok((
@@ -672,15 +709,16 @@ fn tombstone() -> Vec<u8> {
 
 /// Delete an object (and its parts): publish a tombstone version.
 pub async fn delete(store: &dyn BlobStore, owner: &StorageSecret, site_id: &str) -> Result<Vec<String>> {
-    let (_, opened, _) = get_owned(store, owner, site_id).await?;
+    let (_, opened, _, seed) = get_owned(store, owner, site_id).await?;
     let mut done = Vec::new();
     for p in &opened.meta.parts {
         let pblob = store.get(&p.site_id).await?;
         let pkey = DataKey::from_link_secret(&p.key)?;
         let part = c0mpute_sealed::open(&pblob, &pkey, Some(&p.site_id))?;
-        done.push(store.put(owner, &part.meta.name, tombstone()).await?);
+        let pseed = object_seed(owner, &part.meta)?;
+        done.push(store.put_signed(pseed, &part.meta.name, tombstone()).await?);
     }
-    done.push(store.put(owner, &opened.meta.name, tombstone()).await?);
+    done.push(store.put_signed(seed, &opened.meta.name, tombstone()).await?);
     Ok(done)
 }
 
@@ -1296,6 +1334,84 @@ mod tests {
         let pkey = DataKey::from_link_secret(&old_parts[0].key).unwrap();
         let pblob = s.get(&old_parts[0].site_id).await.unwrap();
         assert!(c0mpute_sealed::open(&pblob, &pkey, None).is_err());
+    }
+
+    /// Seal like an app does (`@profullstack/c0mpute-sealed`): a fresh
+    /// signing key wrapped to the owner as custody, an owner-only roster the
+    /// app cannot write (here: sealed under an unrelated secret), and
+    /// published under that key.
+    async fn app_upload(s: &DirStore, owner: &StoragePublic, kind: Kind, content: &[u8], parts: Vec<PartRef>, recipients: &[StoragePublic]) -> (String, DataKey) {
+        let mut seed = Zeroizing::new([0u8; 32]);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, seed.as_mut());
+        let name = c0mpute_sealed::random_name();
+        let custody = c0mpute_sealed::wrap_custody(&seed, owner).unwrap();
+        let stranger = StorageSecret::generate();
+        let sealed = c0mpute_sealed::seal_custodial(
+            content,
+            &SealParams {
+                kind,
+                name: &name,
+                owner: &stranger,
+                file_name: Some("clip.mp4".into()),
+                content_type: Some("video/mp4".into()),
+                files: BTreeMap::new(),
+                parts,
+                recipients,
+                created: 1,
+                version: 0,
+            },
+            &seed,
+            Some(custody),
+            None,
+        )
+        .unwrap();
+        let id = s.put_signed(seed, &name, sealed.blob).await.unwrap();
+        assert_eq!(id, sealed.site_id);
+        (id, sealed.dek)
+    }
+
+    #[tokio::test]
+    async fn app_sealed_objects_stay_manageable_by_their_owner() {
+        let (_d, s) = store();
+        let alice = StorageSecret::generate();
+        let bob = StorageSecret::generate();
+        let data = b"a screen recording".repeat(500);
+        let (id, _) = app_upload(&s, &alice.public(), Kind::File, &data, vec![], &[alice.public()]).await;
+        let r = ObjectRef { site_id: id.clone(), key: None, path: None };
+        assert_eq!(&*get(&s, &r, Some(&alice)).await.unwrap().opened.content, &data);
+        // Bob cannot read it, and cannot manage it even once shared.
+        assert!(get(&s, &r, Some(&bob)).await.is_err());
+        let roster = share(&s, &alice, &id, &[bob.public()]).await.unwrap();
+        assert_eq!(roster, vec![alice.public(), bob.public()]);
+        assert_eq!(&*get(&s, &r, Some(&bob)).await.unwrap().opened.content, &data);
+        assert!(delete(&s, &bob, &id).await.is_err());
+        // Revoke keeps the site id (same key) and locks bob out.
+        let (roster, re) = revoke(&s, &alice, &id, &[bob.public()]).await.unwrap();
+        assert_eq!(roster, vec![alice.public()]);
+        assert_eq!(re.site_id, id);
+        assert!(get(&s, &r, Some(&bob)).await.is_err());
+        assert_eq!(&*get(&s, &r, Some(&alice)).await.unwrap().opened.content, &data);
+        delete(&s, &alice, &id).await.unwrap();
+        assert!(get(&s, &r, Some(&alice)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn app_sealed_multipart_deletes_every_part() {
+        let (_d, s) = store();
+        let alice = StorageSecret::generate();
+        let data: Vec<u8> = (0..250_000u32).map(|i| (i % 251) as u8).collect();
+        let mut parts = Vec::new();
+        for piece in data.chunks(100_000) {
+            let (pid, pkey) = app_upload(&s, &alice.public(), Kind::Part, piece, vec![], &[]).await;
+            parts.push(PartRef { site_id: pid, key: pkey.to_link_secret().to_string(), len: piece.len() as u64 });
+        }
+        let (id, _) = app_upload(&s, &alice.public(), Kind::Multipart, &[], parts.clone(), &[alice.public()]).await;
+        let r = ObjectRef { site_id: id.clone(), key: None, path: None };
+        assert_eq!(&*get(&s, &r, Some(&alice)).await.unwrap().opened.content, &data);
+        let gone = delete(&s, &alice, &id).await.unwrap();
+        assert_eq!(gone.len(), 4, "3 parts + root");
+        let pkey = DataKey::from_link_secret(&parts[0].key).unwrap();
+        assert!(c0mpute_sealed::open(&s.get(&parts[0].site_id).await.unwrap(), &pkey, None).is_err());
     }
 
     #[tokio::test]

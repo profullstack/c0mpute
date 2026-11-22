@@ -25,6 +25,8 @@ use zeroize::Zeroizing;
 const LABEL_X25519: &[u8] = b"c0mpute-private-storage-x25519-v1";
 const LABEL_SIGN: &[u8] = b"c0mpute-private-storage-object-sign-v1";
 const LABEL_LOCAL: &[u8] = b"c0mpute-private-storage-local-index-v1";
+/// HKDF label of the account-link proof ([`StorageSecret::link_proof`]).
+pub const LINK_INFO: &[u8] = b"c0mpute-storage-link-v1";
 /// Prefix of a shareable storage identity string.
 pub const SHARE_PREFIX: &str = "c0ps1.";
 
@@ -92,6 +94,35 @@ impl StorageSecret {
         let mut out = [0u8; 16];
         hk.expand(label.as_bytes(), &mut out).expect("16 bytes is a valid HKDF length");
         crate::format::base32_name(&out)
+    }
+
+    /// Proof that this machine holds the storage key behind
+    /// [`StorageSecret::public`], for linking the storage identity to a
+    /// c0mpute.com account (`c0mpute storage key link`). An X25519 key cannot
+    /// sign, so possession is proved the standard way for a Diffie-Hellman
+    /// key: the server sends a fresh ephemeral X25519 public key, and the
+    /// proof is `HKDF-SHA256(ikm = X25519(storage key, server key), salt =
+    /// server key || storage public key, info = "c0mpute-storage-link-v1\n"
+    /// || context)`. Only the holder of the storage key (or of the server's
+    /// ephemeral secret) can compute it, and `context` binds it to one
+    /// challenge.
+    pub fn link_proof(&self, server_pub: &[u8; 32], context: &[u8]) -> anyhow::Result<[u8; 32]> {
+        let ss = self.x25519.diffie_hellman(&PublicKey::from(*server_pub));
+        if !ss.was_contributory() {
+            anyhow::bail!("server key is a low-order point");
+        }
+        let mut salt = [0u8; 64];
+        salt[..32].copy_from_slice(server_pub);
+        salt[32..].copy_from_slice(&self.public().0);
+        let mut info = Vec::with_capacity(LINK_INFO.len() + 1 + context.len());
+        info.extend_from_slice(LINK_INFO);
+        info.push(b'\n');
+        info.extend_from_slice(context);
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(Some(&salt), ss.as_bytes())
+            .expand(&info, &mut out)
+            .map_err(|_| anyhow::anyhow!("link proof: context too long"))?;
+        Ok(out)
     }
 
     /// Key for encrypting the owner's local object index at rest.
@@ -170,6 +201,24 @@ mod tests {
         assert_eq!(StoragePublic::from_share_string(&s).unwrap(), p);
         assert!(StoragePublic::from_share_string("c0dm1.abc").is_err());
         assert!(StoragePublic::from_share_string(&format!("{SHARE_PREFIX}{}", URL_SAFE_NO_PAD.encode([0u8; 32]))).is_err());
+    }
+
+    #[test]
+    fn link_proof_needs_the_storage_key() {
+        let me = StorageSecret::from_seed(&[3u8; 32]);
+        let server = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let server_pub = PublicKey::from(&server).to_bytes();
+        let proof = me.link_proof(&server_pub, b"ctx").unwrap();
+        // The server recomputes it from its ephemeral secret and the claimed public key.
+        let ss = server.diffie_hellman(&PublicKey::from(me.public().0));
+        let mut salt = [0u8; 64];
+        salt[..32].copy_from_slice(&server_pub);
+        salt[32..].copy_from_slice(&me.public().0);
+        let mut want = [0u8; 32];
+        Hkdf::<Sha256>::new(Some(&salt), ss.as_bytes()).expand(b"c0mpute-storage-link-v1\nctx", &mut want).unwrap();
+        assert_eq!(proof, want);
+        assert_ne!(StorageSecret::generate().link_proof(&server_pub, b"ctx").unwrap(), proof);
+        assert_ne!(me.link_proof(&server_pub, b"other").unwrap(), proof);
     }
 
     #[test]

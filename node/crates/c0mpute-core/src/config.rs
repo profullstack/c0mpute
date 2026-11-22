@@ -337,6 +337,13 @@ pub struct HostingConfig {
     /// owner-signed, within `max_bytes`). Reads and clones are always served.
     #[serde(default = "default_git_pushes")]
     pub git_pushes: bool,
+    /// Take sealed (private-storage) objects that apps upload for c0mpute.com
+    /// accounts (`/storage/v1/sealed/...`, see `docs/private-storage.md`).
+    /// The value is the hex ed25519 public key that signs upload tickets
+    /// (c0mpute.com's); empty (the default) leaves it off.
+    /// `C0MPUTE_SEALED_INGEST_ISSUER` overrides it.
+    #[serde(default)]
+    pub sealed_ingest_issuer: String,
 }
 
 fn default_git_pushes() -> bool {
@@ -357,6 +364,7 @@ impl Default for HostingConfig {
             extra_challengers: Vec::new(),
             settle_every_secs: default_settle_every(),
             git_pushes: default_git_pushes(),
+            sealed_ingest_issuer: String::new(),
         }
     }
 }

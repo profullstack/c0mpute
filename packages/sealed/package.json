@@ -1,0 +1,51 @@
+{
+  "name": "@profullstack/c0mpute-sealed",
+  "version": "0.1.0",
+  "description": "Publish files into a person's c0mpute private storage from an app (browser, React Native, Node), end-to-end encrypted: the c0mpute-private-v1 sealed format in WebCrypto plus a client for c0mpute.com's storage:write API.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Profullstack",
+  "homepage": "https://github.com/profullstack/c0mpute/blob/master/docs/private-storage.md#publish-from-apps",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/profullstack/c0mpute.git",
+    "directory": "packages/sealed"
+  },
+  "keywords": [
+    "c0mpute",
+    "encryption",
+    "e2ee",
+    "private-storage",
+    "webcrypto",
+    "x25519",
+    "aes-gcm",
+    "oauth"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./format": {
+      "types": "./src/index.d.ts",
+      "default": "./src/format.js"
+    }
+  },
+  "types": "./src/index.d.ts",
+  "files": [
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0"
+  },
+  "scripts": {
+    "test": "node --test test/sealed.test.js"
+  }
+}

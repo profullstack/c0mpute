@@ -982,6 +982,15 @@ impl Supervisor {
             None
         };
         crate::hosting::git::set_push_policy(cfg.git_pushes, only);
+        let issuer = std::env::var("C0MPUTE_SEALED_INGEST_ISSUER")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cfg.sealed_ingest_issuer.clone());
+        if !issuer.trim().is_empty() && !self.config.private.enabled
+            && !crate::hosting::sealed_ingest::configure(&issuer, dir.join("sealed-ingest"))
+        {
+            tracing::warn!("hosting: sealed_ingest_issuer is not a hex ed25519 key; app uploads stay off");
+        }
         self.spawn_settlement(hosting.clone(), dir);
         Ok(hosting)
     }
