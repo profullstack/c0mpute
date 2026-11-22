@@ -5,9 +5,9 @@ import "server-only";
 import * as webauthn from "@simplewebauthn/server";
 import { cloudSql, currentUser, env, SESSION_COOKIE, siteUrl, store, bearer } from "../chat/server";
 import type { User } from "../chat/store";
-import { earningsStore, operatorNodes } from "../earnings/server";
-import { getNodesPayload } from "../nodes";
-import { buildFleet, createFleetService, signingKey, type FleetService } from "./fleet";
+import { earningsStore } from "../earnings/server";
+import { createFleetService, signingKey, type FleetService } from "./fleet";
+import { fleetView } from "./fleet-view";
 import { createLinkService, type Linker } from "./link";
 import { createPasskeys, relyingParty, type Passkeys } from "./passkeys";
 import { createAccountStore, ENROLL_PREFIX, type AccountStore } from "./store";
@@ -81,17 +81,6 @@ export async function keepsAWayIn(user: User, removing: { coinpay?: boolean; pas
 
 /** The signed-in operator's fleet: every node on the account, its status, earnings and queued commands. */
 export async function fleetFor(userId: string) {
-  const claims = await operatorNodes(userId);
-  const nodes = claims.map((c) => c.node);
-  const day = 86_400_000;
-  const e = earningsStore();
-  const [meta, board, t24, t30, tAll, state] = await Promise.all([
-    accountStore().nodeMeta(userId),
-    getNodesPayload().catch(() => null),
-    e.totalsFor(nodes, Date.now() - day),
-    e.totalsFor(nodes, Date.now() - 30 * day),
-    e.totalsFor(nodes, 0),
-    fleetService().state(userId),
-  ]);
-  return buildFleet({ claims, meta, board: board?.nodes ?? [], t24, t30, tAll, pending: state.pending, paused: state.paused });
+  const { nodes, totals } = await fleetView(userId, { accounts: accountStore(), fleet: fleetService(), earnings: earningsStore() });
+  return { nodes, totals };
 }

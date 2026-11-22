@@ -625,6 +625,29 @@ pub async fn drain(max: Duration, every: Duration) -> usize {
     }
 }
 
+/// The last automatic or fleet update that failed to install here: (version,
+/// error, unix seconds). Cleared when an install goes through. Linked nodes
+/// report it to their fleet, which can alert the operator.
+static LAST_INSTALL_ERROR: std::sync::Mutex<Option<(String, String, u64)>> = std::sync::Mutex::new(None);
+
+pub fn record_install_error(version: &str, error: &str) {
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut g) = LAST_INSTALL_ERROR.lock() {
+        *g = Some((version.to_string(), error.chars().take(500).collect(), at));
+    }
+}
+
+pub fn clear_install_error() {
+    if let Ok(mut g) = LAST_INSTALL_ERROR.lock() {
+        *g = None;
+    }
+}
+
+/// (version, error, unix seconds) of the last failed install, if the latest one failed.
+pub fn last_install_error() -> Option<(String, String, u64)> {
+    LAST_INSTALL_ERROR.lock().ok().and_then(|g| g.clone())
+}
+
 /// Longest wait between polls after repeated failures.
 pub const MAX_POLL_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -704,6 +727,7 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
         }
         match install(&current_version, &manifest, PostBench::Wait).await {
             Ok(UpgradeOutcome::Upgraded { from, to }) => {
+                clear_install_error();
                 info!(%from, %to, "auto-upgrade: installed new binary");
                 #[cfg(unix)]
                 if let Some(exe) = &exe {
@@ -731,6 +755,7 @@ pub async fn poll_loop(current_version: String, release_feed_url: String, interv
             Ok(_) => unreachable!("install installs or errors"),
             Err(e) => {
                 wait = backoff.failed(&manifest.version, interval);
+                record_install_error(&manifest.version, &format!("{e:#}"));
                 warn!(err = %format!("{e:#}"), version = %manifest.version, retry_secs = wait.as_secs(), "auto-upgrade: install failed");
             }
         }

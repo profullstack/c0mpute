@@ -1,39 +1,17 @@
 // Server wiring for the operator dashboard: whose nodes are whose, Infernet
 // provider credits, and the report. The recorder lives in ./recorder.
 import "server-only";
-import { infernet, pushStore } from "../chat/server";
+import { infernet } from "../chat/server";
 import { getNodesPayload, type NodeRow } from "../nodes";
 import { buildReport, RANGES, type InfernetHour, type InfernetInput, type RangeKey, type Report, type ReportNode } from "./report";
-import { nodeKey, type OperatorNode } from "./store";
+import type { OperatorNode } from "./store";
 import { earningsStore } from "./recorder";
 import { buildObserved, type ObservedWindow } from "./network-by-class";
 
 export { earningsStore };
 
-// ── the operator's nodes ─────────────────────────────────────────────────────
-
-/**
- * This account's nodes: the ones it claimed, plus any linked for hosting
- * (`c0mpute chat connect hosting`), which already name their peer id.
- */
-export async function operatorNodes(userId: string): Promise<OperatorNode[]> {
-  const store = earningsStore();
-  const claims = await store.claims(userId);
-  const have = new Set(claims.map((c) => c.node));
-  let linked: { name: string; peer_id: string | null; created_at: string }[] = [];
-  try {
-    linked = await pushStore().nodes(userId);
-  } catch {
-    // Hosting links are a bonus; the dashboard works without them.
-  }
-  for (const h of linked) {
-    const k = nodeKey(h.peer_id);
-    if (!k || have.has(k.node)) continue;
-    have.add(k.node);
-    claims.push({ node: k.node, peer_id: k.peer_id, label: h.name, class: null, cost_usd_per_hour: null, via: "hosting", created_at: h.created_at });
-  }
-  return claims;
-}
+export { operatorNodes } from "./operators";
+import { operatorNodes } from "./operators";
 
 // ── Infernet ─────────────────────────────────────────────────────────────────
 

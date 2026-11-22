@@ -25,6 +25,14 @@ export async function register() {
   } catch (e) {
     console.error("disk dues: could not start the recorder", e);
   }
+  // Fleet alerts per account (node offline, earnings drop, update failed,
+  // disk low), evaluated every minute by one server at a time.
+  try {
+    const { startFleetAlerts } = await import("./lib/accounts/alerts-runner");
+    startFleetAlerts();
+  } catch (e) {
+    console.error("fleet alerts: could not start", e);
+  }
   // Gallery "Get listed": badge hit counts, the 30-day free queue and the
   // weekly badge re-checks.
   try {

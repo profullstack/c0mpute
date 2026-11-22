@@ -707,8 +707,8 @@ async function settingsView() {
       "div",
       { class: "card" },
       acct?.signedIn
-        ? h("div", {}, h("p", {}, "Signed in", acct.me?.name ? ` as ${acct.me.name}` : "", acct.me?.did ? h("span", { class: "dim mono" }, ` ${acct.me.did}`) : null), acct.me?.balance ? h("p", {}, `Spendable $${acct.me.balance.spendable_usd}, earned by your nodes $${acct.me.balance.earned_spendable_usd}`) : null, acct.error ? h("p", { class: "bad" }, acct.error) : null, h("p", { class: "dim" }, `key from ${acct.source === "env" ? "$C0MPUTE_API_KEY" : info?.chatJson}`), btn("Sign out", async () => (toast((await call("account:logout")) ?? ""), show("settings")), "b danger"))
-        : h("div", {}, h("p", {}, "Not signed in. Sign-in opens c0mpute.com in your browser: approve the code with CoinPay, a passkey or a password. The key is shared with the c0mpute CLI and TUI (~/.c0mpute/chat.json, readable only by you)."), btn("Sign in", () => call("account:login"), "b primary")),
+        ? h("div", {}, h("p", {}, "Signed in", acct.me?.name ? ` as ${acct.me.name}` : "", acct.me?.did ? h("span", { class: "dim mono" }, ` ${acct.me.did}`) : null), acct.me?.balance ? h("p", {}, `Spendable $${acct.me.balance.spendable_usd}, earned by your nodes $${acct.me.balance.earned_spendable_usd}`) : null, acct.error ? h("p", { class: "bad" }, acct.error) : null, h("p", { class: "dim" }, `key from ${acct.source === "env" ? "$C0MPUTE_API_KEY" : acct.source === "keychain" ? "OS keychain" : info?.chatJson}`), acct.keychain === false ? h("p", { class: "dim" }, "No OS keychain available on this machine: the key stays in the 0600 chat.json file only.") : null, btn("Sign out", async () => (toast((await call("account:logout")) ?? ""), show("settings")), "b danger"))
+        : h("div", {}, h("p", {}, "Not signed in. Sign-in opens c0mpute.com in your browser: approve the code with CoinPay, a passkey or a password. The CLI and TUI read the key from ~/.c0mpute/chat.json (readable only by you); this app keeps its copy encrypted in your OS keychain."), btn("Sign in", () => call("account:login"), "b primary")),
       loginLog,
     ),
     acct?.signedIn ? await fleetCard() : "",

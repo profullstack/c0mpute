@@ -4,6 +4,7 @@
  * roles serving and some gated, and a small network.
  */
 import type { BenchReport } from "./bench.ts";
+import { sortFleet, type FleetNode } from "./fleet.ts";
 import type { Job } from "./jobs.ts";
 import type { NodeStatusJson } from "./node.ts";
 import { initialState, type AppState } from "./state.ts";
@@ -219,5 +220,71 @@ export function demoState(): AppState {
         loading: false,
       },
     },
+    fleet: { ...s.fleet, list: { data: { nodes: sortFleet(demoFleet),fleet_key: null, payouts_ready: true }, error: null, at: NOW, loading: false } },
   };
 }
+
+/** Three linked nodes: one reporting stage-2 state, one paused, one that has not reported yet. */
+export const demoFleet: FleetNode[] = [
+  {
+    node: "a1b2c3d4",
+    label: "gpu-box",
+    online: true,
+    last_seen_s: 20,
+    version: "0.3.105",
+    tags: ["gpu", "eu"],
+    verified: true,
+    paused: false,
+    pending_commands: 0,
+    jobs_24h: 42,
+    earned_usd: { h24: 1.5, d30: 31.2, all: 120 },
+    node_state: {
+      v: 1,
+      version: "0.3.105",
+      paused: false,
+      settings: { models: ["qwen2.5:7b", "gemma3:4b"], house_models: true, uncensored: false, hosting: true, storage: null },
+      effective: { served_models: ["qwen2.5:7b", "gemma3:4b"], house_models: true, uncensored: false, hosting: true, storage: true },
+      disk: { free_bytes: 512 * 2 ** 30, total_bytes: 2048 * 2 ** 30 },
+      update_error: null,
+    },
+    state_at: "2026-11-11T11:59:40Z",
+  },
+  {
+    node: "b2c3d4e5",
+    label: "attic",
+    online: true,
+    last_seen_s: 45,
+    version: "0.3.105",
+    tags: [],
+    verified: true,
+    paused: true,
+    pending_commands: 1,
+    jobs_24h: 0,
+    earned_usd: { h24: 0, d30: 4.1, all: 9 },
+    node_state: {
+      v: 1,
+      version: "0.3.105",
+      paused: true,
+      settings: { models: null, house_models: null, uncensored: null, hosting: false, storage: false },
+      effective: { served_models: ["qwen3:4b"], house_models: true, uncensored: true, hosting: false, storage: false },
+      disk: { free_bytes: 40 * 2 ** 30, total_bytes: 100 * 2 ** 30 },
+      update_error: { version: "0.3.106", error: "download failed", at: "2026-11-11T11:00:00Z" },
+    },
+    state_at: "2026-11-11T11:59:10Z",
+  },
+  {
+    node: "c3d4e5f6",
+    label: null,
+    online: false,
+    last_seen_s: 86400,
+    version: "0.3.90",
+    tags: ["old"],
+    verified: false,
+    paused: null,
+    pending_commands: 0,
+    jobs_24h: 0,
+    earned_usd: { h24: 0, d30: 0, all: 2 },
+    node_state: null,
+    state_at: null,
+  },
+];

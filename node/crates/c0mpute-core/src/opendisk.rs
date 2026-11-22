@@ -60,7 +60,7 @@ pub struct Capacity {
 /// (`~/.local/share/c0mpute -> /mnt/vdb/c0mpute`) otherwise matches only `/`
 /// by path prefix, and the node offered its small root disk instead (vienna:
 /// 18 GiB instead of 3 TiB).
-pub(crate) fn disk_for(root: &Path) -> (u64, u64) {
+pub fn disk_for(root: &Path) -> (u64, u64) {
     let resolved = resolve_root(root);
     let root = resolved.as_path();
     let disks = sysinfo::Disks::new_with_refreshed_list();

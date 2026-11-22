@@ -2601,6 +2601,11 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             tokio::spawn(referral_cli::claim_if_pending(false, false));
             let default_speech_roles = roles.is_none();
             effective_worker_roles(&mut cfg, roles.as_deref(), gpu, no_storage, no_hosting);
+            c0mpute_core::fleet_settings::set_effective(c0mpute_core::fleet_settings::Effective {
+                storage: cfg.roles.contains(&Role::Storage),
+                hosting: cfg.roles.contains(&Role::Hosting),
+                storage_root: Some(cfg.storage.root.clone()),
+            });
             if cfg.lists_on_d1sks() {
                 eprintln!(
                     "disk provider: storing shards and holding sites for the network, listed on {} \
@@ -5975,6 +5980,15 @@ fn effective_worker_roles(cfg: &mut Config, roles: Option<&[String]>, gpu: bool,
     // `worker start` then provisions Chatterbox and Qwen3-TTS; C0MPUTE_TTS_GPU=0 opts out.
     if c0mpute_core::speech::has_cuda_gpu() && !cfg.roles.contains(&Role::Tts) {
         cfg.roles.push(Role::Tts);
+    }
+    // The operator's fleet settings (c0mpute.com fleet: storage / hosting
+    // on or off) beat config.toml; the command-line opt-outs beat both.
+    let fleet = c0mpute_core::fleet_settings::current();
+    if let Some(on) = fleet.storage {
+        cfg.storage.enabled = on;
+    }
+    if let Some(on) = fleet.hosting {
+        cfg.hosting.enabled = on;
     }
     if no_storage {
         cfg.storage.enabled = false;

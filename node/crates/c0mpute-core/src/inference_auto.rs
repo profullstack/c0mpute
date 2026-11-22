@@ -267,7 +267,7 @@ fn gib(bytes: u64) -> f64 {
 /// Ignores the install itself: [`gate_reason`] words that part.
 pub fn host_gate(config: &InferenceConfig, total: u64, available: u64, free_disk: u64, installed: bool) -> Option<String> {
     if !config.auto_install_enabled() {
-        return Some("turned off (C0MPUTE_INFERENCE_AUTO=0 or [inference] auto_install = false)".into());
+        return Some("turned off (C0MPUTE_INFERENCE_AUTO=0, [inference] auto_install = false, or house models off from the fleet)".into());
     }
     let Some((model, min_free)) = pick_model(config, total) else {
         return Some(format!("{:.0} GiB RAM, the house model needs {} GiB", gib(total), (config.min_ram_gb / 2).max(1)));

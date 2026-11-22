@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { SignInOptions } from "@/components/sign-in-options";
 import { passkeyRegister, passkeysSupported } from "@/lib/accounts/passkey-client";
+import { AlertsCard } from "./alerts-card";
 
 type Passkey = { id: string; name: string | null; synced: boolean; created_at: string; last_used_at: string | null };
 type Key = { id: string; label: string; prefix: string; created_at: string; last_used_at: string | null };
@@ -339,6 +340,8 @@ c0mpute node link   # the node signs a challenge with its identity key`}</pre>
           )}
         </div>
       </section>
+
+      <AlertsCard />
 
       {/* keys */}
       <section className={card}>
