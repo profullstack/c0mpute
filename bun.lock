@@ -20,7 +20,7 @@
     },
     "apps/desktop": {
       "name": "@c0mpute/desktop",
-      "version": "0.3.94",
+      "version": "0.3.100",
       "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
         "@types/bun": "latest",
@@ -36,7 +36,7 @@
     },
     "apps/tui": {
       "name": "@c0mpute/tui",
-      "version": "0.3.94",
+      "version": "0.3.100",
       "bin": {
         "c0mpute-tui": "./src/index.ts",
       },
@@ -50,10 +50,10 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.3.98",
+      "version": "0.3.102",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
-        "@profullstack/chat-plugins": "^0.1.0",
+        "@profullstack/chat-plugins": "^0.2.0",
         "@profullstack/coinpay-onboard": "^0.5.1",
         "@profullstack/cross-promo": "^0.2.0",
         "@profullstack/footer": "latest",
@@ -79,7 +79,7 @@
     },
     "packages/captcha": {
       "name": "@profullstack/c0mpute-captcha",
-      "version": "0.3.94",
+      "version": "0.3.100",
       "bin": {
         "c0mpute-captcha": "./bin/c0mpute-captcha.js",
       },
@@ -94,7 +94,7 @@
     },
     "packages/shared": {
       "name": "@c0mpute/shared",
-      "version": "0.3.94",
+      "version": "0.3.100",
       "devDependencies": {
         "typescript": "^7.0.2",
       },
@@ -310,7 +310,7 @@
 
     "@profullstack/c0mpute-sealed": ["@profullstack/c0mpute-sealed@workspace:packages/sealed"],
 
-    "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.1.0", "", {}, "sha512-V6KwXpevLQFExiGwl3PlvX82s0GWae4VnajVOAeTF7+rl/ODfS+Yawmcf10VtjOdnK+JM45NRy0l95t8kX9jsg=="],
+    "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.2.0", "", {}, "sha512-ewvgaXAqlSTuXmT5+IvVRi36cWtLuTT1QOs9wfRgq1pUINTnUklYFMvXF0y0XWHBF36vLTQpTVrry0yBZFbL4g=="],
 
     "@profullstack/coinpay-onboard": ["@profullstack/coinpay-onboard@0.5.1", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.32.2", "zod": "^4.6.7" }, "bin": { "coinpay-onboard": "bin/coinpay-onboard" } }, "sha512-vuM/1vYvkXP2E/tBcTBZ8JY4K49qtSPPY1N9XRQvIlcy0Sezr+spOf6vYBkRPhasKcFqda44MRLgxPseG9Kvdg=="],
 
