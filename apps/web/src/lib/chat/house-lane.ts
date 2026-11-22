@@ -18,6 +18,7 @@
 // SQLite Cloud connection lib/chat/server.ts opens on import.
 
 import type { ChatRequest } from "./completions";
+import { billedSubjectHeaders } from "./billed-subject";
 
 export const HOUSE_LANE = "house";
 const KEEPALIVE_MS = 15_000;
@@ -106,7 +107,10 @@ export async function houseLaneChat(opts: {
       headers: {
         authorization: `Bearer ${cfg.reservationKey}`,
         "x-infernet-client-key": cfg.clientKey,
-        "x-infernet-billed-subject": subject,
+        // Signed (subject|ts|request id) like every other call we make for a
+        // person: Infernet refuses an unsigned subject once
+        // INFERNET_REQUIRE_SIGNED_SUBJECTS is on.
+        ...billedSubjectHeaders(subject, deps.env("C0MPUTE_INFERNET_SUBJECT_SECRET")),
         "content-type": "application/json",
         accept: req.stream ? "text/event-stream" : "application/json",
       },
