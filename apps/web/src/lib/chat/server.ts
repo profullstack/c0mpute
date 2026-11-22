@@ -1,6 +1,7 @@
 // Server-side wiring for c0mpute chat: the store on SQLite Cloud, request auth,
 // CoinPay OAuth, the Infernet upstream and a per-user rate limit.
 import { Database } from "@sqlitecloud/drivers";
+import { labelerFromEnv, moderatePush } from "./moderation";
 import { unwrapData } from "./envelope";
 import { infernetCall, modelPool, sharedRouter, sqlStatsStore } from "./routed";
 import { createHash, randomBytes } from "node:crypto";
@@ -59,7 +60,14 @@ export const store = () => (_store ??= createStore(cloudSql));
 
 let _pushStore: PushStore | null = null;
 /** `/push hosting` + `/connect hosting`: linked nodes and pushes, per account. */
-export const pushStore = () => (_pushStore ??= createPushStore(cloudSql, { cloudNodeId: env("C0MPUTE_CLOUD_NODE_ID") }));
+export const pushStore = () =>
+  (_pushStore ??= createPushStore(cloudSql, {
+    cloudNodeId: env("C0MPUTE_CLOUD_NODE_ID"),
+    moderate: async (files) => {
+      const cfg = labelerFromEnv();
+      return cfg ? moderatePush(files, cfg) : { verdict: "unchecked", reason: "no labeler configured (C0MPUTE_LABELER_TOKEN)" };
+    },
+  }));
 
 let _oauthStore: OAuthStore | null = null;
 /** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
