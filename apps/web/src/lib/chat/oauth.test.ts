@@ -84,3 +84,15 @@ describe("oauth store", () => {
     expect(protectedResourceMetadata("https://c0mpute.com").resource).toBe("https://c0mpute.com/api/mcp");
   });
 });
+
+describe("the inference scope", () => {
+  test("is offered, normalized, and advertised with the revocation endpoint", async () => {
+    const { parseScope } = await import("./oauth");
+    expect(parseScope("inference")).toBe("inference");
+    expect(parseScope("inference mcp")).toBe("mcp inference");
+    expect(parseScope("inference admin")).toBeNull();
+    const m = authServerMetadata("https://c0mpute.com");
+    expect(m.scopes_supported).toContain("inference");
+    expect(m.revocation_endpoint).toBe("https://c0mpute.com/api/oauth/revoke");
+  });
+});

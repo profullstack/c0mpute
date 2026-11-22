@@ -425,6 +425,13 @@ export function createStore(sql: Sql) {
       await sql.run(`DELETE FROM chat_tokens WHERE token_hash = ?`, [hashToken(token)]);
     },
 
+    /** RFC 7009 for app-held keys: deletes the token only if it is an OAuth-issued key. */
+    revokeOAuthToken: async (token: string) => {
+      if (typeof token !== "string" || !token.startsWith(KEY_PREFIX) || token.length > 200) return;
+      await init();
+      await sql.run(`DELETE FROM chat_tokens WHERE token_hash = ? AND kind = 'oauth'`, [hashToken(token)]);
+    },
+
     async listKeys(userId: string) {
       await init();
       const rows = await sql.all(
