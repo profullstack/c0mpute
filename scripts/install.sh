@@ -22,7 +22,10 @@
 #   --worker        Add Docker / FFmpeg readiness checks
 #   --developer     Verbose diagnostics
 #   --force         Reinstall over existing
-#   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF)
+#   --ref <code>    Credit a referrer on c0mpute.com/nodes (same as C0MPUTE_REF). A paid
+#                   referral code (c0mpute.com/dashboard/refer) is also claimed for its
+#                   owner when the worker first starts: a share of the house fee, never
+#                   your earnings. Set once, before the node's first paid job.
 #   --name <handle> Your node's nickname on c0mpute.com/nodes (same as C0MPUTE_NAME)
 #   --contact <email> Optional public email for questions about your node, shown
 #                   on c0mpute.com/nodes (same as C0MPUTE_CONTACT). Asked for

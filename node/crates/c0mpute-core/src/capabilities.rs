@@ -336,6 +336,19 @@ pub fn referral_code() -> Option<String> {
     handle_setting("C0MPUTE_REF", "ref")
 }
 
+/// Where the referral code is stored: `$C0MPUTE_HOME/ref`, else
+/// `~/.c0mpute/ref` (what `install.sh --ref` and `c0mpute worker register
+/// --ref` write).
+pub fn referral_code_path() -> Option<std::path::PathBuf> {
+    c0mpute_home().map(|h| h.join("ref"))
+}
+
+/// Where the answer to this node's paid-referral claim is kept
+/// (`<code> <outcome>`), so the claim is sent once per code.
+pub fn referral_claim_path() -> Option<std::path::PathBuf> {
+    c0mpute_home().map(|h| h.join("ref.claim"))
+}
+
 /// The operator nickname this node shows on c0mpute.com/nodes, if any.
 ///
 /// `C0MPUTE_NAME` wins; otherwise `~/.c0mpute/name` (or `$C0MPUTE_HOME/name`),

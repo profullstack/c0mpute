@@ -38,6 +38,7 @@ mod peers;
 mod private_storage;
 mod promo;
 mod gallery_cli;
+mod referral_cli;
 mod site_owner;
 mod storage;
 mod swarm_cli;
@@ -172,6 +173,14 @@ enum Cmd {
     Worker {
         #[command(subcommand)]
         cmd: WorkerCmd,
+    },
+    /// Node referrals: claim this node's referral code, or get your own
+    /// referral link and see your commissions (a share of the house fee on
+    /// the paid jobs your referred nodes serve, never their earnings).
+    #[command(alias = "ref", alias = "refer")]
+    Referral {
+        #[command(subcommand)]
+        cmd: referral_cli::ReferralCmd,
     },
     /// Job lifecycle.
     Job {
@@ -606,7 +615,13 @@ enum Cmd {
 #[derive(Subcommand, Debug)]
 enum WorkerCmd {
     /// Register this machine as a worker (requires a CoinPay worker DID).
-    Register,
+    Register {
+        /// Referral code (c0mpute.com/r/<code>): saved like `install.sh --ref`
+        /// and, for a paid referral code, claimed now with this node's key.
+        /// Set once, before the node's first paid job; it never changes after.
+        #[arg(long = "ref", value_name = "CODE")]
+        referral: Option<String>,
+    },
     /// Start the worker daemon and accept jobs.
     Start {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
@@ -1908,6 +1923,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         }
         Cmd::Pricing { cmd } => run_pricing(cmd, &config_path),
         Cmd::Name { handle, clear } => run_name(handle, clear),
+        Cmd::Referral { cmd } => referral_cli::run(cmd).await,
         Cmd::Contact { email, clear } => run_contact(email, clear),
         Cmd::Private { cmd } => run_private(cmd, &config_path),
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
@@ -2404,7 +2420,11 @@ fn worker_status_json(config_path: &std::path::Path) -> Result<serde_json::Value
 
 async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()> {
     match cmd {
-        WorkerCmd::Register => {
+        WorkerCmd::Register { referral } => {
+            if let Some(code) = referral.as_deref() {
+                let saved = referral_cli::save_code(code)?;
+                println!("referral code {saved} saved");
+            }
             let r = run_register(Some(config_path))?;
             println!("registered as worker:");
             println!("  peer-id   : {}", r.peer_id);
@@ -2425,6 +2445,8 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // existing DID) and best-effort — a worker runs fine without it,
             // so a missing/logged-out coinpay must not fail registration.
             ensure_coinpay_did();
+            // A paid referral code is claimed once, signed with this node's key.
+            referral_cli::claim_if_pending(false, false).await;
             println!();
             println!("next:");
             println!(
@@ -2523,6 +2545,10 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 );
             }
             ensure_current_version_benchmark();
+            // A referral code saved by install.sh and never answered (offline
+            // at install, or installed before this existed): claim it now, in
+            // the background, so it never delays the worker.
+            tokio::spawn(referral_cli::claim_if_pending(false, false));
             let default_speech_roles = roles.is_none();
             effective_worker_roles(&mut cfg, roles.as_deref(), gpu, no_storage, no_hosting);
             if cfg.lists_on_d1sks() {

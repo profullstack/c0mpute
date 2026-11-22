@@ -11,6 +11,7 @@ import { describeSteps, PLUGIN_TOOL_NAMES, PLUGIN_TOOLS, pluginTool, type Plugin
 import type { PluginEvent } from "./plugin-shared";
 import { GALLERY_TOOL_NAMES, GALLERY_TOOLS, galleryTool } from "../gallery/mcp";
 import type { GalleryService } from "../gallery/service";
+import { REFERRAL_TOOL_NAMES, REFERRAL_TOOLS, referralTool } from "../referrals-mcp";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -160,7 +161,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return null;
     }
     case "tools/list":
-      return ok(id, { tools: [...TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : [])] });
+      return ok(id, { tools: [...TOOLS, ...REFERRAL_TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -196,6 +197,11 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
         if (PLUGIN_TOOL_NAMES.has(name)) {
           if (!ctx.plugins) return fail(id, -32602, `unknown tool: ${name}`);
           const r = await pluginTool(name, args, ctx.user.id, ctx.plugins);
+          return ok(id, text(r.text, r.isError));
+        }
+        if (REFERRAL_TOOL_NAMES.has(name)) {
+          // ctx.upstream is already bound to this person (their CoinPay sub).
+          const r = await referralTool(name, ctx.upstream);
           return ok(id, text(r.text, r.isError));
         }
         if (name === "whoami") return ok(id, text(JSON.stringify({ did: ctx.user.did, name: ctx.user.name })));
