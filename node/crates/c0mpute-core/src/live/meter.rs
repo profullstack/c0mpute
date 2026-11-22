@@ -85,11 +85,15 @@ pub fn bitrate_bps(rec: &LiveRecord) -> u64 {
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 
-/// Viewers a single relay may claim to have served in one epoch.
+/// Viewers a single relay may claim to have served in one epoch: the paid
+/// ceiling for a paid stream, else the binding's `max_viewers` or 25. (A
+/// stream with no binding has no viewer cap on gateways, and earns nothing,
+/// so its bound only keeps the reported bytes sane.)
 pub fn viewer_bound(rec: &LiveRecord) -> u64 {
-    match rec.viewer_cap() {
-        None => PAID_VIEWER_BOUND,
-        Some(cap) => cap as u64,
+    if rec.is_paid() {
+        PAID_VIEWER_BOUND
+    } else {
+        rec.max_viewers.filter(|n| *n > 0).unwrap_or(record::FREE_MAX_VIEWERS) as u64
     }
 }
 

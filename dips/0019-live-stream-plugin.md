@@ -64,17 +64,19 @@ record of what shipped; the rest of the document is the design as proposed.
   to other nodes. Every 60 s it signs one receipt per stream,
   `{stream_id, peer, bytes, epoch}`, and gossips it on
   `c0mpute/jobs/live.relay`. A status aggregator checks the signature
-  against the peer id, cuts the bytes to bitrate x 60 s x viewer cap (25 for
+  against the peer id, cuts the bytes to bitrate x 60 s x viewers (25 for
   a stream that is not paid, or its `max_viewers`; 1,000 per relay for a paid
   one), and files it as a credited job of type `live.relay` with
   `job_id = live:<stream_id>:<node>:<epoch>` and
   `paid_usd = bytes / 1e9 * $0.01` when the record says `paid`, else 0.
   c0mpute.com reads those rows from `GET /jobs` and settles them against the
   streamer's balance (95% operator, 5% house).
-- **Free tier**: a stream that is not paid is served to at most 25 clients
-  per gateway (or the binding's `max_viewers`) and, through the hosted
-  ingest, capped at 720 lines. Its relays earn nothing. A paid stream has no
-  viewer cap and is copied as published.
+- **Free tier**: an account-bound stream whose binding says it is not paid
+  is served to at most 25 clients per gateway (or the binding's
+  `max_viewers`) and, through the hosted ingest, capped at 720 lines. Its
+  relays earn nothing. A paid stream has no viewer cap and is copied as
+  published. A stream with no account binding (`c0mpute stream go`) has no
+  viewer cap either, exactly as before 0.3.105; its relays earn nothing.
 
 **Not built**
 

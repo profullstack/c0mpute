@@ -19,8 +19,9 @@
 //! * Every node counts the bytes it serves per stream (HTTP to viewers,
 //!   chunks to other nodes) and gossips a signed receipt per stream every
 //!   minute; status aggregators turn those into `live.relay` jobs credited
-//!   to the node ([`meter`]). A stream that is not paid is served to at most
-//!   its viewer cap of clients per gateway.
+//!   to the node ([`meter`]). An account-bound stream that is not paid is
+//!   served to at most its viewer cap of clients per gateway; a stream with
+//!   no binding (`c0mpute stream go`) has no cap.
 //!
 //! No coordinator: records are self-certifying, holders are learned from
 //! gossip, and every byte is checked against its blake3 hash.
@@ -425,8 +426,9 @@ impl LiveStream {
         });
     }
 
-    /// May `client` watch `stream_id` here? Always for a paid stream. A
-    /// stream that is not paid has a viewer cap per gateway: a client seen
+    /// May `client` watch `stream_id` here? Always for a paid stream and for
+    /// a stream with no account binding. An account-bound stream that is
+    /// not paid has a viewer cap per gateway: a client seen
     /// within `viewer_ttl` keeps its place, a new one gets in while fewer
     /// than the cap are active.
     pub async fn admit_viewer(&self, stream_id: &str, client: &str) -> bool {
@@ -1026,7 +1028,7 @@ fn not_found(msg: &'static str) -> Response {
     (StatusCode::NOT_FOUND, msg).into_response()
 }
 
-/// A stream that is not paid already has its viewer cap of clients here.
+/// A bound, unpaid stream already has its viewer cap of clients here.
 fn viewer_limit() -> Response {
     let mut resp = (
         StatusCode::SERVICE_UNAVAILABLE,

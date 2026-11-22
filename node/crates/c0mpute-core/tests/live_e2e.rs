@@ -465,8 +465,9 @@ async fn gateway_live_routes_send_cors_and_content_types() {
     live.stop();
 }
 
-/// A stream that is not paid is served to its viewer cap of clients per
-/// gateway; a paid one has no cap. Bytes a gateway serves are counted per
+/// An account-bound stream that is not paid is served to its viewer cap of
+/// clients per gateway; a paid one, and a stream with no binding at all
+/// (`c0mpute stream go`), has no cap. Bytes a gateway serves are counted per
 /// stream and become one signed receipt per epoch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn free_streams_cap_viewers_and_served_bytes_become_receipts() {
@@ -487,6 +488,26 @@ async fn free_streams_cap_viewers_and_served_bytes_become_receipts() {
     let rec = b.push(0, &bytes, 2000, false).await.unwrap();
     assert!(rec.verify());
     assert_eq!(rec.viewer_cap(), Some(2));
+
+    // A plain p2p stream (no account binding) is never capped, as on 0.3.104.
+    let plain_owner = libp2p::identity::Keypair::generate_ed25519();
+    let mut plain = Broadcaster::new(live.clone(), plain_owner, "plain-show", &[("src", None)], 4).unwrap();
+    let plain_id = plain.stream_id();
+    let plain_rec = plain.push(0, &synthetic(4), 2000, false).await.unwrap();
+    assert_eq!(plain_rec.viewer_cap(), None);
+    assert!(!plain_rec.is_paid());
+    {
+        let app = live.router();
+        let plain_seg = format!("/live/{plain_id}/{}.ts", plain_rec.body.renditions[0].segments[0].hash);
+        for i in 1..=60 {
+            let client = format!("203.0.113.{i}");
+            assert_eq!(get(&app, &format!("/live/{plain_id}/index.m3u8"), &client).await.status(), 200);
+            assert_eq!(get(&app, &plain_seg, &client).await.status(), 200);
+        }
+        assert_eq!(live.active_viewers(&plain_id), 0, "uncapped streams are not counted");
+        assert!(!live.info(&plain_id).await.unwrap().paid);
+        assert_eq!(live.info(&plain_id).await.unwrap().max_viewers, None);
+    }
     let seg = rec.body.renditions[0].segments[0].clone();
     let app = live.router();
     let playlist = format!("/live/{id}/index.m3u8");
@@ -528,8 +549,9 @@ async fn free_streams_cap_viewers_and_served_bytes_become_receipts() {
     assert_eq!(live.count_chunk(&"ab".repeat(32), 1000).await, None);
 
     let receipts = live.publish_receipts(77).await;
-    assert_eq!(receipts.len(), 1);
-    let r = &receipts[0];
+    assert_eq!(receipts.len(), 2, "one for the bound stream, one for the plain one");
+    assert!(receipts.iter().any(|r| r.stream_id == plain_id));
+    let r = receipts.iter().find(|r| r.stream_id == id).unwrap();
     assert!(r.verify());
     assert_eq!(r.stream_id, id);
     assert_eq!(r.peer, live.peer_id());

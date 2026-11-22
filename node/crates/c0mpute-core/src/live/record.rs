@@ -26,7 +26,8 @@ const SIGNING_DOMAIN: &str = "c0mpute-live-v1";
 const BINDING_DOMAIN: &str = "c0mpute-live-bind-v1";
 /// Longest account id in a binding.
 pub const MAX_ACCOUNT_CHARS: usize = 128;
-/// Concurrent viewers one gateway serves of a stream that is not paid.
+/// Concurrent viewers one gateway serves of an account-bound stream whose
+/// binding says it is not paid, when the binding names no number.
 pub const FREE_MAX_VIEWERS: u32 = 25;
 
 /// Segments are carried over libp2p in chunks of this size (the chunk
@@ -298,10 +299,13 @@ impl LiveRecord {
         self.bind_sig.is_some() && self.paid == Some(true)
     }
 
-    /// Most concurrent viewers one gateway serves: `None` (no cap) for a
-    /// paid stream, else the binding's `max_viewers` or [`FREE_MAX_VIEWERS`].
+    /// Most concurrent viewers one gateway serves. Only an account-bound
+    /// stream whose binding says it is not paid has a cap: the binding's
+    /// `max_viewers` or [`FREE_MAX_VIEWERS`]. A paid stream has none, and
+    /// neither has a stream with no binding at all (`c0mpute stream go`),
+    /// which is served exactly as before bindings existed.
     pub fn viewer_cap(&self) -> Option<u32> {
-        if self.is_paid() {
+        if self.bind_sig.is_none() || self.is_paid() {
             None
         } else {
             Some(self.max_viewers.filter(|n| *n > 0).unwrap_or(FREE_MAX_VIEWERS))
@@ -495,7 +499,14 @@ mod tests {
         let plain = LiveRecord::sign(&k, body("show", 7, 2)).unwrap();
         assert_eq!(plain.body.signing_bytes(), rec.body.signing_bytes());
         assert!(!plain.is_paid());
-        assert_eq!(plain.viewer_cap(), Some(FREE_MAX_VIEWERS));
+        assert_eq!(plain.viewer_cap(), None, "a stream with no binding has no viewer cap");
+        let unpaid = Binding {
+            account: "user_42".into(),
+            paid: false,
+            max_viewers: None,
+        };
+        let bound_free = LiveRecord::sign_bound(&k, body("show", 7, 2), Some(&unpaid)).unwrap();
+        assert_eq!(bound_free.viewer_cap(), Some(FREE_MAX_VIEWERS), "bound and unpaid: the default cap");
         assert!(!String::from_utf8(serde_json::to_vec(&plain).unwrap()).unwrap().contains("bind_sig"));
 
         // Flipping paid, moving the binding to another window, or dropping

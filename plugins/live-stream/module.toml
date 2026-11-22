@@ -39,9 +39,10 @@
 #     checks the key with c0mpute.com before taking media, runs one ffmpeg per
 #     publisher and signs the stream's account (and whether it is paid) into
 #     its records. Not a default role: public port and ffmpeg.
-#   - Free tier (a stream whose account has no balance, or one published with
-#     `stream go`): 25 viewers per gateway, 720p through the hosted ingest,
-#     relays unpaid. Paid streams have no viewer cap.
+#   - Free tier (a hosted-ingest stream whose account has no balance): 25
+#     viewers per gateway, 720p, relays unpaid. Paid streams have no viewer
+#     cap. A stream published with `stream go` (no account) has no viewer cap
+#     either, as before; its relays earn nothing.
 #   - Gateways answer the /live routes with access-control-allow-origin: *
 #     (and OPTIONS), so a browser player on another origin can play them.
 #
