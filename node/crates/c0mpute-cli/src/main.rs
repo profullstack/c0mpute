@@ -40,6 +40,7 @@ mod peers;
 mod private_storage;
 mod promo;
 mod gallery_cli;
+mod experts_cli;
 mod referral_cli;
 mod site_owner;
 mod storage;
@@ -554,6 +555,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: gallery_cli::GalleryCmd,
     },
+
+    /// The c0mpute Experts store (c0mpute.com/experts): first-party AI
+    /// experts for security, sales, automation, legal and tax information.
+    /// `c0mpute experts` lists them; `status`, `trial`, `subscribe <plan>
+    /// --email`. 90 days free per CoinPay account, then a monthly plan.
+    Experts {
+        #[command(subcommand)]
+        cmd: Option<experts_cli::ExpertsCmd>,
+    },
+
+    /// Ask a c0mpute Expert: `c0mpute ask security-analyst "question"`
+    /// (`-` reads the question from stdin). Needs `c0mpute login`; the first
+    /// question starts your free trial.
+    Ask(experts_cli::AskArgs),
 
     /// Stop a RENTED node (Vast.ai, SaladCloud) while nobody needs it and
     /// start it when the network has jobs for its models. Opt-in; runs on an
@@ -2082,6 +2097,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Chat { args } => ai_chat::run(&args).await,
         Cmd::Promo(args) => promo::run(args).await,
         Cmd::Gallery { cmd } => gallery_cli::run(cmd).await,
+        Cmd::Experts { cmd } => experts_cli::run(cmd).await,
+        Cmd::Ask(a) => experts_cli::ask(a).await,
         Cmd::Autoscale(args) => autoscale::run(args).await,
         Cmd::Tui { args } => run_tui(&args),
         Cmd::Update { check, feed } => run_update(check, feed).await,
