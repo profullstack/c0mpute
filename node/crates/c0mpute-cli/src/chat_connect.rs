@@ -427,7 +427,7 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
     api.progress(job, &format!("{total} files, {:.1} MiB: publishing", bytes as f64 / 1048576.0)).await;
 
     let disks = job.disks.clone().unwrap_or_else(|| "auto".into());
-    let exe = std::env::current_exe().context("own executable")?;
+    let exe = child_exe()?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(publish_args(&dir, &job.name, wait_secs, &disks));
     let (ok, stdout, tail) = run_streaming(api, job, cmd).await?;
@@ -455,7 +455,7 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
         bail!("bad site name {:?}", job.name);
     }
     api.progress(job, "removing the site from the network").await;
-    let exe = std::env::current_exe().context("own executable")?;
+    let exe = child_exe()?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(rm_args(&job.name));
     let (ok, _stdout, tail) = run_streaming(api, job, cmd).await?;
@@ -465,6 +465,17 @@ async fn rm(api: &Api, job: &Job) -> Result<()> {
     api.report(job, json!({"ok": true, "deleted": true})).await?;
     println!("removed:  {}", job.name);
     Ok(())
+}
+
+/// The binary to run `hosting publish` / `hosting rm` children with: this
+/// one's installed path. After an auto-update swaps the file, Linux names the
+/// running image `<path> (deleted)`, and `current_exe()` returns that string;
+/// a stale copy that happened to sit under that exact name (vienna's cloud
+/// node, 2026-11-22: a 0.3.50 binary) was then run instead, and every push
+/// failed with "unexpected argument '--key'". The path without the suffix is
+/// the binary that replaced us, which takes every flag we pass.
+fn child_exe() -> Result<std::path::PathBuf> {
+    c0mpute_update::current_exe_path().context("own executable")
 }
 
 /// `c0mpute hosting publish <dir> --name <n> --wait-secs <s> [--disks <q>]`.
