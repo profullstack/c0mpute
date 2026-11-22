@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
  * subject — the same identity they signed in here with.
  */
 export async function GET(req: Request) {
-  const user = await currentUser(req);
+  // OAuth keys with the "inference" scope may read who they are and the balance they spend.
+  const user = await currentUser(req, { scope: "inference" });
   if (!user) return unauthorized();
 
   const balance = await balanceFor(user.coinpay_sub);

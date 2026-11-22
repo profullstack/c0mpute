@@ -4,12 +4,14 @@ import { balanceFor, currentUser, json, unauthorized } from "@/lib/chat/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  const user = await currentUser(req);
+  // OAuth keys with the "inference" scope may read who they are and the balance they spend.
+  const user = await currentUser(req, { scope: "inference" });
   if (!user) return unauthorized();
   // What this person can spend on inference: money they topped up plus what
   // their nodes earned. Null when Infernet is unreachable or no account is
   // linked yet, which is not an error - chat then runs on the free tier.
-  const nodesWanted = new URL(req.url).searchParams.get("nodes") === "1";
+  // An app-held (OAuth) key never sees the fleet.
+  const nodesWanted = new URL(req.url).searchParams.get("nodes") === "1" && user.token_kind !== "oauth";
   const [balance, fleet] = await Promise.all([balanceFor(user.coinpay_sub), nodesWanted ? fleetFor(user.id).catch(() => null) : Promise.resolve(null)]);
   return json({
     id: user.id,

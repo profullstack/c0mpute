@@ -53,7 +53,7 @@ async function check(get: (k: string) => string | null) {
     return { error: back(redirect, { error: "invalid_request", error_description: "PKCE S256 required", state }) } as const;
   }
   const scope = parseScope(get("scope"));
-  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write, live:publish", state }) } as const;
+  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write, live:publish, inference", state }) } as const;
   const q: Q = { client_id: client.client_id, redirect_uri: redirect, code_challenge: challenge, state, scope };
   return { client, q } as const;
 }
@@ -85,6 +85,12 @@ export async function GET(req: Request) {
   }
   if (scopes.includes("live:publish")) {
     can.push("create and end live streams on your account and read their stream keys, billed per GB relayed to your compute balance (free tier when it is empty)");
+  }
+  if (scopes.includes("inference")) {
+    can.push(
+      "send prompts to AI models on c0mpute and have each answer charged to your compute balance (it can see your balance, not your chats, files, nodes or other keys)",
+      "use the private house lane: prompts it sends that way run only on a node Profullstack operates, never a third-party node, and are deleted once answered. That node, and the app itself, can read them",
+    );
   }
   let storageNote = "";
   if (scopes.includes("storage:write")) {

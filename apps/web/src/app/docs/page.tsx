@@ -403,6 +403,37 @@ curl -sS https://c0mpute.com/v1/chat/completions \\
         </Code>
       </Section>
 
+      <Section h="house-lane" title="[ private house lane ]">
+        <P>
+          On the open network the node that wins a job decrypts and runs the prompt, so its operator could read it.
+          For prompts that must not leave our hands (health records, finances), send{" "}
+          <code>x-c0mpute-lane: house</code> (or <code>&quot;c0mpute&quot;: {"{"} &quot;lane&quot;: &quot;house&quot; {"}"}</code>{" "}
+          in the body). The request then runs <b>only</b> on a node Profullstack operates, through an Infernet house-lane
+          reservation; never on a third-party node, never on the free tier, never on a fallback.
+        </P>
+        <P>
+          It is <b>paid only</b>: each answer is billed to your compute balance at the normal per-token price, and with no
+          balance you get <code>402 balance_required</code> (top up at <Link href="/checkout">/checkout</Link>). If the
+          house node is down you get <code>503 house_lane_unavailable</code> and nothing else runs it. Plain chat only (no
+          tools, plugins or stored runs); <code>model</code> is ignored. Answers carry <code>x-c0mpute-lane: house</code>{" "}
+          and <code>x_c0mpute.charged_usd</code>.
+        </P>
+        <P>
+          <b>Who sees what:</b> the app that sent the prompt; c0mpute.com and Infernet in memory while relaying (not
+          logged); Infernet holds it encrypted in its job queue only while the job runs, then deletes the prompt, the answer
+          and the token stream (it keeps model, node, timestamps, token counts and the charge); and the house node that
+          runs the model. No other operator. Apps can act for you with an OAuth key of scope <code>inference</code>{" "}
+          (chat billed to your balance, and reading that balance; nothing else), revocable with{" "}
+          <code>POST /api/oauth/revoke</code>.
+        </P>
+        <Code>
+          {`curl https://c0mpute.com/v1/chat/completions \\
+  -H "Authorization: Bearer $C0MPUTE_KEY" -H "x-c0mpute-lane: house" \\
+  -H "content-type: application/json" \\
+  -d '{"messages":[{"role":"user","content":"Explain HbA1c 6.1% in plain words."}],"max_tokens":300}'`}
+        </Code>
+      </Section>
+
       <Section h="chat-commands" title="[ chat commands ]">
         <P>
           In <Link href="/chat">c0mpute.com/chat</Link> (and{" "}

@@ -5,7 +5,8 @@ import { runManager } from "@/lib/chat/run-manager";
 import { RunLimitError, SSE_HEADERS } from "@/lib/chat/runs";
 import { routeRequest, routedChat, routerEnabled } from "@/lib/chat/routed";
 import { toolChatResponse } from "@/lib/chat/tools-http";
-import { currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { houseLaneChat, wantsHouseLane } from "@/lib/chat/house-lane";
+import { balanceFor, currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, siteUrl, unauthorized } from "@/lib/chat/server";
 import { recordUsage } from "@/lib/leaderboard/server";
 import { expertSlugOf } from "@/lib/experts/chat";
 import { expertChatResponse } from "@/lib/experts/server";
@@ -42,7 +43,8 @@ const err = (status: number, message: string, headers: Record<string, string> = 
  * and DELETE stops it (closing the connection no longer does).
  */
 export async function POST(req: Request) {
-  const user = await currentUser(req);
+  // OAuth keys with the "inference" scope (apps acting for a person) may chat too.
+  const user = await currentUser(req, { scope: "inference" });
   if (!user) return unauthorized();
   if (!sameOrigin(req)) return err(403, "cross-site request refused");
   const rl = rateLimit(user.id);
@@ -51,8 +53,25 @@ export async function POST(req: Request) {
   const raw = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   const parsed = parseChatRequest(raw);
   if (typeof parsed === "string") return err(400, parsed);
+
+  // House lane (lib/chat/house-lane.ts): Profullstack-operated node only,
+  // paid only, nothing stored, no fallback. Checked before every other path
+  // so no plugin, run store, router or open-network route ever sees it.
+  if (wantsHouseLane(req, raw)) {
+    recordUsage(user.id, user.token_kind === "session" ? "chat" : "api", "house");
+    return houseLaneChat({
+      subject: user.coinpay_sub,
+      req: parsed,
+      signal: req.signal,
+      deps: { fetch, env, balance: (sub) => balanceFor(sub), topUpUrl: `${siteUrl()}/checkout` },
+    });
+  }
+
   // One count for the public leaderboard: the surface and the model name, nothing else.
   recordUsage(user.id, user.token_kind === "session" ? "chat" : "api", typeof raw?.model === "string" ? raw.model : "auto");
+  // An app-held (OAuth) key gets plain inference: never the person's chat
+  // plugins (their connected tools) nor a stored, resumable run.
+  const appKey = user.token_kind === "oauth";
 
   // An Expert (model "expert:<slug>"): the signed manifest applied to this
   // turn, behind the Experts trial / subscription gate (lib/experts).
@@ -72,9 +91,9 @@ export async function POST(req: Request) {
   // Chat plugins: with any plugin on (and not `plugins: false`), the server
   // runs the tool loop; each model step is billed like a normal turn.
   const approvals = Array.isArray(raw?.approvals) ? raw.approvals : [];
-  const withPlugins = raw?.plugins !== false && (approvals.length > 0 || (await hasEnabledPlugins(user.id)));
+  const withPlugins = !appKey && raw?.plugins !== false && (approvals.length > 0 || (await hasEnabledPlugins(user.id)));
 
-  if (raw?.resumable === true && parsed.stream && raw) {
+  if (!appKey && raw?.resumable === true && parsed.stream && raw) {
     try {
       // Kept (sealed) with the run so any server can continue it after a deploy.
       const runs = runManager();

@@ -22,8 +22,12 @@ export const SCOPE = "mcp";
  * the person's browser into their private storage (it cannot read them).
  * "live:publish": create and end the person's live streams and read their
  * stream keys and usage (c0mpute Live), nothing else on the account.
+ * "inference": run chat completions (POST /v1/chat/completions) billed to the
+ * person's compute balance, including the private house lane, and read that
+ * balance (/api/v1/me, /api/v1/balance). No chat plugins, no history, no
+ * keys, nothing else on the account.
  */
-export const SCOPES = ["mcp", "storage:write", "live:publish"] as const;
+export const SCOPES = ["mcp", "storage:write", "live:publish", "inference"] as const;
 
 /** A requested scope string, normalized ("mcp" when absent), or null when it names an unknown scope. */
 export function parseScope(raw: string | null | undefined): string | null {
@@ -219,6 +223,8 @@ export function authServerMetadata(site: string) {
     authorization_endpoint: `${site}/oauth/authorize`,
     token_endpoint: `${site}/api/oauth/token`,
     registration_endpoint: `${site}/api/oauth/register`,
+    revocation_endpoint: `${site}/api/oauth/revoke`,
+    revocation_endpoint_auth_methods_supported: ["none"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
