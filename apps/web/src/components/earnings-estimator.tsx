@@ -16,7 +16,8 @@ import {
   DEFAULT_CPU_MODEL,
 } from "@/lib/cpu-estimates";
 import { MARKET_FEE_PCT, OPERATOR_SHARE_PCT } from "@/lib/market";
-import { R4CK_SITE, THIN_SAMPLE, type LiveRate, type LiveRates } from "@/lib/r4ck-rates";
+import { R4CK_SITE, type LiveRates } from "@/lib/r4ck-rates";
+import { asOf, cpuRateHint as cpuHintFor, gpuRateHint as gpuHintFor, hourly } from "@/lib/rate-hints";
 import type { ObservedGroup, ObservedWindow } from "@/lib/earnings/network-by-class";
 
 const DAYS_PER_MONTH = 30;
@@ -37,20 +38,6 @@ function cpuRateFor(model: string, live: LiveRates | null): string {
   if (r != null) return String(r);
   const match = CPU_RATE_REFERENCES.find((cpu) => cpu.model === model);
   return match ? String(match.hourlyUsd) : "";
-}
-
-function asOf(live: LiveRates): string {
-  return live.fetchedAt.slice(0, 10);
-}
-
-function hourly(v: number): string {
-  return `$${v < 0.1 ? v.toFixed(4).replace(/0+$/, "") : v < 1 ? v.toFixed(3).replace(/0$/, "") : v.toFixed(2)}/h`;
-}
-
-function liveHint(r: LiveRate, live: LiveRates, what: string): string {
-  const from = r.providers != null ? ` from ${r.providers} provider${r.providers === 1 ? "" : "s"}` : "";
-  const thin = r.offers < THIN_SAMPLE ? ` Only ${r.offers} offer${r.offers === 1 ? "" : "s"}, so treat it as rough.` : "";
-  return `median of ${r.offers.toLocaleString()} ${what}${from} on r4ck, as of ${asOf(live)}; cheapest ${hourly(r.lowUsd)}.${thin}`;
 }
 
 /** The observed-network class that matches what the visitor picked. */
@@ -134,23 +121,8 @@ export function EarningsEstimator({
     setCpuRateEdited(false);
   }
 
-  const selectedGpuSource = selectedGpu?.source ? GPU_RATE_SOURCES[selectedGpu.source] : null;
-  const selectedGpuLive = selectedGpu && liveRates ? liveRates.gpu[selectedGpu.model] : undefined;
-  const gpuRateHint = !selectedGpu
-    ? "Custom model: enter a comparable rate."
-    : selectedGpuLive && liveRates
-      ? `${selectedGpu.vram} · per-GPU ${liveHint(selectedGpuLive, liveRates, "hourly offers")}`
-      : selectedGpuSource
-        ? `${selectedGpu.vram} · r4ck lists no live hourly offer for this GPU right now, so this is the ${selectedGpuSource.label} rate checked ${GPU_RATE_CHECKED_AT}.`
-        : selectedGpu.r4ck
-          ? `${selectedGpu.vram} · r4ck lists no live hourly offer for this GPU right now, so enter your own.`
-          : `${selectedGpu.vram} · no public hourly rental rate for this GPU, so enter your own.`;
-  const selectedCpuLive = selectedCpu && liveRates ? liveRates.cpu[selectedCpu.model] : undefined;
-  const cpuRateHint = !selectedCpu
-    ? "Custom CPU VM: enter a comparable hourly price."
-    : selectedCpuLive && liveRates
-      ? `${selectedCpu.specs} · monthly price over 730 h, ${liveHint(selectedCpuLive, liveRates, "VPS plans with this spec")}`
-      : `${selectedCpu.specs} · starting price from ${CPU_RATE_SOURCE.label}, checked ${CPU_RATE_CHECKED_AT} (r4ck rates unavailable).`;
+  const gpuRateHint = gpuHintFor(selectedGpu, liveRates);
+  const cpuRateHint = cpuHintFor(selectedCpu, liveRates);
   const observedWindow = observedByClass?.windows.find((w) => w.days === observedDays) ?? null;
   const myClass = classFor(hardware, gpuModel);
 
