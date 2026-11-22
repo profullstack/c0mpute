@@ -59,7 +59,7 @@ c0mpute fleet show <node> [--json]
 c0mpute fleet pause|resume <node...|--tag T|--all>   # stop/start bidding on new jobs
 c0mpute fleet update  <node...|--tag T|--all>       # install the latest release
 c0mpute fleet restart <node...|--tag T|--all>
-c0mpute fleet tag <node...|--tag T> <tags>          # also: untag, set-tags
+c0mpute fleet tag <node...|--tag T> --set <tags>    # also: untag, set-tags
 c0mpute fleet rename <node> <name>
 c0mpute fleet unlink <node...>
 c0mpute fleet earnings [--json]                     # per node: 24h, 30d, all

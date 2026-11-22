@@ -107,7 +107,7 @@ c0mpute node link --token c0e_...                                       # instal
 {`c0mpute fleet ls [--tag rack-a] [--json]
 c0mpute fleet show <node>
 c0mpute fleet pause|resume|update|restart <node...> | --tag rack-a | --all
-c0mpute fleet tag <node...> vast,home        c0mpute fleet untag <node...> home
+c0mpute fleet tag <node...> --set vast,home  c0mpute fleet untag <node...> --set home
 c0mpute fleet rename <node> "den 3060"       c0mpute fleet unlink <node...>
 c0mpute fleet earnings [--json]              c0mpute fleet audit
 c0mpute fleet token create|ls|revoke`}
