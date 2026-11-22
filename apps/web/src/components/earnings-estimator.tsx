@@ -448,14 +448,14 @@ function ObservedPanel({
   return (
     <div className="space-y-3 text-xs leading-6">
       <p className="text-[var(--color-dim)]">
-        Every job the network completed in the last {w.days} days, as the status aggregators heard it, priced at what the buyer agreed to pay in the job auction, after the assumed {MARKET_FEE_PCT}% fee. Per paid hour divides that by the time nodes spent running the jobs, so it compares directly with the rental rate above. These are agreed job prices, not settled payouts; the settled ledger totals are in the line below and on <a href="/status#earnings">/status</a>.
+        Every job the network completed in the last {w.days} days, as the status aggregators heard it, priced at what the buyer agreed to pay in the job auction, after the assumed {MARKET_FEE_PCT}% fee. Per paid hour divides that by the time nodes spent running the jobs, so it compares directly with the rental rate above. Source: the c0mpute job ledger (node_jobs). Chat inference bridged from Infernet is paid through the Infernet ledger, not at its auction price, so it shows jobs and hours here but no money; the settled totals in the line below count it once, from that ledger. See <a href="/status#earnings">/status</a>.
       </p>
       {w.totals.jobs === 0 ? (
         <p className="text-[var(--color-fg)]">No completed jobs are on file for this window.</p>
       ) : (
         <>
           <p className="text-[var(--color-fg)]">
-            <strong className="accent">Sample:</strong> {w.totals.jobs.toLocaleString()} jobs on {w.totals.nodes} node{w.totals.nodes === 1 ? "" : "s"}, {w.totals.busy_hours.toFixed(1)} paid hours, {usd(w.totals.net_usd)} after the fee ({perHour(w.totals)} per paid hour).
+            <strong className="accent">Sample:</strong> {w.totals.jobs.toLocaleString()} jobs ({w.totals.settled_elsewhere_jobs.toLocaleString()} of them Infernet chat) on {w.totals.nodes} node{w.totals.nodes === 1 ? "" : "s"}, {w.totals.busy_hours.toFixed(1)} paid hours, {usd(w.totals.net_usd)} after the fee for c0mpute-priced work ({perHour(w.totals)} per priced hour).
             {w.covered_days < w.days && since ? ` History on file starts ${since}, so this covers ${w.covered_days} of ${w.days} days.` : ""}
             {small ? " That is a small sample from an early network: read it as what has happened so far, not a typical rate." : ""}
           </p>
@@ -497,8 +497,14 @@ function ObservedTable({ title, groups }: { title: string; groups: ObservedGroup
               <td className="py-2 pr-4 tabular-nums">{g.nodes}</td>
               <td className="py-2 pr-4 tabular-nums">{g.jobs.toLocaleString()}</td>
               <td className="py-2 pr-4 tabular-nums">{g.busy_hours.toFixed(1)}</td>
-              <td className="py-2 pr-4 tabular-nums">{usd(g.net_usd)}</td>
-              <td className="py-2 accent font-bold tabular-nums">{perHour(g)}</td>
+              {g.settled_elsewhere_jobs === g.jobs ? (
+                <td className="py-2 text-[var(--color-dim)]" colSpan={2}>paid via the Infernet ledger</td>
+              ) : (
+                <>
+                  <td className="py-2 pr-4 tabular-nums">{usd(g.net_usd)}</td>
+                  <td className="py-2 accent font-bold tabular-nums">{perHour(g)}</td>
+                </>
+              )}
             </tr>
           ))}
         </tbody>

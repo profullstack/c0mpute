@@ -55,7 +55,7 @@ export default async function EstimatesPage() {
         {observed && (
           <p className="text-sm leading-6 text-[var(--color-fg)]">
             Node operators earned <strong className="accent">{usd(observed.earned30d)}</strong> in the last 30 days
-            ({usd(observed.earnedAll)} all time) across {observed.earningNodes30d.toLocaleString()} nodes.{" "}
+            ({usd(observed.earnedAll)} all time) across {observed.earningNodes30d.toLocaleString()} nodes: settled chat pay from the Infernet ledger plus c0mpute-native jobs from the c0mpute job ledger, each dollar counted once.{" "}
             <Link href="/status#earnings">Real ledger numbers</Link>.
           </p>
         )}

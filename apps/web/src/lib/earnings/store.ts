@@ -197,11 +197,17 @@ export function createEarningsStore(sql: Sql) {
      * Jobs and buyer-agreed takings per node since `sinceMs` (0 = all history),
      * for the network-wide earnings on /status. Callers aggregate; no node is shown.
      */
-    async nodeTotals(sinceMs: number): Promise<{ node: string; jobs: number; paid_usd: number }[]> {
+    /**
+     * Jobs and agreed takings per node since `sinceMs`, leaving out the workload
+     * types in `excludeTypes` (ones paid in another ledger, so they are not
+     * counted twice).
+     */
+    async nodeTotals(sinceMs: number, excludeTypes: readonly string[] = []): Promise<{ node: string; jobs: number; paid_usd: number }[]> {
       await init();
+      const not = excludeTypes.length ? `AND type NOT IN (${excludeTypes.map(() => "?").join(", ")})` : "";
       const rows = await sql.all(
-        `SELECT node, COUNT(*) AS jobs, SUM(paid_usd) AS paid_usd FROM node_jobs WHERE completed_at >= ? GROUP BY node`,
-        [sinceMs],
+        `SELECT node, COUNT(*) AS jobs, SUM(paid_usd) AS paid_usd FROM node_jobs WHERE completed_at >= ? ${not} GROUP BY node`,
+        [sinceMs, ...excludeTypes],
       );
       return rows.map((r) => ({ node: String(r.node), jobs: Number(r.jobs) || 0, paid_usd: Number(r.paid_usd) || 0 }));
     },

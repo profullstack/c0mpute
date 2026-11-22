@@ -4,7 +4,7 @@ import type { Sql } from "../chat/store";
 import { buildObserved } from "./network-by-class";
 import { createEarningsStore } from "./store";
 
-test("buildObserved groups by class and workload, net of the fee, per paid hour", () => {
+test("buildObserved groups by class and workload, net of the fee, per priced hour; Infernet chat carries no money", () => {
   const now = Date.UTC(2026, 10, 22);
   const w = buildObserved({
     days: 7,
@@ -12,18 +12,22 @@ test("buildObserved groups by class and workload, net of the fee, per paid hour"
     historyFrom: now - 4 * 86_400_000,
     classOf: (n) => ({ a: "gpu:nvidia", b: "cpu" })[n] ?? null,
     rows: [
-      { node: "a", type: "infernet.inference", jobs: 10, busy_s: 3600, paid_usd: 1 },
+      // Bridged chat: its auction price is not money (Infernet's ledger pays it), so it never adds dollars.
+      { node: "a", type: "infernet.inference", jobs: 10, busy_s: 7200, paid_usd: 5 },
+      { node: "a", type: "diffusion.txt2img", jobs: 2, busy_s: 3600, paid_usd: 1 },
       { node: "b", type: "tts.synthesize", jobs: 5, busy_s: 1800, paid_usd: 0.1 },
-      { node: "c", type: "infernet.inference", jobs: 1, busy_s: 10, paid_usd: 0 },
+      { node: "c", type: "infernet.inference", jobs: 1, busy_s: 10, paid_usd: 0.01 },
     ],
   });
   expect(w.covered_days).toBe(4);
-  expect(w.totals).toMatchObject({ nodes: 3, jobs: 16 });
+  expect(w.totals).toMatchObject({ nodes: 3, jobs: 18, settled_elsewhere_jobs: 11 });
   expect(w.totals.net_usd).toBeCloseTo(1.1 * 0.95);
   const gpu = w.by_class.find((g) => g.key === "gpu:nvidia")!;
-  expect(gpu.net_per_busy_hour).toBeCloseTo(0.95);
-  expect(w.by_class.find((g) => g.key === "unknown")?.net_per_busy_hour).toBeNull();
-  expect(w.by_type[0]).toMatchObject({ key: "infernet.inference", label: "chat inference (Infernet)", nodes: 2, jobs: 11 });
+  expect(gpu.busy_hours).toBeCloseTo(3);
+  expect(gpu.net_per_busy_hour).toBeCloseTo(0.95); // $0.95 over the 1 priced hour, not 3
+  expect(w.by_class.find((g) => g.key === "unknown")).toMatchObject({ net_usd: 0, net_per_busy_hour: null });
+  const chat = w.by_type.find((g) => g.key === "infernet.inference")!;
+  expect(chat).toMatchObject({ label: "chat inference (Infernet)", nodes: 2, jobs: 11, net_usd: 0, net_per_busy_hour: null, settled_elsewhere_jobs: 11 });
 });
 
 test("store.networkSince and claimedClasses read the whole network", async () => {

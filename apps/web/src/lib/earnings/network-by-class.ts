@@ -4,11 +4,15 @@
 //
 // The money here is the agreed price in the c0mpute auction (what the buyer
 // accepted for the job), less the assumed market fee: the same "agreed"
-// figure the operator dashboard shows. It is an observed price per job, not a
-// settled payout: settled credits for bridged Infernet chat work are paid in
-// Infernet's ledger, per operator, and show on /dashboard/nodes.
+// figure the operator dashboard shows. Chat inference bridged from Infernet
+// (SETTLED_IN_INFERNET_TYPES) is paid in Infernet's ledger, not at its auction
+// price, so its jobs and hours are shown but carry no money here: the settled
+// totals on the page count it, once.
 
 import { operatorEarnings } from "../node-costs";
+import { SETTLED_IN_INFERNET_TYPES } from "./network";
+
+const SETTLED_ELSEWHERE = new Set<string>(SETTLED_IN_INFERNET_TYPES);
 
 export interface NetworkJobRow {
   node: string;
@@ -28,8 +32,10 @@ export interface ObservedGroup {
   gross_usd: number;
   /** After the assumed market fee. */
   net_usd: number;
-  /** net_usd / busy_hours: comparable to an hourly rental rate for paid time. Null with no busy time. */
+  /** net_usd / priced busy hours: comparable to an hourly rental rate for paid time. Null with no priced time. */
   net_per_busy_hour: number | null;
+  /** Jobs whose pay is settled in Infernet's ledger, so they carry no money here. */
+  settled_elsewhere_jobs: number;
 }
 
 export interface ObservedWindow {
@@ -68,15 +74,23 @@ export function typeLabel(t: string): string {
 function group(key: string, label: string, rows: NetworkJobRow[]): ObservedGroup {
   let jobs = 0;
   let busy = 0;
+  let pricedBusy = 0;
   let gross = 0;
+  let elsewhere = 0;
   const nodes = new Set<string>();
   for (const r of rows) {
     jobs += r.jobs;
     busy += r.busy_s;
-    gross += r.paid_usd;
     nodes.add(r.node);
+    if (SETTLED_ELSEWHERE.has(r.type)) {
+      elsewhere += r.jobs;
+      continue;
+    }
+    pricedBusy += r.busy_s;
+    gross += r.paid_usd;
   }
   const busyHours = busy / 3600;
+  const pricedHours = pricedBusy / 3600;
   const net = operatorEarnings(gross);
   return {
     key,
@@ -86,8 +100,9 @@ function group(key: string, label: string, rows: NetworkJobRow[]): ObservedGroup
     busy_hours: busyHours,
     gross_usd: gross,
     net_usd: net,
-    // Under a minute of paid time makes a per-hour figure meaningless.
-    net_per_busy_hour: busyHours >= 1 / 60 ? net / busyHours : null,
+    // Under a minute of priced time makes a per-hour figure meaningless.
+    net_per_busy_hour: pricedHours >= 1 / 60 ? net / pricedHours : null,
+    settled_elsewhere_jobs: elsewhere,
   };
 }
 

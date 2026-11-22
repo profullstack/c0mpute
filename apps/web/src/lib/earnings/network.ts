@@ -4,11 +4,22 @@
 //  - c0mpute jobs: every credited job copied out of the aggregators into
 //    node_jobs (recorder.ts). paid_usd is what the buyer agreed to; the node
 //    keeps it minus the market fee (splitPrice, same as /nodes). Infernet chat
-//    a c0mpute node serves is credited at $0 here and paid through Infernet.
+//    a c0mpute node serves (type infernet.inference) is ALSO filed there, at
+//    the bridge's agreed price; it is paid through Infernet, so those rows are
+//    excluded (SETTLED_IN_INFERNET_TYPES) and the ledger counts it once.
 //  - Infernet inference: GET /api/v1/network/earnings, the provider_earnings
 //    ledger (operator net, house fee, referral commissions), subsidies left out.
 // Nothing here names a node, account or wallet.
 import { splitPrice } from "../market";
+
+/**
+ * Workload types whose pay is settled in Infernet's ledger, not by the c0mpute
+ * auction. A chat job Infernet bridges to a c0mpute node is filed twice: once
+ * in node_jobs at the price the bridge agreed in the auction, and once as the
+ * operator's settled credit in provider_earnings. The ledger is the money that
+ * moved, so these node_jobs rows are left out of the c0mpute side.
+ */
+export const SETTLED_IN_INFERNET_TYPES = ["infernet.inference"] as const;
 
 export const WINDOWS = { "24h": 24 * 3_600_000, "7d": 7 * 24 * 3_600_000, "30d": 30 * 24 * 3_600_000 } as const;
 export type WindowKey = keyof typeof WINDOWS | "all";
