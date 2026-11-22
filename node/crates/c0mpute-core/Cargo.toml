@@ -61,4 +61,5 @@ libc = "0.2"
 
 [dev-dependencies]
 libp2p = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 tempfile = { workspace = true }

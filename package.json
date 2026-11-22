@@ -1,6 +1,6 @@
 {
   "name": "c0mpute-monorepo",
-  "version": "0.3.94",
+  "version": "0.3.100",
   "private": true,
   "workspaces": [
     "apps/*",
