@@ -561,8 +561,11 @@ fn default_inference_min_free_disk_gb() -> u64 {
 }
 
 impl InferenceConfig {
+    /// The house runtime may install and run: config and env allow it, and
+    /// the operator's fleet did not turn house models off.
     pub fn auto_install_enabled(&self) -> bool {
         auto_install_enabled_with(self.auto_install, std::env::var("C0MPUTE_INFERENCE_AUTO").ok())
+            && crate::fleet_settings::current().house_models != Some(false)
     }
 }
 

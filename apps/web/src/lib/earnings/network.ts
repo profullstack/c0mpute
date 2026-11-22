@@ -19,7 +19,7 @@ import { splitPrice } from "../market";
  * operator's settled credit in provider_earnings. The ledger is the money that
  * moved, so these node_jobs rows are left out of the c0mpute side.
  */
-export const SETTLED_IN_INFERNET_TYPES = ["infernet.inference"] as const;
+export const SETTLED_IN_INFERNET_TYPES = ["infernet.inference", "live.relay"] as const;
 
 export const WINDOWS = { "24h": 24 * 3_600_000, "7d": 7 * 24 * 3_600_000, "30d": 30 * 24 * 3_600_000 } as const;
 export type WindowKey = keyof typeof WINDOWS | "all";

@@ -50,6 +50,8 @@ export interface AggregatorJob {
   seen_at_ms: number;
   busy_s: number;
   paid_usd: number;
+  /** The worker's full libp2p peer id, when the aggregator sends it (0.3.105+). */
+  peer?: string;
 }
 
 /**
@@ -118,6 +120,7 @@ export function cleanJob(j: unknown): AggregatorJob | null {
     // A day of run time per job at most, and the aggregator's own price cap.
     busy_s: num(r.busy_s, 86_400) ?? 0,
     paid_usd: num(r.paid_usd, 1_000) ?? 0,
+    ...(typeof r.peer === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,64}$/.test(r.peer) ? { peer: r.peer } : {}),
   };
 }
 

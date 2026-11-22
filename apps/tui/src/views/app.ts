@@ -7,6 +7,7 @@ import { ansi256, placeholderCell, truncate, type Container, type Theme } from "
 import { HELP_COMMANDS } from "../commands.ts";
 import { TAB_LABELS, TABS, type AppState, type Tab } from "../state.ts";
 import { renderChat, type ChatHandlers } from "./chat.ts";
+import { fleetOverlay, renderFleet, type FleetHandlers } from "./fleet.ts";
 import { renderJobs, type JobsHandlers } from "./jobs.ts";
 import { renderNetwork, type NetworkHandlers } from "./network.ts";
 import { renderNode, type NodeHandlers } from "./node.ts";
@@ -22,6 +23,7 @@ export interface Handlers {
   node?: NodeHandlers;
   network?: NetworkHandlers;
   settings?: SettingsHandlers;
+  fleet?: FleetHandlers;
 }
 
 /** The keys each tab answers to, for the bottom bar (and the help). */
@@ -71,12 +73,31 @@ export function tabKeys(state: AppState): { key: string; label: string }[] {
         { key: "Enter", label: "change" },
         { key: "L", label: "sign in" },
       ];
+    case "fleet":
+      if (!state.creds.key) return [{ key: "L", label: "sign in" }];
+      return [
+        { key: "↑↓", label: "move" },
+        { key: "Space", label: "select" },
+        { key: "a", label: "all" },
+        { key: "Enter", label: "actions" },
+        { key: "p", label: "pause" },
+        { key: "c", label: "resume" },
+        { key: "U", label: "update" },
+        { key: "X", label: "restart" },
+        { key: "t/T", label: "tag/untag" },
+        { key: "m", label: "models" },
+        { key: "H", label: "house" },
+        { key: "u", label: "uncensored" },
+        { key: "o", label: "hosting" },
+        { key: "s", label: "storage" },
+        { key: "r", label: "refresh" },
+      ];
   }
 }
 
 export const GLOBAL_KEYS: [string, string][] = [
   ["Tab / Shift+Tab", "next / previous tab"],
-  ["1-5 or Alt+1-5", "go to a tab (Alt in the chat input)"],
+  ["1-6 or Alt+1-6", "go to a tab (Alt in the chat input; 6 is Fleet)"],
   ["?  or  F1", "this help"],
   ["r", "refresh what this tab shows"],
   ["q / Ctrl+C", "quit (q when not typing)"],
@@ -215,10 +236,13 @@ export function renderApp(ui: Container, state: AppState, theme: Theme, h: Handl
           return renderNetwork(body, state, theme, h.network);
         case "settings":
           return renderSettings(body, state, theme, h.settings);
+        case "fleet":
+          return renderFleet(body, state, theme, h.fleet);
       }
     });
     footer(col, state, theme, h);
   });
+  if (fleetOverlay(ui, state, theme, () => h.fleet?.onCancel?.())) return;
   if (state.picker) pickerOverlay(ui, state, theme, h);
   else if (state.preview) previewOverlay(ui, state, theme, h);
   else if (state.help) helpOverlay(ui, state, theme, h);

@@ -1,0 +1,49 @@
+# c0mpute plugin manifest. See dips/0006-module-model.md.
+#
+# Optional, off unless you install it. nixamp (https://nixamp.com, npm
+# `nixamp`) is a music player and radio server: it plays a folder of music or
+# any link as stations other people can tune in to, and it can broadcast a
+# station to streaming platforms over RTMP. Its source lives upstream; this
+# directory is the marketplace wrapper.
+#
+# `c0mpute plugin install nixamp`:
+#   1. installs the nixamp CLI (nixamp.com/install.sh) if it is not on PATH,
+#   2. checks for ffmpeg and ffprobe, which nixamp needs,
+#   3. prints how to start a station and how to put it on c0mpute Live
+#      (`--rtmp c0mpute=<stream key>`), so the node's own relays and every
+#      other node carry it.
+# Nothing is started and the c0mpute config is not changed: running a radio
+# station is the operator's choice. A node that only wants to be paid for
+# relaying live streams needs nothing from here; that is the built-in
+# live-stream plugin, on by default.
+
+[module]
+id          = "nixamp"
+name        = "nixamp — run a radio station on your node"
+version     = "0.3.106"
+kind        = "service"
+category    = "media"
+status      = "available"
+description = "Optional: install the nixamp music player and radio server on a node, and broadcast its stations to c0mpute Live so the network relays them. Needs ffmpeg."
+author      = "Profullstack"
+license     = "MIT"
+homepage    = "https://nixamp.com"
+source      = "https://github.com/profullstack/nixamp"
+keywords    = ["music", "radio", "station", "live", "streaming", "rtmp", "nixamp"]
+
+[module.requirements]
+c0mpute      = ">=0.3.105"
+os           = ["linux", "darwin"]
+arch         = ["x86_64", "aarch64"]
+capabilities = ["ffmpeg", "network:ingress?"]
+
+[module.dispatch]
+mode   = "subprocess"
+binary = "nixamp"
+# Standalone CLI on PATH; run it as `nixamp <args>`.
+
+[module.surfaces]
+cli = "nixamp"
+
+[module.config.defaults]
+enabled = false

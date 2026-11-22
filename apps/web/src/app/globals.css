@@ -77,6 +77,39 @@ a:hover {
 .prose th, .prose td { border: 1px solid var(--color-rule); padding: .5em .75em; text-align: left; }
 .prose th         { background: var(--color-card); color: var(--color-fg); font-weight: 600; }
 
+/* /checkout (@profullstack/checkout): its --pfc-* properties mapped onto the
+   theme. The package swaps its own values under prefers-color-scheme: dark
+   with `.pfc:not([data-theme="light"])`; this selector outranks that, so the
+   site's one dark theme holds in both schemes. */
+.c0-checkout .pfc.pfc {
+  --pfc-accent: var(--color-accent);
+  --pfc-accent-fg: var(--color-bg);
+  --pfc-fg: var(--color-fg);
+  --pfc-muted: var(--color-dim);
+  --pfc-card: var(--color-card);
+  --pfc-border: var(--color-rule);
+  --pfc-error: var(--color-warn);
+  --pfc-popular-bg: var(--color-accent-dim);
+  --pfc-popular-fg: var(--color-fg);
+  --pfc-radius: 0.25rem;
+  /* The package's own `margin: 0 auto` outranks the wrapper's space-y. */
+  margin-bottom: 2rem;
+  padding: 0;
+  font-family: var(--font-mono);
+}
+.c0-checkout .pfc-title {
+  color: var(--color-accent);
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.c0-checkout .pfc-option-name,
+.c0-checkout .pfc-option-amount {
+  font-weight: 600;
+}
+.c0-checkout .pfc-amount input {
+  color-scheme: dark;
+}
+
 /* Header menus (components/site-nav.tsx). The mobile sheet is full screen, so
    the page under it must not scroll; :has() keeps that CSS-only. */
 body:has(.nav-mobile[open]) {

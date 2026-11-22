@@ -6,11 +6,23 @@
 // web. Everything that touches the machine goes through this process: the
 // bundled CLI, ~/mcps, ~/skills and config.toml.
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, session, shell, Tray, WebContentsView } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, safeStorage, session, shell, Tray, WebContentsView } from "electron";
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { readCreds, api, complete, models, chatJsonPath, type Me } from "./account";
+import {
+  readCreds,
+  api,
+  complete,
+  models,
+  chatJsonPath,
+  accountStorePath,
+  clearKeychainCreds,
+  forgetChatJsonKey,
+  setKeychainBackend,
+  type KeychainBackend,
+  type Me,
+} from "./account";
 import { AgentSession, type AgentEvent, type Decision } from "./agent";
 import { buildTools } from "./agent-tools";
 import { Cli, cliOutput, locateCli, onPath, planShim, shimScript } from "./cli";
@@ -323,6 +335,24 @@ function mcpView() {
 
 // ── sign in (`c0mpute chat login`) ─────────────────────────────────────
 
+// The account key lives in the OS keychain via safeStorage (account.ts). On
+// Linux, "basic_text" means no keyring was found and Chromium encrypts with a
+// fixed password, which is not a keychain: treat it as unavailable so the UI
+// says so and the key stays in the 0600 chat.json only.
+const keychainBackend: KeychainBackend = {
+  isEncryptionAvailable: () => {
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    if (process.platform !== "linux") return true;
+    try {
+      return safeStorage.getSelectedStorageBackend() !== "basic_text";
+    } catch {
+      return false;
+    }
+  },
+  encryptString: (s) => safeStorage.encryptString(s),
+  decryptString: (b) => safeStorage.decryptString(b),
+};
+
 function login() {
   const child = cli.spawn(["chat", "login"]);
   const split = [new LineSplitter(), new LineSplitter()];
@@ -358,6 +388,7 @@ const handlers: Record<string, Handler> = {
     mcpDir: defaultMcpDir(),
     skillsDir: defaultSkillsDir(),
     chatJson: chatJsonPath(),
+    accountStore: accountStorePath(),
     settings,
   }),
   "app:checkUpdate": async () => checkForUpdate({ version: VERSION, appImage: process.env.APPIMAGE }),
@@ -470,13 +501,25 @@ const handlers: Record<string, Handler> = {
         error = e instanceof Error ? e.message : String(e);
       }
     }
-    return { url: creds.url, source: creds.source, signedIn: !!creds.key, me, error };
+    return { url: creds.url, source: creds.source, keychain: creds.keychain, signedIn: !!creds.key, me, error };
   },
   "account:login": () => login(),
+  // Signing out signs out everywhere on this machine: the keychain copy, and
+  // chat.json through the CLI (or directly when the CLI could not), or the
+  // next read would import the key again.
   "account:logout": async () => {
-    const r = await cli.run(["chat", "logout"]);
+    clearKeychainCreds();
+    let out: string;
+    try {
+      out = cliOutput(await cli.run(["chat", "logout"]));
+    } catch (e) {
+      out = e instanceof Error ? e.message : String(e);
+    }
+    if (forgetChatJsonKey()) out = `${out ? `${out}\n` : ""}removed the key from ${chatJsonPath()}`;
+    lastMe = null;
+    updateTray();
     chatView?.webContents.reload();
-    return cliOutput(r);
+    return out || "signed out";
   },
   "account:nodes": () => api("/api/v1/hosting/nodes"),
   // The operator's fleet: the same c0mpute.com endpoints as /dashboard/nodes,
@@ -629,6 +672,14 @@ function registerIpc() {
 app.on("second-instance", () => showWindow());
 
 app.whenReady().then(async () => {
+  // safeStorage works only once the app is ready; this first read imports
+  // ~/.c0mpute/chat.json into the keychain store if it is newer.
+  setKeychainBackend(keychainBackend);
+  try {
+    readCreds();
+  } catch {
+    /* never block start on the keychain */
+  }
   registerIpc();
   watchChatSession();
   createWindow();

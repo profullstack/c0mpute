@@ -1,4 +1,4 @@
-import { balanceFor, currentUser, json, unauthorized } from "@/lib/chat/server";
+import { balanceFor, currentUser, json, siteUrl, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
  * GET /api/v1/balance — the signed-in person's compute balance.
  *
  * c0mpute chat runs on the Infernet network, and the balance lives there:
- * money topped up (CoinPay or x402) plus what this person's nodes have earned
+ * money topped up (at /checkout, CoinPay or x402) plus what this person's nodes have earned
  * and not withdrawn. Inference draws it down; when it is empty the network
  * serves the free, rate-limited tier instead of refusing.
  *
@@ -26,14 +26,14 @@ export async function GET(req: Request) {
         linked: false,
         total_spendable_usd: "0.000000",
         note: "no compute balance yet; chat runs on the free tier",
-        top_up: "https://infernetprotocol.com/dashboard/billing",
+        top_up: `${siteUrl()}/checkout`,
       },
       200,
       { "cache-control": "no-store" },
     );
   }
   return json(
-    { ...balance, top_up: "https://infernetprotocol.com/dashboard/billing" },
+    { ...balance, top_up: `${siteUrl()}/checkout` },
     200,
     { "cache-control": "no-store" },
   );

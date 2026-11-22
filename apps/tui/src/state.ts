@@ -6,13 +6,14 @@
 import type { TextEditState } from "@profullstack/hqtui";
 import type { BenchState } from "./bench.ts";
 import type { Creds, Settings } from "./config.ts";
+import type { FleetAction, FleetOutcome, FleetPayload, FleetRequest, TextAction } from "./fleet.ts";
 import type { Job } from "./jobs.ts";
 import { emptyNode, type NodeSnapshot } from "./node.ts";
 import { idle, type Loadable, type Me, type NodesPayload, type PricingPayload, type StatusPayload } from "./network.ts";
 
-export const TABS = ["chat", "jobs", "node", "network", "settings"] as const;
+export const TABS = ["chat", "jobs", "node", "network", "settings", "fleet"] as const;
 export type Tab = (typeof TABS)[number];
-export const TAB_LABELS: Record<Tab, string> = { chat: "Chat", jobs: "Jobs", node: "Node", network: "Network", settings: "Settings" };
+export const TAB_LABELS: Record<Tab, string> = { chat: "Chat", jobs: "Jobs", node: "Node", network: "Network", settings: "Settings", fleet: "Fleet" };
 
 export interface ChatMsg {
   role: "user" | "assistant" | "note";
@@ -61,6 +62,24 @@ export interface LoginFlow {
   done: boolean;
 }
 
+/** The Fleet tab: the account's nodes, a selection, and at most one prompt or confirmation. */
+export interface FleetState {
+  list: Loadable<FleetPayload>;
+  /** Highlighted row. */
+  sel: number;
+  /** Selected node ids (Space / a). Empty = actions apply to the highlighted node. */
+  picked: string[];
+  /** Asking for tags or models before the confirmation. */
+  prompt: { action: TextAction; nodes: string[]; input: TextEditState } | null;
+  /** Nothing is sent until this is answered with y. */
+  confirm: { req: FleetRequest; text: string } | null;
+  /** The action menu (Enter): index into FLEET_ACTIONS. */
+  menu: number | null;
+  /** The last action's per-node results. */
+  outcome: FleetOutcome | null;
+  sending: FleetAction | null;
+}
+
 export type SettingsRow = "account" | "model" | "downloads" | "adult" | "preview" | "pushNode";
 export const SETTINGS_ROWS: SettingsRow[] = ["account", "model", "downloads", "adult", "preview", "pushNode"];
 
@@ -87,6 +106,7 @@ export interface AppState {
   netPanel: "nodes" | "prices";
   netScroll: number;
   settingsSel: number;
+  fleet: FleetState;
   /** Editing the downloads dir in place. */
   editing: TextEditState | null;
   login: LoginFlow | null;
@@ -141,6 +161,7 @@ export function initialState(parts: {
     netPanel: "nodes",
     netScroll: 0,
     settingsSel: 0,
+    fleet: { list: idle(), sel: 0, picked: [], prompt: null, confirm: null, menu: null, outcome: null, sending: null },
     editing: null,
     login: null,
     imagesInTerminal: parts.imagesInTerminal ?? false,

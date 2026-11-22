@@ -345,8 +345,15 @@ pub fn runtime_url() -> Option<String> {
 
 static READY: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
-/// Models the runtime listed at the last probe (empty: not ready, advertise nothing).
+/// Models the runtime listed at the last probe, less the ones the operator's
+/// fleet settings leave out (empty: not ready, advertise nothing).
 pub fn ready_models() -> Vec<String> {
+    let listed = READY.read().map(|m| m.clone()).unwrap_or_default();
+    crate::fleet_settings::filter_models(listed, &crate::fleet_settings::current())
+}
+
+/// Every model the runtime listed at the last probe, before fleet settings.
+pub fn listed_models() -> Vec<String> {
     READY.read().map(|m| m.clone()).unwrap_or_default()
 }
 

@@ -50,10 +50,11 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.3.100",
+      "version": "0.3.104",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
         "@profullstack/chat-plugins": "^0.2.0",
+        "@profullstack/checkout": "^0.1.0",
         "@profullstack/coinpay-onboard": "^0.5.1",
         "@profullstack/cross-promo": "^0.2.0",
         "@profullstack/footer": "latest",
@@ -343,6 +344,8 @@
     "@profullstack/c0mpute-sealed": ["@profullstack/c0mpute-sealed@workspace:packages/sealed"],
 
     "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.2.0", "", {}, "sha512-ewvgaXAqlSTuXmT5+IvVRi36cWtLuTT1QOs9wfRgq1pUINTnUklYFMvXF0y0XWHBF36vLTQpTVrry0yBZFbL4g=="],
+
+    "@profullstack/checkout": ["@profullstack/checkout@0.1.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"] }, "sha512-gPkruQ3Gq+ltQZQaUlCIlL2b7WTyEvBYusrfWGVjSYiuDCdeAtMyEKBEqVgh9d358lSMAl6ht4BbjRcAHaDfRw=="],
 
     "@profullstack/coinpay-onboard": ["@profullstack/coinpay-onboard@0.5.1", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.32.2", "zod": "^4.6.7" }, "bin": { "coinpay-onboard": "bin/coinpay-onboard" } }, "sha512-vuM/1vYvkXP2E/tBcTBZ8JY4K49qtSPPY1N9XRQvIlcy0Sezr+spOf6vYBkRPhasKcFqda44MRLgxPseG9Kvdg=="],
 

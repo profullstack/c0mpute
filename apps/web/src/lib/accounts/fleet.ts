@@ -4,7 +4,8 @@
 //
 // Two kinds of action:
 //   - account-side (rename, tag, untag, unlink, cost): changed here at once;
-//   - node-side (pause, resume, update, restart): queued as a command the node
+//   - node-side (pause, resume, update, restart, and the node settings
+//     models, house-models, uncensored, hosting, storage): queued as a command the node
 //     fetches on its own poll (authenticated by its identity key), carrying an
 //     ed25519 signature by this site's fleet key that the node checks against
 //     the key it pinned when it linked, along with its own peer id and the
@@ -12,14 +13,18 @@
 //     this account (verified) can be sent commands.
 // Every action is written to the account's audit log.
 
-import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, type KeyObject } from "node:crypto";
 import type { Row, Sql } from "../chat/store";
 import { nodeKey, type OperatorNode } from "../earnings/store";
 import type { NodeRow } from "../nodes";
 import type { AccountStore, NodeMeta } from "./store";
 import { cleanTags } from "./store";
 
-export const NODE_ACTIONS = ["pause", "resume", "update", "restart"] as const;
+export const NODE_ACTIONS = ["pause", "resume", "update", "restart", "models", "house-models", "uncensored", "hosting", "storage"] as const;
+/** Node settings: applied by the node to `<config dir>/fleet-settings.json` (node/crates/c0mpute-core/src/fleet_settings.rs). */
+export const SETTING_ACTIONS = ["models", "house-models", "uncensored", "hosting", "storage"] as const;
+/** Most models one allowlist may name (fleet_settings.rs MAX_MODELS). */
+export const MAX_MODELS = 64;
 export const ACCOUNT_ACTIONS = ["rename", "tag", "untag", "set-tags", "unlink", "cost"] as const;
 export type NodeAction = (typeof NODE_ACTIONS)[number];
 export type AccountAction = (typeof ACCOUNT_ACTIONS)[number];
@@ -32,6 +37,81 @@ export const MAX_BULK = 500;
 
 export const isNodeAction = (a: string): a is NodeAction => (NODE_ACTIONS as readonly string[]).includes(a);
 export const isFleetAction = (a: string): a is FleetAction => isNodeAction(a) || (ACCOUNT_ACTIONS as readonly string[]).includes(a);
+
+/** Model ids, the same rule the node applies (fleet_settings.rs `valid_model_id`). */
+export const validModelId = (m: string) => m.length > 0 && m.length <= 128 && /^[A-Za-z0-9\-_.:/@]+$/.test(m);
+
+/**
+ * The args a node-side action carries (signed with the command), or why they
+ * are refused. pause/resume/update/restart carry none; the settings:
+ *   models {models: string[]} (empty = every model the node has),
+ *   house-models | uncensored | hosting | storage {on: true | false | null}
+ *   (null hands the setting back to the node's own config).
+ */
+export function nodeArgs(action: NodeAction, args: Record<string, unknown>): Record<string, unknown> | string {
+  if (action === "models") {
+    const raw = args.models;
+    const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : raw == null ? [] : null;
+    if (!list) return "models: a list of model ids (empty = every model the node has)";
+    const out: string[] = [];
+    for (const m of list) {
+      const id = typeof m === "string" ? m.trim() : "";
+      if (!id) continue;
+      if (!validModelId(id)) return `not a model id: ${JSON.stringify(m)}`;
+      if (!out.includes(id)) out.push(id);
+    }
+    if (out.length > MAX_MODELS) return `at most ${MAX_MODELS} models`;
+    return { models: out };
+  }
+  if ((SETTING_ACTIONS as readonly string[]).includes(action)) {
+    const on = args.on;
+    if (on === true || on === false || on === null) return { on };
+    if (on === "on" || on === "off") return { on: on === "on" };
+    return `${action}: args {on: true | false} (or null for the node's own config)`;
+  }
+  return {};
+}
+
+/** What a node reports about itself on each poll (fleet_agent.rs `node_state`). */
+export type NodeState = {
+  v: number;
+  version: string | null;
+  paused: boolean | null;
+  settings: { models: string[] | null; house_models: boolean | null; uncensored: boolean | null; hosting: boolean | null; storage: boolean | null };
+  effective: { served_models: string[]; house_models: boolean | null; uncensored: boolean | null; hosting: boolean | null; storage: boolean | null };
+  disk: { free_bytes: number; total_bytes: number } | null;
+  update_error: { version: string; error: string; at: number } | null;
+};
+
+const bool = (v: unknown) => (typeof v === "boolean" ? v : null);
+const strs = (v: unknown, max = MAX_MODELS) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && validModelId(x)).slice(0, max) : null);
+const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+
+/** A node's reported state, kept to the known fields and sizes (it is node-supplied input). */
+export function cleanNodeState(raw: unknown): NodeState | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, any>;
+  const st = (r.settings ?? {}) as Record<string, unknown>;
+  const ef = (r.effective ?? {}) as Record<string, unknown>;
+  const free = num(r.disk?.free_bytes);
+  const total = num(r.disk?.total_bytes);
+  const ue = r.update_error;
+  return {
+    v: Number(r.v) || 1,
+    version: typeof r.version === "string" ? r.version.slice(0, 32) : null,
+    paused: bool(r.paused),
+    settings: { models: strs(st.models), house_models: bool(st.house_models), uncensored: bool(st.uncensored), hosting: bool(st.hosting), storage: bool(st.storage) },
+    effective: { served_models: strs(ef.served_models) ?? [], house_models: bool(ef.house_models), uncensored: bool(ef.uncensored), hosting: bool(ef.hosting), storage: bool(ef.storage) },
+    disk: free != null && total != null && total > 0 ? { free_bytes: free, total_bytes: total } : null,
+    update_error:
+      ue && typeof ue === "object" && typeof ue.error === "string"
+        ? { version: String(ue.version ?? "").slice(0, 32), error: String(ue.error).slice(0, 500), at: Number(ue.at) || 0 }
+        : null,
+  };
+}
+
+/** Largest state body a node may send (bytes). */
+export const MAX_STATE_BYTES = 16_384;
 
 const COMMAND_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS fleet_commands (
@@ -50,6 +130,14 @@ const COMMAND_SCHEMA = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_fleet_commands_peer ON fleet_commands(peer_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_fleet_commands_user ON fleet_commands(user_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS fleet_node_state (
+     peer_id    TEXT PRIMARY KEY,
+     node       TEXT NOT NULL,
+     user_id    TEXT NOT NULL,
+     state      TEXT NOT NULL,
+     updated_at TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_fleet_node_state_user ON fleet_node_state(user_id)`,
 ];
 
 // ── the site's fleet signing key ──────────────────────────────────────────────
@@ -94,11 +182,17 @@ export function commandMessage(c: { id: string; account_id: string; peer_id: str
   return `c0mpute fleet command v1\nid: ${c.id}\naccount: ${c.account_id}\nnode: ${c.peer_id}\naction: ${c.action}\nargs: ${c.args}\nexpires: ${c.expires_at}`;
 }
 
-/** The text a node signs to fetch its commands (or report one): proves it holds the node key. */
-export function pollMessage(o: { site: string; peerId: string; ts: number; kind: "poll" | "result"; id?: string; ok?: boolean }): string {
-  const tail = o.kind === "result" ? `\nid: ${o.id}\nok: ${o.ok ? "true" : "false"}` : "";
+/**
+ * The text a node signs to fetch its commands (or report one): proves it holds
+ * the node key. A poll that carries the node's state adds the state's SHA-256
+ * (fleet_agent.rs `poll_message_with_state`), so the state is signed too.
+ */
+export function pollMessage(o: { site: string; peerId: string; ts: number; kind: "poll" | "result"; id?: string; ok?: boolean; stateSha256?: string }): string {
+  const tail = o.kind === "result" ? `\nid: ${o.id}\nok: ${o.ok ? "true" : "false"}` : o.stateSha256 ? `\nstate: ${o.stateSha256}` : "";
   return `c0mpute node ${o.kind} v1\nsite: ${o.site}\nnode: ${o.peerId}\nts: ${o.ts}${tail}`;
 }
+
+export const sha256Hex = (s: string) => createHash("sha256").update(s).digest("hex");
 
 // ── the fleet view ────────────────────────────────────────────────────────────
 
@@ -123,6 +217,9 @@ export type FleetNode = {
   paused: boolean | null;
   pending_commands: number;
   linked_at: string;
+  /** What the node last reported (settings, models served, disk, a failed update); null before its first report. */
+  node_state: NodeState | null;
+  state_at: string | null;
 };
 
 export type FleetTotals = { nodes: number; online: number; verified: number; jobs_24h: number; earned_usd: { h24: number; d30: number; all: number } };
@@ -138,6 +235,7 @@ export function buildFleet(o: {
   tAll: Totals;
   pending?: Map<string, number>;
   paused?: Map<string, boolean>;
+  states?: Map<string, { state: NodeState; at: string }>;
 }): { nodes: FleetNode[]; totals: FleetTotals } {
   const meta = new Map(o.meta.map((m) => [m.node, m]));
   const board = new Map(o.board.map((n) => [n.id, n]));
@@ -165,9 +263,12 @@ export function buildFleet(o: {
       jobs_24h: jobs24,
       earned_usd: { h24: round(o.t24.get(c.node)?.paid_usd ?? 0), d30: round(o.t30.get(c.node)?.paid_usd ?? 0), all: round(o.tAll.get(c.node)?.paid_usd ?? 0) },
       cost_usd_per_hour: c.cost_usd_per_hour,
-      paused: o.paused?.get(c.node) ?? null,
+      // The node's own word beats the last pause/resume command we saw finish.
+      paused: o.states?.get(c.node)?.state.paused ?? o.paused?.get(c.node) ?? null,
       pending_commands: o.pending?.get(c.node) ?? 0,
       linked_at: m?.verified_at ?? c.created_at,
+      node_state: o.states?.get(c.node)?.state ?? null,
+      state_at: o.states?.get(c.node)?.at ?? null,
     };
   });
   const sum = (f: (n: FleetNode) => number) => round(nodes.reduce((s, n) => s + f(n), 0));
@@ -262,6 +363,19 @@ export function createFleetService(deps: { sql: Sql; accounts: AccountStore; sit
     /** The raw public key (base64) nodes pin when they link. */
     publicKey: async () => publicKeyB64(await key()),
 
+    /** Keep what a node reported about itself (verified poll from a node linked to an account). */
+    async saveState(peerId: string, state: NodeState) {
+      await init();
+      const owner = await accounts.verifiedOwner(nodeKey(peerId)?.node ?? "");
+      if (!owner || owner.peer_id !== peerId) return false;
+      await sql.run(
+        `INSERT INTO fleet_node_state (peer_id, node, user_id, state, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(peer_id) DO UPDATE SET node = excluded.node, user_id = excluded.user_id, state = excluded.state, updated_at = excluded.updated_at`,
+        [peerId, nodeKey(peerId)!.node, owner.user_id, JSON.stringify(state), iso()],
+      );
+      return true;
+    },
+
     /** Queue a node-side action for one verified node. Supersedes the same action still waiting. */
     async enqueue(userId: string, n: { node: string; peer_id: string }, action: NodeAction, args: Record<string, unknown> = {}) {
       await init();
@@ -324,8 +438,8 @@ export function createFleetService(deps: { sql: Sql; accounts: AccountStore; sit
       return true;
     },
 
-    /** Waiting commands per node, and each node's last pause/resume that went through. */
-    async state(userId: string): Promise<{ pending: Map<string, number>; paused: Map<string, boolean> }> {
+    /** Waiting commands per node, each node's last pause/resume that went through, and what each node reported. */
+    async state(userId: string): Promise<{ pending: Map<string, number>; paused: Map<string, boolean>; states: Map<string, { state: NodeState; at: string }> }> {
       await init();
       const pending = new Map<string, number>();
       for (const r of await sql.all(`SELECT node, COUNT(*) AS n FROM fleet_commands WHERE user_id = ? AND status IN ('queued', 'delivered') GROUP BY node`, [userId])) {
@@ -337,7 +451,32 @@ export function createFleetService(deps: { sql: Sql; accounts: AccountStore; sit
         [userId],
       );
       for (const r of rows) paused.set(String(r.node), r.action === "pause");
-      return { pending, paused };
+      const states = new Map<string, { state: NodeState; at: string }>();
+      for (const r of await sql.all(`SELECT node, state, updated_at FROM fleet_node_state WHERE user_id = ?`, [userId])) {
+        try {
+          const st = cleanNodeState(JSON.parse(String(r.state)));
+          if (st) states.set(String(r.node), { state: st, at: String(r.updated_at) });
+        } catch {}
+      }
+      return { pending, paused, states };
+    },
+
+    /** The last update command per node of this account (for the update-failed alert). */
+    async lastUpdates(userId: string): Promise<Map<string, { status: string; done_at: string | null; result: string | null }>> {
+      await init();
+      const out = new Map<string, { status: string; done_at: string | null; result: string | null }>();
+      const rows = await sql.all(
+        `SELECT node, status, done_at, result FROM fleet_commands WHERE user_id = ? AND action = 'update' AND status IN ('done', 'failed') ORDER BY done_at`,
+        [userId],
+      );
+      for (const r of rows) out.set(String(r.node), { status: String(r.status), done_at: (r.done_at as string) ?? null, result: (r.result as string) ?? null });
+      return out;
+    },
+
+    /** Forget a node's reported state (unlink). */
+    async dropState(userId: string, node: string) {
+      await init();
+      await sql.run(`DELETE FROM fleet_node_state WHERE user_id = ? AND node = ?`, [userId, node]);
     },
   };
 }
@@ -370,12 +509,18 @@ export async function runAction(o: {
     if (!tags || (action !== "set-tags" && tags.length === 0)) return { error: "tags: short lowercase words (a-z 0-9 . _ -), comma separated" };
   }
   if (action === "rename" && targets.length !== 1) return { error: "rename one node at a time" };
+  let cmdArgs: Record<string, unknown> | null = null;
+  if (isNodeAction(action)) {
+    const a = nodeArgs(action, args);
+    if (typeof a === "string") return { error: a };
+    cmdArgs = a;
+  }
   for (const n of targets) {
     let r: { ok: boolean; detail: string; command?: string };
     try {
       if (isNodeAction(action)) {
         if (!n.verified || !n.peer_id) r = { ok: false, detail: "not verified: run `c0mpute node link` on the node first" };
-        else r = { ok: true, detail: "queued", command: await fleet.enqueue(userId, { node: n.node, peer_id: n.peer_id }, action, {}) };
+        else r = { ok: true, detail: "queued", command: await fleet.enqueue(userId, { node: n.node, peer_id: n.peer_id }, action, cmdArgs!) };
       } else if (action === "rename") {
         const label = typeof args.label === "string" ? args.label.trim().slice(0, 64) || null : null;
         r = (await earnings.update(userId, n.node, { label })) ? { ok: true, detail: `renamed to ${label ?? "(none)"}` } : { ok: false, detail: "not found" };
@@ -394,13 +539,16 @@ export async function runAction(o: {
         // unlink
         const a = await earnings.unclaim(userId, n.node);
         const b = await accounts.unverifyNode(userId, n.node);
+        await fleet.dropState(userId, n.node).catch(() => {});
         r = a || b ? { ok: true, detail: "unlinked" } : { ok: false, detail: "not found" };
       }
     } catch (e) {
       r = { ok: false, detail: e instanceof Error ? e.message : "failed" };
     }
     results.push({ node: n.node, ...r });
-    await accounts.audit(userId, { node: n.node, action, args: action === "rename" || tags ? { ...args } : undefined, actor, outcome: `${r.ok ? "ok" : "refused"}: ${r.detail}` }).catch(() => {});
+    await accounts
+      .audit(userId, { node: n.node, action, args: action === "rename" || tags ? { ...args } : cmdArgs && Object.keys(cmdArgs).length ? cmdArgs : undefined, actor, outcome: `${r.ok ? "ok" : "refused"}: ${r.detail}` })
+      .catch(() => {});
   }
   return { results, ok: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length };
 }

@@ -71,7 +71,7 @@ c0mpute chat login   # the same thing, kept for scripts that use it`}
           API and MCP take <code>Authorization: Bearer c0k_...</code> (a key from <code>c0mpute login</code> or the account page). MCP clients
           (Claude, ChatGPT) can instead connect to <code>https://c0mpute.com/api/mcp</code> and sign in through OAuth; tools include{" "}
           <code>whoami</code>, <code>list_my_nodes</code>, <code>my_earnings</code>, <code>fleet_list</code>, <code>fleet_action</code>,{" "}
-          <code>fleet_earnings</code> and <code>link_node</code>.
+          <code>fleet_earnings</code>, <code>fleet_alerts_get</code>, <code>fleet_alerts_set</code> and <code>link_node</code>.
         </P>
         <Code>
 {`curl -H "authorization: Bearer $C0MPUTE_API_KEY" https://c0mpute.com/api/v1/me?nodes=1
@@ -111,6 +111,37 @@ c0mpute fleet tag <node...> --set vast,home  c0mpute fleet untag <node...> --set
 c0mpute fleet rename <node> "den 3060"       c0mpute fleet unlink <node...>
 c0mpute fleet earnings [--json]              c0mpute fleet audit
 c0mpute fleet token create|ls|revoke`}
+        </Code>
+        <P>
+          Node settings are signed commands too. The node writes them to <code>fleet-settings.json</code> in its config dir (never to your
+          config.toml), and reports its new state on the next poll, so the fleet view shows what each node really serves. Models and the
+          house/uncensored switches take effect at once; hosting and storage restart the worker after its running jobs finish. A
+          command-line <code>--no-storage</code> / <code>--no-hosting</code> on the node still wins. <code>default</code> hands a setting back to
+          the node&apos;s own config.
+        </P>
+        <Code>
+{`c0mpute fleet models <node...|--tag T|--all> --set qwen3:4b,llama3:8b   # serve only these (--clear: all)
+c0mpute fleet house-models on|off|default <node...|--tag T|--all>
+c0mpute fleet uncensored on|off|default <node...|--tag T|--all>
+c0mpute fleet hosting on|off|default <node...|--tag T|--all>
+c0mpute fleet storage on|off|default <node...|--tag T|--all>
+# API: POST /api/v1/fleet/actions {"action":"hosting","tag":"rack-a","args":{"on":false}}
+#      {"action":"models","nodes":["AbCd1234"],"args":{"models":["qwen3:4b"]}}`}
+        </Code>
+      </Section>
+
+      <Section h="alerts" title="[ fleet alerts ]">
+        <P>
+          Email when a node goes offline (default after 15 minutes), the fleet&apos;s earnings drop (the last 24 hours against the trailing
+          7-day daily average, default 50% down), an update fails, or a disk runs low (default under 10 GB or 5% free). One email when it
+          starts and one when it is fixed; a node that flaps inside the cooldown (default 60 minutes) does not send more. The address is
+          confirmed by a link first. Set it on <Link href="/account#alerts">your account</Link>, or:
+        </P>
+        <Code>
+{`c0mpute fleet alerts set --email you@example.com --offline-minutes 15 --disk-min-gb 20 --off earnings
+c0mpute fleet alerts get [--json]
+c0mpute fleet alerts test
+# API: GET|PUT /api/v1/fleet/alerts, POST {"test":true}   MCP: fleet_alerts_get, fleet_alerts_set`}
         </Code>
       </Section>
 
@@ -291,6 +322,84 @@ c0mpute infernet model list
 c0mpute infernet model recommend --use-case marketing
 c0mpute infernet model recommend --use-case research
 c0mpute infernet model recommend --use-case coding`}
+        </Code>
+      </Section>
+
+      <Section h="api" title="[ chat API (OpenAI-compatible) ]">
+        <P>
+          Base URL <code>https://c0mpute.com/v1</code> with an API key
+          (<code>c0k_...</code>) from the chat&apos;s keys tab:{" "}
+          <code>POST /v1/chat/completions</code> and <code>GET /v1/models</code>.
+          Any OpenAI SDK works. Honored: <code>model</code> (a model id, or{" "}
+          <code>auto</code>, <code>auto:fast</code>, <code>auto:standard</code>,{" "}
+          <code>auto:high</code>, <code>auto:max</code> for the router),{" "}
+          <code>messages</code> (string content or text content parts; image
+          parts get a 400, no vision model serves the API yet),{" "}
+          <code>stream</code>, <code>temperature</code>,{" "}
+          <code>max_tokens</code> (up to 8192), <code>response_format</code>{" "}
+          (<code>json_object</code> / <code>json_schema</code>, as an
+          instruction to the model) and the tool-calling fields below.
+        </P>
+        <P>
+          <b>Tool calling.</b> <code>tools</code> (type <code>function</code>),{" "}
+          <code>tool_choice</code> (<code>auto</code>, <code>none</code>,{" "}
+          <code>required</code> or a named function),{" "}
+          <code>parallel_tool_calls</code>, assistant messages with{" "}
+          <code>tool_calls</code> and <code>role: &quot;tool&quot;</code>{" "}
+          results with <code>tool_call_id</code>. Replies carry{" "}
+          <code>choices[0].message.tool_calls</code> (ids, arguments as a JSON
+          string) and <code>finish_reason: &quot;tool_calls&quot;</code>;
+          streamed, they arrive as <code>delta.tool_calls</code> chunks, and{" "}
+          <code>stream_options.include_usage</code> adds a usage chunk (token
+          counts are estimated at about 4 characters a token). Works with the
+          OpenAI SDKs, LangChain <code>bindTools</code>, the Vercel AI SDK,
+          n8n&apos;s AI Agent, LiteLLM and opencode.
+        </P>
+        <P>
+          Tool-capable models: <code>qwen3:4b</code>,{" "}
+          <code>nemotron-3-nano:4b</code>, <code>qwen2.5-coder:7b</code>{" "}
+          (tested on a node), and the same families at other sizes:{" "}
+          <code>qwen3*</code>, <code>qwen3-coder</code>,{" "}
+          <code>qwen2.5-coder:14b</code>, <code>qwen3.5</code> builds,{" "}
+          <code>devstral</code>, <code>llama3.1+</code>,{" "}
+          <code>mistral-nemo</code>. With <code>auto</code> a request with
+          tools goes to the best tool-capable model online and moves to the
+          next one if a node is busy. A request with tools for any other
+          model is refused with a 400 naming the ones that work, so tools are
+          never dropped silently. Every model uses the{" "}
+          <code>&lt;tool_call&gt;</code> format the Qwen and Hermes families
+          are trained on (what Ollama&apos;s own templates render), translated
+          to and from OpenAI fields at c0mpute.com, so every node version
+          serves tool requests. Each call is one ordinary chat job, billed the
+          same as a chat turn; a reply with an unreadable tool call gets one
+          repair retry.
+        </P>
+        <Code>
+{`# 1. Offer a tool; the model asks for it
+curl -sS https://c0mpute.com/v1/chat/completions \\
+  -H "Authorization: Bearer $C0MPUTE_KEY" -H "Content-Type: application/json" \\
+  -d '{"model": "auto",
+       "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+       "tools": [{"type": "function", "function": {
+         "name": "get_weather", "description": "Current weather for a city",
+         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]}'
+# -> choices[0].finish_reason = "tool_calls"
+#    choices[0].message.tool_calls = [{"id": "call_abc...", "type": "function",
+#      "function": {"name": "get_weather", "arguments": "{\\"city\\":\\"Paris\\"}"}}]
+
+# 2. Run the tool yourself, send the result back with the same id
+curl -sS https://c0mpute.com/v1/chat/completions \\
+  -H "Authorization: Bearer $C0MPUTE_KEY" -H "Content-Type: application/json" \\
+  -d '{"model": "auto",
+       "messages": [
+         {"role": "user", "content": "What is the weather in Paris?"},
+         {"role": "assistant", "content": null, "tool_calls": [{"id": "call_abc", "type": "function",
+           "function": {"name": "get_weather", "arguments": "{\\"city\\":\\"Paris\\"}"}}]},
+         {"role": "tool", "tool_call_id": "call_abc", "content": "{\\"temp_c\\": 17, \\"conditions\\": \\"light rain\\"}"}],
+       "tools": [{"type": "function", "function": {
+         "name": "get_weather", "description": "Current weather for a city",
+         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]}'
+# -> choices[0].message.content = "It is 17 C with light rain in Paris."`}
         </Code>
       </Section>
 

@@ -16,6 +16,7 @@ import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store
 import { DEFAULT_PLUGINS } from "./plugin-policy";
 import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
 import { createShareStore, type ShareStore } from "./share-store";
+import { createLiveStore } from "../live/store";
 import { createMediaStore, type MediaKind, type MediaStore } from "./media-owners";
 
 // ── store ────────────────────────────────────────────────────────────────────
@@ -98,6 +99,10 @@ let _shareStore: ShareStore | null = null;
 export const shareStore = () => (_shareStore ??= createShareStore(cloudSql));
 
 let _convoStore: ConvoStore | null = null;
+let _liveStore: ReturnType<typeof createLiveStore> | null = null;
+/** c0mpute Live: account-bound live streams and what their relays are owed. */
+export const liveStore = () => (_liveStore ??= createLiveStore(cloudSql));
+
 export const convoStore = () =>
   (_convoStore ??= createConvoStore(cloudSql, { key: convoKey(pluginKey(env("C0MPUTE_CHAT_KEY")), pluginKey(env("C0MPUTE_PLUGIN_KEY"))) }));
 

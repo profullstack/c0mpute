@@ -3,6 +3,7 @@
 // trusted client key; c0mpute users are rate-limited per account here.
 
 import { parseAutoModel } from "@/lib/router";
+import { parseTooling, renderMessages, type Tooling } from "./tools";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ChatRequest = {
@@ -11,38 +12,81 @@ export type ChatRequest = {
   stream?: boolean;
   temperature?: number;
   max_tokens?: number;
+  /** OpenAI tools / tool_choice / parallel_tool_calls (lib/chat/tools.ts). Never forwarded as-is. */
+  tooling?: Tooling;
+  /** stream_options.include_usage */
+  include_usage?: boolean;
 };
 
-const ROLES = new Set(["system", "user", "assistant"]);
 const MAX_CHARS = 200_000;
 const MAX_MESSAGES = 200;
 
-/** Validate and strip a client body down to what we forward. */
+/**
+ * Validate a client body and strip it down to what we forward. Messages come
+ * back as plain system/user/assistant strings: content-part arrays are
+ * flattened to their text, and tool history (assistant tool_calls, role
+ * "tool") is rendered into the `<tool_call>` / `<tool_response>` format the
+ * models were trained on (lib/chat/tools.ts).
+ */
 export function parseChatRequest(body: unknown): ChatRequest | string {
   if (!body || typeof body !== "object") return "body must be a JSON object";
   const b = body as Record<string, unknown>;
   if (!Array.isArray(b.messages) || b.messages.length === 0) return "messages[] is required";
   if (b.messages.length > MAX_MESSAGES) return `at most ${MAX_MESSAGES} messages`;
-  let chars = 0;
-  const messages: ChatMessage[] = [];
-  for (const m of b.messages as Record<string, unknown>[]) {
-    if (!m || typeof m.content !== "string" || !ROLES.has(m.role as string)) {
-      return "each message must be { role: system|user|assistant, content: string }";
-    }
-    chars += m.content.length;
-    messages.push({ role: m.role as ChatMessage["role"], content: m.content });
-  }
+  const messages = renderMessages(b.messages);
+  if (typeof messages === "string") return messages;
+  const chars = messages.reduce((n, m) => n + m.content.length, 0);
   if (chars > MAX_CHARS) return `messages total more than ${MAX_CHARS} characters`;
+  const tooling = parseTooling(b);
+  if (typeof tooling === "string") return tooling;
+  const jsonNote = responseFormatNote(b.response_format);
+  if (jsonNote && typeof jsonNote === "object") return jsonNote.error;
+  if (jsonNote) {
+    // Into the caller's system prompt, or after the house prompt it would have had.
+    const i = messages.findIndex((m) => m.role === "system");
+    if (i >= 0) messages[i] = { role: "system", content: `${messages[i].content}\n\n${jsonNote}` };
+    else messages.unshift({ role: "system", content: `${C0_SYSTEM_PROMPT}\n\n${jsonNote}` });
+  }
   const out: ChatRequest = { messages, stream: b.stream === true };
+  if (tooling && tooling.choice !== "none") out.tooling = tooling;
+  const so = b.stream_options as Record<string, unknown> | undefined;
+  if (so && typeof so === "object" && so.include_usage === true) out.include_usage = true;
   // "auto" and the router aliases ("auto:high", ...) are not model ids.
   if (typeof b.model === "string" && b.model && !parseAutoModel(b.model)) out.model = b.model.slice(0, 200);
   if (typeof b.temperature === "number" && Number.isFinite(b.temperature)) {
     out.temperature = Math.min(2, Math.max(0, b.temperature));
   }
-  if (typeof b.max_tokens === "number" && Number.isFinite(b.max_tokens)) {
-    out.max_tokens = Math.min(8192, Math.max(1, Math.floor(b.max_tokens)));
+  const maxTokens = typeof b.max_completion_tokens === "number" ? b.max_completion_tokens : b.max_tokens;
+  if (typeof maxTokens === "number" && Number.isFinite(maxTokens)) {
+    out.max_tokens = Math.min(8192, Math.max(1, Math.floor(maxTokens)));
   }
   return out;
+}
+
+/**
+ * `response_format`: Infernet carries no format field to the node, so JSON
+ * mode is an instruction appended as a system turn (the router also checks
+ * the reply parses when it routes). "text" or absent: nothing.
+ */
+export function responseFormatNote(rf: unknown): string | null | { error: string } {
+  if (rf === undefined || rf === null) return null;
+  if (typeof rf !== "object") return { error: "response_format must be an object" };
+  const r = rf as Record<string, unknown>;
+  if (r.type === "text") return null;
+  const base = "Respond with one valid JSON object only: no prose, no code fences.";
+  if (r.type === "json_object") return base;
+  if (r.type === "json_schema") {
+    const js = r.json_schema as Record<string, unknown> | undefined;
+    const schema = js && typeof js === "object" ? js.schema : undefined;
+    return schema ? `${base} It must match this JSON Schema:\n${JSON.stringify(schema).slice(0, 8000)}` : base;
+  }
+  return { error: 'response_format.type must be "text", "json_object" or "json_schema"' };
+}
+
+/** The request as Infernet takes it: only the fields it reads. */
+function wireBody(req: ChatRequest) {
+  const { tooling: _t, include_usage: _u, ...rest } = req;
+  return rest;
 }
 
 export type Upstream = (path: string, init?: RequestInit) => Promise<Response>;
@@ -86,7 +130,7 @@ export async function forwardChat(upstream: Upstream, req: ChatRequest, signal?:
   return upstream("/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", accept: req.stream ? "text/event-stream" : "application/json" },
-    body: JSON.stringify({ ...req, messages: withHousePrompt(req.messages), p2p_only: true }),
+    body: JSON.stringify({ ...wireBody(req), messages: withHousePrompt(req.messages), p2p_only: true }),
     signal,
   });
 }

@@ -181,7 +181,7 @@ pub fn installed(kind: GpuKind) -> bool {
 /// Why this GPU box would not run the house Ollama, or None when it would.
 pub fn gate(config: &crate::config::InferenceConfig, gpu: Option<Gpu>, free_disk: u64, is_installed: bool) -> Option<String> {
     if !config.auto_install_enabled() {
-        return Some("turned off (C0MPUTE_INFERENCE_AUTO=0 or [inference] auto_install = false)".into());
+        return Some("turned off (C0MPUTE_INFERENCE_AUTO=0, [inference] auto_install = false, or house models off from the fleet)".into());
     }
     let Some(gpu) = gpu else {
         return Some("no NVIDIA or discrete AMD GPU".into());

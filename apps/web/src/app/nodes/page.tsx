@@ -38,6 +38,7 @@ function jobLabel(t: string): string {
     "video.img2vid": "image to video",
     "ffmpeg.transcode": "transcode",
     "workflow.step": "workflow step",
+    "live.relay": "live stream relay",
     "container.run": "container",
     "infernet.temporal.train": "fine-tune",
     "infernet.temporal.infer": "temporal inference",
