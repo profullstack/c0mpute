@@ -10,7 +10,7 @@ import { mailBody, type GalleryMail } from "./email";
 import { createGalleryService, GalleryError, parseSubmission, publicStatus, type Submission } from "./service";
 import { createGalleryStore, toEntry } from "./store";
 import { normalizeUrl } from "./url";
-import { checkBadge, FetchRefused, hasBadge, isPrivateAddress, safeFetch } from "./verify";
+import { checkBadge, FetchRefused, hasBadge, isPrivateAddress, readReputation, safeFetch } from "./verify";
 
 process.env.CROSS_PROMO = "bundled"; // never fetch the catalog in tests
 
@@ -97,6 +97,22 @@ describe("SSRF guard", () => {
     const resolve = async (h: string) => (h === "internal.example" ? ["127.0.0.1"] : ["93.184.216.34"]);
     await expect(safeFetch("https://example.com", { fetch: w.fetch, resolve })).rejects.toThrow(/private/);
     await expect(safeFetch("https://example.com:2375/", { fetch: w.fetch, resolve })).rejects.toThrow(/port/);
+  });
+});
+
+describe("reputation", () => {
+  test("only domain-level lists block; an IP on Spamhaus ZEN is a note", () => {
+    const shared = readReputation({
+      listed: true,
+      reasons: ["23.95.0.1 (A record) on Spamhaus ZEN: SBL"],
+      dnsbl: [{ list: "Spamhaus DBL", status: "clear" }, { list: "URIBL", status: "clear" }],
+      indicators: [],
+      addresses: [{ ip: "23.95.0.1", listed: true }],
+    });
+    expect(shared.listed).toBe(false);
+    expect(shared.notes?.[0]).toMatch(/IP blocklist/);
+    expect(readReputation({ dnsbl: [{ list: "Spamhaus DBL", status: "listed" }] })).toMatchObject({ listed: true, reasons: ["Spamhaus DBL: listed"] });
+    expect(readReputation({ indicators: ["phishing"] }).listed).toBe(true);
   });
 });
 
