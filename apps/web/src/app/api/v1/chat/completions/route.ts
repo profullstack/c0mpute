@@ -4,6 +4,7 @@ import { pluginChatResponse } from "@/lib/chat/plugin-http";
 import { runManager } from "@/lib/chat/run-manager";
 import { RunLimitError, SSE_HEADERS } from "@/lib/chat/runs";
 import { routeRequest, routedChat, routerEnabled } from "@/lib/chat/routed";
+import { toolChatResponse } from "@/lib/chat/tools-http";
 import { currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
 import { recordUsage } from "@/lib/leaderboard/server";
 
@@ -16,7 +17,13 @@ const err = (status: number, message: string, headers: Record<string, string> = 
 /**
  * OpenAI-compatible chat completions on the c0mpute network.
  *   Authorization: Bearer c0k_...   (or the c0mpute.com session cookie)
- *   POST { model?, messages, stream?, temperature?, max_tokens?, plugins?: false, approvals?: string[], plugin_events?: true }
+ *   POST { model?, messages, stream?, temperature?, max_tokens?, tools?, tool_choice?, parallel_tool_calls?,
+ *          response_format?, stream_options?, plugins?: false, approvals?: string[], plugin_events?: true }
+ *
+ * `tools`: OpenAI function calling. Replies carry message.tool_calls and
+ * finish_reason "tool_calls" (streamed as delta.tool_calls); role "tool"
+ * results and assistant tool_calls are accepted in history. Only
+ * tool-capable models take them (lib/chat/tools.ts); others get a 400.
  *
  * `model`: a model id goes straight to that model. "auto" (or absent),
  * "auto:fast" | "auto:standard" | "auto:high" | "auto:max" goes through the
@@ -43,6 +50,20 @@ export async function POST(req: Request) {
   if (typeof parsed === "string") return err(400, parsed);
   // One count for the public leaderboard: the surface and the model name, nothing else.
   recordUsage(user.id, user.token_kind === "session" ? "chat" : "api", typeof raw?.model === "string" ? raw.model : "auto");
+
+  // OpenAI tool calling (`tools`, tool_choice not "none"): the client runs its
+  // own tool loop, so server-side plugins, resumable runs and the multi-step
+  // router stay out of it. Only tool-capable models take it; never dropped.
+  if (parsed.tooling) {
+    return toolChatResponse({ upstream: infernetFor(user.coinpay_sub), req: parsed, rawModel: raw?.model, signal: req.signal });
+  }
+
+  // OpenAI tool calling (`tools` with tool_choice other than "none"): the
+  // client runs its own tools, so server-side plugins, resumable runs and the
+  // multi-model router stay out of it (lib/chat/tools.ts).
+  if (parsed.tooling) {
+    return toolChatResponse({ upstream: infernetFor(user.coinpay_sub), req: parsed, rawModel: raw?.model, signal: req.signal });
+  }
 
   // Chat plugins: with any plugin on (and not `plugins: false`), the server
   // runs the tool loop; each model step is billed like a normal turn.
