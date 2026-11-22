@@ -11,6 +11,7 @@ export const env = (name: string): string => (process.env as Record<string, stri
 import { createStore, type Sql, type Store, type User } from "./store";
 import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
+import { createStorageStore, type StorageStore } from "./storage";
 import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
 import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
 import { createShareStore, type ShareStore } from "./share-store";
@@ -69,6 +70,24 @@ export const pushStore = () =>
       return cfg ? moderatePush(files, cfg) : { verdict: "unchecked", reason: "no labeler configured (C0MPUTE_LABELER_TOKEN)" };
     },
   }));
+
+let _storageStore: StorageStore | null = null;
+const envBytes = (name: string) => (Number(env(name)) > 0 ? Number(env(name)) : undefined);
+/** Linked storage identities and app upload sessions (docs/private-storage.md). */
+export const storageStore = () =>
+  (_storageStore ??= createStorageStore(cloudSql, {
+    ticketSeed: () => env("C0MPUTE_STORAGE_TICKET_KEY"),
+    limits: Object.fromEntries(
+      Object.entries({
+        maxUploadBytes: envBytes("C0MPUTE_STORAGE_MAX_UPLOAD_BYTES"),
+        dailyBytes: envBytes("C0MPUTE_STORAGE_DAILY_BYTES"),
+        totalBytes: envBytes("C0MPUTE_STORAGE_TOTAL_BYTES"),
+        uploadsPerHour: envBytes("C0MPUTE_STORAGE_UPLOADS_PER_HOUR"),
+      }).filter(([, v]) => v !== undefined),
+    ),
+  }));
+/** The gateway apps stream sealed bytes to (it must have the ticket key's public half configured). */
+export const storageIngestUrl = () => (env("C0MPUTE_STORAGE_INGEST_URL") || "https://gateway.c0mpute.com").replace(/\/$/, "");
 
 let _oauthStore: OAuthStore | null = null;
 /** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
@@ -152,7 +171,10 @@ function cookie(req: Request, name: string): string | null {
  * Every other route sees it as signed out, so this is the one place the scope
  * is enforced.
  */
-export async function currentUser(req: Request, opts: { oauth?: boolean } = {}): Promise<(User & { token_kind: string }) | null> {
+export async function currentUser(
+  req: Request,
+  opts: { oauth?: boolean; scope?: string } = {},
+): Promise<(User & { token_kind: string; token_scope?: string | null; token_label?: string | null }) | null> {
   const token = bearer(req) ?? cookie(req, SESSION_COOKIE);
   try {
     return scopedUser(await store().userForToken(token), opts);
@@ -162,9 +184,26 @@ export async function currentUser(req: Request, opts: { oauth?: boolean } = {}):
   }
 }
 
-/** The "mcp" scope: an OAuth-issued key is a user only where `oauth` is allowed. */
-export function scopedUser<T extends { token_kind: string }>(user: T | null, opts: { oauth?: boolean } = {}): T | null {
-  return user?.token_kind === "oauth" && !opts.oauth ? null : user;
+/** The scopes an OAuth-issued key carries (keys from before scopes: "mcp"). */
+export function tokenScopes(user: { token_scope?: string | null }): string[] {
+  return (user.token_scope || "mcp").split(/\s+/).filter(Boolean);
+}
+
+/**
+ * OAuth-issued keys are a user only where one of their scopes is accepted:
+ * "mcp" where the route passes `oauth: true` (the MCP server and the media it
+ * links to), "storage:write" where it passes `scope: "storage:write"`.
+ * Sessions and full API keys pass everywhere.
+ */
+export function scopedUser<T extends { token_kind: string; token_scope?: string | null }>(
+  user: T | null,
+  opts: { oauth?: boolean; scope?: string } = {},
+): T | null {
+  if (user?.token_kind !== "oauth") return user;
+  const scopes = tokenScopes(user);
+  if (opts.oauth && scopes.includes("mcp")) return user;
+  if (opts.scope && scopes.includes(opts.scope)) return user;
+  return null;
 }
 
 export function sessionToken(req: Request) {

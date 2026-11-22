@@ -89,6 +89,10 @@ const INFO_COMMIT: &[u8] = b"c0mpute-private-v1 commit";
 const INFO_BODY: &[u8] = b"c0mpute-private-v1 body";
 const INFO_WRAP: &[u8] = b"c0mpute-private-v1 wrap";
 const INFO_ROSTER: &[u8] = b"c0mpute-private-v1 roster";
+const INFO_CUSTODY: &[u8] = b"c0mpute-private-v1 custody";
+/// Length of a decoded custody blob: X25519 ephemeral public key (32) +
+/// AES-256-GCM sealed 32-byte signing seed (48).
+const CUSTODY_LEN: usize = 32 + 32 + 16;
 const SIG_DOMAIN: &str = "c0mpute-private-v1 object";
 
 /// A data key. Zeroized on drop; not `Clone` (use [`DataKey::duplicate`]
@@ -201,6 +205,18 @@ pub struct Meta {
     pub files: BTreeMap<String, SiteFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<PartRef>,
+    /// Custody of the per-object signing key, on objects sealed by someone
+    /// other than their owner: an app uploading into a user's private
+    /// storage (`docs/private-storage.md`, "Publish from apps"). The app
+    /// cannot derive the owner's per-object key, so it signs with a fresh
+    /// ed25519 key and wraps that key's 32-byte seed to the owner's storage
+    /// key here ([`wrap_custody`]). Only the owner can unwrap it
+    /// ([`unwrap_custody`]), which is what lets the owner's CLI update,
+    /// share, revoke and delete the object later. Readers who hold the data
+    /// key (share recipients, link holders) see an opaque blob they cannot
+    /// open. Absent on objects the owner sealed itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody: Option<String>,
 }
 
 /// The hosting site id for an owner key (hex) and name: 20 hex characters of
@@ -404,10 +420,29 @@ pub fn seal(content: &[u8], p: &SealParams<'_>) -> Result<Sealed, SealError> {
 /// own body key and its own nonce space. Never pass a DEK obtained from
 /// someone else's object.
 pub fn seal_with_key(content: &[u8], p: &SealParams<'_>, dek: DataKey) -> Result<Sealed, SealError> {
+    seal_inner(content, p, dek, p.owner.object_signing_key(p.name), None)
+}
+
+/// Seal `content` signed by an explicit per-object key instead of the one
+/// derived from `p.owner`: for objects first sealed by an app on the owner's
+/// behalf (see [`Meta::custody`]). `custody` is carried into the metadata
+/// unchanged, so a re-sealed (revoked) version stays manageable. `dek: None`
+/// draws a fresh data key. `p.owner` still seals the roster.
+pub fn seal_custodial(
+    content: &[u8],
+    p: &SealParams<'_>,
+    signing_seed: &[u8; 32],
+    custody: Option<String>,
+    dek: Option<DataKey>,
+) -> Result<Sealed, SealError> {
+    let signer = ed25519_dalek::SigningKey::from_bytes(signing_seed);
+    seal_inner(content, p, dek.unwrap_or_else(DataKey::generate), signer, custody)
+}
+
+fn seal_inner(content: &[u8], p: &SealParams<'_>, dek: DataKey, signer: ed25519_dalek::SigningKey, custody: Option<String>) -> Result<Sealed, SealError> {
     if content.len() as u64 > MAX_CONTENT {
         return Err(SealError::TooLarge);
     }
-    let signer = p.owner.object_signing_key(p.name);
     let owner_hex = hex::encode(signer.verifying_key().as_bytes());
     let site_id = site_id_for(&owner_hex, p.name);
     let meta = Meta {
@@ -423,6 +458,7 @@ pub fn seal_with_key(content: &[u8], p: &SealParams<'_>, dek: DataKey) -> Result
         version: if p.version == 0 { now_version() } else { p.version },
         files: p.files.clone(),
         parts: p.parts.clone(),
+        custody,
     };
     let meta_bytes = Zeroizing::new(serde_json::to_vec(&meta).map_err(|e| SealError::BadMeta(e.to_string()))?);
     if meta_bytes.len() > MAX_META {
@@ -685,6 +721,89 @@ pub fn unwrap_dek(blob: &[u8], secret: &StorageSecret) -> Result<DataKey, SealEr
         return Err(SealError::WrongKey);
     }
     Ok(dek)
+}
+
+/// Wrap a per-object ed25519 signing seed to the owner's storage key, for
+/// [`Meta::custody`]. Same construction as a key-wrap slot, under its own
+/// HKDF label: fresh ephemeral X25519 key `e`, `ss = X25519(e, R)`,
+/// `KEK = HKDF(ss, salt = e_pub || R, "c0mpute-private-v1 custody")`,
+/// `blob = e_pub || AES-256-GCM(KEK, nonce = 0^96, aad = magic || object
+/// owner public key, seed)`, base64url. The AAD pins the blob to the object
+/// key it carries, so it cannot be moved onto another object.
+pub fn wrap_custody(signing_seed: &[u8; 32], to: &StoragePublic) -> Result<String, SealError> {
+    let owner_pub = ed25519_dalek::SigningKey::from_bytes(signing_seed).verifying_key().to_bytes();
+    let eph = EphemeralSecret::random_from_rng(OsRng);
+    let eph_pub = PublicKey::from(&eph);
+    let ss = eph.diffie_hellman(&PublicKey::from(to.0));
+    if !ss.was_contributory() {
+        return Err(SealError::BadMeta("owner key is a low-order point".into()));
+    }
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(eph_pub.as_bytes());
+    salt[32..].copy_from_slice(&to.0);
+    let kek = hkdf32(ss.as_bytes(), &salt, INFO_CUSTODY);
+    let cipher = Aes256Gcm::new_from_slice(kek.as_ref()).expect("32-byte key");
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&[0u8; 12]), Payload { msg: signing_seed, aad: &custody_aad(&owner_pub) })
+        .map_err(|_| SealError::Tampered)?;
+    let mut out = Vec::with_capacity(CUSTODY_LEN);
+    out.extend_from_slice(eph_pub.as_bytes());
+    out.extend_from_slice(&ct);
+    Ok(URL_SAFE_NO_PAD.encode(out))
+}
+
+/// Hex ed25519 public key of a per-object signing seed: the `owner` an
+/// object signed with it carries, and the key its hosting record names.
+pub fn object_owner_hex(signing_seed: &[u8; 32]) -> String {
+    hex::encode(ed25519_dalek::SigningKey::from_bytes(signing_seed).verifying_key().as_bytes())
+}
+
+fn custody_aad(owner_pub: &[u8; 32]) -> [u8; 8 + 32] {
+    let mut a = [0u8; 40];
+    a[..8].copy_from_slice(&MAGIC);
+    a[8..].copy_from_slice(owner_pub);
+    a
+}
+
+/// The per-object signing seed from an opened object's [`Meta::custody`],
+/// when `secret` is the storage key it was wrapped to. Checks that the seed
+/// is the key the object is signed with. [`SealError::NoSlot`] when the
+/// object has no custody blob or it is not addressed to `secret`.
+pub fn unwrap_custody(meta: &Meta, secret: &StorageSecret) -> Result<Zeroizing<[u8; 32]>, SealError> {
+    let raw = meta.custody.as_deref().ok_or(SealError::NoSlot)?;
+    let blob = Zeroizing::new(URL_SAFE_NO_PAD.decode(raw.trim()).map_err(|_| SealError::BadMeta("custody is not base64url".into()))?);
+    if blob.len() != CUSTODY_LEN {
+        return Err(SealError::BadMeta("custody has the wrong length".into()));
+    }
+    let owner_pub: [u8; 32] = hex::decode(&meta.owner)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or(SealError::BadSignature)?;
+    let mut eph = [0u8; 32];
+    eph.copy_from_slice(&blob[..32]);
+    let ss = secret.x25519().diffie_hellman(&PublicKey::from(eph));
+    if !ss.was_contributory() {
+        return Err(SealError::NoSlot);
+    }
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(&eph);
+    salt[32..].copy_from_slice(&secret.public().0);
+    let kek = hkdf32(ss.as_bytes(), &salt, INFO_CUSTODY);
+    let cipher = Aes256Gcm::new_from_slice(kek.as_ref()).expect("32-byte key");
+    let pt = Zeroizing::new(
+        cipher
+            .decrypt(Nonce::from_slice(&[0u8; 12]), Payload { msg: &blob[32..], aad: &custody_aad(&owner_pub) })
+            .map_err(|_| SealError::NoSlot)?,
+    );
+    if pt.len() != 32 {
+        return Err(SealError::NoSlot);
+    }
+    let mut seed = Zeroizing::new([0u8; 32]);
+    seed.copy_from_slice(&pt);
+    if ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes() != owner_pub {
+        return Err(SealError::BadSignature);
+    }
+    Ok(seed)
 }
 
 /// A random object name for the network record: 26 base32-ish characters
@@ -1078,6 +1197,50 @@ mod tests {
         p.version = 42;
         let s = seal(b"x", &p).unwrap();
         assert_eq!(open(&s.blob, &s.dek, None).unwrap().meta.version, 42);
+    }
+
+    #[test]
+    fn custodial_objects_are_signed_by_the_app_key_and_manageable_by_the_owner() {
+        // An app seals for alice with a fresh key it made and wraps that key
+        // to her. Alice opens it, recovers the signing key, and re-seals.
+        let f = fixture();
+        let app_seed = [42u8; 32];
+        let custody = wrap_custody(&app_seed, &f.alice.public()).unwrap();
+        let app_owner = StorageSecret::generate(); // seals the roster; not alice
+        let s = seal_custodial(b"from an app", &params(&app_owner, &f.name, &[f.alice.public()]), &app_seed, Some(custody), None).unwrap();
+        let (o, dek) = open_with_secret(&s.blob, &f.alice, Some(&s.site_id)).unwrap();
+        assert_eq!(&*o.content, b"from an app");
+        let app_pub = hex::encode(ed25519_dalek::SigningKey::from_bytes(&app_seed).verifying_key().as_bytes());
+        assert_eq!(o.meta.owner, app_pub);
+        assert_eq!(s.site_id, site_id_for(&app_pub, &f.name));
+        let seed = unwrap_custody(&o.meta, &f.alice).unwrap();
+        assert_eq!(*seed, app_seed);
+        // Nobody else can unwrap it, not even a share recipient with the DEK.
+        let bob = StorageSecret::generate();
+        assert_eq!(unwrap_custody(&o.meta, &bob).unwrap_err(), SealError::NoSlot);
+        let by_link = open(&s.blob, &dek, None).unwrap();
+        assert!(by_link.meta.custody.is_some());
+        // Re-sealed by the owner under the same key: same site, still opens.
+        let v2 = seal_custodial(b"revoked", &params(&f.alice, &f.name, &[f.alice.public()]), &seed, o.meta.custody.clone(), None).unwrap();
+        assert_eq!(v2.site_id, s.site_id);
+        let (o2, _) = open_with_secret(&v2.blob, &f.alice, Some(&s.site_id)).unwrap();
+        assert_eq!(&*o2.content, b"revoked");
+        assert_eq!(*unwrap_custody(&o2.meta, &f.alice).unwrap(), app_seed);
+    }
+
+    #[test]
+    fn custody_cannot_be_moved_to_another_object() {
+        let f = fixture();
+        let custody = wrap_custody(&[7u8; 32], &f.alice.public()).unwrap();
+        // An object signed by a different key that copies the custody blob.
+        let s = seal_custodial(b"x", &params(&f.alice, &f.name, &[f.alice.public()]), &[8u8; 32], Some(custody), None).unwrap();
+        let (o, _) = open_with_secret(&s.blob, &f.alice, None).unwrap();
+        assert!(unwrap_custody(&o.meta, &f.alice).is_err());
+        // Objects the owner sealed itself carry no custody.
+        let own = seal(b"x", &params(&f.alice, &f.name, &[f.alice.public()])).unwrap();
+        let (o, _) = open_with_secret(&own.blob, &f.alice, None).unwrap();
+        assert!(o.meta.custody.is_none());
+        assert_eq!(unwrap_custody(&o.meta, &f.alice).unwrap_err(), SealError::NoSlot);
     }
 
     #[test]

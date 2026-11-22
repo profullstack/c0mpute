@@ -1,0 +1,73 @@
+name: sealed-js
+
+# @profullstack/c0mpute-sealed (packages/sealed) must stay byte-compatible
+# with the Rust sealed format: its own tests, then objects it seals are opened,
+# shared, revoked and deleted with the code behind `c0mpute storage get`
+# (node/crates/c0mpute-core/tests/sealed_js_interop.rs).
+
+on:
+  pull_request:
+    paths:
+      - "packages/sealed/**"
+      - "node/crates/c0mpute-sealed/**"
+      - "node/crates/c0mpute-core/src/sealed_store.rs"
+      - "node/crates/c0mpute-core/src/hosting/sealed_ingest.rs"
+      - "node/crates/c0mpute-core/src/hosting/site.rs"
+      - "node/crates/c0mpute-core/tests/sealed_js_interop.rs"
+      - ".github/workflows/sealed-js.yml"
+  push:
+    branches: [master]
+    paths:
+      - "packages/sealed/**"
+      - "node/crates/c0mpute-sealed/**"
+      - "node/crates/c0mpute-core/src/sealed_store.rs"
+      - "node/crates/c0mpute-core/src/hosting/sealed_ingest.rs"
+      - "node/crates/c0mpute-core/src/hosting/site.rs"
+      - "node/crates/c0mpute-core/tests/sealed_js_interop.rs"
+  workflow_dispatch:
+
+concurrency:
+  group: sealed-js-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  interop:
+    name: js tests + rust interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: JS tests (in a copy, outside the bun workspace)
+        run: |
+          cp -r packages/sealed "$RUNNER_TEMP/sealed"
+          cd "$RUNNER_TEMP/sealed"
+          npm install --no-audit --no-fund
+          npm test
+
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        run: |
+          version=$(grep -E '^rust\s*=' .mise.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=${version:-stable}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Objects sealed in JS open in Rust
+        env:
+          C0MPUTE_JS_INTEROP: "1"
+          C0MPUTE_DISABLE_MDNS: "1"
+        run: |
+          export C0MPUTE_SEALED_JS_DIR="$RUNNER_TEMP/sealed"
+          cargo test -p c0mpute-core --locked --test sealed_js_interop -- --nocapture

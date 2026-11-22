@@ -922,7 +922,7 @@ impl P2pChat {
     }
 }
 
-async fn login(rest: &[String]) -> Result<()> {
+pub(crate) async fn login(rest: &[String]) -> Result<()> {
     let mut url_flag = None;
     let mut it = rest.iter();
     while let Some(arg) = it.next() {

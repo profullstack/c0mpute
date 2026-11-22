@@ -1,5 +1,5 @@
-import { consentToken, redirectMatches, SCOPE, tokenEq } from "@/lib/chat/oauth";
-import { currentUser, oauthStore, sessionToken, siteUrl } from "@/lib/chat/server";
+import { consentToken, parseScope, redirectMatches, tokenEq } from "@/lib/chat/oauth";
+import { currentUser, oauthStore, sessionToken, siteUrl, storageStore } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -52,7 +52,9 @@ async function check(get: (k: string) => string | null) {
   if (get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge)) {
     return { error: back(redirect, { error: "invalid_request", error_description: "PKCE S256 required", state }) } as const;
   }
-  const q: Q = { client_id: client.client_id, redirect_uri: redirect, code_challenge: challenge, state, scope: SCOPE };
+  const scope = parseScope(get("scope"));
+  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write", state }) } as const;
+  const q: Q = { client_id: client.client_id, redirect_uri: redirect, code_challenge: challenge, state, scope };
   return { client, q } as const;
 }
 
@@ -72,12 +74,31 @@ export async function GET(req: Request) {
   const hidden = Object.entries({ ...q, csrf })
     .map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(v)}">`)
     .join("");
+  const scopes = q.scope.split(" ");
+  const can: string[] = [];
+  if (scopes.includes("mcp")) {
+    can.push(
+      "publish, update and take down websites on the c0mpute network for you",
+      "ask models on the network, billed to your compute balance",
+      "make promo videos",
+    );
+  }
+  let storageNote = "";
+  if (scopes.includes("storage:write")) {
+    can.push("upload encrypted files into your private storage. It cannot read them: they are encrypted on your device to your own storage key, which neither the app nor c0mpute ever holds");
+    const linked = await storageStore()
+      .identity(user.id)
+      .catch(() => null);
+    storageNote = linked
+      ? `<p>Your private storage: <code>${esc(linked.identity.slice(0, 18))}…</code>${linked.fingerprint ? ` (${esc(linked.fingerprint)})` : ""}. Read what it uploads with <code>c0mpute storage get</code>.</p>`
+      : `<p><b>No storage identity is linked to this account yet.</b> Run <code>c0mpute storage key link</code> on your computer first, or the app's uploads will be refused.</p>`;
+  }
   return page(
     "Connect",
     `<h1>Connect <b>${esc(client.name)}</b> to c0mpute?</h1>
 <p>Signed in as <b>${esc(user.name || user.did)}</b>.</p>
 <p>${esc(client.name)} will be able to:</p>
-<ul><li>publish, update and take down websites on the c0mpute network for you</li><li>ask models on the network, billed to your compute balance</li><li>make promo videos</li></ul>
+<ul>${can.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>${storageNote}
 <form method="post" action="/oauth/authorize">${hidden}
 <div class="row"><button type="submit" name="decision" value="deny">Cancel</button><button class="ok" type="submit" name="decision" value="allow">Allow</button></div></form>
 <small>You will be sent back to <code>${esc(host)}</code>. It gets an API key you can revoke any time in c0mpute chat (keys).</small>`,

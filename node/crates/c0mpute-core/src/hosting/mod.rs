@@ -30,6 +30,7 @@ pub mod origin;
 pub mod proof;
 pub mod relay;
 pub mod replicas;
+pub mod sealed_ingest;
 pub mod seed;
 pub mod settle;
 pub mod site;
@@ -3422,6 +3423,7 @@ impl Hosting {
             .route("/p/{site}", get(redirect_private_root))
             .route("/p/{site}/", get(private_loader))
             .merge(git::router())
+            .merge(sealed_ingest::router())
             .fallback(serve_by_host)
             // Last, so it is in front of every route above and the fallback.
             .layer(axum::middleware::from_fn_with_state(self.clone(), serve_site_host))

@@ -16,6 +16,20 @@ export const CODE_PREFIX = "c0a_";
 const CODE_MINUTES = 5;
 const MAX_REDIRECTS = 10;
 export const SCOPE = "mcp";
+/**
+ * Scopes an app may ask for. "mcp": the remote MCP server (chat, hosting
+ * pushes, promo videos). "storage:write": upload files the app encrypted in
+ * the person's browser into their private storage (it cannot read them).
+ */
+export const SCOPES = ["mcp", "storage:write"] as const;
+
+/** A requested scope string, normalized ("mcp" when absent), or null when it names an unknown scope. */
+export function parseScope(raw: string | null | undefined): string | null {
+  const asked = (raw ?? "").split(/\s+/).filter(Boolean);
+  if (asked.length === 0) return SCOPE;
+  if (asked.length > 8 || !asked.every((s) => (SCOPES as readonly string[]).includes(s))) return null;
+  return SCOPES.filter((s) => asked.includes(s)).join(" ");
+}
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -177,7 +191,7 @@ export function createOAuthStore(sql: Sql) {
       if (p.client_id !== r.client_id) throw new OAuthError("invalid_grant", "code was issued to another client");
       if (p.redirect_uri !== r.redirect_uri) throw new OAuthError("invalid_grant", "redirect_uri does not match the authorization request");
       if (!pkceOk(p.code_verifier, String(r.challenge))) throw new OAuthError("invalid_grant", "PKCE verification failed");
-      return { user_id: String(r.user_id), client_id: String(r.client_id), scope: (r.scope as string | null) ?? SCOPE };
+      return { user_id: String(r.user_id), client_id: String(r.client_id), scope: parseScope(r.scope as string | null) ?? SCOPE };
     },
   };
   return store;
@@ -186,8 +200,8 @@ export function createOAuthStore(sql: Sql) {
 export type OAuthStore = ReturnType<typeof createOAuthStore>;
 
 /** CSRF token for the consent form: bound to the browser session and this exact request. */
-export function consentToken(session: string, q: { client_id: string; redirect_uri: string; code_challenge: string; state: string }) {
-  return sha256hex(`consent|${session}|${q.client_id}|${q.redirect_uri}|${q.code_challenge}|${q.state}`);
+export function consentToken(session: string, q: { client_id: string; redirect_uri: string; code_challenge: string; state: string; scope?: string }) {
+  return sha256hex(`consent|${session}|${q.client_id}|${q.redirect_uri}|${q.code_challenge}|${q.state}|${q.scope ?? SCOPE}`);
 }
 
 export function tokenEq(a: string, b: string) {
@@ -207,7 +221,7 @@ export function authServerMetadata(site: string) {
     grant_types_supported: ["authorization_code"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
-    scopes_supported: [SCOPE],
+    scopes_supported: [...SCOPES],
     service_documentation: `${site}/docs`,
   };
 }

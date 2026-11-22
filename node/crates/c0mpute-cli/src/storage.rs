@@ -293,7 +293,7 @@ pub async fn run(cmd: StorageCmd, config_path: &std::path::Path) -> Result<()> {
             private_storage::revoke(&reference, &from, &gateway, Duration::from_secs(wait_secs)).await
         }
         StorageCmd::Link { reference, gateway } => private_storage::link(&reference, &gateway).await,
-        StorageCmd::Key { cmd } => private_storage::key(cmd),
+        StorageCmd::Key { cmd } => private_storage::key(cmd).await,
         #[cfg(all(target_os = "linux", feature = "fuse"))]
         StorageCmd::Mount { dir, volume, gateway } => crate::mount::run(&dir, &volume, &gateway).await,
         StorageCmd::Ls { quiet, private } => {

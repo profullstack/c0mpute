@@ -48,8 +48,8 @@ pub mod pad;
 
 pub use format::{
     CHUNK_PLAINTEXT, DataKey, HEADER_LEN, Kind, MAX_RECIPIENTS, Meta, Opened, PartRef, SealParams,
-    Sealed, SiteFile, now_version, open, open_with_secret, random_name, rewrap, roster, seal, seal_with_key,
-    site_id_for, unwrap_dek,
+    Sealed, SiteFile, now_version, object_owner_hex, open, open_with_secret, random_name, rewrap, roster, seal, seal_custodial, seal_with_key,
+    site_id_for, unwrap_custody, unwrap_dek, wrap_custody,
 };
 pub use keys::{StoragePublic, StorageSecret};
 
