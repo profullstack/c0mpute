@@ -16,6 +16,8 @@ import {
   DEFAULT_CPU_MODEL,
 } from "@/lib/cpu-estimates";
 import { MARKET_FEE_PCT, OPERATOR_SHARE_PCT } from "@/lib/market";
+import { R4CK_SITE, THIN_SAMPLE, type LiveRate, type LiveRates } from "@/lib/r4ck-rates";
+import type { ObservedGroup, ObservedWindow } from "@/lib/earnings/network-by-class";
 
 const DAYS_PER_MONTH = 30;
 const OTHER_GPU = "__other__";
@@ -23,9 +25,41 @@ const CUSTOM_CPU = "__custom__";
 
 type Hardware = "gpu" | "cpu";
 
-function rateFor(model: string): string {
+function gpuRateFor(model: string, live: LiveRates | null): string {
+  const r = live?.gpu[model]?.hourlyUsd;
+  if (r != null) return String(r);
   const match = GPU_RATE_REFERENCES.find((gpu) => gpu.model === model);
   return match?.hourlyUsd != null ? String(match.hourlyUsd) : "";
+}
+
+function cpuRateFor(model: string, live: LiveRates | null): string {
+  const r = live?.cpu[model]?.hourlyUsd;
+  if (r != null) return String(r);
+  const match = CPU_RATE_REFERENCES.find((cpu) => cpu.model === model);
+  return match ? String(match.hourlyUsd) : "";
+}
+
+function asOf(live: LiveRates): string {
+  return live.fetchedAt.slice(0, 10);
+}
+
+function hourly(v: number): string {
+  return `$${v < 0.1 ? v.toFixed(4).replace(/0+$/, "") : v < 1 ? v.toFixed(3).replace(/0$/, "") : v.toFixed(2)}/h`;
+}
+
+function liveHint(r: LiveRate, live: LiveRates, what: string): string {
+  const from = r.providers != null ? ` from ${r.providers} provider${r.providers === 1 ? "" : "s"}` : "";
+  const thin = r.offers < THIN_SAMPLE ? ` Only ${r.offers} offer${r.offers === 1 ? "" : "s"}, so treat it as rough.` : "";
+  return `median of ${r.offers.toLocaleString()} ${what}${from} on r4ck, as of ${asOf(live)}; cheapest ${hourly(r.lowUsd)}.${thin}`;
+}
+
+/** The observed-network class that matches what the visitor picked. */
+function classFor(hardware: Hardware, gpuModel: string): string {
+  if (hardware === "cpu") return "cpu";
+  const group = GPU_RATE_REFERENCES.find((g) => g.model === gpuModel)?.group ?? "";
+  if (group.startsWith("AMD")) return "gpu:amd";
+  if (group === "Apple silicon") return "gpu:apple";
+  return "gpu:nvidia";
 }
 
 function usd(value: number): string {
@@ -64,18 +98,23 @@ export function EarningsEstimator({
   cpuWorkersOnline,
   observed = null,
   gpuPrice = null,
+  liveRates = null,
+  observedByClass = null,
 }: {
   jobsCompleted24h: number | null;
   cpuWorkersOnline: number | null;
   observed?: ObservedEarnings | null;
   gpuPrice?: GpuModelPrice | null;
+  liveRates?: LiveRates | null;
+  observedByClass?: { history_from: number | null; windows: ObservedWindow[] } | null;
 }) {
   const [hardware, setHardware] = useState<Hardware>("gpu");
   const [gpuModel, setGpuModel] = useState(DEFAULT_GPU_MODEL);
   const [customGpuModel, setCustomGpuModel] = useState("");
-  const [gpuHourlyRate, setGpuHourlyRate] = useState(rateFor(DEFAULT_GPU_MODEL));
+  const [gpuHourlyRate, setGpuHourlyRate] = useState(gpuRateFor(DEFAULT_GPU_MODEL, liveRates));
   const [cpuReference, setCpuReference] = useState(DEFAULT_CPU_MODEL);
-  const [cpuHourlyRate, setCpuHourlyRate] = useState(String(CPU_RATE_REFERENCES[0].hourlyUsd));
+  const [cpuHourlyRate, setCpuHourlyRate] = useState(cpuRateFor(DEFAULT_CPU_MODEL, liveRates));
+  const [observedDays, setObservedDays] = useState(7);
   const [cpuRateEdited, setCpuRateEdited] = useState(false);
   const [hoursAvailable, setHoursAvailable] = useState("24");
 
@@ -86,22 +125,34 @@ export function EarningsEstimator({
 
   function updateGpuModel(next: string) {
     setGpuModel(next);
-    setGpuHourlyRate(rateFor(next));
+    setGpuHourlyRate(gpuRateFor(next, liveRates));
   }
 
   function updateCpuModel(next: string) {
     setCpuReference(next);
-    const match = CPU_RATE_REFERENCES.find((cpu) => cpu.model === next);
-    setCpuHourlyRate(match ? String(match.hourlyUsd) : "");
+    setCpuHourlyRate(cpuRateFor(next, liveRates));
     setCpuRateEdited(false);
   }
 
   const selectedGpuSource = selectedGpu?.source ? GPU_RATE_SOURCES[selectedGpu.source] : null;
+  const selectedGpuLive = selectedGpu && liveRates ? liveRates.gpu[selectedGpu.model] : undefined;
   const gpuRateHint = !selectedGpu
     ? "Custom model: enter a comparable rate."
-    : selectedGpuSource
-      ? `${selectedGpu.vram} · rate from ${selectedGpuSource.label}.`
-      : `${selectedGpu.vram} · no public hourly rental rate for this GPU, so enter your own.`;
+    : selectedGpuLive && liveRates
+      ? `${selectedGpu.vram} · per-GPU ${liveHint(selectedGpuLive, liveRates, "hourly offers")}`
+      : selectedGpuSource
+        ? `${selectedGpu.vram} · r4ck lists no live hourly offer for this GPU right now, so this is the ${selectedGpuSource.label} rate checked ${GPU_RATE_CHECKED_AT}.`
+        : selectedGpu.r4ck
+          ? `${selectedGpu.vram} · r4ck lists no live hourly offer for this GPU right now, so enter your own.`
+          : `${selectedGpu.vram} · no public hourly rental rate for this GPU, so enter your own.`;
+  const selectedCpuLive = selectedCpu && liveRates ? liveRates.cpu[selectedCpu.model] : undefined;
+  const cpuRateHint = !selectedCpu
+    ? "Custom CPU VM: enter a comparable hourly price."
+    : selectedCpuLive && liveRates
+      ? `${selectedCpu.specs} · monthly price over 730 h, ${liveHint(selectedCpuLive, liveRates, "VPS plans with this spec")}`
+      : `${selectedCpu.specs} · starting price from ${CPU_RATE_SOURCE.label}, checked ${CPU_RATE_CHECKED_AT} (r4ck rates unavailable).`;
+  const observedWindow = observedByClass?.windows.find((w) => w.days === observedDays) ?? null;
+  const myClass = classFor(hardware, gpuModel);
 
   return (
     <section className="space-y-5 border border-[var(--color-rule)] bg-[var(--color-card)] rounded-md p-4 sm:p-6">
@@ -133,7 +184,7 @@ export function EarningsEstimator({
                 {GPU_GROUPS.map((group) => (
                   <optgroup key={group} label={group}>
                     {GPU_RATE_REFERENCES.filter((gpu) => gpu.group === group).map((gpu) => (
-                      <option key={gpu.model} value={gpu.model}>{`${gpu.model} · ${gpu.vram}`}</option>
+                      <option key={gpu.model} value={gpu.model}>{`${gpu.model} · ${gpu.vram}${liveRates?.gpu[gpu.model] ? ` · ${hourly(liveRates.gpu[gpu.model].hourlyUsd)}` : ""}`}</option>
                     ))}
                   </optgroup>
                 ))}
@@ -179,7 +230,7 @@ export function EarningsEstimator({
                 className="w-full rounded border border-[var(--color-rule)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
               >
                 {CPU_RATE_REFERENCES.map((cpu) => (
-                  <option key={cpu.model} value={cpu.model}>{`${cpu.model} · $${cpu.hourlyUsd}/h`}</option>
+                  <option key={cpu.model} value={cpu.model}>{`${cpu.model} · ${hourly(Number(cpuRateFor(cpu.model, liveRates)))}`}</option>
                 ))}
                 <option value={CUSTOM_CPU}>Other CPU VM (enter your own rate)</option>
               </select>
@@ -202,7 +253,7 @@ export function EarningsEstimator({
                 className="w-full rounded border border-[var(--color-rule)] bg-[var(--color-bg)] px-3 py-2 text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
               />
               <span className="block text-xs text-[var(--color-dim)]">
-                {selectedCpu ? `${selectedCpu.specs} · starting price from ${CPU_RATE_SOURCE.label}${cpuRateEdited ? "; using your edited rate" : ""}.` : "Custom CPU VM: enter a comparable hourly price."} VM prices include memory, storage, and transfer.
+                {cpuRateHint}{cpuRateEdited ? " Using your edited rate." : ""} VM prices include memory, storage, and transfer.
               </span>
             </label>
           </>
@@ -314,6 +365,32 @@ export function EarningsEstimator({
         </div>
       )}
 
+      <div className="border-t border-[var(--color-rule)] pt-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">Observed on c0mpute: job prices by hardware and workload</h2>
+          <div className="flex gap-2" role="group" aria-label="Observed window">
+            {(observedByClass?.windows ?? []).map((w) => (
+              <button
+                key={w.days}
+                type="button"
+                aria-pressed={observedDays === w.days}
+                onClick={() => setObservedDays(w.days)}
+                className={`rounded border px-3 py-1 text-xs font-semibold ${observedDays === w.days ? "border-[var(--color-accent)] accent" : "border-[var(--color-rule)] text-[var(--color-dim)]"}`}
+              >
+                {w.days} days
+              </button>
+            ))}
+          </div>
+        </div>
+        {!observedWindow ? (
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            The network job history is unavailable right now, so there is no observed figure to show.
+          </p>
+        ) : (
+          <ObservedPanel window={observedWindow} myClass={myClass} rate={rate} historyFrom={observedByClass?.history_from ?? null} />
+        )}
+      </div>
+
       <div className="border-t border-[var(--color-rule)] pt-4 space-y-2 text-xs leading-6">
         <p className="text-[var(--color-fg)]">
           <strong className="accent">What operators actually earned:</strong>{" "}
@@ -327,24 +404,105 @@ export function EarningsEstimator({
           <p className="text-[var(--color-dim)]">
             {cpuWorkersOnline === null
               ? "The live status does not report CPU-capable workers right now."
-              : `${cpuWorkersOnline.toLocaleString()} online workers advertise CPU capability; this is not a count of CPU-only nodes.`} The public status does not attribute jobs or payouts to CPU hardware, so actual CPU earnings, including Infernet work, cannot be calculated from it.
+              : `${cpuWorkersOnline.toLocaleString()} online workers advertise CPU capability; this is not a count of CPU-only nodes.`} Observed job prices for CPU nodes are in the hardware-class table above.
           </p>
         )}
         <p className="text-[var(--color-dim)]">
-          This is a comparison scenario, not a c0mpute payout forecast. Providers currently bid per job, so realized earnings depend on workload demand, your bids, and how often jobs choose your node. {hardware === "gpu" ? (
-            <>GPU rental references were checked {GPU_RATE_CHECKED_AT}; prices change. Sources:{" "}
-              <a href={GPU_RATE_SOURCES["runpod-secure"].url} target="_blank" rel="noopener noreferrer">RunPod</a>,
-              {" "}<a href={GPU_RATE_SOURCES["vast-median"].url} target="_blank" rel="noopener noreferrer">Vast.ai</a>,
-              {" "}<a href={GPU_RATE_SOURCES["vast-low"].url} target="_blank" rel="noopener noreferrer">r4ck.dev</a>,
-              {" "}<a href={GPU_RATE_SOURCES.lambda.url} target="_blank" rel="noopener noreferrer">Lambda</a>.
+          The monthly scenarios are comparisons, not a c0mpute payout forecast. Providers currently bid per job, so realized earnings depend on workload demand, your bids, and how often jobs choose your node.{" "}
+          {liveRates ? (
+            <>
+              Comparison rates come from{" "}
+              <a href={`${R4CK_SITE}/servers?kind=gpu&interval=hour&sort=price`} target="_blank" rel="noopener noreferrer">r4ck</a>, our search engine over server and GPU offers: the median price of the live offers for each spec ({liveRates.gpuOffersRead.toLocaleString()} hourly GPU offers read), refreshed daily, as of {asOf(liveRates)}. GPU rates are per GPU; CPU rates are VPS monthly prices over 730 hours. Where r4ck lists no offer, the page falls back to hand-checked rates from{" "}
             </>
           ) : (
-            <>CPU VM comparison rates are from {CPU_RATE_SOURCE.label}, checked {CPU_RATE_CHECKED_AT}; they include RAM, storage, and transfer. Source:{" "}
-              <a href={CPU_RATE_SOURCE.url} target="_blank" rel="noopener noreferrer">DigitalOcean pricing</a>.
-            </>
+            <>Live r4ck rates are unavailable right now, so these are hand-checked rates (GPU {GPU_RATE_CHECKED_AT}, CPU {CPU_RATE_CHECKED_AT}) from{" "}</>
           )}
+          <a href={GPU_RATE_SOURCES["runpod-secure"].url} target="_blank" rel="noopener noreferrer">RunPod</a>,
+          {" "}<a href={GPU_RATE_SOURCES["vast-median"].url} target="_blank" rel="noopener noreferrer">Vast.ai</a>,
+          {" "}<a href={GPU_RATE_SOURCES.lambda.url} target="_blank" rel="noopener noreferrer">Lambda</a> and
+          {" "}<a href={CPU_RATE_SOURCE.url} target="_blank" rel="noopener noreferrer">DigitalOcean</a>. Prices change.
         </p>
       </div>
     </section>
+  );
+}
+
+function perHour(g: ObservedGroup): string {
+  return g.net_per_busy_hour == null ? "-" : `${usd(g.net_per_busy_hour)}/h`;
+}
+
+function ObservedPanel({
+  window: w,
+  myClass,
+  rate,
+  historyFrom,
+}: {
+  window: ObservedWindow;
+  myClass: string;
+  rate: number;
+  historyFrom: number | null;
+}) {
+  const mine = w.by_class.find((g) => g.key === myClass) ?? null;
+  const small = w.totals.jobs < 1000 || w.totals.nodes < 10;
+  const since = historyFrom ? new Date(historyFrom).toISOString().slice(0, 10) : null;
+  return (
+    <div className="space-y-3 text-xs leading-6">
+      <p className="text-[var(--color-dim)]">
+        Every job the network completed in the last {w.days} days, as the status aggregators heard it, priced at what the buyer agreed to pay in the job auction, after the assumed {MARKET_FEE_PCT}% fee. Per paid hour divides that by the time nodes spent running the jobs, so it compares directly with the rental rate above. These are agreed job prices, not settled payouts; the settled ledger totals are in the line below and on <a href="/status#earnings">/status</a>.
+      </p>
+      {w.totals.jobs === 0 ? (
+        <p className="text-[var(--color-fg)]">No completed jobs are on file for this window.</p>
+      ) : (
+        <>
+          <p className="text-[var(--color-fg)]">
+            <strong className="accent">Sample:</strong> {w.totals.jobs.toLocaleString()} jobs on {w.totals.nodes} node{w.totals.nodes === 1 ? "" : "s"}, {w.totals.busy_hours.toFixed(1)} paid hours, {usd(w.totals.net_usd)} after the fee ({perHour(w.totals)} per paid hour).
+            {w.covered_days < w.days && since ? ` History on file starts ${since}, so this covers ${w.covered_days} of ${w.days} days.` : ""}
+            {small ? " That is a small sample from an early network: read it as what has happened so far, not a typical rate." : ""}
+          </p>
+          {mine ? (
+            <p className="text-[var(--color-fg)]">
+              <strong className="accent">Your hardware class ({mine.label}):</strong> {mine.jobs.toLocaleString()} jobs on {mine.nodes} node{mine.nodes === 1 ? "" : "s"}, {perHour(mine)} per paid hour observed
+              {rate > 0 ? `, against the ${usd(rate)}/h comparison rate above` : ""}.
+              {mine.nodes < 3 ? ` Only ${mine.nodes} node${mine.nodes === 1 ? "" : "s"} in this class, so this is one operator's experience, not a market.` : ""}
+            </p>
+          ) : (
+            <p className="text-[var(--color-fg)]">No completed jobs are on file for this hardware class in the window.</p>
+          )}
+          <ObservedTable title="by hardware class" groups={w.by_class} />
+          <ObservedTable title="by workload" groups={w.by_type} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ObservedTable({ title, groups }: { title: string; groups: ObservedGroup[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-left text-xs">
+        <thead className="text-[var(--color-dim)]">
+          <tr className="border-b border-[var(--color-rule)]">
+            <th className="py-2 pr-4 font-medium">{title}</th>
+            <th className="py-2 pr-4 font-medium">nodes</th>
+            <th className="py-2 pr-4 font-medium">jobs</th>
+            <th className="py-2 pr-4 font-medium">paid hours</th>
+            <th className="py-2 pr-4 font-medium">after fee</th>
+            <th className="py-2 font-medium">per paid hour</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-[var(--color-rule)]">
+          {groups.map((g) => (
+            <tr key={g.key}>
+              <td className="py-2 pr-4">{g.label}</td>
+              <td className="py-2 pr-4 tabular-nums">{g.nodes}</td>
+              <td className="py-2 pr-4 tabular-nums">{g.jobs.toLocaleString()}</td>
+              <td className="py-2 pr-4 tabular-nums">{g.busy_hours.toFixed(1)}</td>
+              <td className="py-2 pr-4 tabular-nums">{usd(g.net_usd)}</td>
+              <td className="py-2 accent font-bold tabular-nums">{perHour(g)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

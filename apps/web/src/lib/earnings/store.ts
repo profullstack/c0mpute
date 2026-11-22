@@ -206,6 +206,30 @@ export function createEarningsStore(sql: Sql) {
       return rows.map((r) => ({ node: String(r.node), jobs: Number(r.jobs) || 0, paid_usd: Number(r.paid_usd) || 0 }));
     },
 
+    /** Every node's jobs, run time and agreed takings per workload type since `sinceMs` (the network view). */
+    async networkSince(sinceMs: number): Promise<Omit<JobBucketRow, "bucket">[]> {
+      await init();
+      const rows = await sql.all(
+        `SELECT node, type, COUNT(*) AS jobs, SUM(busy_s) AS busy_s, SUM(paid_usd) AS paid_usd
+           FROM node_jobs WHERE completed_at >= ? GROUP BY node, type`,
+        [sinceMs],
+      );
+      return rows.map((r) => ({
+        node: String(r.node),
+        type: String(r.type),
+        jobs: Number(r.jobs) || 0,
+        busy_s: Number(r.busy_s) || 0,
+        paid_usd: Number(r.paid_usd) || 0,
+      }));
+    },
+
+    /** The hardware class each claimed node last reported, across all accounts. */
+    async claimedClasses(): Promise<Map<string, string>> {
+      await init();
+      const rows = await sql.all(`SELECT node, class FROM operator_nodes WHERE class IS NOT NULL`);
+      return new Map(rows.map((r) => [String(r.node), String(r.class)]));
+    },
+
     /** The first job on file, so the page can say how far back history goes. */
     async firstJobAt(): Promise<number | null> {
       await init();
