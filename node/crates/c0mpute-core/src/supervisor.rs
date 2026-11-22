@@ -835,6 +835,10 @@ impl Supervisor {
                     // Layers the custom-domain fallback too.
                     r = r.layer(axum::middleware::from_fn_with_state(g.clone(), crate::x402::gate));
                 }
+                // DIP-0036: refuse files a subscribed labeler flagged (off unless configured).
+                if let Some(m) = crate::moderation::Gate::from_config(&self.config) {
+                    r = r.layer(axum::middleware::from_fn_with_state(m, crate::moderation::gate));
+                }
                 app = app.merge(r);
             }
             // ThreatCrush: one access-log line per request (off by default).
