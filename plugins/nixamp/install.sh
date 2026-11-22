@@ -66,11 +66,15 @@ watches at a c0mpute.com/live link:
        https://c0mpute.com/dashboard/live
   2. Start the station with the key as a destination:
        nixamp daemon start ~/Music --name "my station" --announce --rtmp c0mpute=<stream key>
-  3. Start the broadcast from the station's admin page, or:
-       curl -X POST -H "x-nixamp-key: <control key>" http://127.0.0.1:4321/api/broadcast
+  3. Start the broadcast (the control key is in the link nixamp prints at start):
+       curl -X POST 'http://127.0.0.1:4321/api/broadcast?k=<control key>' \
+         -H 'content-type: application/json' \
+         -d '{"source":"http://127.0.0.1:4321/api/live?k=<control key>"}'
+     Stop it with:  curl -X DELETE 'http://127.0.0.1:4321/api/broadcast?k=<control key>'
 
-Needs nixamp with the c0mpute destination (see `nixamp --help`; update with
-`nixamp update`). Relays are paid $0.01 per GB from the streamer's c0mpute
+Needs nixamp 0.81.0 or newer for the c0mpute destination (`nixamp update`).
+The stream key is on the command line, so other users of this machine can see
+it in the process list. Relays are paid $0.01 per GB from the streamer's c0mpute
 balance; with no balance the stream runs on the free tier.
 
 Keep it running across reboots with your own service manager, for example a
