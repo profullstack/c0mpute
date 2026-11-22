@@ -1578,7 +1578,7 @@ export function ChatApp({ error }: { error: string | null }) {
               return known ? ts.map((t) => (t.id === e.id ? { ...t, status: row.status, text: row.text } : t)) : [...ts, row];
             });
           } else if (e.type === "approval_needed") {
-            setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "approval", approval: e.approval }]);
+            setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "approval", approval: e.approval, ...(e.summary ? { summary: e.summary } : {}) }]);
           }
         },
         (s) =>
@@ -1659,6 +1659,13 @@ export function ChatApp({ error }: { error: string | null }) {
       } else if (cmd.kind === "on" || cmd.kind === "off") {
         const r = await pluginsApi.toggle(cmd.slug, cmd.kind === "on");
         say(`// ${r.plugin.slug} ${r.plugin.enabled ? "on" : "off"}`);
+      } else if (cmd.kind === "paper" || cmd.kind === "live") {
+        if (cmd.kind === "live" && !window.confirm(`Switch ${cmd.slug} to your LIVE account? Orders will use real money. Every order still asks you first. The model can be wrong; you decide.`)) {
+          say(`// ${cmd.slug}: still on paper`);
+        } else {
+          const r = await pluginsApi.mode(cmd.slug, cmd.kind);
+          say(`// ${r.plugin.slug}: ${r.plugin.trading_mode === "live" ? "LIVE account (real money; every order asks first)" : "paper trading"}`);
+        }
       } else if (cmd.kind === "connect") {
         const ok = await signInPopup(`/api/v1/chat/plugins/${encodeURIComponent(cmd.slug)}/connect`, cmd.slug);
         say(ok ? `// ${cmd.slug} connected` : `// ${cmd.slug}: sign-in not finished`);

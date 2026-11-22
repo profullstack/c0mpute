@@ -12,6 +12,7 @@ import { chatText, type ChatRequest, type Upstream } from "./completions";
 import { checkPluginUrl, pluginGuard, PluginUrlError } from "./plugin-net";
 import { PluginError, type ChatPlugin, type PluginAuth, type PluginStoreDb, type PluginTokens } from "./plugin-store";
 import type { PluginEvent } from "./plugin-shared";
+import { applyPolicy, describeAction, FINANCE_CATALOG, policyFor, redactLog } from "./plugin-policy";
 import { env, json, pluginStore, siteUrl } from "./server";
 
 export const CALLBACK_PATH = "/api/v1/chat/plugins/callback";
@@ -34,13 +35,13 @@ export function pluginErr(e: unknown) {
       : 502;
     return json({ error: { message: e.message, code: status, reason: code } }, status);
   }
-  console.error("chat plugins", e);
+  console.error("chat plugins", redactLog(e));
   return json({ error: { message: `plugin error: ${e instanceof Error ? e.message : String(e)}`, code: 502 } }, 502);
 }
 
 // ── catalog ─────────────────────────────────────────────────────────────────
 
-export type CatalogEntry = { slug: string; name: string; title: string; description: string; url: string };
+export type CatalogEntry = { slug: string; name: string; title: string; description: string; url: string; icon?: string; default?: boolean };
 
 function hostOf(u: string): string {
   try {
@@ -61,13 +62,22 @@ const isOwnHost = (u: string) => {
  * c0mpute.com/api/mcp, whose hosting tools are already native in c0mpute chat.
  */
 export function catalogFor(_site = siteUrl()): CatalogEntry[] {
-  return cp.CATALOG.filter((e) => e.url.startsWith("https://") && !isOwnHost(e.url)).map((e) => ({
+  const money: CatalogEntry[] = FINANCE_CATALOG.map((e) => ({ slug: e.slug, name: e.name, title: e.name, description: e.description, url: e.url, icon: e.icon, default: e.default }));
+  const taken = new Set(money.map((e) => e.slug));
+  const pkg = cp.CATALOG.filter((e) => e.url.startsWith("https://") && !isOwnHost(e.url) && !taken.has(e.slug)).map((e) => ({
     slug: e.slug,
     name: e.name,
     title: e.name,
     description: e.description ?? "",
     url: e.url,
   }));
+  return [...money, ...pkg];
+}
+
+/** A discovered auth record with the money policy's narrower scopes, when it has some. */
+function withPolicyScopes(url: string, auth: PluginAuth): PluginAuth {
+  const scopes = policyFor(url)?.scopes;
+  return auth === "none" || !scopes ? auth : { ...auth, scopes: [...scopes] };
 }
 
 // ── add ─────────────────────────────────────────────────────────────────────
@@ -85,7 +95,7 @@ export async function addPlugin(userId: string, target: string, store: PluginSto
   if (isOwnHost(input.url)) throw new PluginError("that is c0mpute's own MCP server: its tools are already built into this chat");
   const u = checkPluginUrl(input.url);
   const d = await cp.discover(u.href, NET);
-  const auth: PluginAuth = d.auth === "none" ? "none" : { ...d.auth };
+  const auth: PluginAuth = withPolicyScopes(d.url, d.auth === "none" ? "none" : { ...d.auth });
   const p = await store.add(userId, {
     slug: input.slug,
     url: d.url,
@@ -95,7 +105,7 @@ export async function addPlugin(userId: string, target: string, store: PluginSto
     auth,
   });
   if (auth === "none" || auth.required === false) {
-    await refreshTools(store, p).catch((e) => console.warn(`chat plugin ${p.slug}: tools/list failed: ${e instanceof Error ? e.message : e}`));
+    await refreshTools(store, p).catch((e) => console.warn(`chat plugin ${p.slug}: tools/list failed: ${redactLog(e)}`));
     return (await store.get(userId, p.slug)) ?? p;
   }
   return p;
@@ -177,8 +187,19 @@ function pkgStore(store: PluginStoreDb): cp.PluginStore {
 }
 
 export async function startConnect(userId: string, slug: string, store: PluginStoreDb = pluginStore()) {
-  const p = await store.get(userId, slug);
+  let p = await store.get(userId, slug);
   if (!p) throw new PluginError(`no chat plugin ${slug} on this account`, 404);
+  if (p.auth !== "none" && (p.auth.deferred || !p.auth.authorization_endpoint)) {
+    // A default plugin: discover its sign-in now, the first time the person uses it.
+    const d = await cp.discover(checkPluginUrl(p.url).href, NET);
+    p = await store.add(userId, {
+      url: p.url,
+      name: d.name || p.name,
+      title: p.title || d.title || null,
+      instructions: d.instructions || null,
+      auth: withPolicyScopes(p.url, d.auth === "none" ? "none" : { ...d.auth }),
+    });
+  }
   if (p.auth === "none") throw new PluginError(`${slug} needs no sign-in`);
   const { authorizeUrl, pending } = await cp.startAuth({
     ...NET,
@@ -201,6 +222,8 @@ export async function finishConnect(state: string, code: string, store: PluginSt
   if (!p) throw new PluginError("that plugin was removed");
   const tokens = await cp.finishAuth({ ...NET, pending: got.pending as cp.PendingAuth, code, state, redirectUri: redirectUri() });
   await store.setTokens(got.user_id, got.slug, tokens as PluginTokens);
+  // Every new brokerage connection starts on paper; live is the person's own switch.
+  if (policyFor(p.url)?.kind === "trading") await store.setTradingMode(got.user_id, got.slug, "paper");
   const fresh = await store.get(got.user_id, got.slug);
   if (fresh) await refreshTools(store, fresh).catch(() => {});
   return { userId: got.user_id, slug: got.slug, name: p.title || p.name };
@@ -214,7 +237,7 @@ async function tokenFor(store: PluginStoreDb, p: ChatPlugin): Promise<string | u
     if (refreshed) await store.setTokens(p.user_id, p.slug, tokens as PluginTokens);
     return tokens.access_token;
   } catch (e) {
-    console.warn(`chat plugin ${p.slug} refresh failed: ${e instanceof Error ? e.message : e}`);
+    console.warn(`chat plugin ${p.slug} refresh failed: ${redactLog(e)}`);
     return p.tokens.access_token;
   }
 }
@@ -225,7 +248,7 @@ const MAX_TOOLS = 64;
 
 export async function refreshTools(store: PluginStoreDb, p: ChatPlugin) {
   const token = await tokenFor(store, p);
-  const tools = await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...NET, maxTools: MAX_TOOLS });
+  const tools = applyPolicy(policyFor(p.url), await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...NET, maxTools: MAX_TOOLS }), p.trading_mode);
   await store.setTools(
     p.user_id,
     p.slug,
@@ -238,13 +261,20 @@ export async function refreshTools(store: PluginStoreDb, p: ChatPlugin) {
 const usable = (p: ChatPlugin) => p.enabled && (p.auth === "none" || p.auth.required === false || !!p.token);
 
 /** Enabled, usable plugins with their live tool lists, as the loop takes them. Failures become events. */
-export async function livePlugins(userId: string, store: PluginStoreDb, emit: (e: PluginEvent) => void, net: cp.NetOptions = NET): Promise<cp.Plugin[]> {
+export async function livePlugins(
+  userId: string,
+  store: PluginStoreDb,
+  emit: (e: PluginEvent) => void,
+  net: cp.NetOptions = NET,
+  policy: typeof policyFor = policyFor,
+): Promise<cp.Plugin[]> {
   const all = (await store.list(userId)).filter(usable);
   const out = await Promise.all(
     all.map(async (p): Promise<cp.Plugin | null> => {
       try {
         const token = await tokenFor(store, p);
-        const tools = await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...net, maxTools: MAX_TOOLS });
+        // Money plugins: only allowlisted reads run on their own; everything else asks (plugin-policy.ts).
+        const tools = applyPolicy(policy(p.url), await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...net, maxTools: MAX_TOOLS }), p.trading_mode);
         return { slug: p.slug, name: p.title || p.name, url: p.url, ...(token ? { token } : {}), enabled: true, tools };
       } catch (e) {
         const reauth = e instanceof cp.PluginError && e.code === "unauthorized";
@@ -315,10 +345,13 @@ export async function runPluginChat(opts: {
   signal?: AbortSignal;
   /** Tests only: network options for a local MCP server. */
   net?: cp.NetOptions;
+  /** Tests only: the money policy for a local URL. */
+  policy?: typeof policyFor;
 }): Promise<PluginChatResult> {
   const store = opts.store ?? pluginStore();
   const net = withSignal(opts.net ?? NET, opts.signal);
-  const plugins = await livePlugins(opts.userId, store, opts.emit, net);
+  const policy = opts.policy ?? policyFor;
+  const plugins = await livePlugins(opts.userId, store, opts.emit, net, policy);
   let model = opts.req.model ?? "auto";
   if (!plugins.length) {
     const r = await chatText(opts.upstream, { ...opts.req, stream: false }, opts.signal);
@@ -377,7 +410,17 @@ export async function runPluginChat(opts: {
         opts.emit({ type: "tool_result", id: e.id, plugin: e.plugin, tool: e.tool, ok: !e.isError, text: (e.text || "").slice(0, UI_TEXT) });
       } else if (e.type === "approval_needed") {
         const c = e.call;
-        opts.emit({ type: "approval_needed", id: c.id, plugin: c.plugin, tool: c.tool, arguments: c.arguments, approval: approvalToken(opts.userId, c.plugin, c.tool, c.arguments) });
+        const url = plugins.find((p) => p.slug === c.plugin)?.url ?? "";
+        const summary = describeAction(policy(url), c.tool, c.arguments ?? {});
+        opts.emit({
+          type: "approval_needed",
+          id: c.id,
+          plugin: c.plugin,
+          tool: c.tool,
+          arguments: c.arguments,
+          approval: approvalToken(opts.userId, c.plugin, c.tool, c.arguments),
+          ...(summary ? { summary } : {}),
+        });
       }
     },
   });

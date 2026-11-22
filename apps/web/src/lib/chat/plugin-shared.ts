@@ -7,6 +7,7 @@ export type PluginCommand =
   | { kind: "rm"; slug: string }
   | { kind: "on" | "off"; slug: string }
   | { kind: "connect"; slug: string }
+  | { kind: "paper" | "live"; slug: string }
   | { kind: "help"; error?: string };
 
 const SLUGISH = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -30,12 +31,13 @@ export function parsePluginCommand(text: string): PluginCommand | null {
   // `/plugin https://…` is add.
   if (/^https?:\/\//i.test(verbRaw)) return { kind: "add", target: verbRaw };
   const slug = (arg ?? "").toLowerCase();
-  const need = (k: "rm" | "on" | "off" | "connect") =>
+  const need = (k: "rm" | "on" | "off" | "connect" | "paper" | "live") =>
     SLUGISH.test(slug) ? ({ kind: k, slug } as PluginCommand) : ({ kind: "help", error: `usage: /plugin ${k} <name>` } as PluginCommand);
   if (verb === "rm" || verb === "remove" || verb === "delete") return need("rm");
   if (verb === "on" || verb === "enable") return need("on");
   if (verb === "off" || verb === "disable") return need("off");
   if (verb === "connect" || verb === "signin" || verb === "login") return need("connect");
+  if (verb === "paper" || verb === "live") return need(verb);
   return { kind: "help", error: `unknown /plugin command "${verbRaw}"` };
 }
 
@@ -44,6 +46,7 @@ export const PLUGIN_HELP = [
   "/plugin ls                 your plugins and the catalog",
   "/plugin on|off <name>      use it in chat, or not",
   "/plugin connect <name>     sign in again",
+  "/plugin paper|live <name>  brokerage plugins: paper trading (the default) or your live account",
   "/plugin rm <name>          remove it",
 ].join("\n");
 
@@ -51,7 +54,16 @@ export const PLUGIN_HELP = [
 export type PluginEvent =
   | { type: "tool_call"; id: string; plugin: string; tool: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; id: string; plugin: string; tool: string; ok: boolean; text: string }
-  | { type: "approval_needed"; id: string; plugin: string; tool: string; arguments: Record<string, unknown>; approval: string }
+  | {
+      type: "approval_needed";
+      id: string;
+      plugin: string;
+      tool: string;
+      arguments: Record<string, unknown>;
+      approval: string;
+      /** Money plugins: the exact action in words (amount, currency, from, to, memo; or the order and paper/live). */
+      summary?: import("./plugin-policy").ActionSummary;
+    }
   | { type: "plugin_error"; plugin: string; message: string };
 
 /** SSE `data:` objects for plugin events carry this `object` so OpenAI clients skip them. */

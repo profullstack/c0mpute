@@ -9,6 +9,7 @@
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { CLAIMS_SCHEMA, claimOnce, type Row, type Sql } from "./store";
+import { FINANCE_CATALOG, policyFor } from "./plugin-policy";
 
 export const PLUGIN_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS chat_plugins (
@@ -39,6 +40,16 @@ export const PLUGIN_SCHEMA = [
      pending    TEXT NOT NULL,
      expires_at TEXT NOT NULL
    )`,
+  // Per-plugin settings that outlive a row: "seeded" (a default plugin was
+  // added once, so removing it keeps it gone) and "trading_mode" (paper/live).
+  `CREATE TABLE IF NOT EXISTS chat_plugin_prefs (
+     user_id    TEXT NOT NULL,
+     slug       TEXT NOT NULL,
+     key        TEXT NOT NULL,
+     value      TEXT NOT NULL,
+     updated_at TEXT NOT NULL,
+     PRIMARY KEY (user_id, slug, key)
+   )`,
   CLAIMS_SCHEMA,
 ];
 
@@ -59,7 +70,12 @@ export type PluginAuth =
       resource?: string;
       /** false: works without sign-in, signing in adds more. */
       required?: boolean;
+      /** A default plugin added without a network call: discovery runs at the first sign-in. */
+      deferred?: boolean;
     };
+
+/** A catalog plugin every account starts with: listed and on, never signed in for them. */
+export type DefaultPlugin = { slug: string; name: string; url: string };
 
 /** The package's token record (access + refresh + what refresh needs), sealed as one JSON. */
 export type PluginTokens = {
@@ -91,6 +107,8 @@ export type ChatPlugin = {
   expires_at: number | null;
   /** Cached tool names + annotations from the last tools/list. */
   tools: { name: string; description?: string; destructive?: boolean }[] | null;
+  /** Brokerage plugins: which account orders go to. New connections start on paper. */
+  trading_mode: "paper" | "live";
   created_at: string;
   updated_at: string;
 };
@@ -158,7 +176,7 @@ export function slugify(name: string): string {
 const now = () => new Date().toISOString();
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
-export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
+export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults?: readonly DefaultPlugin[] }) {
   let ready: Promise<void> | null = null;
   const init = () =>
     (ready ??= (async () => {
@@ -174,7 +192,7 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
   };
   const aad = (userId: string, slug: string, col: string) => `${userId}|${slug}|${col}`;
 
-  function toPlugin(r: Row): ChatPlugin {
+  function toPlugin(r: Row, prefs: Map<string, string> = new Map()): ChatPlugin {
     const userId = String(r.user_id);
     const slug = String(r.slug);
     let tokens: PluginTokens | null = null;
@@ -205,9 +223,49 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
       token: tokens?.access_token ?? null,
       expires_at: r.expires_at == null ? null : Number(r.expires_at),
       tools,
+      trading_mode: prefs.get(`${slug}|trading_mode`) === "live" ? "live" : "paper",
       created_at: String(r.created_at),
       updated_at: String(r.updated_at),
     };
+  }
+
+  async function prefsOf(userId: string): Promise<Map<string, string>> {
+    const rows = await sql.all(`SELECT slug, key, value FROM chat_plugin_prefs WHERE user_id = ?`, [userId]);
+    return new Map(rows.map((r) => [`${String(r.slug)}|${String(r.key)}`, String(r.value)]));
+  }
+
+  /**
+   * Default plugins, once per account: a row that is on and not signed in
+   * (auth discovered at the first sign-in, so this makes no network call).
+   * Marked "seeded" so a person who removes one does not get it back, and
+   * skipped when the account already has that server or is at the limit.
+   */
+  const seededHere = new Set<string>();
+  async function seedDefaults(userId: string) {
+    const defaults = opts.defaults ?? [];
+    if (!defaults.length || seededHere.has(userId)) return;
+    const prefs = await prefsOf(userId);
+    const todo = defaults.filter((d) => !prefs.has(`${d.slug}|seeded`));
+    if (todo.length) {
+      const rows = await sql.all(`SELECT slug, url FROM chat_plugins WHERE user_id = ?`, [userId]);
+      const urls = new Set(rows.map((r) => String(r.url)));
+      const slugs = new Set(rows.map((r) => String(r.slug)));
+      let count = rows.length;
+      const t = now();
+      for (const d of todo) {
+        if (!urls.has(d.url) && !slugs.has(d.slug) && count < MAX_PLUGINS) {
+          const auth: PluginAuth = { issuer: "", authorization_endpoint: "", token_endpoint: "", required: true, deferred: true };
+          await sql.run(
+            `INSERT OR IGNORE INTO chat_plugins (user_id, slug, url, name, title, instructions, auth, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, 1, ?, ?)`,
+            [userId, d.slug, d.url, d.name.slice(0, 120), d.name.slice(0, 120), JSON.stringify(auth), t, t],
+          );
+          count++;
+        }
+        await sql.run(`INSERT OR REPLACE INTO chat_plugin_prefs (user_id, slug, key, value, updated_at) VALUES (?, ?, 'seeded', '1', ?)`, [userId, d.slug, t]);
+      }
+    }
+    seededHere.add(userId);
+    if (seededHere.size > 50_000) seededHere.clear();
   }
 
   const store = {
@@ -215,19 +273,34 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
 
     async list(userId: string): Promise<ChatPlugin[]> {
       await init();
-      return (await sql.all(`SELECT * FROM chat_plugins WHERE user_id = ? ORDER BY created_at`, [userId])).map(toPlugin);
+      await seedDefaults(userId);
+      const prefs = await prefsOf(userId);
+      return (await sql.all(`SELECT * FROM chat_plugins WHERE user_id = ? ORDER BY created_at`, [userId])).map((r) => toPlugin(r, prefs));
     },
 
     async get(userId: string, slug: string): Promise<ChatPlugin | null> {
       await init();
+      await seedDefaults(userId);
       const r = (await sql.all(`SELECT * FROM chat_plugins WHERE user_id = ? AND slug = ?`, [userId, slug]))[0];
-      return r ? toPlugin(r) : null;
+      return r ? toPlugin(r, await prefsOf(userId)) : null;
     },
 
     async byUrl(userId: string, url: string): Promise<ChatPlugin | null> {
       await init();
       const r = (await sql.all(`SELECT * FROM chat_plugins WHERE user_id = ? AND url = ?`, [userId, url]))[0];
-      return r ? toPlugin(r) : null;
+      return r ? toPlugin(r, await prefsOf(userId)) : null;
+    },
+
+    /** Brokerage plugins: "paper" (default) or "live". */
+    async setTradingMode(userId: string, slug: string, mode: "paper" | "live"): Promise<ChatPlugin | null> {
+      await init();
+      await sql.run(`INSERT OR REPLACE INTO chat_plugin_prefs (user_id, slug, key, value, updated_at) VALUES (?, ?, 'trading_mode', ?, ?)`, [
+        userId,
+        slug,
+        mode === "live" ? "live" : "paper",
+        now(),
+      ]);
+      return store.get(userId, slug);
     },
 
     /** Add (or refresh the metadata of) a plugin. Re-adding the same URL keeps its slug and tokens. */
@@ -273,6 +346,8 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null }) {
       if (!had) return false;
       await sql.run(`DELETE FROM chat_plugins WHERE user_id = ? AND slug = ?`, [userId, slug]);
       await sql.run(`DELETE FROM chat_plugin_pending WHERE user_id = ? AND slug = ?`, [userId, slug]);
+      // Settings go with it (a re-add starts on paper again); "seeded" stays so a default does not come back.
+      await sql.run(`DELETE FROM chat_plugin_prefs WHERE user_id = ? AND slug = ? AND key <> 'seeded'`, [userId, slug]);
       return true;
     },
 
@@ -370,11 +445,16 @@ export function publicPlugin(p: ChatPlugin, site: string) {
   const offersAuth = p.auth !== "none";
   const needsAuth = offersAuth && (p.auth as Exclude<PluginAuth, "none">).required !== false;
   const connected = !needsAuth || !!p.token;
+  const policy = policyFor(p.url);
+  const entry = FINANCE_CATALOG.find((e) => e.url === p.url);
   return {
     slug: p.slug,
     url: p.url,
     name: p.name,
     title: p.title,
+    icon: entry?.icon ?? null,
+    kind: policy?.kind ?? null,
+    ...(policy?.kind === "trading" ? { trading_mode: p.trading_mode } : {}),
     enabled: p.enabled,
     auth: needsAuth ? "oauth" : offersAuth ? "optional" : "none",
     connected,
