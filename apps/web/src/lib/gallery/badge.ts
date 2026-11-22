@@ -67,7 +67,11 @@ export function badgeMarkdown(url: string): string {
 }
 
 // ── hit counts ───────────────────────────────────────────────────────────────
-const pending = new Map<string, number>();
+// On globalThis: Next bundles instrumentation.ts (which flushes) and the
+// /badge.svg route (which counts) as separate module graphs, so a plain
+// module-level Map gave each its own copy and every count was lost.
+const g = globalThis as { __c0GalleryHits?: Map<string, number> };
+const pending = (g.__c0GalleryHits ??= new Map<string, number>());
 const MAX_KEYS = 10_000;
 
 /** Count one badge load for this URL key (flushed by flushHits). */
