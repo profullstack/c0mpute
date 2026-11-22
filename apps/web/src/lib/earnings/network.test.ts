@@ -63,6 +63,8 @@ describe("store.nodeTotals", () => {
       { job_id: "1", node: "aaaaaaaa", type: "tts", completed_at_ms: 1_000, seen_at_ms: 1_000, busy_s: 1, paid_usd: 0.1 },
       { job_id: "2", node: "aaaaaaaa", type: "tts", completed_at_ms: 5_000, seen_at_ms: 5_000, busy_s: 1, paid_usd: 0.2 },
       { job_id: "3", node: "bbbbbbbb", type: "stt", completed_at_ms: 6_000, seen_at_ms: 6_000, busy_s: 1, paid_usd: 0 },
+      // Paid through Infernet: its $0.01 auction cap must never count here.
+      { job_id: "4", node: "cccccccc", type: "infernet.inference", completed_at_ms: 6_500, seen_at_ms: 6_500, busy_s: 1, paid_usd: 0.01 },
     ]);
     const all = await store.nodeTotals(0);
     expect(all.find((r) => r.node === "aaaaaaaa")).toEqual({ node: "aaaaaaaa", jobs: 2, paid_usd: 0.30000000000000004 });

@@ -13,18 +13,21 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
-/** Real earnings for the estimator: c0mpute jobs + Infernet inference, never double counted. */
+/**
+ * Real earnings for the estimator: settled money only (Infernet credits). c0mpute
+ * auction prices are agreed, not paid, until market settlement launches.
+ */
 function observedFrom(e: NetworkEarnings | null): ObservedEarnings | null {
-  if (!e || (!e.c0mpute && !e.infernet)) return null;
-  const sum = (k: "7d" | "30d" | "all") => (e.c0mpute?.[k]?.earned_usd ?? 0) + (e.infernet?.[k]?.earned_usd ?? 0);
-  const inf7 = e.infernet?.["7d"];
+  if (!e?.infernet) return null;
+  const inf = e.infernet;
+  const inf7 = inf["7d"];
   return {
-    earned30d: sum("30d"),
-    earned7d: sum("7d"),
-    earnedAll: sum("all"),
-    earningNodes30d: Math.max(e.c0mpute?.["30d"]?.earning_nodes ?? 0, e.infernet?.["30d"]?.earning_nodes ?? 0),
-    medianNode30d: Math.max(e.c0mpute?.["30d"]?.median_node_usd ?? 0, e.infernet?.["30d"]?.median_node_usd ?? 0),
-    bestNode30d: Math.max(e.c0mpute?.["30d"]?.best_node_usd ?? 0, e.infernet?.["30d"]?.best_node_usd ?? 0),
+    earned30d: inf["30d"].earned_usd,
+    earned7d: inf7.earned_usd,
+    earnedAll: inf.all.earned_usd,
+    earningNodes30d: inf["30d"].earning_nodes,
+    medianNode30d: inf["30d"].median_node_usd,
+    bestNode30d: inf["30d"].best_node_usd,
     paidJobsPerDay: (inf7?.jobs ?? 0) / 7,
     avgPaidJobUsd: inf7 && inf7.jobs > 0 ? inf7.billed_usd / inf7.jobs : 0,
   };
@@ -51,7 +54,7 @@ export default async function EstimatesPage() {
         <h1 className="text-2xl sm:text-3xl font-bold accent">Compute earnings estimates</h1>
         {observed && (
           <p className="text-sm leading-6 text-[var(--color-fg)]">
-            Node operators earned <strong className="accent">{usd(observed.earned30d)}</strong> in the last 30 days
+            Node operators were paid <strong className="accent">{usd(observed.earned30d)}</strong> in the last 30 days
             ({usd(observed.earnedAll)} all time) across {observed.earningNodes30d.toLocaleString()} nodes.{" "}
             <Link href="/status#earnings">Real ledger numbers</Link>.
           </p>

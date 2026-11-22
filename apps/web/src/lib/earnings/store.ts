@@ -200,7 +200,10 @@ export function createEarningsStore(sql: Sql) {
     async nodeTotals(sinceMs: number): Promise<{ node: string; jobs: number; paid_usd: number }[]> {
       await init();
       const rows = await sql.all(
-        `SELECT node, COUNT(*) AS jobs, SUM(paid_usd) AS paid_usd FROM node_jobs WHERE completed_at >= ? GROUP BY node`,
+        // infernet.inference is paid through Infernet's own ledger; the aggregator
+        // reports its auction cap ($0.01) here, which is not money anyone paid.
+        `SELECT node, COUNT(*) AS jobs, SUM(paid_usd) AS paid_usd FROM node_jobs
+          WHERE completed_at >= ? AND type <> 'infernet.inference' GROUP BY node`,
         [sinceMs],
       );
       return rows.map((r) => ({ node: String(r.node), jobs: Number(r.jobs) || 0, paid_usd: Number(r.paid_usd) || 0 }));

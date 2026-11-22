@@ -316,7 +316,7 @@ export function EarningsEstimator({
 
       <div className="border-t border-[var(--color-rule)] pt-4 space-y-2 text-xs leading-6">
         <p className="text-[var(--color-fg)]">
-          <strong className="accent">What operators actually earned:</strong>{" "}
+          <strong className="accent">What operators were actually paid (settled):</strong>{" "}
           {observed
             ? `${usd(observed.earned30d)} in the last 30 days (${usd(observed.earned7d)} in 7 days, ${usd(observed.earnedAll)} all time) across ${observed.earningNodes30d.toLocaleString()} earning nodes; the median earning node made ${usd(observed.medianNode30d)} and the best ${usd(observed.bestNode30d)} in 30 days.`
             : "The earnings ledgers are not answering right now."}{" "}
