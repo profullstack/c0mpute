@@ -272,7 +272,7 @@ export async function groundQuestion(
   // one result per site within each search, no URL twice.
   const perList = lists.map((hits) => {
     const seen = new Set<string>();
-    return hits.filter((h) => !seen.has(h.host) && seen.add(h.host));
+    return hits.filter((h) => relevantHit(question, h.host) && !seen.has(h.host) && seen.add(h.host));
   });
   const top: { hit: Hit; q: string }[] = [];
   const urls = new Set<string>();
@@ -354,6 +354,10 @@ export function searchPlan(question: string): { queries: string[]; subjects: str
     .filter((c) => terms(c).length);
   const first = clauses[0] ?? main;
   const wants = terms(first.replace(/-/g, " ")).filter((w) => GENERIC.has(w) && !VAGUE.has(w)).slice(0, 6);
+  // The city the question is in carries to the follow-up searches ("inner
+  // sunset" alone found a "Sunset 2BR" in Plovdiv, 2026-11-22).
+  const cityMatch = CITY_RE.exec(question);
+  const city = cityMatch ? (CITY_ALIAS[cityMatch[0].toLowerCase()] ?? cityMatch[0]) : "";
   const subjects: string[] = [];
   const queries = [main];
   clauses.forEach((c, i) => {
@@ -361,9 +365,25 @@ export function searchPlan(question: string): { queries: string[]; subjects: str
     const s = (i === 0 ? firstSubject(c) : null) ?? clauseSubject(c);
     if (!s || subjects.includes(s)) return;
     subjects.push(s);
-    if (i > 0) queries.push(`${s} ${wants.join(" ")}`.trim().slice(0, 200));
+    if (i > 0) {
+      const inCity = city && !s.toLowerCase().includes(city.toLowerCase()) ? ` ${city}` : "";
+      queries.push(`${s}${inCity} ${wants.join(" ")}`.replace(/\s+/g, " ").trim().slice(0, 200));
+    }
   });
   return { queries: queries.slice(0, 3), subjects };
+}
+
+const CITY_ALIAS: Record<string, string> = { sf: "San Francisco", nyc: "New York", la: "Los Angeles", dc: "Washington DC", philly: "Philadelphia", atx: "Austin" };
+const CITY_RE =
+  /\b(sf|nyc|la|dc|philly|atx|san francisco|oakland|berkeley|san jose|sausalito|los angeles|san diego|seattle|portland|new york|brooklyn|boston|chicago|austin|denver|miami|washington dc|philadelphia|atlanta|london|paris|berlin|toronto|vancouver)\b/i;
+
+/** Vacation and hotel sites: wrong for "what does an apartment rent for". */
+const VACATION_HOSTS = /(^|\.)(booking\.com|airbnb\.[a-z.]+|vrbo\.com|expedia\.[a-z.]+|tripadvisor\.[a-z.]+|hotels\.com|agoda\.com|trivago\.[a-z.]+|kayak\.[a-z.]+)$/i;
+const HOUSING_Q = /\b(rent|rents|rental|lease|apartment|apartments|apt|br|[1-4]br|bedroom|studio|condo|housing|landlord)\b/i;
+
+/** Drop results that cannot answer the question (vacation sites for a housing question). */
+export function relevantHit(question: string, host: string): boolean {
+  return !(HOUSING_Q.test(question) && VACATION_HOSTS.test(host));
 }
 
 /** A long first clause: the trailing place phrase ("... on SF marina district" → "sf marina district"). */

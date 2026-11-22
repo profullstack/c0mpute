@@ -13,6 +13,7 @@ import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
 import { createPluginStore, pluginKey, type PluginStoreDb } from "./plugin-store";
 import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
+import { createShareStore, type ShareStore } from "./share-store";
 import { createMediaStore, type MediaKind, type MediaStore } from "./media-owners";
 
 // ── store ────────────────────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ export const pushStore = () =>
 let _oauthStore: OAuthStore | null = null;
 /** OAuth clients and authorization codes for the MCP server (ChatGPT, Claude). */
 export const oauthStore = () => (_oauthStore ??= createOAuthStore(cloudSql));
+
+let _shareStore: ShareStore | null = null;
+export const shareStore = () => (_shareStore ??= createShareStore(cloudSql));
 
 let _convoStore: ConvoStore | null = null;
 export const convoStore = () =>
