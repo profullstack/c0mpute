@@ -616,6 +616,21 @@ pub fn runtime_busy_answer(result: &Value) -> bool {
         .any(|k| e.contains(k))
 }
 
+/// A runtime-busy answer that means the worker's runtime is down or wedged
+/// (unreachable, dropped the connection, timed out), not merely full. Such a
+/// worker is benched: before 2026-11-22 the bridge cleared its standing on
+/// every such answer, so a node whose Ollama kept dropping requests (dev2,
+/// ~0.8 tok/s under OOM) kept winning chat turns that then hung for minutes.
+pub fn runtime_down_answer(result: &Value) -> bool {
+    if !runtime_busy_answer(result) {
+        return false;
+    }
+    let e = result.get("error").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    ["reach the local runtime", "connection refused", "connection closed", "timed out", "timeout", "no model is served", "not served here"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
 async fn run_job(
     state: &JobsBridge,
     workload: Workload,
@@ -867,7 +882,6 @@ async fn run_round(
         // Turned away or failed on the worker: another round, not an error.
         return Round::Requeue(format!("worker {worker} turned the job away"));
     }
-    state.penalties.clear(&worker);
     let worker_failed = |detail: &str| {
         Round::Done(Err(ApiError(
             StatusCode::BAD_GATEWAY,
@@ -899,8 +913,14 @@ async fn run_round(
         && deadline.saturating_duration_since(tokio::time::Instant::now()) > Duration::from_secs(5)
     {
         let e = result.get("error").and_then(Value::as_str).unwrap_or("").chars().take(160).collect::<String>();
+        if runtime_down_answer(&result) {
+            let bench = state.penalties.strike(&worker);
+            tracing::info!(worker = %worker, bench_secs = bench.as_secs(), "jobs bridge: worker runtime down, benched");
+        }
         return Round::Requeue(format!("worker {worker} runtime busy: {e}"));
     }
+    // Delivered an answer: good standing again.
+    state.penalties.clear(&worker);
     let result = if workload == Workload::RenderFrame {
         let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         match attach_render_frames(state, spec, result, &worker, &outcome.result_key, budget).await {
@@ -1231,6 +1251,17 @@ mod tests {
         assert!(runtime_busy_answer(&json!({"v": 1, "ok": false, "error": "runtime answered 503 Service Unavailable: server busy"})));
         assert!(!runtime_busy_answer(&json!({"v": 1, "ok": false, "error": "messages must hold 1..=64 entries"})));
         assert!(!runtime_busy_answer(&json!({"v": 1, "ok": true, "text": "timed out", "model": "m"})));
+    }
+
+    #[test]
+    fn a_dead_runtime_is_benched_a_full_one_is_not() {
+        // dev2 2026-11-22: Ollama dropped the request after 209 s.
+        let dropped = json!({"v": 1, "ok": false, "error": "reach the local runtime: error sending request for url (http://127.0.0.1:11434/v1/chat/completions): client error (SendRequest): connection closed before message completed"});
+        assert!(runtime_busy_answer(&dropped));
+        assert!(runtime_down_answer(&dropped));
+        assert!(runtime_down_answer(&json!({"v": 1, "ok": false, "error": "reach the local runtime: connection refused"})));
+        assert!(!runtime_down_answer(&json!({"v": 1, "ok": false, "error": "runtime answered 503 Service Unavailable: server busy"})));
+        assert!(!runtime_down_answer(&json!({"v": 1, "ok": false, "error": "messages must hold 1..=64 entries"})));
     }
 
     #[test]

@@ -146,6 +146,8 @@ type Msg = {
   tools?: ToolView[];
   /** A resumable turn still streaming: reattached after a reload or a dropped connection. */
   run?: string;
+  /** Where a turn is before its first word (queued, running on a node): shown until text arrives. */
+  status?: string;
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -302,7 +304,7 @@ function save(c: Convo[]) {
   try {
     const slim = c.slice(0, 100).map((cv) => ({
       ...cv,
-      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, revealed: _revealed, ...m }) => m),
+      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, revealed: _revealed, status: _status, ...m }) => m),
     }));
     localStorage.setItem(STORE, JSON.stringify(slim));
   } catch {}
@@ -318,19 +320,59 @@ const newConvo = (model: string): Convo => ({
 /** An error the server put in the stream (not a dropped connection, so not worth reattaching). */
 class StreamError extends Error {}
 
+/** The stream went silent: a dead connection (the server sends a keepalive every 15 s), so reattach. */
+class StreamStalled extends Error {}
+
+/** No byte for this long means the connection is dead (server keepalives come every 15 s). */
+const STREAM_IDLE_MS = 45_000;
+
+/** The human line in a `: status {...}` SSE comment (where the turn is: queued, running on a node). */
+function statusLine(line: string): string | null {
+  if (!line.startsWith(": status")) return null;
+  try {
+    const s = JSON.parse(line.slice(8).trim()) as { message?: unknown };
+    return typeof s.message === "string" && s.message ? s.message : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
-async function readStream(res: Response, onDelta: (t: string) => void, onEvent?: (e: PluginEvent) => void) {
+async function readStream(
+  res: Response,
+  onDelta: (t: string) => void,
+  onEvent?: (e: PluginEvent) => void,
+  onStatus?: (s: string) => void,
+) {
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
   for (;;) {
-    const { done, value } = await reader.read();
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<never>((_, reject) => {
+      idle = setTimeout(() => reject(new StreamStalled("the connection went quiet")), STREAM_IDLE_MS);
+    });
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await Promise.race([reader.read(), stalled]);
+    } catch (e) {
+      if (e instanceof StreamStalled) void reader.cancel().catch(() => {});
+      throw e;
+    } finally {
+      clearTimeout(idle);
+    }
+    const { done, value } = chunk;
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) !== -1) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
+      const status = statusLine(line);
+      if (status) {
+        onStatus?.(status);
+        continue;
+      }
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (data === "[DONE]") return;
@@ -1435,8 +1477,24 @@ export function ChatApp({ error }: { error: string | null }) {
             setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "approval", approval: e.approval }]);
           }
         },
+        (s) =>
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            if (!last || last.role !== "assistant" || last.status === s) return c;
+            msgs[msgs.length - 1] = { ...last, status: s };
+            return { ...c, messages: msgs };
+          }),
       );
     }
+    // Finished (or failed): the progress line is not part of the answer.
+    update(id, (c) => {
+      const msgs = c.messages.slice();
+      const last = msgs[msgs.length - 1];
+      if (!last?.status) return c;
+      msgs[msgs.length - 1] = { ...last, status: undefined };
+      return { ...c, messages: msgs };
+    });
   }
 
   /** Approve or deny a destructive tool call the model asked for (only on the chat's last turn). */
@@ -1647,7 +1705,12 @@ export function ChatApp({ error }: { error: string | null }) {
                   {m.role === "user" ? "> you" : "< c0mpute"}
                 </div>
                 <div className="whitespace-pre-wrap break-words">
-                  {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
+                  {m.content ||
+                    (busy && i === active.messages.length - 1 ? (
+                      <span className="text-[var(--color-dim)]">{m.status ? `// ${m.status} ▍` : "// sending it to the network… ▍"}</span>
+                    ) : (
+                      ""
+                    ))}
                 </div>
                 {m.tools?.map((t) => (
                   <ToolCard

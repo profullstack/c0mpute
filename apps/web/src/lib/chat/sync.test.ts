@@ -550,3 +550,36 @@ describe("resumable runs: what reaches the database", () => {
     expect(await text(m.stream(run.id))).toContain("did not answer in time");
   });
 });
+
+describe("a slow network never leaves the chat silent (2026-11-22)", () => {
+  test("start() hands back the run while the upstream is still deciding", async () => {
+    const up = fakeUpstream();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const m = createRunManager({ timers: false, startWaitMs: 20, opener: async (_r, signal) => (await gate, up.body(signal)) });
+    const t0 = Date.now();
+    const run = await m.start(req());
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(run.status).toBe("running");
+    const out = text(m.stream(run.id));
+    release();
+    await tick();
+    up.push(delta("hi") + "data: [DONE]\n\n");
+    up.close();
+    expect(answerText(await out)).toBe("hi");
+  });
+
+  test("an idle live stream gets keepalive comments, not stored with the run", async () => {
+    const up = fakeUpstream();
+    const m = createRunManager({ timers: false, keepaliveMs: 15, opener: async (_r, signal) => up.body(signal) });
+    const run = await m.start(req());
+    const out = text(m.stream(run.id));
+    await new Promise((r) => setTimeout(r, 80));
+    up.push(delta("ok") + "data: [DONE]\n\n");
+    up.close();
+    const body = await out;
+    expect(body).toContain(": keepalive");
+    expect(answerText(body)).toBe("ok");
+    expect(await text(m.stream(run.id))).not.toContain(": keepalive");
+  });
+});
