@@ -47,6 +47,15 @@ COPY --from=rustbuild /src/target/release/c0mpute /usr/local/bin/c0mpute
 COPY scripts/railway-web-start.sh /usr/local/bin/railway-web-start.sh
 RUN chmod +x /usr/local/bin/railway-web-start.sh
 
+# Never run as root: a dedicated user whose uid (10001) matches no account on
+# the host. The code stays root-owned and read-only to it; the only paths the
+# running site writes are Next's caches under .next and the aggregator's
+# throwaway identity under $HOME.
+RUN useradd --uid 10001 --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
+    && chown -R app:app /app/apps/web/.next
+ENV HOME=/home/app
+USER app
+
 # The aggregator serves its JSON on loopback; the site reads it there.
 ENV C0MPUTE_STATUS_BIND=127.0.0.1:8090
 ENV STATUS_AGGREGATOR_URL=http://127.0.0.1:8090
