@@ -17,7 +17,7 @@
     "@profullstack/cross-promo": "^0.2.0",
     "@profullstack/footer": "latest",
     "@profullstack/modern-css": "0.2.0",
-    "@profullstack/x402-gateway": "^0.18.2",
+    "@profullstack/x402-gateway": "^0.18.4",
     "@simplewebauthn/browser": "14.0.0",
     "@simplewebauthn/server": "14.0.3",
     "@sqlitecloud/drivers": "^1.0.982",
