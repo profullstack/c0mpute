@@ -267,7 +267,7 @@ function AdultSettings({ me, setMe, on, setOn }: { me: Me; setMe: (m: Me) => voi
 }
 
 /**
- * What this person can spend on inference: money they topped up on Infernet
+ * What this person can spend on inference: money they topped up at /checkout
  * plus what their own nodes earned. Chat still works at zero - the network
  * serves the free, rate-limited tier - so this is information, not a gate.
  */
@@ -276,7 +276,7 @@ function BalanceLine({ balance }: { balance: Balance | null }) {
     return (
       <p className="text-[var(--color-dim)]">
         no balance ·{" "}
-        <a className="hover:text-[var(--color-fg)] underline" href="https://infernetprotocol.com/dashboard/billing" target="_blank" rel="noreferrer">
+        <a className="hover:text-[var(--color-fg)] underline" href="/checkout">
           top up
         </a>
       </p>
@@ -291,7 +291,7 @@ function BalanceLine({ balance }: { balance: Balance | null }) {
         ${spendable < 0.01 && spendable > 0 ? spendable.toFixed(6) : spendable.toFixed(2)}
       </span>
       {earned > 0 ? <span className="text-[var(--color-dim)]"> (incl. earned)</span> : null} ·{" "}
-      <a className="hover:text-[var(--color-fg)] underline" href="https://infernetprotocol.com/dashboard/billing" target="_blank" rel="noreferrer">
+      <a className="hover:text-[var(--color-fg)] underline" href="/checkout">
         top up
       </a>
     </p>
