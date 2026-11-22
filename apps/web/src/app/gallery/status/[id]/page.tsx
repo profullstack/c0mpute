@@ -23,7 +23,7 @@ export default async function StatusPage({ params, searchParams }: { params: Pro
   const { id } = await params;
   const { paid, new: isNew } = await searchParams;
   const l = await gallery().store.byId(id).catch(() => null);
-  if (!l) notFound();
+  if (!l) return notFound();
   const s = publicStatus(l);
   const canPay = !l.paid_at && (l.status === "queued" || l.status === "awaiting_payment" || l.status === "review");
   const canCheck = l.status === "queued" || l.status === "awaiting_payment" || (l.status === "approved" && l.listed_via === "badge");
