@@ -6,7 +6,7 @@ import { accountStore, fleetFor, fleetService } from "@/lib/accounts/server";
 import { isFleetAction, runAction, selectNodes } from "@/lib/accounts/fleet";
 import { earningsStore } from "@/lib/earnings/server";
 import { recordUsage } from "@/lib/leaderboard/server";
-import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
+import { convoStore, currentUser, infernetFor, json, liveStore, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery(), fleet: fleetDeps(user) })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery(), fleet: fleetDeps(user), live: { store: liveStore(), site: siteUrl() } })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
 }

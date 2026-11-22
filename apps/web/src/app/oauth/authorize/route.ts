@@ -53,7 +53,7 @@ async function check(get: (k: string) => string | null) {
     return { error: back(redirect, { error: "invalid_request", error_description: "PKCE S256 required", state }) } as const;
   }
   const scope = parseScope(get("scope"));
-  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write", state }) } as const;
+  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write, live:publish", state }) } as const;
   const q: Q = { client_id: client.client_id, redirect_uri: redirect, code_challenge: challenge, state, scope };
   return { client, q } as const;
 }
@@ -82,6 +82,9 @@ export async function GET(req: Request) {
       "ask models on the network, billed to your compute balance",
       "make promo videos",
     );
+  }
+  if (scopes.includes("live:publish")) {
+    can.push("create and end live streams on your account and read their stream keys, billed per GB relayed to your compute balance (free tier when it is empty)");
   }
   let storageNote = "";
   if (scopes.includes("storage:write")) {
