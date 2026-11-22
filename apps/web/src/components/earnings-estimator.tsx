@@ -36,12 +36,39 @@ function usd(value: number): string {
   }).format(value);
 }
 
+/** What node operators actually earned (from /status earnings), for the page header and payback panel. */
+export interface ObservedEarnings {
+  earned30d: number;
+  earned7d: number;
+  earnedAll: number;
+  earningNodes30d: number;
+  medianNode30d: number;
+  bestNode30d: number;
+  /** Paid (billed) inference jobs per day over the last 7 days, all models. */
+  paidJobsPerDay: number;
+  /** Average gross a paid job billed over the last 7 days, USD. */
+  avgPaidJobUsd: number;
+}
+
+/** The live network price of the house GPU model, from Infernet's public /api/v1/pricing. */
+export interface GpuModelPrice {
+  model: string;
+  outPerMUsd: number;
+}
+
+/** Payback multiples shown in the panel: 1x pays the rent; 5x pays it and rents four more. */
+export const PAYBACK_MULTIPLES = [1, 5] as const;
+
 export function EarningsEstimator({
   jobsCompleted24h,
   cpuWorkersOnline,
+  observed = null,
+  gpuPrice = null,
 }: {
   jobsCompleted24h: number | null;
   cpuWorkersOnline: number | null;
+  observed?: ObservedEarnings | null;
+  gpuPrice?: GpuModelPrice | null;
 }) {
   const [hardware, setHardware] = useState<Hardware>("gpu");
   const [gpuModel, setGpuModel] = useState(DEFAULT_GPU_MODEL);
@@ -235,12 +262,66 @@ export function EarningsEstimator({
         </p>
       </div>
 
+      {hardware === "gpu" && rate > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-[var(--color-fg)]">What a rented GPU has to sell to pay back</h2>
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            Renting this GPU at {usd(rate)}/h costs {usd(rate * 24)} a day. At <strong>1x</strong> the work it serves
+            pays its own rent. At <strong>5x</strong> it pays its rent and the rent of four more GPUs, which is how one
+            profitable GPU grows into five. Counted after the {MARKET_FEE_PCT}% house fee, before electricity and tax
+            (a rented GPU has none of the first).
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-left text-xs">
+              <thead className="text-[var(--color-dim)]">
+                <tr className="border-b border-[var(--color-rule)]">
+                  <th className="py-2 pr-4 font-medium">payback</th>
+                  <th className="py-2 pr-4 font-medium">operator earnings / day</th>
+                  <th className="py-2 pr-4 font-medium">
+                    {gpuPrice ? `output tokens / day at ${usd(gpuPrice.outPerMUsd)}/1M` : "output tokens / day"}
+                  </th>
+                  <th className="py-2 font-medium">paid jobs / day</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--color-rule)]">
+                {PAYBACK_MULTIPLES.map((x) => {
+                  const net = x * rate * 24;
+                  const buyerSpend = net / (OPERATOR_SHARE_PCT / 100);
+                  const tokens = gpuPrice && gpuPrice.outPerMUsd > 0 ? (buyerSpend / gpuPrice.outPerMUsd) * 1e6 : null;
+                  const jobs = observed && observed.avgPaidJobUsd > 0 ? buyerSpend / observed.avgPaidJobUsd : null;
+                  return (
+                    <tr key={x}>
+                      <td className="py-3 pr-4 font-bold">{x}x</td>
+                      <td className="py-3 pr-4 tabular-nums accent font-bold">{usd(net)}</td>
+                      <td className="py-3 pr-4 tabular-nums">
+                        {tokens === null ? "—" : `${(tokens / 1e6).toFixed(tokens < 1e6 ? 2 : 1)}M`}
+                      </td>
+                      <td className="py-3 tabular-nums">{jobs === null ? "—" : Math.ceil(jobs).toLocaleString()}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            {gpuPrice
+              ? `Tokens are priced at the live network output price of ${gpuPrice.model} (input is extra, so this is the most work it can take). `
+              : "The live network price is unavailable right now. "}
+            {observed
+              ? `Paid jobs use what a paid inference job actually billed over the last 7 days (${usd(observed.avgPaidJobUsd)} on average); the whole network sold ${Math.round(observed.paidJobsPerDay).toLocaleString()} paid jobs a day. A GPU needs that much demand of its own before renting it pays.`
+              : "Observed demand is unavailable right now."}
+          </p>
+        </div>
+      )}
+
       <div className="border-t border-[var(--color-rule)] pt-4 space-y-2 text-xs leading-6">
         <p className="text-[var(--color-fg)]">
-          <strong className="accent">Observed c0mpute demand:</strong>{" "}
-          {jobsCompleted24h === null
-            ? "Live network stats are unavailable, and public payout totals by hardware are not available, so there is no actual average to show."
-            : `${jobsCompleted24h.toLocaleString()} jobs completed across all hardware in the last 24 hours. Public payout totals by hardware are not available, so there is no actual average to show.`}
+          <strong className="accent">What operators actually earned:</strong>{" "}
+          {observed
+            ? `${usd(observed.earned30d)} in the last 30 days (${usd(observed.earned7d)} in 7 days, ${usd(observed.earnedAll)} all time) across ${observed.earningNodes30d.toLocaleString()} earning nodes; the median earning node made ${usd(observed.medianNode30d)} and the best ${usd(observed.bestNode30d)} in 30 days.`
+            : "The earnings ledgers are not answering right now."}{" "}
+          {jobsCompleted24h === null ? "" : `${jobsCompleted24h.toLocaleString()} jobs completed in the last 24 hours. `}
+          <a href="/status#earnings">See the full breakdown</a>.
         </p>
         {hardware === "cpu" && (
           <p className="text-[var(--color-dim)]">
@@ -254,6 +335,7 @@ export function EarningsEstimator({
             <>GPU rental references were checked {GPU_RATE_CHECKED_AT}; prices change. Sources:{" "}
               <a href={GPU_RATE_SOURCES["runpod-secure"].url} target="_blank" rel="noopener noreferrer">RunPod</a>,
               {" "}<a href={GPU_RATE_SOURCES["vast-median"].url} target="_blank" rel="noopener noreferrer">Vast.ai</a>,
+              {" "}<a href={GPU_RATE_SOURCES["vast-low"].url} target="_blank" rel="noopener noreferrer">r4ck.dev</a>,
               {" "}<a href={GPU_RATE_SOURCES.lambda.url} target="_blank" rel="noopener noreferrer">Lambda</a>.
             </>
           ) : (

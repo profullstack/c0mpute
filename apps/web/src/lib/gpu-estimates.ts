@@ -13,13 +13,14 @@
  * `hourlyUsd: null`: the page asks the operator for their own comparison rate
  * instead of inventing one. Update when the public rate cards change.
  */
-export const GPU_RATE_CHECKED_AT = "2026-11-08";
+export const GPU_RATE_CHECKED_AT = "2026-11-22";
 
 export const GPU_RATE_SOURCES = {
   "runpod-secure": { label: "RunPod Secure Cloud", url: "https://www.runpod.io/pricing" },
   "runpod-community": { label: "RunPod Community Cloud", url: "https://www.runpod.io/pricing" },
   "vast-median": { label: "Vast.ai median on-demand offer", url: "https://vast.ai/pricing" },
   lambda: { label: "Lambda on-demand", url: "https://lambda.ai/service/gpu-cloud/pricing" },
+  "vast-low": { label: "Vast.ai lowest in-stock offer (via r4ck.dev)", url: "https://r4ck.dev/servers?gpu=1&interval=hour&sort=price" },
 } as const;
 
 export type GpuRateSourceId = keyof typeof GPU_RATE_SOURCES;
@@ -39,15 +40,15 @@ export interface GpuRateReference {
 
 export const GPU_RATE_REFERENCES: GpuRateReference[] = [
   // Consumer NVIDIA
-  { model: "NVIDIA RTX 3060", vram: "12 GB", group: "NVIDIA GeForce", hourlyUsd: 0.07, source: "vast-median" },
+  { model: "NVIDIA RTX 3060", vram: "12 GB", group: "NVIDIA GeForce", hourlyUsd: 0.05, source: "vast-low" },
   { model: "NVIDIA RTX 3070", vram: "8 GB", group: "NVIDIA GeForce", hourlyUsd: 0.13, source: "runpod-community" },
   { model: "NVIDIA RTX 3080", vram: "10 GB", group: "NVIDIA GeForce", hourlyUsd: 0.17, source: "runpod-community" },
-  { model: "NVIDIA RTX 3090", vram: "24 GB", group: "NVIDIA GeForce", hourlyUsd: 0.5, source: "runpod-secure" },
+  { model: "NVIDIA RTX 3090", vram: "24 GB", group: "NVIDIA GeForce", hourlyUsd: 0.11, source: "vast-low" },
   { model: "NVIDIA RTX 4060 Ti 16GB", vram: "16 GB", group: "NVIDIA GeForce", hourlyUsd: 0.16, source: "vast-median" },
   { model: "NVIDIA RTX 4070", vram: "12 GB", group: "NVIDIA GeForce", hourlyUsd: 0.19, source: "vast-median" },
   { model: "NVIDIA RTX 4070 Ti Super", vram: "16 GB", group: "NVIDIA GeForce", hourlyUsd: 0.21, source: "vast-median" },
   { model: "NVIDIA RTX 4080", vram: "16 GB", group: "NVIDIA GeForce", hourlyUsd: 0.5, source: "runpod-secure" },
-  { model: "NVIDIA RTX 4090", vram: "24 GB", group: "NVIDIA GeForce", hourlyUsd: 0.89, source: "runpod-secure" },
+  { model: "NVIDIA RTX 4090", vram: "24 GB", group: "NVIDIA GeForce", hourlyUsd: 0.28, source: "vast-low" },
   { model: "NVIDIA RTX 5080", vram: "16 GB", group: "NVIDIA GeForce", hourlyUsd: 0.59, source: "runpod-secure" },
   { model: "NVIDIA RTX 5090", vram: "32 GB", group: "NVIDIA GeForce", hourlyUsd: 1.19, source: "runpod-secure" },
 
