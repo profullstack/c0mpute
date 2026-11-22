@@ -250,6 +250,11 @@ pub fn run_worker_subscriber_with_load(
                     debug!(job_id = %offer.job_id, "dispatch: a newer twin runs this identity, not bidding");
                     continue;
                 }
+                // Paused from the operator's fleet (c0mpute.com, `c0mpute fleet pause`).
+                if crate::fleet_pause::paused() {
+                    debug!(job_id = %offer.job_id, "dispatch: paused by the operator's fleet, not bidding");
+                    continue;
+                }
                 // Restarting into an update: finish what we hold, take nothing new.
                 if c0mpute_update::draining() {
                     debug!(job_id = %offer.job_id, "dispatch: draining for an update, not bidding");

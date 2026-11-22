@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { SignInOptions } from "@/components/sign-in-options";
 
 // Mirrors lib/earnings/server.ts Dashboard (kept loose: this is a client file).
 type Totals = {
@@ -144,13 +145,8 @@ export function EarningsDashboard() {
   if (!me) {
     return (
       <div className="space-y-4 text-sm leading-7">
-        <p>Sign in to see what your nodes earned against what they cost to run. A CoinPay account with a DID is required.</p>
-        <a
-          href={`/api/auth/coinpay/login?next=${encodeURIComponent("/dashboard/nodes")}`}
-          className="inline-block !border border-[var(--color-accent)] px-4 py-2 accent"
-        >
-          Sign in with CoinPay
-        </a>
+        <p>Sign in to manage your fleet and see what your nodes earned against what they cost to run. Payouts need CoinPay connected.</p>
+        <SignInOptions next="/dashboard/nodes" compact />
         <p className="text-[var(--color-dim)]">
           No node yet? <a href="/providers">run one</a>, then come back.
         </p>

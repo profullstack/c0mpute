@@ -5,7 +5,7 @@
  */
 import type { Container, Theme } from "@profullstack/hqtui";
 import { expandHome } from "../config.ts";
-import { usd } from "../network.ts";
+import { usd, whoLabel } from "../network.ts";
 import { adultActive, SETTINGS_ROWS, type AppState, type SettingsRow } from "../state.ts";
 import { panel } from "./common.ts";
 
@@ -35,14 +35,14 @@ export function settingsItems(state: AppState): SettingsItem[] {
               row,
               label: "account",
               value: me
-                ? `${me.name ?? "(no name)"} · ${me.did.slice(0, 32)}${me.did.length > 32 ? "…" : ""} · ${me.balance ? `balance ${usd(me.balance.spendable_usd)}` : "free tier"}`
+                ? `${whoLabel(me)}${me.did && me.name ? ` · ${me.did.slice(0, 24)}…` : ""} · ${me.coinpay === false ? "CoinPay not connected (no payouts)" : me.balance ? `balance ${usd(me.balance.spendable_usd)}` : "free tier"} · ${me.totals ? `${me.totals.nodes} nodes (${me.totals.online} online)` : "nodes ?"}`
                 : state.me.error
                   ? `key from ${state.creds.source === "env" ? "$C0MPUTE_API_KEY" : "~/.c0mpute/chat.json"}; ${state.me.error}`
                   : "checking…",
-              hint: `${state.creds.url} · Enter re-checks · sign out: c0mpute chat logout`,
+              hint: `${state.creds.url} · Enter re-checks · fleet: c0mpute fleet ls · link this box: c0mpute node link · sign out: c0mpute logout${me?.nodes?.length ? ` · ${me.nodes.slice(0, 6).map((n) => `${n.online ? "●" : "○"}${n.label ?? n.node}`).join(" ")}` : ""}`,
               warn: !me && !!state.me.error,
             }
-          : { row, label: "account", value: "not signed in", hint: "L or Enter: sign in here (device code, approve with CoinPay) · or run: c0mpute chat login", warn: true };
+          : { row, label: "account", value: "not signed in", hint: "L or Enter: sign in here (device code; approve with CoinPay, a passkey or a password) · or run: c0mpute login", warn: true };
       case "model":
         return { row, label: "default model", value: s.defaultModel ?? "any live model", hint: "Enter: pick (new chats use it; /model changes one chat)" };
       case "downloads":
@@ -101,7 +101,7 @@ export function renderSettings(ui: Container, state: AppState, theme: Theme, h: 
           p.text(`and check it shows the code  ${state.login.code}`, { fg: theme.foreground, size: 1 });
         }
         p.text(state.login.status, { fg: state.login.done ? theme.success : theme.muted, wrap: true, size: 2 });
-        p.label("CoinPay sign-in; your CoinPay account needs a DID. The key is saved where `c0mpute chat` reads it.", { wrap: true, size: 2 });
+        p.label("Approve with CoinPay, a passkey or a password. The key is saved where the c0mpute CLI reads it (one sign-in for CLI, TUI and desktop).", { wrap: true, size: 2 });
       }
     });
   });

@@ -49,7 +49,7 @@ type User = NonNullable<Awaited<ReturnType<typeof currentUser>>>;
 export async function isGalleryAdmin(user: User | null): Promise<boolean> {
   if (!user || user.token_kind === "oauth") return false;
   const subs = env("C0MPUTE_ADMIN_SUBS").split(",").map((s) => s.trim()).filter(Boolean);
-  if (subs.includes(user.coinpay_sub)) return true;
+  if (user.coinpay_sub && subs.includes(user.coinpay_sub)) return true;
   const b = (await balanceFor(user.coinpay_sub)) as { admin?: unknown } | null;
   return b?.admin === true;
 }

@@ -48,7 +48,7 @@ describe("chat", () => {
   it("says how to sign in when there is no key", () => {
     const s = demoState();
     const text = draw({ ...s, creds: { ...s.creds, key: null, source: null }, me: { data: null, error: null, at: null, loading: false }, chat: { ...s.chat, convo: { ...s.chat.convo, messages: [] } } });
-    expect(text).toContain("not signed in · c0mpute chat login");
+    expect(text).toContain("not signed in · c0mpute login");
     expect(text).toContain("Not signed in: run `c0mpute chat login`");
   });
 });

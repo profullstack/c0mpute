@@ -66,7 +66,7 @@ export async function GET(req: Request) {
   const session = sessionToken(req);
   if (!user || user.token_kind !== "session" || !session) {
     const next = `/oauth/authorize${url.search}`;
-    return new Response(null, { status: 302, headers: { location: `${siteUrl()}/api/auth/coinpay/login?next=${encodeURIComponent(next)}`, "cache-control": "no-store" } });
+    return new Response(null, { status: 302, headers: { location: `${siteUrl()}/signin?next=${encodeURIComponent(next)}`, "cache-control": "no-store" } });
   }
   const { client, q } = r;
   const host = new URL(q.redirect_uri).host;
@@ -96,7 +96,7 @@ export async function GET(req: Request) {
   return page(
     "Connect",
     `<h1>Connect <b>${esc(client.name)}</b> to c0mpute?</h1>
-<p>Signed in as <b>${esc(user.name || user.did)}</b>.</p>
+<p>Signed in as <b>${esc(user.name || user.did || user.id)}</b>.</p>
 <p>${esc(client.name)} will be able to:</p>
 <ul>${can.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>${storageNote}
 <form method="post" action="/oauth/authorize">${hidden}

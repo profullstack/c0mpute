@@ -54,6 +54,66 @@ c0mpute coinpay wallet status               # linked addresses + balances`}
         </Code>
       </Section>
 
+      <Section h="sign-in" title="[ sign in with CoinPay ]">
+        <P>
+          One c0mpute account works everywhere: the site and the installed app, chat, your node dashboard and fleet, the CLI and TUI,
+          the API and MCP. Sign in at <Link href="/signin">/signin</Link> with <b>CoinPay</b> (OAuth 2.1 with PKCE; your CoinPay DID becomes your
+          identity and payouts go to your CoinPay wallet) or a <b>passkey</b>. Passwords exist but are deprecated and will be removed.
+          Add or remove methods, connect CoinPay and make API keys on <Link href="/account">/account</Link>.
+        </P>
+        <Code>
+{`c0mpute login        # device sign-in: approve the code in your browser (any sign-in method)
+c0mpute whoami       # the account, CoinPay DID and linked nodes
+c0mpute logout       # forget this machine's key (~/.c0mpute/chat.json, mode 0600)
+c0mpute chat login   # the same thing, kept for scripts that use it`}
+        </Code>
+        <P>
+          API and MCP take <code>Authorization: Bearer c0k_...</code> (a key from <code>c0mpute login</code> or the account page). MCP clients
+          (Claude, ChatGPT) can instead connect to <code>https://c0mpute.com/api/mcp</code> and sign in through OAuth; tools include{" "}
+          <code>whoami</code>, <code>list_my_nodes</code>, <code>my_earnings</code>, <code>fleet_list</code>, <code>fleet_action</code>,{" "}
+          <code>fleet_earnings</code> and <code>link_node</code>.
+        </P>
+        <Code>
+{`curl -H "authorization: Bearer $C0MPUTE_API_KEY" https://c0mpute.com/api/v1/me?nodes=1
+curl -H "authorization: Bearer $C0MPUTE_API_KEY" https://c0mpute.com/api/v1/account`}
+        </Code>
+      </Section>
+
+      <Section h="link-node" title="[ link your node ]">
+        <P>
+          Linking proves you control a node: the server sends a one-shot challenge, the node signs it with its identity key (the key behind
+          its peer id), and the node is verified to your account. Its earnings show on your account and it accepts fleet commands. Payouts
+          need CoinPay connected.
+        </P>
+        <Code>
+{`c0mpute login && c0mpute node link          # on the node
+c0mpute node link --tags home,gpu --label den-3060
+
+# Many boxes, no browser: an enrollment token (shown once, stored hashed, revocable)
+c0mpute fleet token create --name rack-a --expires 7d --tags rack-a
+curl -fsSL https://c0mpute.com/install.sh | sh -s -- --enroll c0e_...   # new boxes
+c0mpute node link --token c0e_...                                       # installed boxes`}
+        </Code>
+      </Section>
+
+      <Section h="fleet" title="[ manage a fleet ]">
+        <P>
+          The same fleet from every surface: <Link href="/dashboard/nodes">/dashboard/nodes</Link> (and the installed app), the TUI, the CLI,
+          the API (<code>GET /api/v1/fleet</code>, <code>POST /api/v1/fleet/actions</code>) and MCP. Actions take one node, a selection, a tag
+          or <code>--all</code>. pause, resume, update and restart are queued and signed by c0mpute.com; the node fetches them on its next poll
+          (about a minute), checks the signature against the key it pinned when it linked, and reports back. Everything lands in the audit log.
+        </P>
+        <Code>
+{`c0mpute fleet ls [--tag rack-a] [--json]
+c0mpute fleet show <node>
+c0mpute fleet pause|resume|update|restart <node...> | --tag rack-a | --all
+c0mpute fleet tag <node...> --set vast,home  c0mpute fleet untag <node...> --set home
+c0mpute fleet rename <node> "den 3060"       c0mpute fleet unlink <node...>
+c0mpute fleet earnings [--json]              c0mpute fleet audit
+c0mpute fleet token create|ls|revoke`}
+        </Code>
+      </Section>
+
       <Section h="worker" title="[ run a worker ]">
         <P>
           Register, then start. <code>--gpu</code> opts into transcode +

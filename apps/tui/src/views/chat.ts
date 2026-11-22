@@ -4,7 +4,7 @@
  */
 import type { Container, Theme } from "@profullstack/hqtui";
 import { KIND_LABEL, mmss, type Job } from "../jobs.ts";
-import { usd } from "../network.ts";
+import { usd, whoLabel } from "../network.ts";
 import { activeModel, adultActive, jobById, type AppState, type ChatMsg } from "../state.ts";
 import { bar, drawLines, spin, tail, wrapBlock, type Line } from "./common.ts";
 
@@ -102,7 +102,7 @@ export function renderChat(ui: Container, state: AppState, theme: Theme, h: Chat
     col.row({ size: 1, gap: 1 }, (row) => {
       row.text(`model ${model}`, { fg: theme.primary, size: "fill" });
       if (adultActive(state)) row.text("18+", { fg: theme.warning, size: 4 });
-      const who = me ? `${me.name ?? me.did.slice(0, 24)} · ${me.balance ? `balance ${usd(me.balance.spendable_usd)}` : "free tier"}` : state.creds.key ? (state.me.error ? `offline? ${state.me.error}` : "checking sign-in…") : "not signed in · c0mpute chat login";
+      const who = me ? `${whoLabel(me, 24)} · ${me.balance ? `balance ${usd(me.balance.spendable_usd)}` : "free tier"}` : state.creds.key ? (state.me.error ? `offline? ${state.me.error}` : "checking sign-in…") : "not signed in · c0mpute login";
       row.text(who, { fg: me ? theme.muted : theme.warning, size: Math.min(48, Math.max(20, who.length)), align: "right" });
     });
     col.panel(

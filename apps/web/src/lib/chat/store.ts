@@ -1,5 +1,8 @@
-// Accounts for c0mpute chat: CoinPay-only sign-in, one row per CoinPay `sub`,
-// and hashed bearer tokens (browser sessions, CLI/API keys, device codes).
+// Accounts for the whole site (chat, dashboards, nodes, fleet, CLI, MCP): one
+// row per person, signed in with CoinPay (bound by `sub`, DID required), a
+// passkey, or a deprecated password, and hashed bearer tokens (browser
+// sessions, CLI/API keys, device codes). The table is still called chat_users
+// because chat shipped first; every surface reads it.
 //
 // Storage is the site's SQLite Cloud database (SQLITE_CLOUD_URL). The store is
 // written against a two-method `Sql` interface so tests run it on bun:sqlite.
@@ -14,9 +17,13 @@ export interface Sql {
 
 export type User = {
   id: string;
-  coinpay_sub: string;
-  did: string;
+  /** The CoinPay account this one is bound to (by `sub`), or null for a passkey/password-only account. */
+  coinpay_sub: string | null;
+  /** The CoinPay DID; set exactly when coinpay_sub is. */
+  did: string | null;
   name: string | null;
+  /** Sign-in name for the deprecated password method, or null. */
+  username?: string | null;
   /** When this person attested they are 18 or older (adult mode), or null. */
   adult_verified_at?: string | null;
 };
@@ -45,12 +52,15 @@ export const CLAIMS_SCHEMA = `CREATE TABLE IF NOT EXISTS chat_claims (
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS chat_users (
-     id            TEXT PRIMARY KEY,
-     coinpay_sub   TEXT NOT NULL UNIQUE,
-     did           TEXT NOT NULL,
-     name          TEXT,
-     created_at    TEXT NOT NULL,
-     last_login_at TEXT NOT NULL
+     id                TEXT PRIMARY KEY,
+     coinpay_sub       TEXT UNIQUE,
+     did               TEXT,
+     name              TEXT,
+     created_at        TEXT NOT NULL,
+     last_login_at     TEXT NOT NULL,
+     adult_verified_at TEXT,
+     username          TEXT UNIQUE,
+     password_hash     TEXT
    )`,
   `CREATE TABLE IF NOT EXISTS chat_tokens (
      token_hash   TEXT PRIMARY KEY,
@@ -82,7 +92,52 @@ const MIGRATIONS = [
   // OAuth scopes on a key ("mcp", "storage:write", space-separated). NULL on
   // keys from before scopes existed: an OAuth key then means "mcp".
   `ALTER TABLE chat_tokens ADD COLUMN scope TEXT`,
+  // Payout wallets CoinPay reports for the account (wallet:read), refreshed at each CoinPay sign-in.
+  `ALTER TABLE chat_users ADD COLUMN coinpay_wallets TEXT`,
 ];
+
+/**
+ * chat_users first shipped with `coinpay_sub NOT NULL` (CoinPay was the only
+ * way in). Passkey and password accounts have no CoinPay sub, and SQLite cannot
+ * drop a NOT NULL, so the table is rebuilt once: copy into the new shape, keep
+ * the old table as chat_users_pre_accounts (a backup), and swap names. Every
+ * id, sub and DID carries over, so sessions and keys keep working.
+ */
+export async function migrateUsersTable(sql: Sql): Promise<boolean> {
+  const cols = await sql.all(`PRAGMA table_info(chat_users)`);
+  const sub = cols.find((c) => c.name === "coinpay_sub");
+  if (!sub || Number(sub.notnull) !== 1) return false;
+  await sql.run(`DROP TABLE IF EXISTS chat_users_v2`);
+  await sql.run(`CREATE TABLE chat_users_v2 (
+     id                TEXT PRIMARY KEY,
+     coinpay_sub       TEXT UNIQUE,
+     did               TEXT,
+     name              TEXT,
+     created_at        TEXT NOT NULL,
+     last_login_at     TEXT NOT NULL,
+     adult_verified_at TEXT,
+     username          TEXT UNIQUE,
+     password_hash     TEXT
+   )`);
+  await sql.run(
+    `INSERT INTO chat_users_v2 (id, coinpay_sub, did, name, created_at, last_login_at, adult_verified_at)
+     SELECT id, coinpay_sub, did, name, created_at, last_login_at, adult_verified_at FROM chat_users`,
+  );
+  await sql.run(`ALTER TABLE chat_users_v2 ADD COLUMN coinpay_wallets TEXT`).catch(() => {});
+  await sql.run(
+    `UPDATE chat_users_v2 SET coinpay_wallets = (SELECT o.coinpay_wallets FROM chat_users o WHERE o.id = chat_users_v2.id)`,
+  );
+  await sql.run(`DROP TABLE IF EXISTS chat_users_pre_accounts`);
+  await sql.run(`ALTER TABLE chat_users RENAME TO chat_users_pre_accounts`);
+  await sql.run(`ALTER TABLE chat_users_v2 RENAME TO chat_users`);
+  return true;
+}
+
+/** Columns never handed to a caller: the password hash stays in the store. */
+function publicUser<T extends object>(row: T): T {
+  const { password_hash: _p, ...rest } = row as T & { password_hash?: unknown };
+  return rest as T;
+}
 
 export const SESSION_PREFIX = "c0s_";
 export const KEY_PREFIX = "c0k_";
@@ -142,6 +197,7 @@ export function createStore(sql: Sql) {
           if (!/duplicate column/i.test(String((e as Error)?.message ?? e))) throw e;
         });
       }
+      await migrateUsersTable(sql);
     })().catch((e) => {
       ready = null;
       throw e;
@@ -177,13 +233,13 @@ export function createStore(sql: Sql) {
       const name = typeof info.name === "string" ? info.name.slice(0, 200) : null;
       const existing = await one<User>(`SELECT * FROM chat_users WHERE coinpay_sub = ?`, [info.sub]);
       if (existing) {
-        await sql.run(`UPDATE chat_users SET did = ?, name = ?, last_login_at = ? WHERE id = ?`, [
+        await sql.run(`UPDATE chat_users SET did = ?, name = COALESCE(?, name), last_login_at = ? WHERE id = ?`, [
           info.did,
           name,
           now(),
           existing.id,
         ]);
-        return { ...existing, did: info.did, name };
+        return publicUser({ ...existing, did: info.did, name: name ?? existing.name });
       }
       const id = "u_" + randomBytes(12).toString("hex");
       await sql.run(
@@ -204,8 +260,127 @@ export function createStore(sql: Sql) {
       return at;
     },
 
+    /**
+     * Connect a CoinPay account to the signed-in account `userId` (the
+     * "Connect CoinPay" button). Bound by `sub` only: a CoinPay account that
+     * already belongs to another c0mpute account is refused, never merged, and
+     * the CoinPay email is never read (CoinPay emails are unverified).
+     */
+    async linkCoinpay(userId: string, info: { sub: string; did?: unknown; name?: unknown }): Promise<User> {
+      if (!info.sub) throw new Error("CoinPay userinfo has no sub");
+      if (!isValidDid(info.did)) throw new NoDidError();
+      const me = await one<User>(`SELECT * FROM chat_users WHERE id = ?`, [userId]);
+      if (!me) throw new Error("no such account");
+      const owner = await one<User>(`SELECT id FROM chat_users WHERE coinpay_sub = ?`, [info.sub]);
+      if (owner && owner.id !== userId) throw new CoinpayTakenError();
+      if (me.coinpay_sub && me.coinpay_sub !== info.sub) {
+        throw new CoinpayTakenError("This c0mpute account is already connected to a different CoinPay account.");
+      }
+      const name = typeof info.name === "string" ? info.name.slice(0, 200) : null;
+      await sql.run(`UPDATE chat_users SET coinpay_sub = ?, did = ?, name = COALESCE(name, ?), last_login_at = ? WHERE id = ?`, [
+        info.sub,
+        info.did,
+        name,
+        now(),
+        userId,
+      ]);
+      return publicUser({ ...me, coinpay_sub: info.sub, did: info.did, name: me.name ?? name });
+    },
+
+    /** Disconnect CoinPay. Callers check the account keeps another way in (a passkey or password). */
+    async unlinkCoinpay(userId: string): Promise<void> {
+      await init();
+      await sql.run(`UPDATE chat_users SET coinpay_sub = NULL, did = NULL, coinpay_wallets = NULL WHERE id = ?`, [userId]);
+    },
+
+    /** A new account with no CoinPay link (first passkey, or a deprecated password signup). */
+    async createLocalUser(name: string | null): Promise<User> {
+      await init();
+      const id = "u_" + randomBytes(12).toString("hex");
+      const n = name ? name.slice(0, 200) : null;
+      await sql.run(`INSERT INTO chat_users (id, coinpay_sub, did, name, created_at, last_login_at) VALUES (?, NULL, NULL, ?, ?, ?)`, [
+        id,
+        n,
+        now(),
+        now(),
+      ]);
+      return { id, coinpay_sub: null, did: null, name: n };
+    },
+
+    /**
+     * The payout wallets CoinPay listed for this account (`wallets` claim with
+     * the wallet:read scope): chain and address only, at most 20.
+     */
+    async setWallets(userId: string, wallets: unknown): Promise<void> {
+      if (!Array.isArray(wallets)) return;
+      const clean = wallets
+        .filter((w): w is Record<string, unknown> => !!w && typeof w === "object")
+        .map((w) => ({
+          chain: String(w.chain ?? w.currency ?? w.network ?? "").slice(0, 20),
+          address: String(w.address ?? w.wallet_address ?? "").slice(0, 128),
+          ...(w.label || w.name ? { label: String(w.label ?? w.name).slice(0, 60) } : {}),
+        }))
+        .filter((w) => w.address)
+        .slice(0, 20);
+      await init();
+      await sql.run(`UPDATE chat_users SET coinpay_wallets = ? WHERE id = ?`, [JSON.stringify(clean), userId]);
+    },
+
+    async wallets(userId: string): Promise<{ chain: string; address: string; label?: string }[] | null> {
+      const r = await one<{ w: string | null }>(`SELECT coinpay_wallets AS w FROM chat_users WHERE id = ?`, [userId]);
+      try {
+        return r?.w ? JSON.parse(r.w) : null;
+      } catch {
+        return null;
+      }
+    },
+
+    async touchLogin(userId: string): Promise<void> {
+      await init();
+      await sql.run(`UPDATE chat_users SET last_login_at = ? WHERE id = ?`, [now(), userId]);
+    },
+
+    async rename(userId: string, name: string | null): Promise<void> {
+      await init();
+      await sql.run(`UPDATE chat_users SET name = ? WHERE id = ?`, [name ? name.slice(0, 200) : null, userId]);
+    },
+
+    // ── deprecated password method ─────────────────────────────────────────────
+    /** The account and its hash for a password sign-in, by username (case-insensitive). */
+    async passwordRow(username: string): Promise<{ id: string; password_hash: string | null } | null> {
+      return one(`SELECT id, password_hash FROM chat_users WHERE username = ?`, [username.toLowerCase()]);
+    },
+
+    /** Set (or replace) the username and password hash. A username taken by someone else is refused. */
+    async setPassword(userId: string, username: string, hash: string): Promise<boolean> {
+      const u = username.toLowerCase();
+      const taken = await one<{ id: string }>(`SELECT id FROM chat_users WHERE username = ?`, [u]);
+      if (taken && taken.id !== userId) return false;
+      await sql.run(`UPDATE chat_users SET username = ?, password_hash = ? WHERE id = ?`, [u, hash, userId]);
+      return true;
+    },
+
+    async clearPassword(userId: string): Promise<void> {
+      await init();
+      await sql.run(`UPDATE chat_users SET username = NULL, password_hash = NULL WHERE id = ?`, [userId]);
+    },
+
+    async hasPassword(userId: string): Promise<boolean> {
+      const r = await one<{ h: string | null }>(`SELECT password_hash AS h FROM chat_users WHERE id = ?`, [userId]);
+      return !!r?.h;
+    },
+
     /** One account by id (what a page shows of it: its name and DID). */
-    userById: (userId: string) => one<User>(`SELECT * FROM chat_users WHERE id = ?`, [userId]),
+    userById: async (userId: string) => {
+      const u = await one<User>(`SELECT * FROM chat_users WHERE id = ?`, [userId]);
+      return u ? publicUser(u) : null;
+    },
+
+    /** Sign this account out of every browser (API keys stay). */
+    revokeSessions: async (userId: string) => {
+      await init();
+      await sql.run(`DELETE FROM chat_tokens WHERE user_id = ? AND kind = 'session'`, [userId]);
+    },
 
     createSession: (userId: string) =>
       init().then(() => issue(userId, "session", "browser", SESSION_PREFIX, SESSION_DAYS * 86_400_000)),
@@ -238,10 +413,11 @@ export function createStore(sql: Sql) {
         await sql.run(`DELETE FROM chat_tokens WHERE token_hash = ?`, [h]);
         return null;
       }
-      if (!isValidDid(row.did)) return null;
+      // A CoinPay-bound account must carry its DID; a passkey/password account has neither.
+      if (row.coinpay_sub && !isValidDid(row.did)) return null;
       sql.run(`UPDATE chat_tokens SET last_used_at = ? WHERE token_hash = ?`, [now(), h]).catch(() => {});
       const { expires_at: _e, ...user } = row;
-      return user;
+      return publicUser(user);
     },
 
     revokeToken: async (token: string) => {
@@ -335,6 +511,15 @@ export function createStore(sql: Sql) {
 export class NoDidError extends Error {
   constructor() {
     super("This CoinPay account has no DID. Create one at coinpayportal.com, then sign in again.");
+  }
+}
+
+/** The CoinPay account is bound to another c0mpute account: refused, never merged. */
+export class CoinpayTakenError extends Error {
+  constructor(
+    msg = "That CoinPay account is already connected to another c0mpute account. Sign in with it instead, or disconnect it there first.",
+  ) {
+    super(msg);
   }
 }
 

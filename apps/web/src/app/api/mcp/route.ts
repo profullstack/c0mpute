@@ -2,6 +2,9 @@ import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
 import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
 import { gallery } from "@/lib/gallery/server";
+import { accountStore, fleetFor, fleetService } from "@/lib/accounts/server";
+import { isFleetAction, runAction, selectNodes } from "@/lib/accounts/fleet";
+import { earningsStore } from "@/lib/earnings/server";
 import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -43,9 +46,26 @@ export async function POST(req: Request) {
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,
   };
-  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery() })))).filter(Boolean);
+  const out = (await Promise.all(batch.map((m) => handleRpc(m, { user, upstream, push: pushStore(), plugins, signal: req.signal, convos: convoStore(), jobs: { record: (u, k, j) => recordJob(u, k, j), owns: ownsJob }, gallery: gallery(), fleet: fleetDeps(user) })))).filter(Boolean);
   if (out.length === 0) return new Response(null, { status: 202 });
   return json(Array.isArray(body) ? out : out[0]);
+}
+
+/** Fleet tools for this caller: the same actions as POST /api/v1/fleet/actions, audit-logged as "mcp". */
+function fleetDeps(user: { coinpay_sub: string | null; did: string | null; name: string | null }) {
+  return {
+    site: siteUrl(),
+    fleet: (userId: string) => fleetFor(userId),
+    account: async () => ({ coinpay: !!user.coinpay_sub, did: user.did, name: user.name, sign_in: null }),
+    action: async (userId: string, body: { action: string; nodes?: unknown; tag?: unknown; all?: unknown; args?: Record<string, unknown> }) => {
+      if (!isFleetAction(body.action)) return { error: "action: pause, resume, update, restart, rename, tag, untag, set-tags, cost or unlink" };
+      const f = await fleetFor(userId);
+      const targets = selectNodes(f.nodes, body);
+      if (typeof targets === "string") return { error: targets };
+      if (!targets.length) return { error: "no nodes matched" };
+      return runAction({ userId, actor: "mcp", action: body.action, args: body.args ?? {}, targets, fleet: fleetService(), accounts: accountStore(), earnings: earningsStore() });
+    },
+  };
 }
 
 export function OPTIONS() {
