@@ -6,12 +6,28 @@
 //! the owner key and the name, so only the owner can publish a new window;
 //! every segment is pinned by its blake3 hash (and each 1 MiB chunk of it by
 //! its own hash), so a relay can verify every byte it forwards.
+//!
+//! A record can also carry an account [`Binding`] (`account`, `paid`,
+//! `max_viewers`, `bind_sig`): which c0mpute.com account the stream belongs to
+//! and whether its relays are paid. Those four fields sit NEXT TO the signed
+//! body, not inside it, with their own owner signature (`bind_sig`, which
+//! covers the stream id and `seq`, so a binding cannot be moved to another
+//! window). A node older than 0.3.105 re-serializes the body it parsed to
+//! check `sig`; a field added inside the body would be dropped there and the
+//! signature would fail. Outside the body it is simply ignored by old nodes,
+//! which keep verifying and relaying the record (gossipsub forwards the
+//! original bytes, so the binding survives the hop).
 
 use anyhow::{Context, Result, bail};
 use c0mpute_proto::Hash;
 use serde::{Deserialize, Serialize};
 
 const SIGNING_DOMAIN: &str = "c0mpute-live-v1";
+const BINDING_DOMAIN: &str = "c0mpute-live-bind-v1";
+/// Longest account id in a binding.
+pub const MAX_ACCOUNT_CHARS: usize = 128;
+/// Concurrent viewers one gateway serves of a stream that is not paid.
+pub const FREE_MAX_VIEWERS: u32 = 25;
 
 /// Segments are carried over libp2p in chunks of this size (the chunk
 /// protocol's comfortable size; see hosting's `FILE_CHUNK_BYTES`).
@@ -85,6 +101,47 @@ pub struct LiveRecord {
     pub body: LiveBody,
     /// ed25519 signature (hex) over [`LiveBody::signing_bytes`].
     pub sig: String,
+    /// The c0mpute.com account this stream belongs to (see [`Binding`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Relays of this stream are paid per GB (the account has a balance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid: Option<bool>,
+    /// Concurrent viewers per gateway while the stream is not paid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_viewers: Option<u32>,
+    /// Owner's ed25519 signature (hex) over [`Binding::signing_bytes`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_sig: Option<String>,
+}
+
+/// Which account a stream belongs to and whether its relays are paid. Set by
+/// the hosted ingest from c0mpute.com's answer for the stream key; a stream
+/// published with `c0mpute stream go` has none and counts as not paid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub account: String,
+    pub paid: bool,
+    pub max_viewers: Option<u32>,
+}
+
+impl Binding {
+    pub fn valid(&self) -> bool {
+        !self.account.is_empty()
+            && self.account.chars().count() <= MAX_ACCOUNT_CHARS
+            && !self.account.chars().any(|c| c.is_control())
+    }
+
+    /// What the owner signs: bound to one stream and one `seq`.
+    pub fn signing_bytes(&self, stream_id: &str, seq: u64) -> Vec<u8> {
+        format!(
+            "{BINDING_DOMAIN}\n{stream_id}\n{seq}\n{}\n{}\n{}",
+            self.account,
+            u8::from(self.paid),
+            self.max_viewers.unwrap_or(0)
+        )
+        .into_bytes()
+    }
 }
 
 /// The id a stream with this owner and name always has: 20 hex characters.
@@ -186,7 +243,16 @@ impl LiveBody {
 impl LiveRecord {
     /// Sign a body with the owner's libp2p (ed25519) keypair. Fills in
     /// `owner` and `stream_id` from the key and name.
-    pub fn sign(keypair: &c0mpute_net::libp2p::identity::Keypair, mut body: LiveBody) -> Result<Self> {
+    pub fn sign(keypair: &c0mpute_net::libp2p::identity::Keypair, body: LiveBody) -> Result<Self> {
+        Self::sign_bound(keypair, body, None)
+    }
+
+    /// [`LiveRecord::sign`], plus an account binding signed by the same key.
+    pub fn sign_bound(
+        keypair: &c0mpute_net::libp2p::identity::Keypair,
+        mut body: LiveBody,
+        binding: Option<&Binding>,
+    ) -> Result<Self> {
         let owner = owner_hex(keypair).context("live streams need an ed25519 identity")?;
         body.stream_id = stream_id_for(&owner, &body.name);
         body.owner = owner;
@@ -194,10 +260,52 @@ impl LiveRecord {
         let sig = keypair
             .sign(&body.signing_bytes())
             .map_err(|e| anyhow::anyhow!("sign live record: {e}"))?;
-        Ok(LiveRecord {
+        let mut rec = LiveRecord {
             body,
             sig: hex::encode(sig),
+            account: None,
+            paid: None,
+            max_viewers: None,
+            bind_sig: None,
+        };
+        if let Some(b) = binding {
+            if !b.valid() {
+                bail!("account must be 1-{MAX_ACCOUNT_CHARS} printable characters");
+            }
+            let bsig = keypair
+                .sign(&b.signing_bytes(&rec.body.stream_id, rec.body.seq))
+                .map_err(|e| anyhow::anyhow!("sign live binding: {e}"))?;
+            rec.account = Some(b.account.clone());
+            rec.paid = Some(b.paid);
+            rec.max_viewers = b.max_viewers;
+            rec.bind_sig = Some(hex::encode(bsig));
+        }
+        Ok(rec)
+    }
+
+    /// The account binding, when the record carries one. Trust it only on a
+    /// record that passed [`LiveRecord::verify`].
+    pub fn binding(&self) -> Option<Binding> {
+        Some(Binding {
+            account: self.account.clone()?,
+            paid: self.paid?,
+            max_viewers: self.max_viewers,
         })
+    }
+
+    /// Relays of this stream are paid.
+    pub fn is_paid(&self) -> bool {
+        self.bind_sig.is_some() && self.paid == Some(true)
+    }
+
+    /// Most concurrent viewers one gateway serves: `None` (no cap) for a
+    /// paid stream, else the binding's `max_viewers` or [`FREE_MAX_VIEWERS`].
+    pub fn viewer_cap(&self) -> Option<u32> {
+        if self.is_paid() {
+            None
+        } else {
+            Some(self.max_viewers.filter(|n| *n > 0).unwrap_or(FREE_MAX_VIEWERS))
+        }
     }
 
     /// True when the fields are sane, the id matches, and the owner signed it.
@@ -211,7 +319,21 @@ impl LiveRecord {
         let Ok(public) = c0mpute_net::libp2p::identity::ed25519::PublicKey::try_from_bytes(&key) else {
             return false;
         };
-        public.verify(&self.body.signing_bytes(), &sig)
+        if !public.verify(&self.body.signing_bytes(), &sig) {
+            return false;
+        }
+        // No binding at all is fine (a plain p2p stream). Any binding field
+        // present means all of it must be there and signed by the owner.
+        if self.account.is_none() && self.paid.is_none() && self.max_viewers.is_none() && self.bind_sig.is_none() {
+            return true;
+        }
+        let (Some(binding), Some(bind_sig)) = (self.binding(), self.bind_sig.as_ref()) else {
+            return false;
+        };
+        let Ok(bind_sig) = hex::decode(bind_sig) else {
+            return false;
+        };
+        binding.valid() && public.verify(&binding.signing_bytes(&self.body.stream_id, self.body.seq), &bind_sig)
     }
 
     pub fn stream_id(&self) -> &str {
@@ -229,13 +351,18 @@ impl LiveRecord {
 }
 
 /// Should `new` replace `current`? Only a verified record with a higher
-/// `seq` for the same stream.
+/// `seq` for the same stream, or the same `seq` when `new` carries the
+/// account binding and `current` lost it on the way (someone stripped it).
 pub fn supersedes(current: Option<&LiveRecord>, new: &LiveRecord) -> bool {
     if !new.verify() {
         return false;
     }
     match current {
-        Some(cur) => cur.body.stream_id == new.body.stream_id && new.body.seq > cur.body.seq,
+        Some(cur) => {
+            cur.body.stream_id == new.body.stream_id
+                && (new.body.seq > cur.body.seq
+                    || (new.body.seq == cur.body.seq && new.bind_sig.is_some() && cur.bind_sig.is_none()))
+        }
         None => true,
     }
 }
@@ -329,6 +456,99 @@ mod tests {
         assert_ne!(forged.body.stream_id, rec.body.stream_id);
         forged.body.stream_id = rec.body.stream_id.clone();
         assert!(!forged.verify());
+    }
+
+    #[test]
+    fn binding_is_signed_and_old_nodes_still_verify() {
+        let k = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let bind = Binding {
+            account: "user_42".into(),
+            paid: true,
+            max_viewers: None,
+        };
+        let rec = LiveRecord::sign_bound(&k, body("show", 7, 2), Some(&bind)).unwrap();
+        assert!(rec.verify());
+        assert!(rec.is_paid());
+        assert_eq!(rec.viewer_cap(), None);
+        assert_eq!(rec.binding(), Some(bind.clone()));
+        let json = serde_json::to_vec(&rec).unwrap();
+        let back: LiveRecord = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, rec);
+        assert!(back.verify());
+
+        // What a v0.3.104 node does: parse only the fields it knows (the
+        // flattened body and `sig`), re-serialize the body, check `sig`.
+        #[derive(Deserialize)]
+        struct OldRecord {
+            #[serde(flatten)]
+            body: LiveBody,
+            sig: String,
+        }
+        let old: OldRecord = serde_json::from_slice(&json).unwrap();
+        assert_eq!(old.body, rec.body);
+        let public = c0mpute_net::libp2p::identity::ed25519::PublicKey::try_from_bytes(
+            &hex::decode(&old.body.owner).unwrap(),
+        )
+        .unwrap();
+        assert!(public.verify(&old.body.signing_bytes(), &hex::decode(&old.sig).unwrap()));
+        // And the signed body bytes are the ones an unbound record has.
+        let plain = LiveRecord::sign(&k, body("show", 7, 2)).unwrap();
+        assert_eq!(plain.body.signing_bytes(), rec.body.signing_bytes());
+        assert!(!plain.is_paid());
+        assert_eq!(plain.viewer_cap(), Some(FREE_MAX_VIEWERS));
+        assert!(!String::from_utf8(serde_json::to_vec(&plain).unwrap()).unwrap().contains("bind_sig"));
+
+        // Flipping paid, moving the binding to another window, or dropping
+        // part of it does not verify.
+        let mut bad = rec.clone();
+        bad.paid = Some(false);
+        assert!(!bad.verify(), "edited paid");
+        let mut bad = rec.clone();
+        bad.account = Some("someone-else".into());
+        assert!(!bad.verify(), "edited account");
+        let mut other = LiveRecord::sign(&k, body("show", 8, 2)).unwrap();
+        other.account = rec.account.clone();
+        other.paid = rec.paid;
+        other.bind_sig = rec.bind_sig.clone();
+        assert!(!other.verify(), "binding replayed on a later seq");
+        let mut bad = rec.clone();
+        bad.bind_sig = None;
+        assert!(!bad.verify(), "binding without its signature");
+
+        // A free-tier binding carries the viewer cap.
+        let free = Binding {
+            account: "user_42".into(),
+            paid: false,
+            max_viewers: Some(10),
+        };
+        let rec = LiveRecord::sign_bound(&k, body("show", 9, 2), Some(&free)).unwrap();
+        assert!(rec.verify() && !rec.is_paid());
+        assert_eq!(rec.viewer_cap(), Some(10));
+        let newline = Binding {
+            account: "a\nb".into(),
+            paid: true,
+            max_viewers: None,
+        };
+        assert!(LiveRecord::sign_bound(&k, body("show", 9, 2), Some(&newline)).is_err());
+    }
+
+    #[test]
+    fn a_stripped_binding_is_restored_at_the_same_seq() {
+        let k = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let bind = Binding {
+            account: "u".into(),
+            paid: true,
+            max_viewers: None,
+        };
+        let bound = LiveRecord::sign_bound(&k, body("show", 5, 2), Some(&bind)).unwrap();
+        let mut stripped = bound.clone();
+        stripped.account = None;
+        stripped.paid = None;
+        stripped.bind_sig = None;
+        assert!(stripped.verify());
+        assert!(supersedes(Some(&stripped), &bound));
+        assert!(!supersedes(Some(&bound), &stripped));
+        assert!(!supersedes(Some(&bound), &bound));
     }
 
     #[test]

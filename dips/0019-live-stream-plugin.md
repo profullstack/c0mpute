@@ -1,13 +1,13 @@
 ---
 dip: 0019
 title: "live-stream — p2p HLS live streaming via BitTorrent-style segment swarming"
-status: Draft
+status: Partly implemented
 authors:
   - anthony@profullstack.com
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-11-22
 discussion:
-implementation:
+implementation: node/crates/c0mpute-core/src/live/ (record, broadcast, playlist, meter, ingest)
 supersedes:
 superseded-by:
 ---
@@ -27,6 +27,67 @@ This is the open-source successor to what Acestream / SopCast proved was
 technically viable for live sports circa 2010: BitTorrent-style live delivery
 is real, it works at scale, and nobody has shipped it as an open, permissionless
 protocol backed by a compute marketplace. We are doing that.
+
+## Implementation status (2026-11-22)
+
+What is built differs from the design below in places. This section is the
+record of what shipped; the rest of the document is the design as proposed.
+
+**Shipped**
+
+- **Signed live windows over gossip** (`c0mpute/live/v1`), MPEG-TS HLS,
+  segment swarming with `Have` gossip, eviction, viewer-driven prefetch.
+  `c0mpute stream go|watch|ls`. Gateways serve
+  `/live/<stream_id>/index.m3u8`, `/live/<stream_id>/<hash>.ts` and
+  `/live/v1/streams`, with `access-control-allow-origin: *` on every answer
+  and OPTIONS answered, so a browser player on another origin works.
+- **On by default for every node.** The `live-stream` role joins a node's
+  roles even when it was started with an explicit `--roles` list, the way
+  storage and hosting do. Opt out with `worker start --no-live`,
+  `[live] enabled = false` or `C0MPUTE_LIVE=0`. Private mode adds nothing.
+- **Hosted RTMP ingest**: `c0mpute stream ingest --listen 0.0.0.0:1935`
+  (secret in `C0MPUTE_LIVE_INGEST_SECRET`). Publishers push to
+  `rtmp://<host>/live/<stream_key>`. The key is checked with c0mpute.com
+  (`POST /api/v1/live/ingest/auth`) before any media is read and before an
+  ffmpeg is started; the FLV is piped into one ffmpeg per publisher; start
+  and end are reported (`POST /api/v1/live/ingest/event`). The key is checked
+  again every minute: a dead key ends the stream, an empty balance drops it
+  to the free tier. Not a default role (public port + ffmpeg).
+- **Account binding.** A record may carry `account`, `paid`, `max_viewers`
+  and `bind_sig` next to the signed body. `bind_sig` is the owner's signature
+  over the stream id, `seq` and those fields. They are outside the body on
+  purpose: a node before 0.3.105 re-serializes the body it parsed to check
+  the signature, so a field added inside the body would break old verifiers,
+  while a field beside it is ignored and the record still verifies.
+- **Metering and pay** (replaces the escrow flow in section 6): every node
+  counts the bytes it serves per stream, over HTTP to viewers and over libp2p
+  to other nodes. Every 60 s it signs one receipt per stream,
+  `{stream_id, peer, bytes, epoch}`, and gossips it on
+  `c0mpute/jobs/live.relay`. A status aggregator checks the signature
+  against the peer id, cuts the bytes to bitrate x 60 s x viewer cap (25 for
+  a stream that is not paid, or its `max_viewers`; 1,000 per relay for a paid
+  one), and files it as a credited job of type `live.relay` with
+  `job_id = live:<stream_id>:<node>:<epoch>` and
+  `paid_usd = bytes / 1e9 * $0.01` when the record says `paid`, else 0.
+  c0mpute.com reads those rows from `GET /jobs` and settles them against the
+  streamer's balance (95% operator, 5% house).
+- **Free tier**: a stream that is not paid is served to at most 25 clients
+  per gateway (or the binding's `max_viewers`) and, through the hosted
+  ingest, capped at 720 lines. Its relays earn nothing. A paid stream has no
+  viewer cap and is copied as published.
+
+**Not built**
+
+- CoinPay escrow per stream and the ingest auction (section 6): pay runs on
+  the account balance instead.
+- The DHT stream descriptor (section 5): discovery is gossip only.
+- fMP4 / LL-HLS (4a), DVR / replay (8), multi-ingest (7), viewer seeding.
+- SRT on the hosted ingest (RTMP only; `stream go` still takes anything
+  ffmpeg reads).
+- Cross-checking receipts against what gateways saw. Receipts are
+  self-reported; the bound above and c0mpute.com's per-account spend cap
+  limit what a lying relay can take.
+- A network-wide viewer count: the cap is per gateway.
 
 ## Motivation
 
@@ -216,6 +277,11 @@ c0mpute stream watch <stream_id> # opens in local HLS player (mpv/vlc)
 ```
 
 ### 6. Payment model
+
+> As built (0.3.105): no escrow and no auction. Relays sign a per-minute
+> bandwidth receipt per stream; aggregators credit it as a `live.relay` job
+> at $0.01 per GB for paid streams; c0mpute.com settles from the streamer's
+> account balance. See "Implementation status" above. The proposal follows.
 
 Live streaming uses a **continuous per-GB settlement** model, distinct from
 the one-shot transcode auction:

@@ -317,6 +317,7 @@ async fn real_ffmpeg_testsrc_through_a_relay() {
         bind: None,
         linger: Duration::ZERO,
         reconnect: false,
+        max_height: None,
     };
     std::fs::create_dir_all(work.join("r0")).unwrap();
     std::fs::create_dir_all(work.join("r1")).unwrap();
@@ -379,4 +380,165 @@ async fn real_ffmpeg_testsrc_through_a_relay() {
         }
     }
     eprintln!("ffmpeg testsrc: master + 2 renditions served through the relay");
+}
+
+async fn get(app: &axum::Router, path: &str, client: &str) -> axum::response::Response {
+    use tower::ServiceExt;
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(path)
+                .header("x-forwarded-for", client)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A browser player on another origin (hls.js on c0mpute.com against a
+/// gateway) can fetch the playlist, the segments and the stream list: every
+/// answer carries `access-control-allow-origin: *`, errors included, OPTIONS
+/// is answered, and the content types are the HLS ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_live_routes_send_cors_and_content_types() {
+    use tower::ServiceExt;
+    let tmp = tempdir().unwrap();
+    let (n, st) = node(&tmp.path().join("g"), vec![]).await;
+    let live = LiveStream::start(n, st, fast()).await.unwrap();
+    let owner = libp2p::identity::Keypair::generate_ed25519();
+    let mut b = Broadcaster::new(live.clone(), owner, "cors-show", &[("src", None)], 4).unwrap();
+    let id = b.stream_id();
+    let bytes = synthetic(0);
+    let rec = b.push(0, &bytes, 2000, false).await.unwrap();
+    let seg = rec.body.renditions[0].segments[0].hash.clone();
+    let app = live.router();
+
+    for (path, ctype) in [
+        (format!("/live/{id}/index.m3u8"), "application/vnd.apple.mpegurl"),
+        (format!("/live/{id}/src/index.m3u8"), "application/vnd.apple.mpegurl"),
+        (format!("/live/{id}/{seg}.ts"), "video/mp2t"),
+        (format!("/live/{id}/src/{seg}.ts"), "video/mp2t"),
+        ("/live/v1/streams".to_string(), "application/json"),
+    ] {
+        let resp = get(&app, &path, "198.51.100.1").await;
+        assert_eq!(resp.status(), 200, "{path}");
+        assert_eq!(resp.headers()["access-control-allow-origin"], "*", "{path}");
+        let got = resp.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(got.starts_with(ctype), "{path}: {got}");
+        if path.ends_with(".ts") {
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], &bytes[..]);
+        }
+    }
+
+    // Errors carry the header too, or the player cannot even read the status.
+    for path in [
+        "/live/00000000000000000000/index.m3u8".to_string(),
+        format!("/live/{id}/{}.ts", "0".repeat(64)),
+        format!("/live/{id}/nope/index.m3u8"),
+    ] {
+        let resp = get(&app, &path, "198.51.100.1").await;
+        assert_eq!(resp.status(), 404, "{path}");
+        assert_eq!(resp.headers()["access-control-allow-origin"], "*", "{path}");
+    }
+
+    // Preflight.
+    for path in [format!("/live/{id}/index.m3u8"), format!("/live/{id}/src/{seg}.ts"), "/live/v1/streams".to_string()] {
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri(&path)
+                    .header("origin", "https://c0mpute.com")
+                    .header("access-control-request-method", "GET")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204, "{path}");
+        assert_eq!(resp.headers()["access-control-allow-origin"], "*");
+        assert!(resp.headers()["access-control-allow-methods"].to_str().unwrap().contains("GET"));
+    }
+    live.stop();
+}
+
+/// A stream that is not paid is served to its viewer cap of clients per
+/// gateway; a paid one has no cap. Bytes a gateway serves are counted per
+/// stream and become one signed receipt per epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn free_streams_cap_viewers_and_served_bytes_become_receipts() {
+    use c0mpute_core::live::meter;
+    use c0mpute_core::live::record::Binding;
+    let tmp = tempdir().unwrap();
+    let (n, st) = node(&tmp.path().join("g"), vec![]).await;
+    let live = LiveStream::start(n, st, fast()).await.unwrap();
+    let owner = libp2p::identity::Keypair::generate_ed25519();
+    let mut b = Broadcaster::new(live.clone(), owner, "tier-show", &[("src", None)], 4).unwrap();
+    b.binding = Some(Binding {
+        account: "acct_1".into(),
+        paid: false,
+        max_viewers: Some(2),
+    });
+    let id = b.stream_id();
+    let bytes = synthetic(0);
+    let rec = b.push(0, &bytes, 2000, false).await.unwrap();
+    assert!(rec.verify());
+    assert_eq!(rec.viewer_cap(), Some(2));
+    let seg = rec.body.renditions[0].segments[0].clone();
+    let app = live.router();
+    let playlist = format!("/live/{id}/index.m3u8");
+    let segment = format!("/live/{id}/{}.ts", seg.hash);
+
+    assert_eq!(get(&app, &playlist, "198.51.100.1").await.status(), 200);
+    assert_eq!(get(&app, &playlist, "198.51.100.2").await.status(), 200);
+    let third = get(&app, &playlist, "198.51.100.3").await;
+    assert_eq!(third.status(), 503, "the third client is over the cap of 2");
+    assert_eq!(third.headers()["access-control-allow-origin"], "*");
+    assert!(third.headers().contains_key("retry-after"));
+    assert_eq!(get(&app, &segment, "198.51.100.3").await.status(), 503, "segments are capped too");
+    assert_eq!(get(&app, &playlist, "198.51.100.1").await.status(), 200, "a viewer already in keeps its place");
+    assert_eq!(live.active_viewers(&id), 2);
+    assert_eq!(live.served_bytes(&id), 0, "refused requests are not served bytes");
+
+    // One viewer fetches the segment: those bytes are counted.
+    assert_eq!(get(&app, &segment, "198.51.100.2").await.status(), 200);
+    assert_eq!(live.served_bytes(&id), bytes.len() as u64);
+
+    // The account tops up: the next record says paid, and the cap is gone.
+    b.binding = Some(Binding {
+        account: "acct_1".into(),
+        paid: true,
+        max_viewers: None,
+    });
+    let rec = b.push(0, &synthetic(1), 2000, false).await.unwrap();
+    assert!(rec.is_paid());
+    for i in 3..40 {
+        assert_eq!(get(&app, &playlist, &format!("198.51.100.{i}")).await.status(), 200);
+    }
+    let info = live.info(&id).await.unwrap();
+    assert!(info.paid);
+    assert_eq!(info.account.as_deref(), Some("acct_1"));
+
+    // A chunk sent to another node over libp2p counts for its stream;
+    // a chunk of anything else does not.
+    assert_eq!(live.count_chunk(&seg.chunks[0], 1000).await.as_deref(), Some(id.as_str()));
+    assert_eq!(live.count_chunk(&"ab".repeat(32), 1000).await, None);
+
+    let receipts = live.publish_receipts(77).await;
+    assert_eq!(receipts.len(), 1);
+    let r = &receipts[0];
+    assert!(r.verify());
+    assert_eq!(r.stream_id, id);
+    assert_eq!(r.peer, live.peer_id());
+    assert_eq!(r.bytes, bytes.len() as u64 + 1000);
+    assert_eq!(r.epoch, 77);
+    assert_eq!(r.job_id(), format!("live:{id}:{}:77", meter::short_node(live.peer_id())));
+    assert!((meter::usd_for(r.bytes, true) - r.bytes as f64 / 1e9 * 0.01).abs() < 1e-15);
+    // Counters start over after a receipt; an idle epoch sends none.
+    assert_eq!(live.served_bytes(&id), 0);
+    assert!(live.publish_receipts(78).await.is_empty());
+    live.stop();
 }

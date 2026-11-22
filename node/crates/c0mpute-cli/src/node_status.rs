@@ -22,6 +22,7 @@ pub struct WorkerFlags {
     pub roles: Option<Vec<String>>,
     pub no_storage: bool,
     pub no_hosting: bool,
+    pub no_live: bool,
     pub gpu: bool,
     pub private: bool,
 }
@@ -38,6 +39,7 @@ pub fn worker_flags(argv: &[String]) -> Option<WorkerFlags> {
             s if s.starts_with("--roles=") => flags.roles = Some(split(&s["--roles=".len()..])),
             "--no-storage" => flags.no_storage = true,
             "--no-hosting" => flags.no_hosting = true,
+            "--no-live" => flags.no_live = true,
             "--gpu" => flags.gpu = true,
             "--private" => flags.private = true,
             _ => {}
@@ -236,8 +238,24 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
         }
         Role::Storage if !cfg.storage_enabled() => gated(role, "turned off (--no-storage, [storage] enabled = false or C0MPUTE_STORAGE=0)"),
         Role::Hosting if !cfg.hosting_enabled() => gated(role, "turned off (--no-hosting, [hosting] enabled = false or C0MPUTE_HOSTING=0)"),
+        Role::LiveStream if !cfg.live_enabled() => gated(role, LIVE_OFF),
+        Role::LiveStream => serving(role, Some("relaying live streams; $0.01 per GB served of paid streams".into())),
         _ => serving(role, None),
     }
+}
+
+/// Why a node is not relaying live streams.
+pub const LIVE_OFF: &str = "turned off (--no-live, [live] enabled = false or C0MPUTE_LIVE=0)";
+
+/// The roles a node runs by default that this one has turned off, each with
+/// how it was turned off. An opted-out role is taken out of the role list, so
+/// without these rows the report would just not mention it.
+fn opted_out(cfg: &Config, roles: &[Role]) -> Vec<RoleState> {
+    let mut out = Vec::new();
+    if !cfg.private.enabled && !cfg.live_enabled() && !roles.contains(&Role::LiveStream) {
+        out.push(gated(&Role::LiveStream, LIVE_OFF));
+    }
+    out
 }
 
 /// What `c0mpute status --json` adds to `worker_status_json`: every role the
@@ -249,6 +267,7 @@ pub async fn report(cfg: &Config, roles: &[Role], worker: Option<(i32, Vec<Strin
     for role in roles {
         states.push(role_state(role, cfg).await);
     }
+    states.extend(opted_out(cfg, roles));
     let mut tagged = cfg.clone();
     tagged.roles = roles.to_vec();
     // Render's probe ran above, so role_tags sees it; inference models are a
@@ -306,7 +325,29 @@ mod tests {
         assert!(f.no_storage && !f.no_hosting && !f.private);
         let f = worker_flags(&argv("c0mpute worker start --roles=music --private --gpu --no-hosting")).unwrap();
         assert_eq!(f.roles, Some(vec!["music".to_string()]));
-        assert!(f.private && f.gpu && f.no_hosting);
+        assert!(f.private && f.gpu && f.no_hosting && !f.no_live);
+        let f = worker_flags(&argv("c0mpute worker start --roles tts --no-live")).unwrap();
+        assert!(f.no_live && !f.no_storage);
+    }
+
+    #[test]
+    fn live_turned_off_is_explained() {
+        let mut cfg = Config::default();
+        cfg.live.enabled = false;
+        if cfg.live_enabled() {
+            return; // C0MPUTE_LIVE=1 in this environment overrides the file
+        }
+        let rows = opted_out(&cfg, &[Role::Tts]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, role_name(&Role::LiveStream));
+        assert!(!rows[0].serving);
+        assert!(rows[0].reason.as_deref().unwrap_or_default().contains("--no-live"));
+        // Still listed (an old config that names it): no second row.
+        assert!(opted_out(&cfg, &[Role::LiveStream]).is_empty());
+        let on = Config::default();
+        if on.live_enabled() {
+            assert!(opted_out(&on, &[Role::Tts]).is_empty());
+        }
     }
 
     #[test]
