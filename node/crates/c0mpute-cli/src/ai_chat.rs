@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::chat_history::{self, Convo};
+use crate::money::{self, Held};
 
 const DEFAULT_URL: &str = "https://c0mpute.com";
 
@@ -47,7 +48,10 @@ c0mpute chat models | whoami | logout\n  \
 c0mpute chat mcp                  # stdio MCP server for Claude Code, Cursor, ...\n  \
 c0mpute chat connect hosting --name <node>  # publish what you /push hosting in the chat\n  \
 c0mpute chat push hosting ls | nodes | status <name> -w | rm <name> | <name> <dir>\n  \
-c0mpute chat plugins ls | add <url|name> | rm | on | off <name>  # tools from remote MCP servers\n\n\
+c0mpute chat plugins ls | add <url|name> | rm | on | off <name>  # tools from remote MCP servers\n  \
+c0mpute plugins paper moomoo | live moomoo --confirm  # brokerage orders: paper (default) or real money\n\n\
+A money action (Mercury payment, CoinPay invoice, moomoo order) shows its card and runs only after you\n\
+type y at the terminal. --yes approves the other held tool calls, never a money one.\n\n\
 Secure p2p messaging moved to `c0mpute dm`."
 )]
 struct Args {
@@ -79,6 +83,11 @@ struct Args {
     /// c0mpute site URL (default https://c0mpute.com, or $C0MPUTE_URL).
     #[arg(long)]
     url: Option<String>,
+    /// Approve held plugin calls that move no money without asking. A money
+    /// action (Mercury, CoinPay, moomoo: payments, invoices, orders) is never
+    /// approved by this: it shows its card and waits for `y` at a terminal.
+    #[arg(long, short = 'y')]
+    yes: bool,
     /// Reopen a saved conversation in the interactive session: the most
     /// recent with no value, or one id from `c0mpute chat history` (this
     /// machine's, else the account's).
@@ -240,9 +249,10 @@ pub async fn run(args: &[String]) -> Result<()> {
         println!("{}", turn.answer);
         return Ok(());
     }
-    // A chat plugin wants to run a destructive tool: ask on the terminal.
-    while !turn.approvals.is_empty() && std::io::stdin().is_terminal() {
-        let ok = ask_approvals(&turn.approvals)?;
+    // A chat plugin wants to run a held tool: a money action shows its card
+    // and needs `y` at the terminal; --yes approves only the others.
+    while !turn.approvals.is_empty() {
+        let ok = ask_approvals(&url, &key, &mut turn.approvals, a.yes, std::io::stdin().is_terminal()).await?;
         if ok.is_empty() {
             break;
         }
@@ -254,8 +264,8 @@ pub async fn run(args: &[String]) -> Result<()> {
 /// One answer from c0mpute.com, plus any plugin calls waiting for approval.
 pub(crate) struct Turn {
     answer: String,
-    /// (what it wants to run, signed approval token)
-    approvals: Vec<(String, String)>,
+    /// Calls held for approval, each with its signed token.
+    approvals: Vec<Held>,
 }
 
 /// "plugin · tool {args}" for a plugin event.
@@ -266,7 +276,7 @@ fn describe_call(e: &Value) -> String {
 }
 
 /// Print a chat plugin step to stderr (the answer itself goes to stdout).
-fn show_plugin_event(e: &Value, approvals: &mut Vec<(String, String)>) {
+fn show_plugin_event(e: &Value, approvals: &mut Vec<Held>) {
     match e["type"].as_str() {
         Some("tool_call") => eprintln!("\x1b[2m[plugin] {}\x1b[0m", describe_call(e)),
         Some("tool_result") => {
@@ -275,10 +285,9 @@ fn show_plugin_event(e: &Value, approvals: &mut Vec<(String, String)>) {
             eprintln!("\x1b[2m[plugin] {} {} {}\x1b[0m", if ok { "ok" } else { "failed" }, e["tool"].as_str().unwrap_or(""), text);
         }
         Some("approval_needed") => {
-            let what = describe_call(e);
-            eprintln!("\x1b[33m[plugin] wants to run {what}\x1b[0m");
-            if let Some(t) = e["approval"].as_str() {
-                approvals.push((what, t.to_string()));
+            eprintln!("\x1b[33m[plugin] wants to run {}\x1b[0m", describe_call(e));
+            if let Some(h) = Held::from_event(e) {
+                approvals.push(h);
             }
         }
         Some("plugin_error") => eprintln!("\x1b[33m[plugin] {}\x1b[0m", e["message"].as_str().unwrap_or("")),
@@ -286,16 +295,74 @@ fn show_plugin_event(e: &Value, approvals: &mut Vec<(String, String)>) {
     }
 }
 
-/// y/N on the terminal for each waiting call; returns the approved tokens.
-fn ask_approvals(waiting: &[(String, String)]) -> Result<Vec<String>> {
+/// Settle which held calls are money actions: a call the server summarized
+/// already is; otherwise the plugin's URL decides (by host, like the server),
+/// looked up once. A failed lookup counts as money, never as less.
+async fn classify_held(url: &str, key: &str, held: &mut [Held]) {
+    if held.iter().all(|h| h.summary.is_some()) {
+        return;
+    }
+    let urls: Option<std::collections::HashMap<String, String>> = async {
+        let res = client().ok()?.get(format!("{url}/api/v1/chat/plugins")).bearer_auth(key).timeout(Duration::from_secs(20)).send().await.ok()?;
+        if !res.status().is_success() {
+            return None;
+        }
+        let v: Value = res.json().await.ok()?;
+        Some(
+            v["plugins"]
+                .as_array()?
+                .iter()
+                .filter_map(|p| Some((p["slug"].as_str()?.to_string(), p["url"].as_str()?.to_string())))
+                .collect(),
+        )
+    }
+    .await;
+    for h in held.iter_mut().filter(|h| h.summary.is_none()) {
+        match &urls {
+            Some(m) => h.classify(Some(m.get(&h.plugin).map(String::as_str).unwrap_or(""))),
+            None => h.classify(None),
+        }
+    }
+}
+
+/// What to do with one held call; prints the card for a money action and the
+/// reason for a decline. `Some(true)` = ask now.
+fn present(h: &Held, yes: bool, interactive: bool) -> Option<bool> {
+    if h.money {
+        eprintln!("\x1b[33m{}\x1b[0m", money::render_card(h));
+    }
+    match money::plan(h, yes, interactive) {
+        money::Plan::Approve => {
+            eprintln!("\x1b[2m(approved by --yes: {})\x1b[0m", h.describe());
+            Some(false)
+        }
+        money::Plan::Ask => {
+            eprint!("{}", money::prompt(h));
+            std::io::stderr().flush().ok();
+            Some(true)
+        }
+        money::Plan::Decline(why) => {
+            eprintln!("\x1b[33m{why}\x1b[0m");
+            None
+        }
+    }
+}
+
+/// Approval for each held call (one-shot mode); returns the approved tokens.
+async fn ask_approvals(url: &str, key: &str, held: &mut [Held], yes: bool, interactive: bool) -> Result<Vec<String>> {
+    classify_held(url, key, held).await;
     let mut ok = Vec::new();
-    for (what, token) in waiting {
-        eprint!("approve {what}? [y/N] ");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        if matches!(line.trim(), "y" | "Y" | "yes") {
-            ok.push(token.clone());
+    for h in held.iter() {
+        match present(h, yes, interactive) {
+            Some(false) => ok.push(h.token.clone()),
+            Some(true) => {
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if money::accepts(&line) {
+                    ok.push(h.token.clone());
+                }
+            }
+            None => {}
         }
     }
     Ok(ok)
@@ -347,7 +414,7 @@ enum StreamEnd {
 }
 
 /// Read one SSE answer to the end: text to stdout, plugin steps to stderr.
-async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: &mut Vec<(String, String)>, track: Option<&RunTrack>) -> Result<StreamEnd> {
+async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: &mut Vec<Held>, track: Option<&RunTrack>) -> Result<StreamEnd> {
     let mut out = std::io::stdout();
     let mut buf = String::new();
     loop {
@@ -608,18 +675,41 @@ impl Input {
     }
 }
 
-/// y/N for each waiting call, read through the session's [`Input`].
-async fn ask_approvals_in(input: &mut Input, waiting: &[(String, String)]) -> Vec<String> {
+/// Approval for each held call, read through the session's [`Input`].
+async fn ask_approvals_in(input: &mut Input, url: &str, key: &str, held: &mut [Held], yes: bool) -> Vec<String> {
+    classify_held(url, key, held).await;
+    let interactive = std::io::stdin().is_terminal();
     let mut ok = Vec::new();
-    for (what, token) in waiting {
-        eprint!("approve {what}? [y/N] ");
-        std::io::stderr().flush().ok();
-        let line = input.line().await.unwrap_or_default();
-        if matches!(line.trim(), "y" | "Y" | "yes") {
-            ok.push(token.clone());
+    for h in held.iter() {
+        match present(h, yes, interactive) {
+            Some(false) => ok.push(h.token.clone()),
+            Some(true) => {
+                let line = input.line().await.unwrap_or_default();
+                if money::accepts(&line) {
+                    ok.push(h.token.clone());
+                }
+            }
+            None => {}
         }
     }
     ok
+}
+
+/// `/plugin ls | on | off | rm | connect | paper <name> | live <name>` in the
+/// session: the same calls as `c0mpute chat plugins ...`. Live trading is
+/// asked about here (or given `--confirm`) before the API is told to switch.
+async fn repl_plugin(input: &mut Input, mut words: Vec<String>) -> Result<()> {
+    if let Some(slug) = crate::chat_plugins::live_needs_confirm(&words) {
+        eprint!("{}\nswitch {slug} to LIVE trading? type y to confirm [y/N] ", crate::chat_plugins::LIVE_WARNING);
+        std::io::stderr().flush().ok();
+        let line = input.line().await.unwrap_or_default();
+        if !money::accepts(&line) {
+            eprintln!("(still on paper)");
+            return Ok(());
+        }
+        words.push("--confirm".into());
+    }
+    crate::chat_plugins::run(&words).await
 }
 
 /// Save locally and (signed in) to the account; a failure only warns.
@@ -677,7 +767,7 @@ async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
     }
     let resumed = !convo.messages.is_empty() && convo.messages.iter().any(|m| m["role"] == "user");
     eprintln!(
-        "c0mpute chat · {} · /model <id>, /models, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
+        "c0mpute chat · {} · /model <id>, /models, /plugin, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
         convo.model_opt().as_deref().unwrap_or("any live model")
     );
     let account = Some((url, key));
@@ -719,6 +809,13 @@ async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
                 models(url).await?;
                 continue;
             }
+            _ if line == "/plugins" || line == "/plugin" || line.starts_with("/plugin ") || line.starts_with("/plugins ") => {
+                let words: Vec<String> = line.split_whitespace().skip(1).map(str::to_string).collect();
+                if let Err(e) = repl_plugin(&mut input, words).await {
+                    eprintln!("error: {e:#}");
+                }
+                continue;
+            }
             _ if line.starts_with("/model") => {
                 let m = line.trim_start_matches("/model").trim();
                 convo.model = if m.is_empty() { "auto".into() } else { m.to_string() };
@@ -734,11 +831,11 @@ async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
         let args = Args { model: convo.model_opt(), ..clone_args(a) };
         let track = RunTrack::new(Some(convo.clone()));
         let mut result = input.during(complete(url, key, &args, &messages, false, &[], Some(&track))).await;
-        while let TurnOutcome::Done(Ok(turn)) = &result {
+        while let TurnOutcome::Done(Ok(turn)) = &mut result {
             if turn.approvals.is_empty() {
                 break;
             }
-            let ok = ask_approvals_in(&mut input, &turn.approvals).await;
+            let ok = ask_approvals_in(&mut input, url, key, &mut turn.approvals, a.yes).await;
             if ok.is_empty() {
                 break;
             }
@@ -802,6 +899,7 @@ fn clone_args(a: &Args) -> Args {
         max_tokens: a.max_tokens,
         temperature: a.temperature,
         json: false,
+        yes: a.yes,
         p2p: a.p2p,
         max_price: a.max_price,
         timeout_s: a.timeout_s,
@@ -1177,6 +1275,69 @@ mod tests {
         // End of input during a turn does not spin or end the turn early.
         let r = input.during(async { tokio::time::sleep(Duration::from_millis(5)).await; 7 }).await;
         assert!(matches!(r, TurnOutcome::Done(7)));
+    }
+
+    /// A one-route HTTP server answering every request with `body` (JSON).
+    async fn mock_api(body: Value) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.to_string();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(res.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn held_event(plugin: &str, tool: &str, token: &str) -> Held {
+        Held::from_event(&json!({"type": "approval_needed", "plugin": plugin, "tool": tool, "arguments": {"amount": 5}, "approval": token})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn yes_never_approves_a_money_call_without_a_terminal() {
+        // "pay" is a custom slug; only its URL (CoinPay's host) makes it money.
+        let url = mock_api(json!({"plugins": [
+            {"slug": "pay", "url": "https://coinpayportal.com/api/mcp"},
+            {"slug": "notes", "url": "https://notes.example.com/mcp"}
+        ]}))
+        .await;
+        let mut held = vec![
+            held_event("pay", "invoice_create_draft", "t-money"),
+            held_event("coinpay", "invoice_create_draft", "t-coinpay"),
+            held_event("notes", "write_note", "t-notes"),
+        ];
+        let ok = ask_approvals(&url, "k", &mut held, true, false).await.unwrap();
+        assert_eq!(ok, vec!["t-notes".to_string()], "--yes approved only the call that moves no money");
+        assert!(held[0].money && held[1].money && !held[2].money);
+        assert_eq!(held[0].summary.as_ref().unwrap().title, "Invoice create draft");
+        // Without --yes and without a terminal, nothing is approved.
+        let ok = ask_approvals(&url, "k", &mut held, false, false).await.unwrap();
+        assert!(ok.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_plugin_list_counts_as_money() {
+        let mut held = vec![held_event("mystery", "do_thing", "t1")];
+        let ok = ask_approvals("http://127.0.0.1:9", "k", &mut held, true, false).await.unwrap();
+        assert!(ok.is_empty());
+        assert!(held[0].money);
+    }
+
+    #[test]
+    fn yes_flag_parses() {
+        assert!(Args::try_parse_from(["c0mpute chat", "--yes", "hi"]).unwrap().yes);
+        assert!(Args::try_parse_from(["c0mpute chat", "-y", "hi"]).unwrap().yes);
+        assert!(!Args::try_parse_from(["c0mpute chat", "hi"]).unwrap().yes);
     }
 
     #[test]

@@ -31,6 +31,7 @@ mod chat_connect;
 mod chat_history;
 mod chat_plugins;
 mod chat_push;
+mod money;
 mod crowdgpt;
 mod dm_cli;
 use dm_cli::run_chat;
@@ -778,6 +779,27 @@ enum PluginCmd {
     /// Uninstall a plugin (alias: `delete`, `remove`).
     #[command(alias = "delete", alias = "remove")]
     Uninstall { id: String },
+    /// Chat plugin (brokerage): send its orders to the live account, with
+    /// real money. Needs --confirm; every order still shows its card and
+    /// waits for your y in the chat.
+    ///
+    /// Example: c0mpute plugins live moomoo --confirm
+    Live {
+        /// The chat plugin, e.g. moomoo.
+        name: String,
+        /// Yes, real money.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Chat plugin (brokerage): send its orders to the paper (simulated)
+    /// account. The default; a new sign-in resets to it, and the live order
+    /// tools are hidden from the model while on paper.
+    ///
+    /// Example: c0mpute plugins paper moomoo
+    Paper {
+        /// The chat plugin, e.g. moomoo.
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2015,6 +2037,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Worker { cmd } => run_worker(cmd, &config_path).await,
         Cmd::Job { cmd } => run_job(cmd).await,
         Cmd::Storage { cmd } => storage::run(cmd, &config_path).await,
+        Cmd::Plugin { cmd: PluginCmd::Live { name, confirm } } => chat_plugins::set_mode(&name, true, confirm).await,
+        Cmd::Plugin { cmd: PluginCmd::Paper { name } } => chat_plugins::set_mode(&name, false, false).await,
         Cmd::Plugin { cmd } => run_plugin(cmd),
 
         Cmd::Transcode { cmd } => run_transcode(cmd).await,
@@ -3322,6 +3346,26 @@ mod worker_stop_tests {
         // The flag does not make a bad target acceptable.
         assert!(plugin_install_plan("http://example.com/p/install.sh", true).is_err());
         assert!(plugin_install_plan("x; id", true).is_err());
+    }
+
+    #[test]
+    fn plugins_paper_and_live_parse() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied()).map(|c| c.command);
+        match parse(&["c0mpute", "plugins", "live", "moomoo", "--confirm"]).unwrap() {
+            Some(Cmd::Plugin { cmd: PluginCmd::Live { name, confirm } }) => {
+                assert_eq!(name, "moomoo");
+                assert!(confirm);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        match parse(&["c0mpute", "plugins", "live", "moomoo"]).unwrap() {
+            Some(Cmd::Plugin { cmd: PluginCmd::Live { confirm, .. } }) => assert!(!confirm),
+            other => panic!("parsed as {other:?}"),
+        }
+        match parse(&["c0mpute", "plugin", "paper", "moomoo"]).unwrap() {
+            Some(Cmd::Plugin { cmd: PluginCmd::Paper { name } }) => assert_eq!(name, "moomoo"),
+            other => panic!("parsed as {other:?}"),
+        }
     }
 
     #[test]
@@ -5671,6 +5715,7 @@ fn run_plugin(cmd: PluginCmd) -> Result<()> {
             println!("[stub] uninstall {id}");
             Ok(())
         }
+        PluginCmd::Live { .. } | PluginCmd::Paper { .. } => unreachable!("chat plugin modes are dispatched in run_app"),
     }
 }
 
