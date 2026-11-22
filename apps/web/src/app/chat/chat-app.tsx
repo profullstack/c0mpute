@@ -186,6 +186,8 @@ type Me = { id: string; did: string; name: string | null; balance?: Balance | nu
 type Key = { id: string; label: string; prefix: string; created_at: string; last_used_at: string | null };
 
 const STORE = "c0_chats_v1";
+/** A shared chat to copy in once signed in ("Continue this conversation"). */
+const PENDING_IMPORT = "c0_pending_import";
 // How long the chat keeps polling a media job: the network queues a job up to
 // 2 h for a free worker, then renders it.
 const QUEUE_DEADLINE_MS = 3 * 60 * 60_000;
@@ -473,6 +475,79 @@ export function ChatApp({ error }: { error: string | null }) {
       return next;
     });
   }, []);
+
+  // ── shared chats: /share/<id> → "Continue this conversation" lands here ──
+  // The id survives a sign-in round trip in localStorage.
+  useEffect(() => {
+    try {
+      const id = new URLSearchParams(window.location.search).get("import");
+      if (id && /^[A-Za-z0-9_-]{10,32}$/.test(id)) {
+        localStorage.setItem(PENDING_IMPORT, id);
+        window.history.replaceState(null, "", "/chat");
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (!me) return;
+    let id: string | null = null;
+    try {
+      id = localStorage.getItem(PENDING_IMPORT);
+      localStorage.removeItem(PENDING_IMPORT);
+    } catch {}
+    if (!id) return;
+    void (async () => {
+      const r = await fetch(`/api/v1/chat/shares/${encodeURIComponent(id!)}`).catch(() => null);
+      if (!r?.ok) {
+        setFailure("that shared chat was removed or the link is wrong");
+        return;
+      }
+      const s = (await r.json()) as { title: string; messages: { role: "user" | "assistant"; content: string; sources?: SourceCard[] }[] };
+      const c: Convo = { ...newConvo("auto"), title: s.title.slice(0, 60), messages: s.messages.map((m) => ({ role: m.role, content: m.content, ...(m.sources ? { sources: m.sources } : {}) })), updated: Date.now() };
+      setConvos((all) => {
+        const next = [c, ...all];
+        save(next);
+        return next;
+      });
+      setActiveId(c.id);
+    })();
+  }, [me]);
+
+  /** Share the open chat: phones get the share sheet (Messages, Mail...), computers a copied link. */
+  const [shareNote, setShareNote] = useState<{ convo: string; url: string; text: string } | null>(null);
+  async function shareChat() {
+    if (!active) return;
+    const convo = active.id;
+    setShareNote({ convo, url: "", text: "making a link…" });
+    const res = await fetch("/api/v1/chat/shares", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ convo_id: convo, title: active.title, messages: active.messages.map((m) => ({ role: m.role, content: m.content, sources: m.sources })) }),
+    }).catch(() => null);
+    const j = res ? await res.json().catch(() => ({})) : {};
+    if (!res?.ok || typeof j.url !== "string") {
+      setShareNote({ convo, url: "", text: j.error?.message ?? "could not make a link; try again" });
+      return;
+    }
+    const url: string = j.url;
+    const phone = typeof navigator !== "undefined" && typeof navigator.share === "function" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+    try {
+      if (phone) {
+        await navigator.share({ title: active.title, text: active.title, url });
+        setShareNote({ convo, url, text: "Shared. Anyone with this link can read the chat:" });
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      setShareNote({ convo, url, text: "Link copied. Paste it into a text or an email. Anyone with it can read this chat:" });
+    } catch {
+      setShareNote({ convo, url, text: "Here is the link. Anyone with it can read this chat:" });
+    }
+  }
+  async function unshareChat(url: string, convo: string) {
+    const id = url.split("/share/")[1];
+    if (!id) return;
+    const r = await fetch(`/api/v1/chat/shares/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+    setShareNote({ convo, url: "", text: r?.ok ? "Unshared. That link no longer works." : "could not unshare; try again" });
+  }
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
@@ -1730,7 +1805,33 @@ export function ChatApp({ error }: { error: string | null }) {
               ))}
             </select>
             <span className="ml-auto text-[var(--color-dim)]">{models.length} models online</span>
+            <button
+              onClick={() => void shareChat()}
+              disabled={!active || busy || !active.messages.some((m) => m.role === "assistant" && m.content)}
+              className="px-3 py-1 border border-[var(--color-fg)] text-[var(--color-fg)] hover:bg-[var(--color-fg)] hover:text-[var(--color-bg)] disabled:opacity-40 disabled:pointer-events-none"
+              title="Make a link anyone can open to read this chat"
+            >
+              Share
+            </button>
           </div>
+          {shareNote && active && shareNote.convo === active.id && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-rule)] px-3 py-2 text-sm">
+              <span>{shareNote.text}</span>
+              {shareNote.url && (
+                <>
+                  <a href={shareNote.url} target="_blank" rel="noopener noreferrer" className="underline accent break-all">
+                    {shareNote.url}
+                  </a>
+                  <button onClick={() => void unshareChat(shareNote.url, shareNote.convo)} className="text-xs text-[var(--color-dim)] underline hover:text-[var(--color-fg)]">
+                    unshare
+                  </button>
+                </>
+              )}
+              <button onClick={() => setShareNote(null)} className="ml-auto text-xs text-[var(--color-dim)] hover:text-[var(--color-fg)]" aria-label="close">
+                ✕
+              </button>
+            </div>
+          )}
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
               <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /plugin add &lt;url&gt; gives the model tools from any remote MCP server. /help lists every command.</p>

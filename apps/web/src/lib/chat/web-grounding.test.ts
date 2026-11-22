@@ -21,7 +21,7 @@ describe("web grounding", () => {
     const p = searchPlan(SF);
     expect(p.subjects).toEqual(["sf marina", "inner sunset"]);
     expect(p.queries).toHaveLength(2);
-    expect(p.queries[1]).toBe("inner sunset avareg cost 2br parkig laundry dishwasher");
+    expect(p.queries[1]).toBe("inner sunset San Francisco avareg cost 2br parkig laundry dishwasher");
     expect(searchPlan("rent in noe valley vs the mission").subjects).toEqual(["noe valley", "mission"]);
     expect(searchPlan("who won the world series").queries).toHaveLength(1);
   });

@@ -41,11 +41,15 @@ export function chatRunOpener(upstreamFor: (subject: string | null) => Upstream,
       return res.body;
     }
     const messages = cont ? continuationMessages(parsed.messages, cont.partial) : parsed.messages;
-    const open = (msgs: ChatMessage[]) => openAnswer(upstream, opts.router?.() ?? null, req.body, parsed, msgs, signal);
+    const web = req.body.web === true;
+    // Nodes default to 512 output tokens, which cut a full answer off mid-table
+    // (2026-11-22); the web chat asks for room unless the caller set a limit.
+    const room = (n: number): ChatRequest => (web && parsed.max_tokens === undefined ? { ...parsed, max_tokens: n } : parsed);
+    const open = (msgs: ChatMessage[], grounded = false) => openAnswer(upstream, opts.router?.() ?? null, req.body, room(grounded ? 1600 : 1200), msgs, signal);
 
     // The web chat asks for grounding (`web: true`); API clients keep the plain path.
     const question = lastUserText(parsed.messages);
-    if (req.body.web !== true || !needsWeb(question)) return open(messages);
+    if (!web || !needsWeb(question)) return open(messages);
 
     // Stream at once: where the search is, then the sources, then the answer.
     let inner: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -62,7 +66,7 @@ export function chatRunOpener(upstreamFor: (subject: string | null) => Upstream,
         push(status(g ? `asking a node, with ${g.sources.length} sources…` : "asking a node…"));
         let body: ReadableStream<Uint8Array> | null;
         try {
-          body = await open(g ? groundedMessages(messages, g) : messages);
+          body = await open(g ? groundedMessages(messages, g) : messages, !!g);
         } catch (e) {
           push(sse({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_error", code: 502 } }) + "data: [DONE]\n\n");
           return void ctrl.close();

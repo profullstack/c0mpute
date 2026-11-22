@@ -1,3 +1,5 @@
+"use client";
+
 // A small, safe Markdown renderer for chat answers: React elements only (no
 // innerHTML), links limited to http(s). Covers what models write: headings,
 // paragraphs, **bold**, *italic*, `code`, fenced code, lists, quotes, rules,
