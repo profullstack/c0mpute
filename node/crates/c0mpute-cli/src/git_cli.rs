@@ -258,7 +258,8 @@ pub fn as_remote_helper() -> Option<i32> {
 
 /// A directory holding `git-remote-c0mpute` -> this binary, for child gits.
 fn helper_dir() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("locate this binary")?;
+    // Never link to "<path> (deleted)" after an auto-update swapped the file.
+    let exe = c0mpute_update::current_exe_path().context("locate this binary")?;
     let dir = c0mpute_core::config::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("git")
