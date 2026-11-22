@@ -57,6 +57,8 @@ export function parseChatRequest(body: unknown): ChatRequest | string {
   const out: ChatRequest = { messages, stream: b.stream === true };
   const cmd = usedCommand(rendered);
   if (cmd) out.command = cmd.name;
+  // Prompt commands do arithmetic: sample tighter unless the caller chose a temperature.
+  if (cmd && typeof b.temperature !== "number") out.temperature = 0.2;
   if (tooling && tooling.choice !== "none") out.tooling = tooling;
   const so = b.stream_options as Record<string, unknown> | undefined;
   if (so && typeof so === "object" && so.include_usage === true) out.include_usage = true;

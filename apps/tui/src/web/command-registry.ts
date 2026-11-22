@@ -131,7 +131,7 @@ export function usedCommand(messages: readonly Msg[]): CommandDef | null {
  * keep the command's instructions. Conversations without a command come back
  * unchanged (same array).
  */
-export function expandCommands<M extends Msg>(messages: M[], housePrompt: string): M[] {
+export function expandCommands<M extends Msg>(messages: M[], housePrompt: string, today: Date = new Date()): M[] {
   let last: CommandDef | null = null;
   const out = messages.map((msg) => {
     if (msg.role !== "user") return msg;
@@ -143,7 +143,8 @@ export function expandCommands<M extends Msg>(messages: M[], housePrompt: string
   });
   if (!last) return messages;
   const cmd: CommandDef = last;
-  const block = `/${cmd.name} instructions:\n${cmd.prompt}`;
+  // Small models assume their training year; runway and forecast dates need today.
+  const block = `/${cmd.name} instructions (today is ${today.toISOString().slice(0, 10)}):\n${cmd.prompt}`;
   const i = out.findIndex((m) => m.role === "system");
   if (i >= 0) out[i] = { ...out[i], content: `${out[i].content}\n\n${block}` };
   else out.unshift({ role: "system", content: `${housePrompt}\n\n${block}` } as M);

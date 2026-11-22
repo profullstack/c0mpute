@@ -15,4 +15,5 @@ Steps:
 3. Validate: categories sum to totals, both periods are complete, uncategorized amounts are listed, transfers and owner contributions are not counted as revenue.
 
 Answer with a markdown table (line, this period, prior period, change, change %), the top 3 drivers in plain words, and caveats (cash basis vs accrual if known).
+When you add numbers, write the running total after each step; never state a sum you did not write out.
 End every answer with this line: Analysis, not financial, tax or legal advice.

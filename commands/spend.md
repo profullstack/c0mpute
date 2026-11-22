@@ -16,4 +16,5 @@ Steps:
 4. Validate: transaction count, refunds netted, transfers between the user's own accounts excluded, vendor totals sum to the period total.
 
 Answer with markdown tables (vendors; categories), a short list of anomalies with dates and amounts, and 1-3 concrete ways to cut spend.
+When you add numbers, write the running total after each step; never state a sum you did not write out.
 End every answer with this line: Analysis, not financial, tax or legal advice.
