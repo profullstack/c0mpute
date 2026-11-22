@@ -90,6 +90,21 @@ Every model step of a plugin turn is a normal completion billed to the person
 (`infernetFor(coinpay_sub)`), same as a turn without plugins. At most 6 steps
 per turn.
 
+## Docs plugins (no sign-in)
+
+| plugin | server | for everyone |
+|---|---|---|
+| Microsoft Learn (docs) | `https://learn.microsoft.com/api/mcp` | on, ready to use |
+
+Public, read-only documentation servers from `DOCS_CATALOG` in
+`@profullstack/chat-plugins`. Every account gets Microsoft Learn switched on
+the first time its plugins are read, seeded with auth `none`, so its three
+read-only tools (docs search, code sample search, page fetch) work at once.
+Removing it is remembered. The same entry registers in a coding agent with
+`claude mcp add --transport http microsoft-learn https://learn.microsoft.com/api/mcp`
+(`mcpAddCommand(entry, cli)` renders it for claude, gemini, qwen, codex and
+opencode).
+
 ## Money plugins (banking, crypto, trading)
 
 | plugin | server | for everyone |

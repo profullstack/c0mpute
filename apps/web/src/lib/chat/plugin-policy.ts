@@ -3,6 +3,9 @@
 // Infernet chat: @profullstack/chat-plugins (src/money.js). This module only
 // re-exports it so the rest of c0mpute imports from one local path.
 //
+// DOCS_CATALOG (Microsoft Learn) comes from the same package: public,
+// read-only documentation servers with no sign-in, on by default, no policy.
+//
 // The gate runs in the tool-call layer (plugins.ts livePlugins/refreshTools):
 // a tool on a money plugin runs alone only when its exact name is on that
 // plugin's read-only allowlist; every other tool, including names never seen,
@@ -12,7 +15,9 @@
 export {
   MODEL_CAN_BE_WRONG,
   FINANCE_CATALOG,
+  DOCS_CATALOG,
   DEFAULT_PLUGINS,
+  mcpAddCommand,
   POLICIES,
   policyFor,
   needsConfirmation,
@@ -21,4 +26,4 @@ export {
   describeAction,
   redactLog,
 } from "@profullstack/chat-plugins";
-export type { ActionSummary, FinanceCatalogEntry, MoneyKind, PluginPolicy, TradingMode } from "@profullstack/chat-plugins";
+export type { ActionSummary, DocsCatalogEntry, FinanceCatalogEntry, MoneyKind, PluginPolicy, TradingMode } from "@profullstack/chat-plugins";
