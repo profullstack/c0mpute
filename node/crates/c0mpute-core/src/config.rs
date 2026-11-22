@@ -58,6 +58,9 @@ pub struct Config {
     /// Static-site hosting: how much this node holds for the network.
     #[serde(default)]
     pub hosting: HostingConfig,
+    /// Live streams: relay them (and earn per GB served). On by default.
+    #[serde(default)]
+    pub live: LiveConfig,
     /// CPU text embeddings (`embed.text`) provisioning.
     #[serde(default)]
     pub embed: EmbedConfig,
@@ -916,6 +919,7 @@ impl Default for Config {
             music: MusicConfig::default(),
             video: VideoConfig::default(),
             hosting: HostingConfig::default(),
+            live: LiveConfig::default(),
             ads: AdsConfig::default(),
             embed: EmbedConfig::default(),
             captcha: CaptchaConfig::default(),
@@ -950,6 +954,23 @@ impl Default for ApiConfig {
             base_url: "https://c0mpute.com/".into(),
             token: None,
         }
+    }
+}
+
+/// Live streams (`live-stream` role): relay other people's streams, serve
+/// them on a gateway, and earn per GB served of paid ones.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiveConfig {
+    /// Relay live streams. On by default on every node, whatever `roles`
+    /// lists; `false` (or `C0MPUTE_LIVE=0`, or `worker start --no-live`) is
+    /// the opt-out.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -1109,6 +1130,17 @@ impl Config {
         env_switch("C0MPUTE_HOSTING", self.hosting.enabled)
     }
 
+    /// Live-stream relaying is on: the config and `C0MPUTE_LIVE` agree.
+    pub fn live_enabled(&self) -> bool {
+        env_switch("C0MPUTE_LIVE", self.live.enabled)
+    }
+
+    /// [`Config::live_enabled`] for a given `C0MPUTE_LIVE` value (`None`:
+    /// unset), so the rule can be checked without touching the environment.
+    pub fn live_enabled_with(&self, env: Option<&str>) -> bool {
+        auto_install_enabled_with(self.live.enabled, env.map(str::to_string).filter(|v| !v.trim().is_empty()))
+    }
+
     /// This disk goes on d1sks: storage on, OpenDisk on, listing on,
     /// `C0MPUTE_D1SKS` not off, and not private mode.
     pub fn lists_on_d1sks(&self) -> bool {
@@ -1126,15 +1158,23 @@ impl Config {
         (c.len() == 2 && c.chars().all(|ch| ch.is_ascii_uppercase())).then_some(c)
     }
 
-    /// Every node is a disk provider: `storage` and `hosting` join the roles
-    /// even when `roles` (or `--roles`) lists others, unless the operator
-    /// turned them off (`enabled = false` or the env switch), which also
-    /// takes them out of an explicit list. Private mode adds nothing: a
-    /// private node keeps exactly the roles it asked for.
+    /// Every node is a disk provider and a live-stream relay: `storage`,
+    /// `hosting` and `live-stream` join the roles even when `roles` (or
+    /// `--roles`) lists others, unless the operator turned them off
+    /// (`enabled = false` or the env switch), which also takes them out of an
+    /// explicit list. Private mode adds nothing: a private node keeps exactly
+    /// the roles it asked for.
     pub fn apply_disk_provider_defaults(&mut self) {
+        let live = self.live_enabled();
+        self.apply_default_roles(self.storage_enabled(), self.hosting_enabled(), live);
+    }
+
+    /// [`Config::apply_disk_provider_defaults`] with each switch given.
+    pub fn apply_default_roles(&mut self, storage: bool, hosting: bool, live: bool) {
         let wanted = [
-            (Role::Storage, self.storage_enabled()),
-            (Role::Hosting, self.hosting_enabled()),
+            (Role::Storage, storage),
+            (Role::Hosting, hosting),
+            (Role::LiveStream, live),
         ];
         for (role, on) in wanted {
             if !on {
@@ -1315,6 +1355,46 @@ mod tests {
         assert!(cfg.roles.contains(&Role::Hosting));
         assert!(cfg.roles.contains(&Role::Tts));
         assert!(cfg.storage.list_on_d1sks);
+    }
+
+    #[test]
+    fn an_explicit_role_list_still_relays_live_streams() {
+        let mut cfg: Config = toml::from_str("roles = [\"tts\", \"stt\"]\n").unwrap();
+        assert!(cfg.live.enabled, "on unless the file says otherwise");
+        cfg.apply_default_roles(true, true, cfg.live_enabled_with(None));
+        assert!(cfg.roles.contains(&Role::LiveStream));
+        assert!(cfg.roles.contains(&Role::Tts));
+        assert!(Config::default().roles.contains(&Role::LiveStream));
+    }
+
+    #[test]
+    fn live_opts_out_by_config_or_env_even_from_an_explicit_list() {
+        // [live] enabled = false
+        let mut cfg: Config = toml::from_str("roles = [\"live-stream\", \"tts\"]\n[live]\nenabled = false\n").unwrap();
+        assert!(!cfg.live_enabled_with(None));
+        cfg.apply_default_roles(true, true, cfg.live_enabled_with(None));
+        assert!(!cfg.roles.contains(&Role::LiveStream));
+        assert!(cfg.roles.contains(&Role::Storage), "the other defaults are untouched");
+
+        // C0MPUTE_LIVE=0 (and its spellings) beats a config that says on.
+        for off in ["0", "false", "no", "off", "OFF"] {
+            let mut cfg: Config = toml::from_str("roles = [\"live-stream\", \"tts\"]\n").unwrap();
+            assert!(!cfg.live_enabled_with(Some(off)), "C0MPUTE_LIVE={off}");
+            cfg.apply_default_roles(true, true, cfg.live_enabled_with(Some(off)));
+            assert_eq!(cfg.roles, vec![Role::Tts, Role::Storage, Role::Hosting]);
+        }
+        // C0MPUTE_LIVE=1 turns it back on over the file; empty means unset.
+        let cfg: Config = toml::from_str("[live]\nenabled = false\n").unwrap();
+        assert!(cfg.live_enabled_with(Some("1")));
+        assert!(!cfg.live_enabled_with(Some("")));
+        assert!(Config::default().live_enabled_with(None));
+    }
+
+    #[test]
+    fn private_mode_does_not_add_live() {
+        let mut cfg: Config = toml::from_str("roles = [\"tts\"]\n[private]\nenabled = true\n").unwrap();
+        cfg.apply_default_roles(true, true, true);
+        assert_eq!(cfg.roles, vec![Role::Tts]);
     }
 
     #[test]

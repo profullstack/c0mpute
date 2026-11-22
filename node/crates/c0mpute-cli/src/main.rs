@@ -662,8 +662,9 @@ enum WorkerCmd {
         /// Comma-separated roles: storage, transcode, tts, stt, gateway,
         /// verifier, workflow-step, video, diffusion, music. Default: the config's
         /// roles plus tts, stt, workflow-step, diffusion and music. Every node
-        /// is also a disk provider (storage + hosting, listed on d1sks) on top
-        /// of whatever is listed here, unless turned off below or in config.
+        /// is also a disk provider (storage + hosting, listed on d1sks) and a
+        /// live-stream relay (paid per GB served) on top of whatever is
+        /// listed here, unless turned off below or in config.
         #[arg(long, value_delimiter = ',')]
         roles: Option<Vec<String>>,
         #[arg(long)]
@@ -676,6 +677,10 @@ enum WorkerCmd {
         /// false` or `C0MPUTE_HOSTING=0`).
         #[arg(long)]
         no_hosting: bool,
+        /// Do not relay live streams (same as `[live] enabled = false` or
+        /// `C0MPUTE_LIVE=0`).
+        #[arg(long)]
+        no_live: bool,
         #[arg(long)]
         gpu: bool,
         /// Private mode for this run: only your own buyers, not advertised.
@@ -1502,6 +1507,33 @@ enum StreamCmd {
         #[arg(long, default_value = "http://127.0.0.1:7777")]
         gateway: String,
     },
+    /// Run the hosted RTMP ingest: accept publishes at
+    /// rtmp://<host>/live/<stream_key>, check each key with c0mpute.com
+    /// before taking any media, and broadcast the stream on the network
+    /// under the key's account.
+    ///
+    /// Needs ffmpeg on PATH, a public TCP port, and the shared ingest secret
+    /// in C0MPUTE_LIVE_INGEST_SECRET. Serves many publishers at once.
+    ///
+    ///   C0MPUTE_LIVE_INGEST_SECRET=... c0mpute stream ingest --listen 0.0.0.0:1935
+    #[command(verbatim_doc_comment)]
+    Ingest {
+        /// Address to accept RTMP on.
+        #[arg(long, default_value = "0.0.0.0:1935")]
+        listen: std::net::SocketAddr,
+        /// c0mpute.com origin that checks stream keys.
+        #[arg(long, default_value = "https://c0mpute.com")]
+        api: String,
+        /// Target segment length in seconds (2-10).
+        #[arg(long, default_value_t = 4)]
+        segment_secs: u32,
+        /// Segments in the live window.
+        #[arg(long, default_value_t = 6)]
+        window: usize,
+        /// After a publisher leaves, keep its last window up this long.
+        #[arg(long, default_value_t = 10)]
+        linger_secs: u64,
+    },
 }
 
 const CRAWL_EXAMPLES: &str = "\
@@ -1813,6 +1845,7 @@ fn main() -> Result<()> {
                 storage,
                 no_storage,
                 no_hosting,
+                no_live,
                 gpu,
                 private,
                 daemon: _,
@@ -1828,6 +1861,9 @@ fn main() -> Result<()> {
         }
         if *no_hosting {
             passthrough.push("--no-hosting".to_string());
+        }
+        if *no_live {
+            passthrough.push("--no-live".to_string());
         }
         if let Some(rs) = roles {
             passthrough.push("--roles".to_string());
@@ -2521,7 +2557,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             if f.private {
                 cfg.private.enabled = true;
             }
-            effective_worker_roles(&mut cfg, f.roles.as_deref(), f.gpu, f.no_storage, f.no_hosting);
+            effective_worker_roles(&mut cfg, f.roles.as_deref(), f.gpu, f.no_storage, f.no_hosting, f.no_live);
             let roles = cfg.roles.clone();
             let gates = node_status::report(&cfg, &roles, worker, source).await;
             if let (Some(base), serde_json::Value::Object(extra)) = (status.as_object_mut(), gates) {
@@ -2575,6 +2611,7 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             storage: _,
             no_storage,
             no_hosting,
+            no_live,
             gpu,
             private,
             // Both handled in `main` before the runtime started; at this point
@@ -2600,12 +2637,18 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
             // the background, so it never delays the worker.
             tokio::spawn(referral_cli::claim_if_pending(false, false));
             let default_speech_roles = roles.is_none();
-            effective_worker_roles(&mut cfg, roles.as_deref(), gpu, no_storage, no_hosting);
+            effective_worker_roles(&mut cfg, roles.as_deref(), gpu, no_storage, no_hosting, no_live);
             c0mpute_core::fleet_settings::set_effective(c0mpute_core::fleet_settings::Effective {
                 storage: cfg.roles.contains(&Role::Storage),
                 hosting: cfg.roles.contains(&Role::Hosting),
                 storage_root: Some(cfg.storage.root.clone()),
             });
+            if cfg.roles.contains(&Role::LiveStream) {
+                eprintln!(
+                    "live relay: relaying live streams for the network, paid per GB served of paid streams \
+                     (opt out: --no-live, [live] enabled = false, C0MPUTE_LIVE=0)"
+                );
+            }
             if cfg.lists_on_d1sks() {
                 eprintln!(
                     "disk provider: storing shards and holding sites for the network, listed on {} \
@@ -4098,6 +4141,29 @@ async fn run_stream(cmd: StreamCmd) -> Result<()> {
                 bind,
                 linger: std::time::Duration::from_secs(linger_secs),
                 reconnect: !no_reconnect,
+                max_height: None,
+            })
+            .await
+        }
+        StreamCmd::Ingest {
+            listen,
+            api,
+            segment_secs,
+            window,
+            linger_secs,
+        } => {
+            use c0mpute_core::live::ingest;
+            let secret = std::env::var(ingest::SECRET_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .with_context(|| format!("set {} to the shared ingest secret", ingest::SECRET_ENV))?;
+            ingest::serve(ingest::IngestOptions {
+                listen,
+                api,
+                secret,
+                segment_secs,
+                window,
+                linger: std::time::Duration::from_secs(linger_secs),
             })
             .await
         }
@@ -5937,10 +6003,17 @@ fn run_uninstall(all: bool, purge: bool, yes: bool) -> Result<()> {
 // ────────────────────────────────────────────────────────────────────────
 
 /// The roles `worker start` runs with: `--roles` when given, otherwise the
-/// config's roles plus the defaults; then transcode for `--gpu`, and storage
-/// and hosting unless opted out. Shared with `c0mpute status --json`, so the
-/// TUI reports the role set the worker actually has.
-fn effective_worker_roles(cfg: &mut Config, roles: Option<&[String]>, gpu: bool, no_storage: bool, no_hosting: bool) {
+/// config's roles plus the defaults; then transcode for `--gpu`, and storage,
+/// hosting and live-stream unless opted out. Shared with `c0mpute status
+/// --json`, so the TUI reports the role set the worker actually has.
+fn effective_worker_roles(
+    cfg: &mut Config,
+    roles: Option<&[String]>,
+    gpu: bool,
+    no_storage: bool,
+    no_hosting: bool,
+    no_live: bool,
+) {
     if let Some(rs) = roles {
         cfg.roles = rs.iter().filter_map(|s| parse_role(s)).collect();
     } else {
@@ -5996,9 +6069,58 @@ fn effective_worker_roles(cfg: &mut Config, roles: Option<&[String]>, gpu: bool,
     if no_hosting {
         cfg.hosting.enabled = false;
     }
-    // Every node is a disk provider unless it opted out: storage and
-    // hosting join even an explicit --roles list.
+    if no_live {
+        cfg.live.enabled = false;
+    }
+    // Every node is a disk provider and a live-stream relay unless it opted
+    // out: storage, hosting and live-stream join even an explicit --roles list.
     cfg.apply_disk_provider_defaults();
+}
+
+#[cfg(test)]
+mod live_default_tests {
+    use super::*;
+
+    fn roles_for(list: Option<&[&str]>, no_live: bool, file: &str) -> Vec<Role> {
+        let mut cfg: Config = toml::from_str(file).unwrap();
+        let owned: Option<Vec<String>> = list.map(|l| l.iter().map(|s| s.to_string()).collect());
+        effective_worker_roles(&mut cfg, owned.as_deref(), false, false, false, no_live);
+        cfg.roles
+    }
+
+    /// `C0MPUTE_LIVE` set in the environment would decide these; the rule
+    /// for it is covered in c0mpute-core's config tests.
+    fn env_is_clean() -> bool {
+        std::env::var_os("C0MPUTE_LIVE").is_none()
+    }
+
+    #[test]
+    fn an_explicit_roles_list_still_gets_live_stream() {
+        if !env_is_clean() {
+            return;
+        }
+        let roles = roles_for(Some(&["tts", "stt"]), false, "");
+        assert!(roles.contains(&Role::LiveStream), "{roles:?}");
+        assert!(roles.contains(&Role::Tts) && roles.contains(&Role::Stt));
+        assert!(roles_for(None, false, "").contains(&Role::LiveStream), "and so do the defaults");
+    }
+
+    #[test]
+    fn no_live_and_the_config_switch_take_it_out() {
+        if !env_is_clean() {
+            return;
+        }
+        // --no-live, with defaults and with an explicit list that names it.
+        assert!(!roles_for(None, true, "").contains(&Role::LiveStream));
+        assert!(!roles_for(Some(&["tts", "live-stream"]), true, "").contains(&Role::LiveStream));
+        // [live] enabled = false, no flag.
+        let off = "[live]\nenabled = false\n";
+        assert!(!roles_for(None, false, off).contains(&Role::LiveStream));
+        assert!(!roles_for(Some(&["tts", "live-stream"]), false, off).contains(&Role::LiveStream));
+        // Storage and hosting are untouched by it.
+        let roles = roles_for(Some(&["tts"]), true, "");
+        assert!(roles.contains(&Role::Storage) && roles.contains(&Role::Hosting));
+    }
 }
 
 fn parse_role(s: &str) -> Option<Role> {

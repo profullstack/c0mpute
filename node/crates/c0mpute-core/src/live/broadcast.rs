@@ -5,6 +5,10 @@
 //! chunks, slides the rendition's window, signs a new [`LiveRecord`] and
 //! gossips it. Inputs are anything ffmpeg reads: a file (paced with `-re`),
 //! an `rtmp://` / `srt://` / `udp://` URL, or `-` for stdin.
+//!
+//! [`go`] is the one-stream command. [`run`] is the same loop on a node
+//! that is already up, fed by the caller ([`Feed`]): the hosted RTMP ingest
+//! (`super::ingest`) runs one per publisher on a single node.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -13,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::playlist::{self, LocalPlaylist};
-use super::record::{self, LiveBody, LiveRecord, Window};
-use super::{LiveStream, Timing};
+use super::record::{self, Binding, LiveBody, LiveRecord, Window};
+use super::{LiveStream, Timing, meter};
 
 /// How the first rendition is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +66,10 @@ pub struct GoOptions {
     pub linger: Duration,
     /// Restart ffmpeg when a network input drops (with a discontinuity).
     pub reconnect: bool,
+    /// Cap the source rendition at this many lines (720 for the free tier).
+    /// Setting it re-encodes the source with libx264; a source already at or
+    /// under the cap keeps its size.
+    pub max_height: Option<u32>,
 }
 
 /// Is `input` a network URL (as opposed to a file or stdin)?
@@ -137,8 +145,13 @@ pub fn ffmpeg_args(opts: &GoOptions, work: &Path) -> Vec<String> {
         c => c,
     };
     a.extend(["-map", "0:v:0?", "-map", "0:a:0?"].iter().map(|s| s.to_string()));
-    match codec {
-        Codec::Copy => a.extend(["-c".into(), "copy".into()]),
+    match (codec, opts.max_height) {
+        // Never upscales: the height is the smaller of the input's and the cap.
+        (_, Some(h)) => {
+            let vf = format!("scale=-2:'min(ih,{})'", h.clamp(144, 4320));
+            x264(&mut a, &["-vf", vf.as_str()]);
+        }
+        (Codec::Copy, None) => a.extend(["-c".into(), "copy".into()]),
         _ => x264(&mut a, &[]),
     }
     hls(&mut a, work.join("r0"));
@@ -162,6 +175,8 @@ pub struct Broadcaster {
     pub windows: Vec<Window>,
     seq: u64,
     pub last: Option<LiveRecord>,
+    /// Account binding signed into every record from now on (hosted ingest).
+    pub binding: Option<Binding>,
 }
 
 fn now_ms() -> u64 {
@@ -193,6 +208,7 @@ impl Broadcaster {
                 .collect(),
             seq: 0,
             last: None,
+            binding: None,
         })
     }
 
@@ -209,7 +225,7 @@ impl Broadcaster {
 
     fn sign(&mut self, ended: bool) -> Result<LiveRecord> {
         let seq = self.next_seq();
-        let rec = LiveRecord::sign(
+        let rec = LiveRecord::sign_bound(
             &self.keypair,
             LiveBody {
                 v: 1,
@@ -221,6 +237,7 @@ impl Broadcaster {
                 ended,
                 renditions: self.windows.iter().map(|w| w.rendition.clone()).collect(),
             },
+            self.binding.as_ref(),
         )?;
         self.last = Some(rec.clone());
         Ok(rec)
@@ -313,6 +330,64 @@ impl Watch {
     }
 }
 
+/// What a broadcast runs on: the node's live service, the key its streams
+/// are signed with, the ffmpeg to run and where ffmpeg writes.
+#[derive(Clone)]
+pub struct Session {
+    pub live: LiveStream,
+    pub keypair: c0mpute_net::libp2p::identity::Keypair,
+    pub ffmpeg: PathBuf,
+    /// Directory for per-stream ffmpeg output (`<work_root>/<name>-<pid>`).
+    pub work_root: PathBuf,
+}
+
+/// What a caller that feeds the media itself hands to [`run`].
+#[derive(Default)]
+pub struct Feed {
+    /// Bytes for ffmpeg's stdin (`opts.input` must be `-`). ffmpeg's stderr
+    /// is then piped and drained here: nothing else reads it, and a full
+    /// stderr pipe stalls ffmpeg.
+    pub stdin: Option<tokio::sync::mpsc::Receiver<bytes::Bytes>>,
+    /// The account binding to sign into records; may change while live
+    /// (a stream that runs out of balance drops to the free tier).
+    pub binding: Option<tokio::sync::watch::Receiver<Option<Binding>>>,
+    /// Set to true to end the broadcast now.
+    pub stop: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Log per-segment lines at debug instead of printing them.
+    pub quiet: bool,
+}
+
+/// Resolves when `stop` turns true; never when there is no stop signal.
+async fn stop_requested(stop: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match stop {
+        Some(rx) => loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        },
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Read ffmpeg's stderr to the end so the pipe never fills. Lines go to the
+/// debug log; the last few are kept for the caller's error message.
+async fn drain_stderr(stderr: tokio::process::ChildStderr, name: String) -> Vec<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(stderr).lines();
+    let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        tracing::debug!(stream = %name, "ffmpeg: {line}");
+        if tail.len() >= 8 {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    tail.into_iter().collect()
+}
+
 /// `c0mpute stream go`: broadcast until the input ends (or ctrl-c).
 pub async fn go(opts: GoOptions) -> Result<()> {
     let ffmpeg = crate::supervisor::which_ffmpeg()
@@ -324,19 +399,14 @@ pub async fn go(opts: GoOptions) -> Result<()> {
     let data = crate::config::data_dir().unwrap_or_else(|| PathBuf::from("."));
     let keypair = c0mpute_net::identity::load_or_create(&data.join("buyer"))?;
     let live = LiveStream::start(supervisor.libp2p.clone(), supervisor.store.clone(), Timing::default()).await?;
+    live.attach_tap(&supervisor.live_tap);
     if let Some(bind) = opts.bind {
         let app = live.router();
         let listener = tokio::net::TcpListener::bind(bind).await.with_context(|| format!("bind {bind}"))?;
         tokio::spawn(async move { axum::serve(listener, app).await });
         eprintln!("local preview: http://{bind}/live/<stream_id>/index.m3u8");
     }
-    let mut renditions: Vec<(&str, Option<String>)> = vec![("src", None)];
-    if opts.low {
-        renditions.push(("480p", None));
-    }
-    let mut b = Broadcaster::new(live.clone(), keypair, &opts.name, &renditions, opts.window)?;
-    let id = b.stream_id();
-    let work = data.join("live").join(format!("{}-{}", opts.name, std::process::id()));
+    let id = record::stream_id_for(&record::owner_hex(&keypair).unwrap_or_default(), &opts.name);
     println!("stream:   {id}");
     println!("playlist: /live/{id}/index.m3u8   (on any c0mpute gateway, e.g. http://<gateway>:7777/live/{id}/index.m3u8)");
     if let Some(bind) = opts.bind {
@@ -345,26 +415,88 @@ pub async fn go(opts: GoOptions) -> Result<()> {
     // Let the swarm reach peers before the first gossip.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
+    let session = Session {
+        live: live.clone(),
+        keypair,
+        ffmpeg,
+        work_root: data.join("live"),
+    };
+    let result = run(&session, &opts, Feed::default()).await;
+    // The last, partial minute of bytes this broadcaster served.
+    live.publish_receipts(meter::epoch_of(now_ms())).await;
+    live.stop();
+    result
+}
+
+/// One broadcast on a node that is already up: run ffmpeg, publish every
+/// segment it finishes, end the stream when the input ends, `feed.stop`
+/// turns true or ctrl-c arrives, then linger so relays fetch the tail.
+pub async fn run(session: &Session, opts: &GoOptions, mut feed: Feed) -> Result<()> {
+    if !record::valid_name(&opts.name) {
+        bail!("stream name must be 1-63 of a-z, 0-9 and '-'");
+    }
+    let mut renditions: Vec<(&str, Option<String>)> = vec![("src", None)];
+    if opts.low {
+        renditions.push(("480p", None));
+    }
+    let mut b = Broadcaster::new(session.live.clone(), session.keypair.clone(), &opts.name, &renditions, opts.window)?;
+    if let Some(rx) = &feed.binding {
+        b.binding = rx.borrow().clone();
+    }
+    let work = session.work_root.join(format!("{}-{}", opts.name, std::process::id()));
+    let piped = feed.stdin.is_some();
+    let quiet = feed.quiet;
+
     let mut restarted = false;
+    let mut stderr_tail: Option<tokio::task::JoinHandle<Vec<String>>> = None;
     let result = loop {
         let _ = std::fs::remove_dir_all(&work);
         let dirs: Vec<PathBuf> = (0..renditions.len()).map(|i| work.join(format!("r{i}"))).collect();
         for d in &dirs {
             std::fs::create_dir_all(d)?;
         }
-        let args = ffmpeg_args(&opts, &work);
+        let args = ffmpeg_args(opts, &work);
         info!(?args, "live: starting ffmpeg");
-        let mut cmd = tokio::process::Command::new(&ffmpeg);
+        let mut cmd = tokio::process::Command::new(&session.ffmpeg);
         cmd.args(&args).kill_on_drop(true);
-        if opts.input != "-" {
+        if piped {
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
+        } else if opts.input != "-" {
             cmd.stdin(std::process::Stdio::null());
         }
         let mut child = cmd.spawn().context("start ffmpeg")?;
+        if piped {
+            // Always drain stderr: an unread pipe fills and ffmpeg stalls.
+            if let Some(stderr) = child.stderr.take() {
+                stderr_tail = Some(tokio::spawn(drain_stderr(stderr, opts.name.clone())));
+            }
+            if let (Some(mut stdin), Some(mut rx)) = (child.stdin.take(), feed.stdin.take()) {
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    while let Some(chunk) = rx.recv().await {
+                        if stdin.write_all(&chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Closing stdin is how ffmpeg learns the input ended.
+                    let _ = stdin.shutdown().await;
+                });
+            }
+        }
         let mut watch = Watch::new(dirs, restarted);
         let mut last_push = Instant::now();
         let exit = loop {
+            if let Some(rx) = &feed.binding {
+                let now = rx.borrow().clone();
+                if now != b.binding {
+                    b.binding = now;
+                }
+            }
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => break None,
+                _ = stop_requested(&mut feed.stop) => break None,
                 status = child.wait() => break Some(status),
                 _ = tokio::time::sleep(Duration::from_millis(300)) => {}
             }
@@ -373,13 +505,12 @@ pub async fn go(opts: GoOptions) -> Result<()> {
                 match b.push(i, &bytes, dur, disc).await {
                     Ok(rec) => {
                         let r = &rec.body.renditions[i];
-                        eprintln!(
-                            "  {} #{} {:.1}s {} KiB",
-                            r.name,
-                            r.media_seq + r.segments.len() as u64 - 1,
-                            dur as f64 / 1000.0,
-                            bytes.len() / 1024
-                        );
+                        let seq = r.media_seq + r.segments.len() as u64 - 1;
+                        if quiet {
+                            tracing::debug!(stream = %opts.name, rendition = %r.name, seq, kib = bytes.len() / 1024, "live: segment");
+                        } else {
+                            eprintln!("  {} #{} {:.1}s {} KiB", r.name, seq, dur as f64 / 1000.0, bytes.len() / 1024);
+                        }
                         last_push = Instant::now();
                     }
                     Err(e) => warn!(err = %e, "live: segment not published"),
@@ -390,6 +521,9 @@ pub async fn go(opts: GoOptions) -> Result<()> {
                 last_push = Instant::now();
             }
         };
+        if exit.is_none() {
+            let _ = child.kill().await;
+        }
         // Pick up segments ffmpeg finished on its way out.
         let (segs, _) = watch.poll();
         for (i, bytes, dur, disc) in segs {
@@ -406,7 +540,14 @@ pub async fn go(opts: GoOptions) -> Result<()> {
                     continue;
                 }
                 if !status.success() && b.last.is_none() {
-                    break Err(anyhow::anyhow!("ffmpeg failed ({status}) before producing a segment"));
+                    let mut why = String::new();
+                    if let Some(h) = stderr_tail.take()
+                        && let Ok(Ok(tail)) = tokio::time::timeout(Duration::from_secs(2), h).await
+                        && !tail.is_empty()
+                    {
+                        why = format!(": {}", tail.join(" | "));
+                    }
+                    break Err(anyhow::anyhow!("ffmpeg failed ({status}) before producing a segment{why}"));
                 }
                 break Ok(());
             }
@@ -415,7 +556,9 @@ pub async fn go(opts: GoOptions) -> Result<()> {
     let _ = std::fs::remove_dir_all(&work);
     b.end().await?;
     if result.is_ok() && b.last.is_some() && !opts.linger.is_zero() {
-        eprintln!("broadcast ended; staying up {} s so relays can fetch the tail", opts.linger.as_secs());
+        if !quiet {
+            eprintln!("broadcast ended; staying up {} s so relays can fetch the tail", opts.linger.as_secs());
+        }
         let deadline = Instant::now() + opts.linger;
         while Instant::now() < deadline {
             tokio::select! {
@@ -425,7 +568,6 @@ pub async fn go(opts: GoOptions) -> Result<()> {
             let _ = b.end().await;
         }
     }
-    live.stop();
     result
 }
 
@@ -446,6 +588,7 @@ mod tests {
             bind: None,
             linger: Duration::ZERO,
             reconnect: true,
+            max_height: None,
         }
     }
 
@@ -477,6 +620,20 @@ mod tests {
         let mut o = opts("rtmp://0.0.0.0:1935/live/k");
         o.listen = true;
         assert!(ffmpeg_args(&o, w).windows(2).any(|p| p == ["-listen", "1"]));
+
+        // The hosted ingest: FLV on stdin, copied when there is no height cap,
+        // re-encoded and scaled down (never up) when there is one.
+        let mut o = opts("-");
+        o.format = Some("flv".into());
+        let paid = ffmpeg_args(&o, w);
+        assert!(paid.windows(2).any(|p| p == ["-f", "flv"]));
+        assert!(paid.windows(2).any(|p| p == ["-c", "copy"]));
+        assert!(!paid.contains(&"-vf".to_string()));
+        o.max_height = Some(720);
+        let free = ffmpeg_args(&o, w);
+        assert!(free.windows(2).any(|p| p == ["-c:v", "libx264"]), "a height cap needs an encode");
+        assert!(free.windows(2).any(|p| p == ["-vf", "scale=-2:'min(ih,720)'"]));
+        assert!(!free.windows(2).any(|p| p == ["-c", "copy"]));
     }
 
     #[test]

@@ -15,6 +15,10 @@
 //!      (bitmagnet-style) to warm the routing table + gossipsub mesh, so we
 //!      hear from peers we'd otherwise miss.
 //!   4. Serves the aggregate JSON over HTTP at `GET /` (plus `/healthz`).
+//!   5. Follows live streams' signed records (`c0mpute/live/v1`) and files
+//!      each relay's signed per-minute receipt (`c0mpute/jobs/live.relay`)
+//!      as a credited `live.relay` job, bounded by what the stream could
+//!      have carried (`crate::live::meter`).
 //!
 //! **No private data is ever exposed** — only aggregate counts. See
 //! `dips/0014-status-aggregator.md` for the privacy model and the frozen
@@ -79,6 +83,10 @@ const KNOWN_WORKLOADS: &[&str] = &[
     "video.img2vid",
     // DIP 0033: builds and container jobs for trusted buyers.
     "container.run",
+    // DIP 0019: live-stream relays. Not an auction: each relay gossips a
+    // signed receipt per stream per minute here (`live::meter`), credited to
+    // it as one job.
+    crate::live::meter::WORKLOAD,
 ];
 
 /// Roles we always surface (even at zero) so the "workers by role" table
@@ -219,6 +227,9 @@ struct JobState {
     /// Offers per model and each worker's last accept/receipt, for
     /// `GET /autoscale` ([`crate::autoscale_signal`]).
     demand: RwLock<crate::autoscale_signal::Demand>,
+    /// Live streams seen (from their signed records) and relay receipts
+    /// already credited.
+    live: RwLock<crate::live::meter::Book>,
 }
 
 impl JobState {
@@ -288,8 +299,51 @@ impl JobState {
         });
     }
 
+    /// A relay's signed receipt for one stream and one minute, already
+    /// checked and bounded by the live book: file it as a completed
+    /// `live.relay` job credited to that relay.
+    async fn on_live_credit(&self, c: crate::live::meter::Credit) {
+        let mut completed = self.completed.write().await;
+        if completed.len() >= MAX_COMPLETED {
+            completed.pop_front();
+        }
+        let seen_at_ms = completed.back().map_or(0, |c| c.seen_at_ms).max(now_ms());
+        completed.push_back(Completed {
+            job_id: c.job_id,
+            workload_type: crate::live::meter::WORKLOAD.to_string(),
+            completed_at_ms: c.completed_at_ms.min(now_ms()),
+            seen_at_ms,
+            // Relaying is not time a node was busy.
+            latency_s: None,
+            credit: Some((c.peer, credited_price(c.paid_usd))),
+        });
+    }
+
+    /// A message on the live record topic or the relay receipt topic.
+    async fn on_live_message(&self, topic: &str, source: Option<String>, data: &[u8]) {
+        if topic == crate::live::TOPIC {
+            if let Ok(crate::live::LiveMsg::Record { record }) = serde_json::from_slice::<crate::live::LiveMsg>(data) {
+                self.live.write().await.on_record(&record, now_ms());
+            }
+            return;
+        }
+        let Some(receipt) = crate::live::meter::parse_receipt(data) else {
+            return;
+        };
+        // The gossip message must come from the relay the receipt names.
+        if source.is_some_and(|s| s != receipt.peer) {
+            return;
+        }
+        let credit = self.live.write().await.on_receipt(&receipt, now_ms());
+        if let Some(c) = credit {
+            debug!(job_id = %c.job_id, bytes = c.bytes, usd = c.paid_usd, "aggregator: live relay receipt");
+            self.on_live_credit(c).await;
+        }
+    }
+
     /// Drop stale in-flight entries and completions outside the 24h window.
     async fn evict(&self, now: u64) {
+        self.live.write().await.evict(now);
         let max_age = MAX_IN_FLIGHT_AGE.as_millis() as u64;
         self.in_flight
             .write()
@@ -873,6 +927,9 @@ struct CreditedJob {
     job_id: String,
     /// The board's row id (short peer id) of the node the buyer accepted.
     node: String,
+    /// The same node's full libp2p peer id (base58): what a settlement
+    /// system credits (`c0mpute:<peer>`).
+    peer: String,
     #[serde(rename = "type")]
     workload_type: String,
     completed_at_ms: u64,
@@ -918,6 +975,7 @@ fn credited_jobs_since<'a>(
         out.push(CreditedJob {
             job_id: c.job_id.clone(),
             node: short_id(worker),
+            peer: worker.clone(),
             workload_type: c.workload_type.clone(),
             completed_at_ms: c.completed_at_ms,
             seen_at_ms: c.seen_at_ms,
@@ -1037,6 +1095,12 @@ async fn run_job_tracker(net: Arc<Libp2pNetwork>, jobs: Arc<JobState>) {
     // Heartbeat is defined but unused today; subscribe defensively so we're
     // already in the mesh if a heartbeat publisher ever ships.
     let _ = net.subscribe(HEARTBEAT_TOPIC).await;
+    // Live streams' signed records: which streams exist, their bitrate and
+    // whether they are paid. Relay receipts are checked against these.
+    if let Err(e) = net.subscribe(crate::live::TOPIC).await {
+        warn!(err = %e, "aggregator: live topic subscribe failed");
+    }
+    let live_receipts = crate::live::meter::topic();
 
     let mut rx = net.messages();
     loop {
@@ -1051,6 +1115,10 @@ async fn run_job_tracker(net: Arc<Libp2pNetwork>, jobs: Arc<JobState>) {
                 return;
             }
         };
+        if msg.topic == crate::live::TOPIC || msg.topic == live_receipts {
+            jobs.on_live_message(&msg.topic, msg.source.map(|s| s.to_base58()), &msg.data).await;
+            continue;
+        }
         if !msg.topic.starts_with("c0mpute/jobs/") {
             continue;
         }
@@ -1142,7 +1210,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
     registry.run(net.clone());
 
     // Job counting + DHT crawl.
-    let jobs = Arc::new(JobState::default());
+    let jobs = Arc::new(JobState {
+        live: RwLock::new(crate::live::meter::Book::from_env()),
+        ..Default::default()
+    });
     tokio::spawn(run_job_tracker(net.clone(), jobs.clone()));
     tokio::spawn(run_dht_crawl(net.clone()));
 
@@ -1578,6 +1649,7 @@ mod tests {
         assert!(!more);
         assert_eq!(all.iter().map(|j| j.job_id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
         assert_eq!(all[0].node, short_id(worker));
+        assert_eq!(all[0].peer, worker, "the full peer id rides along for settlement");
         assert!((all[2].paid_usd - 0.03).abs() < 1e-9);
         assert!(all[0].busy_s >= 2.5);
         // Nothing after the last one seen.
@@ -1588,6 +1660,110 @@ mod tests {
         assert!(page.iter().all(|j| j.seen_at_ms == page[0].seen_at_ms));
         let json = serde_json::to_value(&all[0]).unwrap();
         assert_eq!(json["type"], "tts.synthesize");
+        assert_eq!(json["peer"], worker);
+    }
+
+    /// A signed live record with one ~`kbps` rendition.
+    fn live_record(
+        owner: &c0mpute_net::libp2p::identity::Keypair,
+        kbps: u64,
+        binding: Option<&crate::live::record::Binding>,
+    ) -> crate::live::record::LiveRecord {
+        use crate::live::record::{LiveBody, LiveRecord, Window, describe_segment};
+        let mut w = Window::new("src", None, 6);
+        for i in 0..3u8 {
+            w.push(describe_segment(&vec![i; (kbps * 500) as usize], 4000, false).0);
+        }
+        LiveRecord::sign_bound(
+            owner,
+            LiveBody {
+                v: 1,
+                stream_id: String::new(),
+                name: "show".into(),
+                owner: String::new(),
+                seq: now_ms(),
+                ts_ms: now_ms(),
+                ended: false,
+                renditions: vec![w.rendition],
+            },
+            binding,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_relay_receipts_become_credited_jobs() {
+        use crate::live::meter::{self, RelayReceipt};
+        use c0mpute_net::libp2p::identity::Keypair;
+        assert!(KNOWN_WORKLOADS.contains(&"live.relay"));
+        let jobs = JobState::default();
+        let owner = Keypair::generate_ed25519();
+        let relay = Keypair::generate_ed25519();
+        let peer = relay.public().to_peer_id().to_base58();
+        let paid = crate::live::record::Binding {
+            account: "acct_1".into(),
+            paid: true,
+            max_viewers: None,
+        };
+        let record = live_record(&owner, 2_000, Some(&paid));
+        let sid = record.stream_id().to_string();
+        let msg = serde_json::to_vec(&crate::live::LiveMsg::Record { record }).unwrap();
+        jobs.on_live_message(crate::live::TOPIC, None, &msg).await;
+
+        let topic = meter::topic();
+        assert_eq!(topic, "c0mpute/jobs/live.relay");
+        let epoch = meter::epoch_of(now_ms()) - 1;
+        let receipt = RelayReceipt::sign_with(&relay, &sid, 2_000_000_000, epoch).unwrap();
+        let wire = serde_json::to_vec(&receipt).unwrap();
+        // Relayed by someone claiming to be another peer: ignored.
+        jobs.on_live_message(&topic, Some("12D3KooWsomeoneElse".into()), &wire).await;
+        assert!(jobs.completed.read().await.is_empty());
+        jobs.on_live_message(&topic, Some(peer.clone()), &wire).await;
+        // The same receipt again is one job, not two.
+        jobs.on_live_message(&topic, Some(peer.clone()), &wire).await;
+        // A receipt for a stream nobody has a record of is not credited.
+        let unknown = RelayReceipt::sign_with(&relay, "00000000000000000000", 5, epoch).unwrap();
+        jobs.on_live_message(&topic, Some(peer.clone()), &serde_json::to_vec(&unknown).unwrap()).await;
+
+        let completed = jobs.completed.read().await;
+        let (rows, more) = credited_jobs_since(completed.iter(), 0, 100);
+        assert!(!more);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        let node = short_id(&peer);
+        assert_eq!(row.job_id, format!("live:{sid}:{node}:{epoch}"));
+        assert!(row.job_id.len() < 128);
+        assert_eq!(row.node, node);
+        assert_eq!(row.peer, peer);
+        assert_eq!(row.workload_type, "live.relay");
+        assert!((row.paid_usd - 0.02).abs() < 1e-9, "2 GB at $0.01 per GB");
+        assert_eq!(row.busy_s, 0.0);
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["type"], "live.relay");
+        assert_eq!(json["peer"], peer);
+        // And it shows on the node's 24h stats under its own type.
+        let stats = node_job_stats(completed.iter());
+        assert!((stats[&node].by_type["live.relay"].paid_usd - 0.02).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn an_unpaid_stream_is_credited_at_zero() {
+        use crate::live::meter::{self, RelayReceipt};
+        use c0mpute_net::libp2p::identity::Keypair;
+        let jobs = JobState::default();
+        let owner = Keypair::generate_ed25519();
+        let relay = Keypair::generate_ed25519();
+        let peer = relay.public().to_peer_id().to_base58();
+        let record = live_record(&owner, 2_000, None);
+        let sid = record.stream_id().to_string();
+        let msg = serde_json::to_vec(&crate::live::LiveMsg::Record { record }).unwrap();
+        jobs.on_live_message(crate::live::TOPIC, None, &msg).await;
+        let receipt = RelayReceipt::sign_with(&relay, &sid, 900_000_000, meter::epoch_of(now_ms())).unwrap();
+        jobs.on_live_message(&meter::topic(), Some(peer), &serde_json::to_vec(&receipt).unwrap()).await;
+        let completed = jobs.completed.read().await;
+        let (rows, _) = credited_jobs_since(completed.iter(), 0, 100);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].paid_usd, 0.0);
     }
 }
 
