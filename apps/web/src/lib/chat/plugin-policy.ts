@@ -89,6 +89,7 @@ const MERCURY_READ = new Set([
   "getTransactionById",
   "listTransactions",
   "getCashflowSummary",
+  "getAutoTransferRules",
   "listCategories",
   "listCredit",
   "getCreditAccountStatements",
