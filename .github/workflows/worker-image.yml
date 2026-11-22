@@ -140,6 +140,11 @@ jobs:
           docker run --rm c0mpute-worker:pr infernet --version
           docker run --rm c0mpute-worker:pr coinpay --version
           docker run --rm --entrypoint python3 c0mpute-worker:pr -m py_compile /opt/c0mpute/status_ui.py
+          # Root start hands a root-owned bind mount to uid 1000, then drops to it.
+          mkdir -p "$RUNNER_TEMP/data" && sudo chown 0:0 "$RUNNER_TEMP/data"
+          test "$(docker run --rm -v "$RUNNER_TEMP/data:/data" c0mpute-worker:pr id -u)" = "1000"
+          test "$(stat -c %u "$RUNNER_TEMP/data")" = "1000"
+          test "$(docker run --rm --user 1000:1000 -v "$RUNNER_TEMP/data:/data" c0mpute-worker:pr id -u)" = "1000"
 
       - name: Export digest
         if: steps.gate.outputs.skip != 'true' && needs.version.outputs.push == 'true'

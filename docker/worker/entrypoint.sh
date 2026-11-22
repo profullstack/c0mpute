@@ -7,6 +7,17 @@
 # PATH runs as is (`docker run ... infernet payout list`).
 set -eu
 
+# Started as root (the image default, so a fresh bind mount or a host that
+# creates /data as root works): give /data to uid 1000 once, then drop to it.
+# Started as uid 1000 (e.g. `user: "1000:1000"`), this is skipped.
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p /data
+  if [ "$(stat -c %u /data)" != "1000" ]; then
+    chown -R 1000:1000 /data
+  fi
+  exec setpriv --reuid=1000 --regid=1000 --init-groups -- "$0" "$@"
+fi
+
 mkdir -p "$HOME" "$C0MPUTE_HOME"
 
 if [ "${1:-}" = "worker" ] && [ "${2:-}" = "start" ]; then
