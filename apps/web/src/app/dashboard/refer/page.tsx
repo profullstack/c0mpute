@@ -1,4 +1,5 @@
 import { DashboardTabs } from "@/components/dashboard-tabs";
+import { LeaderboardPrivacy } from "@/components/leaderboard-privacy";
 import { ReferDashboard } from "./refer-dashboard";
 
 export const metadata = {
@@ -18,6 +19,7 @@ export default function ReferPage() {
         <DashboardTabs active="/dashboard/refer" />
       </header>
       <ReferDashboard />
+      <LeaderboardPrivacy />
     </div>
   );
 }

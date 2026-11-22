@@ -301,6 +301,7 @@ export default async function StatusPage() {
         <p>
           &rarr;{" "}
           <Link href="/getting-started">getting-started</Link> &middot;{" "}
+          <Link href="/leaderboard">leaderboard</Link> &middot;{" "}
           <Link href="/docs">docs</Link> &middot;{" "}
           <Link href="/plugins">plugins</Link>
         </p>

@@ -5,6 +5,7 @@ import { runManager } from "@/lib/chat/run-manager";
 import { RunLimitError, SSE_HEADERS } from "@/lib/chat/runs";
 import { routeRequest, routedChat, routerEnabled } from "@/lib/chat/routed";
 import { currentUser, env, infernetFor, json, modelRouter, rateLimit, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { recordUsage } from "@/lib/leaderboard/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -40,6 +41,8 @@ export async function POST(req: Request) {
   const raw = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   const parsed = parseChatRequest(raw);
   if (typeof parsed === "string") return err(400, parsed);
+  // One count for the public leaderboard: the surface and the model name, nothing else.
+  recordUsage(user.id, user.token_kind === "session" ? "chat" : "api", typeof raw?.model === "string" ? raw.model : "auto");
 
   // Chat plugins: with any plugin on (and not `plugins: false`), the server
   // runs the tool loop; each model step is billed like a normal turn.
