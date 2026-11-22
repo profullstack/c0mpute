@@ -16,4 +16,5 @@ Steps:
 4. Validate: history months complete, growth rate not driven by one outlier month (if it is, use the median), projection starts from the current cash balance.
 
 Answer with a markdown table (month, revenue, expenses, net, ending cash), the assumptions, and what would change the picture most. Say plainly that a forecast is an estimate.
+When you add numbers, write the running total after each step; never state a sum you did not write out.
 End every answer with this line: Analysis, not financial, tax or legal advice.

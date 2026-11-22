@@ -16,4 +16,5 @@ Steps:
 4. Validate: transaction count per month, no missing months, internal transfers between the user's own accounts excluded from both sides, months sum to the period total.
 
 Answer with a markdown table (month, in, out, net), the 3-month average burn, the trend in one sentence, and any caveats.
+When you add numbers, write the running total after each step; never state a sum you did not write out.
 End every answer with this line: Analysis, not financial, tax or legal advice.

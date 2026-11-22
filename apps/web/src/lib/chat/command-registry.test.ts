@@ -103,7 +103,7 @@ describe("expansion", () => {
     const out = expandCommands([{ role: "user" as const, content: "/analyze How many signups in total?" }], "HOUSE");
     expect(out).toHaveLength(2);
     expect(out[0].role).toBe("system");
-    expect(out[0].content.startsWith("HOUSE\n\n/analyze instructions:\n")).toBe(true);
+    expect(out[0].content).toMatch(/^HOUSE\n\n\/analyze instructions \(today is \d{4}-\d{2}-\d{2}\):\n/);
     expect(out[0].content).toContain("**Checks**");
     expect(out[1]).toEqual({ role: "user", content: "How many signups in total?" });
   });
@@ -117,7 +117,7 @@ describe("expansion", () => {
       { role: "user" as const, content: "and if burn doubles?" },
     ];
     const out = expandCommands(msgs, "HOUSE");
-    expect(out[0].content.startsWith("MINE\n\n/runway instructions:")).toBe(true);
+    expect(out[0].content.startsWith("MINE\n\n/runway instructions (today is")).toBe(true);
     expect(out[0].content).not.toContain("/cashflow instructions");
     expect(out[1].content).toBe("last quarter");
     expect(out[3].content).toMatch(/^\(\/runway with no details/);
@@ -134,7 +134,11 @@ describe("expansion", () => {
     if (typeof r === "string") throw new Error(r);
     expect(r.command).toBe("analyze");
     expect(r.messages[0].content.startsWith(C0_SYSTEM_PROMPT)).toBe(true);
-    expect(r.messages[0].content).toContain("/analyze instructions:");
+    expect(r.messages[0].content).toContain("/analyze instructions (today is");
+    expect(r.temperature).toBe(0.2);
+    const warm = parseChatRequest({ temperature: 0.9, messages: [{ role: "user", content: "/runway" }] });
+    if (typeof warm === "string") throw new Error(warm);
+    expect(warm.temperature).toBe(0.9);
     expect(r.messages[1].content).toBe("total?\nmonth,n\nJan,3\nFeb,4");
     const plain = parseChatRequest({ messages: [{ role: "user", content: "hi" }] });
     if (typeof plain === "string") throw new Error(plain);
