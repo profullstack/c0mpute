@@ -10,6 +10,7 @@ import {
 } from "@/lib/nodes";
 import { MARKET_FEE_PCT } from "@/lib/market";
 import { pageOg } from "@/lib/og";
+import { getNetworkEarnings } from "@/lib/earnings/network-server";
 
 const DESCRIPTION =
   "Every c0mpute node online right now: jobs each one ran in the last 24 hours by type, how long they took, what they earned, who runs each node and who invited them. The goal is 100,000 nodes.";
@@ -51,7 +52,9 @@ function ago(s: number): string {
 }
 
 export default async function NodesPage() {
-  const p = await getNodesPayload();
+  const [p, earnings] = await Promise.all([getNodesPayload(), getNetworkEarnings().catch(() => null)]);
+  const inf = earnings?.infernet ?? null;
+  const money = (n: number) => (n >= 0.01 || n === 0 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`);
   const online = p.workers_online;
   const pct = Math.max(0.5, Math.min(100, (online / NODE_GOAL) * 100));
   const byType = summarizeByType(p.nodes);
@@ -68,6 +71,40 @@ export default async function NodesPage() {
           Run a node? <Link href="/dashboard/nodes">See your own earnings vs spend</Link> over the last hour to 30 days, and your <Link href="/dashboard/disk">hosted sites and disk earnings</Link>.
         </p>
       </header>
+
+      {inf && (
+        <section className="space-y-3 border border-[var(--color-rule)] bg-[var(--color-card)] rounded-md p-4 sm:p-5" id="earnings">
+          <h2 className="text-sm font-semibold">[ what running a node pays ]</h2>
+          <div className="grid gap-4 sm:grid-cols-3 text-sm">
+            <div>
+              <p className="text-xs text-[var(--color-dim)]">paid to node operators</p>
+              <p className="accent font-bold text-lg tabular-nums">{money(inf.all.earned_usd)}</p>
+              <p className="text-xs text-[var(--color-dim)]">
+                settled · {money(inf["30d"].earned_usd)} in 30 days · {inf.all.earning_nodes} nodes paid · best {money(inf.all.best_node_usd)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--color-dim)]">operators keep</p>
+              <p className="accent font-bold text-lg tabular-nums">{100 - MARKET_FEE_PCT}%</p>
+              <p className="text-xs text-[var(--color-dim)]">
+                house commission {money(inf.all.house_fee_usd)}, {inf.all.house_fee_pct}% of {money(inf.all.billed_usd)} billed
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-[var(--color-dim)]">refer a node, earn a commission</p>
+              <p className="accent font-bold text-lg tabular-nums">{money(inf.all.commissions_usd)}</p>
+              <p className="text-xs text-[var(--color-dim)]">
+                paid to {inf.all.earning_referrers} referrers so far · 5% of the house fee on every job a node you referred serves, never out of the operator&apos;s share
+              </p>
+            </div>
+          </div>
+          <p className="text-xs text-[var(--color-dim)] leading-6">
+            Real ledger numbers, house subsidies left out. <Link href="/status#earnings">Full breakdown</Link> ·{" "}
+            <a href="https://infernetprotocol.com/refer">Get your referral link</a> ·{" "}
+            <Link href="/estimates">What a GPU needs to pay back</Link> · <Link href="/providers">Run a node</Link>
+          </p>
+        </section>
+      )}
 
       <section className="space-y-2">
         <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
@@ -103,8 +140,8 @@ export default async function NodesPage() {
           <>
             <p className="text-sm leading-7">
               <span className="accent font-bold">{earningNodes}</span> nodes ran{" "}
-              <span className="accent font-bold">{totalJobs.toLocaleString()}</span> jobs and kept{" "}
-              <span className="accent font-bold">{usd(totalEarned)}</span> after the {MARKET_FEE_PCT}% fee.
+              <span className="accent font-bold">{totalJobs.toLocaleString()}</span> jobs at an agreed{" "}
+              <span className="accent font-bold">{usd(totalEarned)}</span> after the {MARKET_FEE_PCT}% fee (settles when market settlement launches; chat is paid through Infernet, above).
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
@@ -166,7 +203,7 @@ export default async function NodesPage() {
                   <th className="py-2 pr-3">bench</th>
                   <th className="py-2 pr-3" title="Completed jobs in the last 24h, by type">jobs 24h</th>
                   <th className="py-2 pr-3" title="Accept-to-receipt time summed over those jobs">busy</th>
-                  <th className="py-2 pr-3" title={`What buyers paid, minus the ${MARKET_FEE_PCT}% fee`}>earned</th>
+                  <th className="py-2 pr-3" title={`What buyers agreed to pay, minus the ${MARKET_FEE_PCT}% fee`}>agreed</th>
                   <th className="py-2 pr-3">version</th>
                   <th className="py-2 pr-3">invited by</th>
                   <th className="py-2">seen</th>
