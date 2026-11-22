@@ -1,0 +1,208 @@
+# Build and publish the c0mpute worker image: ghcr.io/profullstack/c0mpute-worker
+#
+# docker/worker/Dockerfile installs a signed c0mpute release with the same
+# https://c0mpute.com/install.sh every node uses, so the image is built after
+# a release is PUBLISHED (the `release` workflow finishing), not from source.
+# Each architecture builds on its own native runner (amd64 and arm64; the
+# installers pull Node/bun toolchains that are slow and flaky under QEMU),
+# pushes by digest, and the `merge` job writes one multi-arch manifest.
+#
+# Tags: :<version> (e.g. :0.3.99), :latest. Pull requests that touch
+# docker/worker build amd64 only and push nothing.
+#
+# Visibility: GHCR creates org packages PRIVATE and has no API to change it,
+# so it is one click by an org admin: github.com/orgs/profullstack/packages ->
+# c0mpute-worker -> Package settings -> Change visibility -> Public. The last
+# step warns until an anonymous pull works.
+name: worker image
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  pull_request:
+    paths:
+      - "docker/worker/**"
+      - ".github/workflows/worker-image.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "c0mpute release to package, e.g. 0.3.99 (default: latest)"
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/profullstack/c0mpute-worker
+
+concurrency:
+  group: worker-image-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      push: ${{ steps.v.outputs.push }}
+    steps:
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            workflow_run) v="$RUN_BRANCH" ;;
+            workflow_dispatch) v="$INPUT_VERSION" ;;
+            *) v="" ;;
+          esac
+          if [ -z "$v" ]; then
+            v=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+              https://github.com/profullstack/c0mpute/releases/latest | sed 's#.*/tag/##')
+          fi
+          v="${v#v}"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a release version: $v" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "pull_request" ]; then echo "push=false"; else echo "push=true"; fi >> "$GITHUB_OUTPUT"
+          echo "c0mpute $v"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Skip arm64 on pull requests
+        id: gate
+        env:
+          PUSH: ${{ needs.version.outputs.push }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ "$PUSH" != "true" ] && [ "$PLATFORM" != "linux/amd64" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.gate.outputs.skip != 'true' && needs.version.outputs.push == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push by digest)
+        id: build
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/worker
+          platforms: ${{ matrix.platform }}
+          build-args: C0MPUTE_VERSION=${{ needs.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://c0mpute.com
+            org.opencontainers.image.title=c0mpute worker
+            org.opencontainers.image.description=Run a c0mpute node: a worker on the c0mpute decentralized compute network
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+          outputs: ${{ needs.version.outputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=docker' }}
+          tags: ${{ needs.version.outputs.push != 'true' && 'c0mpute-worker:pr' || '' }}
+
+      - name: Smoke test the image
+        if: steps.gate.outputs.skip != 'true' && needs.version.outputs.push != 'true'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          docker run --rm c0mpute-worker:pr --version | tee v.txt
+          grep -q "$VERSION" v.txt
+          docker run --rm c0mpute-worker:pr infernet --version
+          docker run --rm c0mpute-worker:pr coinpay --version
+          docker run --rm --entrypoint python3 c0mpute-worker:pr -m py_compile /opt/c0mpute/status_ui.py
+
+      - name: Export digest
+        if: steps.gate.outputs.skip != 'true' && needs.version.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+          echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.skip != 'true' && needs.version.outputs.push == 'true'
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [version, build]
+    if: needs.version.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" \
+            $(printf "${IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+      - name: Check anonymous pull (package visibility)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:profullstack/c0mpute-worker:pull" | jq -r .token)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/profullstack/c0mpute-worker/manifests/${VERSION}")
+          if [ "$code" = "200" ]; then
+            echo "anonymous pull works" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::ghcr.io/profullstack/c0mpute-worker is not public (HTTP $code): an org admin must set Package settings -> Change visibility -> Public"
+            echo "ghcr.io/profullstack/c0mpute-worker is PRIVATE (HTTP $code): make it public in package settings" >> "$GITHUB_STEP_SUMMARY"
+          fi
