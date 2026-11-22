@@ -1,6 +1,6 @@
 {
   "name": "c0mpute",
-  "version": "0.3.94",
+  "version": "0.3.98",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "@c0mpute/shared": "workspace:*",
     "@profullstack/chat-plugins": "^0.1.0",
     "@profullstack/footer": "latest",
+    "@profullstack/modern-css": "0.2.0",
     "@profullstack/x402-gateway": "^0.18.2",
     "@sqlitecloud/drivers": "^1.0.982",
     "ioredis": "^6.0.0",

@@ -67,6 +67,7 @@ export default function RootLayout({
           src="https://cdn.jsdelivr.net/npm/@profullstack/webmcp@0/src/embed.js"
           data-pages={JSON.stringify({
             chat: "/chat",
+            gallery: "/gallery",
             market: "/market",
             nodes: "/nodes",
             apps: "/apps",
@@ -92,6 +93,7 @@ export default function RootLayout({
             site="https://c0mpute.com/"
             tagline="MIT licensed"
             links={[
+              { label: "Gallery", href: "/gallery" },
               { label: "Blog", href: "/blog" },
               { label: "About", href: "/about" },
               { label: "Contact", href: "/contact" },
