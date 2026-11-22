@@ -20,7 +20,7 @@
 [module]
 id          = "nixamp"
 name        = "nixamp — run a radio station on your node"
-version     = "0.3.106"
+version     = "0.3.107"
 kind        = "service"
 category    = "media"
 status      = "available"
@@ -32,7 +32,7 @@ source      = "https://github.com/profullstack/nixamp"
 keywords    = ["music", "radio", "station", "live", "streaming", "rtmp", "nixamp"]
 
 [module.requirements]
-c0mpute      = ">=0.3.105"
+c0mpute      = ">=0.3.107"
 os           = ["linux", "darwin"]
 arch         = ["x86_64", "aarch64"]
 capabilities = ["ffmpeg", "network:ingress?"]
