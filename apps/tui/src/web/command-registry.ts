@@ -113,6 +113,16 @@ export function publicCommands() {
   }));
 }
 
+/** The latest prompt command a conversation's user turns used, if any. */
+export function usedCommand(messages: readonly Msg[]): CommandDef | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "user") continue;
+    const hit = splitCommand(messages[i].content);
+    if (hit) return hit.command;
+  }
+  return null;
+}
+
 /**
  * Expand prompt commands in a conversation. Every user turn that starts with
  * a registered `/name` keeps only its argument; the prompt of the LATEST
