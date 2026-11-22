@@ -479,6 +479,11 @@ const handlers: Record<string, Handler> = {
     return cliOutput(r);
   },
   "account:nodes": () => api("/api/v1/hosting/nodes"),
+  // The operator's fleet: the same c0mpute.com endpoints as /dashboard/nodes,
+  // the CLI (`c0mpute fleet`) and MCP, with the account key.
+  "fleet:list": () => api("/api/v1/fleet"),
+  "fleet:action": (action: string, nodes: string[], args: Record<string, unknown> = {}) =>
+    api("/api/v1/fleet/actions", { method: "POST", body: JSON.stringify({ action, nodes, args }) }),
   // Chat plugins (remote MCP servers the account's chats use): the same
   // c0mpute.com endpoints as the web chat and the CLI. Sign-in opens in an
   // app window on a one-time link, so no cookie or key is handed over.

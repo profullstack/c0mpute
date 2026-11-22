@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { SignInOptions } from "@/components/sign-in-options";
 
 // Mirrors lib/disk/server.ts DiskDashboard (kept loose: this is a client file).
 type Totals = { earned_usd: number; spend_usd: number; own_usd: number; net_usd: number };
@@ -148,13 +149,8 @@ export function DiskDashboard() {
   if (!me) {
     return (
       <div className="space-y-4 text-sm leading-7">
-        <p>Sign in to see your hosted sites and apps, what they cost, and what your nodes earn hosting other people&apos;s. A CoinPay account with a DID is required.</p>
-        <a
-          href={`/api/auth/coinpay/login?next=${encodeURIComponent("/dashboard/disk")}`}
-          className="inline-block !border border-[var(--color-accent)] px-4 py-2 accent"
-        >
-          Sign in with CoinPay
-        </a>
+        <p>Sign in to see your hosted sites and apps, what they cost, and what your nodes earn hosting other people&apos;s. </p>
+        <SignInOptions next="/dashboard/disk" compact />
       </div>
     );
   }

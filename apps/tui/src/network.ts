@@ -73,12 +73,23 @@ export interface Balance {
 
 export interface Me {
   id: string;
-  did: string;
+  /** The CoinPay DID; null for a passkey/password account without CoinPay connected. */
+  did: string | null;
   name: string | null;
   auth?: string;
+  coinpay?: boolean;
   adult_verified_at: string | null;
   balance: Balance | null;
+  /** The account's linked nodes (`/api/v1/me?nodes=1`), the same list as `c0mpute fleet ls`. */
+  nodes?: { node: string; label: string | null; online: boolean; verified: boolean; tags: string[]; version: string | null }[];
+  totals?: { nodes: number; online: number; verified: number };
 }
+
+/** How a signed-in account is named on screen: its name, else its DID, else its id. */
+export const whoLabel = (me: Me, max = 32) => {
+  const s = me.name ?? me.did ?? me.id;
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+};
 
 export interface Loadable<T> {
   data: T | null;
@@ -108,7 +119,7 @@ export const fetchStatus = (api: Api) => ok(api.json<StatusPayload>("/api/status
 export const fetchNodes = (api: Api) => ok(api.json<NodesPayload>("/api/nodes", { auth: false, timeoutMs: 15_000 }), "node list");
 export const fetchPricing = (api: Api) =>
   ok(api.json<PricingPayload>(`${process.env.INFERNET_URL || INFERNET_URL}/api/v1/pricing`, { auth: false, timeoutMs: 15_000 }), "prices");
-export const fetchMe = (api: Api) => ok(api.json<Me>("/api/v1/me", { timeoutMs: 15_000 }), "account");
+export const fetchMe = (api: Api) => ok(api.json<Me>("/api/v1/me?nodes=1", { timeoutMs: 15_000 }), "account");
 
 export async function fetchModels(api: Api): Promise<string[]> {
   const body = await ok(api.json<{ data?: { id: string }[] }>("/api/v1/models", { auth: false, timeoutMs: 15_000 }), "models");

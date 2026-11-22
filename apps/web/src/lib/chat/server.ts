@@ -257,7 +257,7 @@ export function unauthorized() {
   return json(
     {
       error: {
-        message: "Sign in with CoinPay at https://c0mpute.com/chat (a CoinPay DID is required), or run `c0mpute chat login`.",
+        message: "Sign in at https://c0mpute.com/signin (CoinPay or a passkey), or run `c0mpute login`; send Authorization: Bearer c0k_... from https://c0mpute.com/account.",
         type: "unauthorized",
         code: 401,
       },
@@ -276,6 +276,8 @@ export const coinpay = {
   clientId: () => env("COINPAY_OAUTH_CLIENT_ID") || "",
   clientSecret: () => env("COINPAY_OAUTH_CLIENT_SECRET") || "",
   redirectUri: () => `${siteUrl()}/api/auth/coinpay/callback`,
+  /** Scopes asked for: a DID is required; COINPAY_OAUTH_SCOPE adds e.g. wallet:read once the client allows it. */
+  scope: () => env("COINPAY_OAUTH_SCOPE") || "openid profile did wallet:read",
 };
 
 export function pkce() {
@@ -309,7 +311,7 @@ export async function coinpayUserinfo(accessToken: string) {
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`userinfo HTTP ${res.status}`);
-  return (await res.json()) as { sub: string; did?: string; name?: string };
+  return (await res.json()) as { sub: string; did?: string; name?: string; wallets?: unknown };
 }
 
 // ── Infernet upstream ────────────────────────────────────────────────────────

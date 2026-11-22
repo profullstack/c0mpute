@@ -35,6 +35,7 @@ pub mod job_process;
 pub mod hosting;
 pub mod live;
 pub mod dispatch;
+pub mod fleet_pause;
 pub mod embed;
 pub mod gameserver;
 pub mod gateway_util;

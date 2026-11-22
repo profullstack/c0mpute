@@ -708,9 +708,10 @@ async function settingsView() {
       { class: "card" },
       acct?.signedIn
         ? h("div", {}, h("p", {}, "Signed in", acct.me?.name ? ` as ${acct.me.name}` : "", acct.me?.did ? h("span", { class: "dim mono" }, ` ${acct.me.did}`) : null), acct.me?.balance ? h("p", {}, `Spendable $${acct.me.balance.spendable_usd}, earned by your nodes $${acct.me.balance.earned_spendable_usd}`) : null, acct.error ? h("p", { class: "bad" }, acct.error) : null, h("p", { class: "dim" }, `key from ${acct.source === "env" ? "$C0MPUTE_API_KEY" : info?.chatJson}`), btn("Sign out", async () => (toast((await call("account:logout")) ?? ""), show("settings")), "b danger"))
-        : h("div", {}, h("p", {}, "Not signed in. Sign-in uses `c0mpute chat login`: approve the code on c0mpute.com with CoinPay (a DID is required). The key is kept by the CLI in ~/.c0mpute/chat.json."), btn("Sign in with CoinPay", () => call("account:login"), "b primary")),
+        : h("div", {}, h("p", {}, "Not signed in. Sign-in opens c0mpute.com in your browser: approve the code with CoinPay, a passkey or a password. The key is shared with the c0mpute CLI and TUI (~/.c0mpute/chat.json, readable only by you)."), btn("Sign in", () => call("account:login"), "b primary")),
       loginLog,
     ),
+    acct?.signedIn ? await fleetCard() : "",
     acct?.signedIn ? await pluginsCard() : "",
     h("h1", {}, "App"),
     h(
@@ -733,6 +734,48 @@ async function settingsView() {
 
 // Chat plugins: remote MCP servers the account's chats (here, the web chat,
 // the CLI) can use. Not the Agent tab's local MCP servers.
+// The operator's nodes, as on c0mpute.com/dashboard/nodes: status, version,
+// earnings, and the common actions on a selection.
+async function fleetCard() {
+  const f = await call("fleet:list");
+  if (!f) return "";
+  const picked = new Set<string>();
+  const usd = (n: number) => `$${(n ?? 0).toFixed(4)}`;
+  const run = async (action: string) => {
+    if (!picked.size) return toast("select nodes first", true);
+    const r = await call("fleet:action", action, [...picked]);
+    if (r) toast(`${action}: ${r.ok} ok${r.failed ? `, ${r.failed} refused` : ""}${["pause", "resume", "update", "restart"].includes(action) ? " (runs on each node within a minute)" : ""}`);
+  };
+  const t = f.totals;
+  return h(
+    "div",
+    { class: "card" },
+    h("div", { class: "row spread" }, h("b", {}, "Fleet"), h("span", { class: "dim" }, `${t.nodes} nodes · ${t.online} online · earned 24h ${usd(t.earned_usd.h24)} · 30d ${usd(t.earned_usd.d30)}`)),
+    f.payouts_ready ? null : h("p", { class: "bad" }, "Connect CoinPay on c0mpute.com/account to get paid."),
+    f.nodes.length
+      ? h(
+          "table",
+          { class: "fleet" },
+          ...f.nodes.map((n: Any) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, h("input", { type: "checkbox", onchange: (e: Event) => ((e.target as HTMLInputElement).checked ? picked.add(n.node) : picked.delete(n.node)) })),
+              h("td", { class: n.online ? "ok" : "dim" }, n.online ? "●" : "○"),
+              h("td", { class: "mono" }, n.node),
+              h("td", {}, n.label ?? ""),
+              h("td", { class: "dim" }, n.version ?? "?"),
+              h("td", {}, `24h ${usd(n.earned_usd.h24)}`),
+              h("td", { class: "dim" }, n.tags.join(", ")),
+              h("td", { class: n.verified ? "dim" : "bad" }, n.verified ? (n.paused ? "paused" : "") : "unverified"),
+            ),
+          ),
+        )
+      : h("p", { class: "dim" }, "No nodes linked yet. On each node: c0mpute login && c0mpute node link"),
+    h("div", { class: "row", style: "margin-top:8px" }, ...["pause", "resume", "update", "restart"].map((a) => btn(a, () => run(a)))),
+  );
+}
+
 async function pluginsCard() {
   const v = await call("account:plugins");
   const input = h("input", { placeholder: "https://example.com/mcp or a catalog name", style: "flex:1" }) as HTMLInputElement;

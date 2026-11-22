@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SignInOptions } from "@/components/sign-in-options";
 
 export function ApproveForm({ initialCode }: { initialCode: string }) {
-  const [me, setMe] = useState<{ did: string; name: string | null } | null | undefined>(undefined);
+  const [me, setMe] = useState<{ id: string; did: string | null; name: string | null } | null | undefined>(undefined);
   const [code, setCode] = useState(initialCode);
   const [state, setState] = useState<"idle" | "done" | "error">("idle");
 
@@ -20,13 +21,8 @@ export function ApproveForm({ initialCode }: { initialCode: string }) {
     const next = `/cli/approve?code=${encodeURIComponent(code)}`;
     return (
       <div className="space-y-4">
-        <p>Sign in to approve the code your terminal shows. A CoinPay account with a DID is required.</p>
-        <a
-          href={`/api/auth/coinpay/login?next=${encodeURIComponent(next)}`}
-          className="inline-block !border border-[var(--color-accent)] px-4 py-2 accent"
-        >
-          Sign in with CoinPay
-        </a>
+        <p>Sign in to approve the code your terminal shows: CoinPay, a passkey, or a password all work.</p>
+        <SignInOptions next={next} />
       </div>
     );
   }
@@ -49,8 +45,8 @@ export function ApproveForm({ initialCode }: { initialCode: string }) {
       }}
     >
       <p>
-        Signed in as <span className="break-all">{me.name ? `${me.name} (${me.did})` : me.did}</span>. Only approve a
-        code you started yourself with <code>c0mpute chat login</code>: it gives that terminal a key that acts as you.
+        Signed in as <span className="break-all">{me.name ? `${me.name} (${me.did ?? me.id})` : (me.did ?? me.id)}</span>. Only approve a
+        code you started yourself with <code>c0mpute login</code>: it gives that terminal a key that acts as you (and can link nodes to your account).
       </p>
       <input
         value={code}

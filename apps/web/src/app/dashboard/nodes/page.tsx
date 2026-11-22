@@ -1,5 +1,6 @@
 import { DashboardTabs } from "@/components/dashboard-tabs";
 import { EarningsDashboard } from "./earnings-dashboard";
+import { FleetPanel } from "./fleet-panel";
 
 export const metadata = {
   title: "my nodes: earnings vs spend — c0mpute",
@@ -17,6 +18,7 @@ export default function NodeEarningsPage() {
         <p className="comment">// what your nodes earned against what they cost to run</p>
         <DashboardTabs active="/dashboard/nodes" />
       </header>
+      <FleetPanel />
       <EarningsDashboard />
     </div>
   );

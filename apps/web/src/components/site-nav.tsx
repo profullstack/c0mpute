@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type NavLink = { href: string; label: string; desc: string };
 type NavGroup = { id: string; label: string; links: NavLink[] };
@@ -30,7 +30,8 @@ const NAV_GROUPS: NavGroup[] = [
     links: [
       { href: "/providers", label: "run a node", desc: "sell your spare compute" },
       { href: "/estimates", label: "earnings estimates", desc: "what your hardware makes" },
-      { href: "/dashboard/nodes", label: "node dashboard", desc: "your earnings vs spend" },
+      { href: "/dashboard/nodes", label: "my fleet", desc: "your nodes, actions, earnings" },
+      { href: "/account", label: "account", desc: "sign-in, keys, payouts, link nodes" },
       { href: "/nodes", label: "nodes online", desc: "the live network" },
       { href: "/benchmark", label: "benchmarks", desc: "how fast nodes are" },
     ],
@@ -73,6 +74,18 @@ const isActive = (pathname: string, href: string) =>
 export function SiteNav() {
   const pathname = usePathname() || "/";
   const root = useRef<HTMLElement>(null);
+  // Who is signed in, for the header's "sign in" / account link. null: signed out.
+  const [me, setMe] = useState<{ name: string | null; did: string | null } | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    fetch("/api/v1/me", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => live && setMe(j))
+      .catch(() => live && setMe(null));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     root.current?.querySelectorAll("details[open]").forEach((d) => ((d as HTMLDetailsElement).open = false));
@@ -172,6 +185,25 @@ export function SiteNav() {
         >
           chat
         </Link>
+        {me === undefined ? (
+          <span className="w-14" aria-hidden="true" />
+        ) : me ? (
+          <Link
+            href="/account"
+            aria-current={current("/account")}
+            title={me.did ?? "your account"}
+            className={`${linkCls("/account")} whitespace-nowrap max-w-[9rem] truncate text-[var(--color-fg)]`}
+          >
+            {me.name || "account"}
+          </Link>
+        ) : (
+          <Link
+            href={`/signin?next=${encodeURIComponent(pathname)}`}
+            className={`${linkCls("/signin")} whitespace-nowrap text-[var(--color-fg)]`}
+          >
+            sign in
+          </Link>
+        )}
 
         {/* mobile */}
         <details className="nav-menu nav-mobile lg:hidden group">

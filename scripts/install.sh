@@ -27,6 +27,8 @@
 #                   owner when the worker first starts: a share of the house fee, never
 #                   your earnings. Set once, before the node's first paid job.
 #   --name <handle> Your node's nickname on c0mpute.com/nodes (same as C0MPUTE_NAME)
+#   --enroll <c0e_> Link this node to your c0mpute account with a fleet
+#                   enrollment token (same as C0MPUTE_ENROLL); no browser needed
 #   --contact <email> Optional public email for questions about your node, shown
 #                   on c0mpute.com/nodes (same as C0MPUTE_CONTACT). Asked for
 #                   when run from a terminal; later `c0mpute contact <email>`.
@@ -116,6 +118,8 @@ while [ $# -gt 0 ]; do
     --no-exec)      NO_EXEC=1 ;;
     --ref)          shift; C0MPUTE_REF="${1:-}" ;;
     --ref=*)        C0MPUTE_REF="${1#--ref=}" ;;
+    --enroll)       shift; C0MPUTE_ENROLL="${1:-}" ;;
+    --enroll=*)     C0MPUTE_ENROLL="${1#--enroll=}" ;;
     --name)         shift; C0MPUTE_NAME="${1:-}" ;;
     --name=*)       C0MPUTE_NAME="${1#--name=}" ;;
     --contact)      shift; C0MPUTE_CONTACT="${1:-}" ;;
@@ -125,7 +129,7 @@ while [ $# -gt 0 ]; do
     --no-uncensored-models) INFERNET_NO_UNCENSORED_MODELS=1 ;;
     --system-service)       SYSTEM_SERVICE=1 ;;
     --help|-h)
-      sed -n '2,41p' "$0"
+      sed -n '2,46p' "$0"
       exit 0
       ;;
     *)
@@ -1294,6 +1298,27 @@ save_contact() {
     && ok "contact '$email' saved (public on https://c0mpute.com/nodes; change with \`c0mpute contact\`)"
 }
 
+# --enroll c0e_... / C0MPUTE_ENROLL: link this node to the account that made
+# the token (`c0mpute fleet token create`, or /account on c0mpute.com). The
+# node signs a one-shot challenge with its identity key; the token can link
+# nodes and nothing else. Failure is a warning, never a failed install.
+enroll_node() {
+  token="${C0MPUTE_ENROLL:-}"
+  [ -n "$token" ] || return 0
+  case "$token" in
+    c0e_*) ;;
+    *) warn "ignoring --enroll: not a c0mpute enrollment token (they start with c0e_)"; return 0 ;;
+  esac
+  bin="$C0MPUTE_HOME/bin/c0mpute"
+  [ -x "$bin" ] || { warn "c0mpute is not installed; cannot enroll"; return 0; }
+  say "linking this node to your c0mpute account (enrollment token)"
+  if C0MPUTE_NO_AUTO_UPDATE=1 "$bin" node link --token "$token"; then
+    ok "node linked: it shows on https://c0mpute.com/dashboard/nodes"
+  else
+    warn "could not link the node now; run later: c0mpute node link --token <token>"
+  fi
+}
+
 # ────────────────────────────────────────────────────────────────────────
 # main
 # ────────────────────────────────────────────────────────────────────────
@@ -1360,6 +1385,7 @@ main() {
   run_doctor
 
   save_ref
+  enroll_node
 
   # Auto-start the worker so the node self-onboards (init + register + serve +
   # distribute) with no manual step. Opt out with --no-start.
