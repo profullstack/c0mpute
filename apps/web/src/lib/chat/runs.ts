@@ -32,6 +32,10 @@ export const RUN_MAX_MS = 20 * 60_000;
 export const RUN_STALE_MS = 20_000;
 /** A turn whose upstream has not answered (headers) within this is failed. */
 export const RUN_OPEN_MS = 5 * 60_000;
+/** start() returns after this even when the upstream has not answered yet. */
+export const RUN_START_WAIT_MS = 1000;
+/** A live stream with nothing new for this long gets an SSE comment, so clients and proxies know it is alive. */
+export const RUN_KEEPALIVE_MS = 15_000;
 /** How many times a run is continued after its server died. */
 export const RUN_MAX_ATTEMPTS = 3;
 
@@ -165,6 +169,10 @@ export function createRunManager(opts: {
   flushMs?: number;
   /** How long the upstream may take to answer before the turn is failed. */
   openMs?: number;
+  /** How long start() waits for the upstream before returning the run anyway. */
+  startWaitMs?: number;
+  /** Idle gap before a live stream gets a keepalive comment. */
+  keepaliveMs?: number;
   /** Start the flush/recovery timers (off in tests, which call tick()). */
   timers?: boolean;
 }) {
@@ -406,14 +414,19 @@ export function createRunManager(opts: {
       }
       runs.set(id, run);
       run.push(enc.encode(sse({ object: "c0mpute.run", id })));
-      try {
-        await open(run);
-      } catch (e) {
+      const opening = open(run).catch((e) => {
         // open() reports upstream errors into the run; anything else must not
         // leave it "running" forever.
         run.push(enc.encode(errorEvent(e instanceof Error ? e.message : String(e)) + "data: [DONE]\n\n"));
         run.end("failed", now());
-      }
+      });
+      // Hand the caller the run quickly whatever the upstream does: awaiting
+      // open() held the HTTP response (no headers, no bytes) until the network
+      // answered, up to RUN_OPEN_MS, and the chat sat on "stop" with nothing
+      // to show (2026-11-22). A fast open (or a fast failure) still settles first.
+      let wait: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([opening, new Promise<void>((r) => (wait = setTimeout(r, opts.startWaitMs ?? RUN_START_WAIT_MS)))]);
+      clearTimeout(wait);
       return run;
     },
 
@@ -477,22 +490,45 @@ export function createRunManager(opts: {
         ctrl.enqueue(skip ? c.subarray(skip) : c);
         skip = 0;
       };
+      const keepaliveMs = opts.keepaliveMs ?? RUN_KEEPALIVE_MS;
       if (run) {
         let listener: Listener | null = null;
+        let alive: ReturnType<typeof setInterval> | undefined;
+        let lastSent = now();
+        const stop = () => {
+          clearInterval(alive);
+          if (listener) run.listeners.delete(listener);
+        };
         return new ReadableStream<Uint8Array>({
           start(ctrl) {
             for (const c of run.chunks) emit(ctrl, c);
             if (run.status !== "running") return ctrl.close();
             listener = (chunk) => {
               try {
-                if (chunk) ctrl.enqueue(chunk);
-                else ctrl.close();
+                if (chunk) {
+                  ctrl.enqueue(chunk);
+                  lastSent = now();
+                } else {
+                  stop();
+                  ctrl.close();
+                }
               } catch {}
             };
             run.listeners.add(listener);
+            // Not stored with the run: only this connection needs to hear it.
+            alive = setInterval(() => {
+              if (skip > 0 || now() - lastSent < keepaliveMs) return;
+              try {
+                ctrl.enqueue(enc.encode(": keepalive\n\n"));
+                lastSent = now();
+              } catch {
+                stop();
+              }
+            }, Math.max(10, Math.floor(keepaliveMs / 3)));
+            (alive as { unref?: () => void }).unref?.();
           },
           cancel() {
-            if (listener) run.listeners.delete(listener);
+            stop();
           },
         });
       }
@@ -501,12 +537,18 @@ export function createRunManager(opts: {
       return new ReadableStream<Uint8Array>({
         async start(ctrl) {
           let last = -1;
+          let lastSent = now();
           const deadline = now() + RUN_MAX_MS;
           try {
             for (;;) {
               for (const c of await storedChunks(id, last)) {
                 emit(ctrl, enc.encode(c.data));
                 last = c.seq;
+                lastSent = now();
+              }
+              if (skip === 0 && now() - lastSent >= keepaliveMs) {
+                ctrl.enqueue(enc.encode(": keepalive\n\n"));
+                lastSent = now();
               }
               const [row] = db ? await db.all(`SELECT status FROM chat_runs WHERE id = ?`, [id]) : [];
               const done = !row || String(row.status) !== "running";
