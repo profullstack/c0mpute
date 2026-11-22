@@ -52,6 +52,10 @@ RUN export HOME=/opt/c0mpute \
 
 COPY --chown=c0mpute:c0mpute entrypoint.sh status_ui.py /opt/c0mpute/
 
+# The entrypoint starts as root only to hand /data to uid 1000, then drops to
+# it with setpriv; the worker itself never runs as root.
+USER root
+
 ENV HOME=/data \
     C0MPUTE_HOME=/data/.c0mpute \
     PATH=/opt/c0mpute/.c0mpute/bin:/opt/c0mpute/.local/bin:/opt/c0mpute/.bun/bin:/opt/c0mpute/.coinpay/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

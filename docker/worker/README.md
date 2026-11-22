@@ -55,8 +55,11 @@ identity keys (`/data/.config/c0mpute`, `/data/.config/infernet`), config
 (`/data/.config/c0mpute/config.toml`), the job runtimes and models it downloads
 on first start, storage shards and hosted sites (`/data/.local/share/c0mpute`).
 Mount a volume there. Without one the node gets a new identity on every
-restart and re-downloads its runtimes. A bind mount must be writable by uid
-1000 (`chown 1000:1000 ./data`).
+restart and re-downloads its runtimes. The entrypoint starts as root only to
+give `/data` to uid 1000 (once, when it is owned by someone else), then drops
+to uid 1000 for the worker and the status page. If you run the container as
+`--user 1000:1000`, that step is skipped and the mount must already be
+writable by uid 1000.
 
 The first start downloads speech models and Python packages (a few GB) before
 the worker serves; watch `docker logs -f c0mpute-worker`.
