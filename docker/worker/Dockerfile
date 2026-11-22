@@ -9,7 +9,7 @@
 #
 # Build context is this directory:
 #   docker build -t c0mpute-worker docker/worker
-#   docker build --build-arg C0MPUTE_VERSION=0.3.99 -t c0mpute-worker docker/worker
+#   docker build --build-arg C0MPUTE_VERSION=0.3.99 -t c0mpute-worker docker/worker   (v0.3.99 works too)
 FROM debian:bookworm-slim
 
 ARG C0MPUTE_VERSION=latest
@@ -34,7 +34,7 @@ USER c0mpute
 # runtimes are fetched by the worker into /data on first start.
 RUN export HOME=/opt/c0mpute \
       C0MPUTE_HOME=/opt/c0mpute/.c0mpute \
-      C0MPUTE_VERSION="${C0MPUTE_VERSION}" \
+      C0MPUTE_VERSION="$(case "${C0MPUTE_VERSION}" in latest|v*) echo "${C0MPUTE_VERSION}" ;; *) echo "v${C0MPUTE_VERSION}" ;; esac)" \
       NO_STORAGE_RELOCATE=1 \
       INFERNET_NO_RELOCATE=1 \
       INFERNET_AUTOSTART=0 \
