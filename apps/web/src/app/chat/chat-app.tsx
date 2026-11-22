@@ -10,6 +10,7 @@ import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCo
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
+import { Markdown, SourceCards, type SourceCard } from "./markdown";
 import { adopt, serverIsNewer, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
 import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
@@ -148,6 +149,8 @@ type Msg = {
   run?: string;
   /** Where a turn is before its first word (queued, running on a node): shown until text arrives. */
   status?: string;
+  /** The web pages a grounded answer drew on (photo cards, [n] citations). */
+  sources?: SourceCard[];
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -337,12 +340,31 @@ function statusLine(line: string): string | null {
   }
 }
 
+/** Keep only well-formed http(s) sources from the stream (they come from web pages). */
+function cleanSources(raw: unknown[]): SourceCard[] {
+  const out: SourceCard[] = [];
+  for (const r of raw) {
+    const s = r as Record<string, unknown>;
+    if (typeof s?.url !== "string" || !/^https?:\/\//.test(s.url) || typeof s.n !== "number") continue;
+    out.push({
+      n: s.n,
+      url: s.url,
+      title: String(s.title ?? s.url).slice(0, 200),
+      host: String(s.host ?? "").slice(0, 100),
+      image: typeof s.image === "string" && /^https:\/\//.test(s.image) ? s.image : null,
+      snippet: String(s.snippet ?? "").slice(0, 300),
+    });
+  }
+  return out.slice(0, 8);
+}
+
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
 async function readStream(
   res: Response,
   onDelta: (t: string) => void,
   onEvent?: (e: PluginEvent) => void,
   onStatus?: (s: string) => void,
+  onSources?: (s: SourceCard[]) => void,
 ) {
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
@@ -385,6 +407,10 @@ async function readStream(
       if (j.error) throw new StreamError(j.error.message ?? "stream error");
       if (j.object === PLUGIN_EVENT_OBJECT) {
         if (j.event && onEvent) onEvent(j.event as PluginEvent);
+        continue;
+      }
+      if (j.object === "c0mpute.sources") {
+        if (Array.isArray(j.sources) && onSources) onSources(cleanSources(j.sources));
         continue;
       }
       const t = j.choices?.[0]?.delta?.content;
@@ -1330,6 +1356,8 @@ export function ChatApp({ error }: { error: string | null }) {
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
           plugin_events: true,
+          // Factual questions get searched on the web first (sources shown as cards).
+          web: true,
           // The server finishes the turn even if this tab closes or the
           // connection drops; the run id lets us (or a reload) reattach.
           resumable: true,
@@ -1484,6 +1512,14 @@ export function ChatApp({ error }: { error: string | null }) {
             if (!last || last.role !== "assistant" || last.status === s) return c;
             msgs[msgs.length - 1] = { ...last, status: s };
             return { ...c, messages: msgs };
+          }),
+        (sources) =>
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            if (!last || last.role !== "assistant") return c;
+            msgs[msgs.length - 1] = { ...last, sources };
+            return { ...c, messages: msgs, updated: Date.now() };
           }),
       );
     }
@@ -1704,14 +1740,19 @@ export function ChatApp({ error }: { error: string | null }) {
                 <div className={`text-xs mb-1 ${m.role === "user" ? "accent" : "text-[var(--color-dim)]"}`}>
                   {m.role === "user" ? "> you" : "< c0mpute"}
                 </div>
-                <div className="whitespace-pre-wrap break-words">
-                  {m.content ||
-                    (busy && i === active.messages.length - 1 ? (
-                      <span className="text-[var(--color-dim)]">{m.status ? `// ${m.status} ▍` : "// sending it to the network… ▍"}</span>
-                    ) : (
-                      ""
-                    ))}
-                </div>
+                {m.role === "assistant" && m.sources?.length ? <SourceCards sources={m.sources} /> : null}
+                {m.role === "assistant" && m.content ? (
+                  <Markdown text={m.content} cites={m.sources} />
+                ) : (
+                  <div className="whitespace-pre-wrap break-words">
+                    {m.content ||
+                      (busy && i === active.messages.length - 1 ? (
+                        <span className="text-[var(--color-dim)]">{m.status ? `// ${m.status} ▍` : "// sending it to the network… ▍"}</span>
+                      ) : (
+                        ""
+                      ))}
+                  </div>
+                )}
                 {m.tools?.map((t) => (
                   <ToolCard
                     key={t.id}
