@@ -16,6 +16,7 @@ import { expertsConfig } from "./config";
 import type { ExpertManifest } from "./manifest";
 import { createExpertsService, ExpertsError, type Asker, type CheckoutOpener, type ExpertsService } from "./service";
 import { createExpertsStore } from "./store";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 const checkout: CheckoutOpener = async (o) => {
   const key = env("COINPAY_API_KEY");
@@ -53,7 +54,7 @@ async function pluginRun(user: User, m: ExpertManifest, req: ChatRequest, signal
   const list = (await base.list(user.id)).filter((p) => p.enabled && pluginAllowed(m, p.url));
   if (!list.length) return null;
   const store = { ...base, list: async (u: string) => (await base.list(u)).filter((p) => pluginAllowed(m, p.url)) };
-  const r = await runPluginChat({ userId: user.id, upstream: infernetFor(user.coinpay_sub), req: expertRequest(m, { ...req, stream: false }, m.model.prefer[0]), emit: () => {}, store, signal });
+  const r = await runPluginChat({ userId: user.id, upstream: infernetFor(billingSubject(user)), req: expertRequest(m, { ...req, stream: false }, m.model.prefer[0]), emit: () => {}, store, signal });
   return { text: stripThinking(r.text), model: r.model };
 }
 
@@ -87,7 +88,7 @@ export async function expertChatResponse(o: { user: User; slug: string; req: Cha
 
   let r: Awaited<ReturnType<typeof expertComplete>>;
   try {
-    r = await expertComplete(infernetFor(o.user.coinpay_sub), m, o.req, o.signal);
+    r = await expertComplete(infernetFor(billingSubject(o.user)), m, o.req, o.signal);
   } catch (e) {
     if (o.signal?.aborted) throw e;
     const status = e instanceof ExpertUnavailable ? e.status : 503;
@@ -111,7 +112,7 @@ export async function expertAnswer(user: User, slug: string, req: ChatRequest, s
   await expertsService().gate(user, m);
   const viaPlugins = await pluginRun(user, m, req, signal).catch(() => null);
   if (viaPlugins) return { ...viaPlugins, expert: m };
-  const r = await expertText(infernetFor(user.coinpay_sub), m, req, signal);
+  const r = await expertText(infernetFor(billingSubject(user)), m, req, signal);
   return { ...r, expert: m };
 }
 
