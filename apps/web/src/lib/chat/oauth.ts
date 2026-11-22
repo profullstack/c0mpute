@@ -20,8 +20,10 @@ export const SCOPE = "mcp";
  * Scopes an app may ask for. "mcp": the remote MCP server (chat, hosting
  * pushes, promo videos). "storage:write": upload files the app encrypted in
  * the person's browser into their private storage (it cannot read them).
+ * "live:publish": create and end the person's live streams and read their
+ * stream keys and usage (c0mpute Live), nothing else on the account.
  */
-export const SCOPES = ["mcp", "storage:write"] as const;
+export const SCOPES = ["mcp", "storage:write", "live:publish"] as const;
 
 /** A requested scope string, normalized ("mcp" when absent), or null when it names an unknown scope. */
 export function parseScope(raw: string | null | undefined): string | null {

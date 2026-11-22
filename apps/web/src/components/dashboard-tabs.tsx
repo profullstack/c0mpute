@@ -3,6 +3,7 @@ import Link from "next/link";
 const TABS = [
   { href: "/dashboard/disk", label: "hosting: sites, apps, disk" },
   { href: "/dashboard/nodes", label: "nodes: compute" },
+  { href: "/dashboard/live", label: "live streams" },
   { href: "/dashboard/refer", label: "refer a node" },
 ] as const;
 

@@ -4,6 +4,9 @@
 import { aggregatorUrls } from "../aggregators";
 import { cloudSql } from "../chat/server";
 import { cleanJob, createEarningsStore, type AggregatorJob, type EarningsStore } from "./store";
+import { liveStore } from "../chat/server";
+import { liveCharge, settlementOn } from "../live/http";
+import { fileReceipts, settlePass } from "../live/settle";
 
 let _store: EarningsStore | null = null;
 export const earningsStore = () => (_store ??= createEarningsStore(cloudSql));
@@ -32,6 +35,8 @@ export async function recordFrom(base: string, store: EarningsStore = earningsSt
     }
     const jobs = (Array.isArray(body.jobs) ? body.jobs : []).map(cleanJob).filter((j): j is AggregatorJob => j !== null);
     if (jobs.length) await store.recordJobs(jobs);
+    // Live relay receipts are also filed against their stream, to be charged to the streamer.
+    if (jobs.length && store === earningsStore()) await fileReceipts(jobs, liveStore()).catch((e) => console.error("live receipts: filing failed", e));
     read += jobs.length;
     const next = typeof body.next_since === "number" && Number.isFinite(body.next_since) ? body.next_since : since;
     // The aggregator restarted with a slower clock, or lost its state: start over
@@ -66,6 +71,7 @@ export function startRecorder(everyMs = 120_000) {
     running = true;
     try {
       await recordAll();
+      if (settlementOn()) await settlePass(liveStore(), liveCharge);
     } catch (e) {
       console.error("node earnings recorder: pass failed", e);
     } finally {
