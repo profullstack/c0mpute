@@ -105,6 +105,20 @@ Removing it is remembered. The same entry registers in a coding agent with
 (`mcpAddCommand(entry, cli)` renders it for claude, gemini, qwen, codex and
 opencode).
 
+## CheapestWayz (cheapest way to do anything, referral earnings)
+
+| plugin | server | for everyone |
+|---|---|---|
+| CheapestWayz | `https://cheapestwayz.com/mcp` | on, not connected |
+
+From `CATALOG` in `@profullstack/chat-plugins` (0.3.1, `default: true`). Seeded
+on and not signed in, like the money defaults: the person signs in to their own
+CheapestWayz account on first use (OAuth 2.1, DCR, PKCE S256), with an email
+link or Sign in with CoinPay. Because the account is theirs, `get_referral_link`
+returns their own link and the commissions it earns (60% of paid lead fees and
+affiliate commissions) go to their CoinPay wallet; no referral handle is passed
+by c0mpute. Removing it is remembered.
+
 ## Money plugins (banking, crypto, trading)
 
 | plugin | server | for everyone |

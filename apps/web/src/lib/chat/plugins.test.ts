@@ -242,4 +242,9 @@ describe("money plugins: confirmation gate in the tool-call layer", () => {
     expect(c.find((e) => e.slug === "coinpay")).toMatchObject({ name: "CoinPay (crypto payments)", default: true });
     expect(c.find((e) => e.slug === "moomoo")).toMatchObject({ name: "moomoo (brokerage and trading)", default: false });
   });
+
+  test("CheapestWayz is in the catalog and on by default, signed in by the person on first use", () => {
+    const c = catalogFor();
+    expect(c.find((e) => e.slug === "cheapestwayz")).toMatchObject({ url: "https://cheapestwayz.com/mcp", default: true });
+  });
 });

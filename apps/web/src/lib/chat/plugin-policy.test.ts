@@ -17,7 +17,7 @@ function memSql(): Sql {
 
 describe("money plugin catalog", () => {
   test("Mercury and CoinPay are on by default; moomoo is listed but off", () => {
-    expect(DEFAULT_PLUGINS.map((d) => d.slug).sort()).toEqual(["coinpay", "mercury", "microsoft-learn"]);
+    expect(DEFAULT_PLUGINS.map((d) => d.slug).sort()).toEqual(["cheapestwayz", "coinpay", "mercury", "microsoft-learn"]);
     const moomoo = FINANCE_CATALOG.find((e) => e.slug === "moomoo")!;
     expect(moomoo.default).toBe(false);
     expect(moomoo.description).toContain("you decide");
@@ -118,7 +118,7 @@ describe("approval card", () => {
 });
 
 describe("default plugins in the store", () => {
-  // The money defaults (sign-in on first use); the docs default is tested below.
+  // The defaults that sign in on first use (money plugins and CheapestWayz); the docs default is tested below.
   const defaults = DEFAULT_PLUGINS.filter((d) => d.auth !== "none").map((d) => ({ slug: d.slug, name: d.name, url: d.url }));
 
   test("Microsoft Learn is seeded on and ready to use, with no sign-in", async () => {
@@ -129,7 +129,7 @@ describe("default plugins in the store", () => {
     const sql = memSql();
     const s = createPluginStore(sql, { key: randomBytes(32), defaults: DEFAULT_PLUGINS });
     const list = await s.list("u1");
-    expect(list.map((p) => p.slug).sort()).toEqual(["coinpay", "mercury", "microsoft-learn"]);
+    expect(list.map((p) => p.slug).sort()).toEqual(["cheapestwayz", "coinpay", "mercury", "microsoft-learn"]);
     const p = list.find((x) => x.slug === "microsoft-learn")!;
     expect(p.auth).toBe("none");
     const pub = publicPlugin(p, "https://c0mpute.com");
@@ -148,7 +148,7 @@ describe("default plugins in the store", () => {
     const s = createPluginStore(memSql(), { key: randomBytes(32), defaults });
     for (const user of ["old-user", "new-user"]) {
       const list = await s.list(user);
-      expect(list.map((p) => p.slug).sort()).toEqual(["coinpay", "mercury"]);
+      expect(list.map((p) => p.slug).sort()).toEqual(["cheapestwayz", "coinpay", "mercury"]);
       for (const p of list) {
         expect(p.enabled).toBe(true);
         expect(p.token).toBeNull();
@@ -171,8 +171,8 @@ describe("default plugins in the store", () => {
     // A fresh process (the seeding cache is per instance) does not bring it back.
     const again = createPluginStore(sql, { key: randomBytes(32), defaults });
     const list = await again.list("u1");
-    expect(list.map((p) => p.slug)).toEqual(["mercury"]);
-    expect(list[0].enabled).toBe(false);
+    expect(list.map((p) => p.slug).sort()).toEqual(["cheapestwayz", "mercury"]);
+    expect(list.find((p) => p.slug === "mercury")!.enabled).toBe(false);
   });
 
   test("an account that already has the server keeps its own row", async () => {
