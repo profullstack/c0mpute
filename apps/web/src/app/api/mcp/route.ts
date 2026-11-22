@@ -5,6 +5,7 @@ import { gallery } from "@/lib/gallery/server";
 import { accountStore, fleetFor, fleetService } from "@/lib/accounts/server";
 import { isFleetAction, runAction, selectNodes } from "@/lib/accounts/fleet";
 import { earningsStore } from "@/lib/earnings/server";
+import { recordUsage } from "@/lib/leaderboard/server";
 import { convoStore, currentUser, infernetFor, json, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +36,8 @@ export async function POST(req: Request) {
       return json({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "rate limit: too many chats this hour" } }, 429);
     }
   }
+  // One count per tool call for the public leaderboard: the tool name, never its arguments.
+  for (const m of batch) if (m?.method === "tools/call") recordUsage(user.id, "mcp", (m.params as { name?: unknown } | undefined)?.name);
   // Billed to this person's compute balance, same as the HTTP chat API.
   const upstream = infernetFor(user.coinpay_sub);
   const plugins = {

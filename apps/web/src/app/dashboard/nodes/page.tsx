@@ -1,4 +1,5 @@
 import { DashboardTabs } from "@/components/dashboard-tabs";
+import { LeaderboardPrivacy } from "@/components/leaderboard-privacy";
 import { EarningsDashboard } from "./earnings-dashboard";
 import { FleetPanel } from "./fleet-panel";
 
@@ -20,6 +21,7 @@ export default function NodeEarningsPage() {
       </header>
       <FleetPanel />
       <EarningsDashboard />
+      <LeaderboardPrivacy />
     </div>
   );
 }

@@ -382,6 +382,7 @@ $ curl -fsSL https://c0mpute.com/install.sh | sh -s -- --contact ops@example.com
 
       <p className="text-xs text-[var(--color-dim)]">
         → <Link href="/providers">running a node</Link> · <Link href="/status">network status</Link> ·{" "}
+        <Link href="/leaderboard">leaderboard</Link> ·{" "}
         <a href="/api/nodes">/api/nodes</a> (JSON)
       </p>
     </div>

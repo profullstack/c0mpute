@@ -97,6 +97,7 @@ export default async function HomePage() {
         <p className="text-xs text-[var(--color-dim)]">
           Here to buy compute instead? → <Link href="/getting-started">submit a job</Link> ·{" "}
           <Link href="/status">explore the network</Link> ·{" "}
+          <Link href="/leaderboard">leaderboard</Link> ·{" "}
           <Link href="/protocol">read the protocol</Link>
         </p>
       </section>
