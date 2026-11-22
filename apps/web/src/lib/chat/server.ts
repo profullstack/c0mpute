@@ -9,6 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 export const env = (name: string): string => (process.env as Record<string, string | undefined>)[name] ?? "";
 
 import { createStore, type Sql, type Store, type User } from "./store";
+import { billedSubjectHeaders } from "./billed-subject";
 import { createPushStore, type PushStore } from "./push";
 import { createOAuthStore, type OAuthStore } from "./oauth";
 import { createStorageStore, type StorageStore } from "./storage";
@@ -332,10 +333,11 @@ export async function infernet(path: string, init: RequestInit = {}, opts: { sub
       ...(init.headers as Record<string, string>),
       ...(key ? { authorization: `Bearer ${key}` } : {}),
       // Name the person this call is for, so Infernet bills their compute
-      // balance rather than treating every c0mpute user as one anonymous
-      // caller. Infernet resolves it through coinpay_identities on the
-      // verified CoinPay sub, and only accepts it from a trusted client key.
-      ...(opts.subject ? { "x-infernet-billed-subject": opts.subject } : {}),
+      // balance (CoinPay sub, resolved through coinpay_identities) or, for an
+      // account with no CoinPay identity, meters their free tier per person
+      // (`c0mpute:<id>`, signed) rather than treating every c0mpute user as
+      // one anonymous caller. Only accepted from a trusted client key.
+      ...billedSubjectHeaders(opts.subject, env("C0MPUTE_INFERNET_SUBJECT_SECRET")),
     },
   });
 }
@@ -361,6 +363,8 @@ export function headerTimeout(ms: number) {
  * on Infernet's free, rate-limited tier.
  */
 export function infernetFor(subject: string | null | undefined) {
+  // Pass billingSubject(user) (./billed-subject), not user.coinpay_sub: an
+  // account without CoinPay is then still metered as itself.
   return (path: string, init: RequestInit = {}) => infernet(path, init, { subject: subject ?? null });
 }
 

@@ -10,6 +10,7 @@ import { balanceFor, currentUser, env, infernetFor, json, modelRouter, rateLimit
 import { recordUsage } from "@/lib/leaderboard/server";
 import { expertSlugOf } from "@/lib/experts/chat";
 import { expertChatResponse } from "@/lib/experts/server";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -85,7 +86,7 @@ export async function POST(req: Request) {
   // own tool loop, so server-side plugins, resumable runs and the multi-step
   // router stay out of it. Only tool-capable models take it; never dropped.
   if (parsed.tooling) {
-    return toolChatResponse({ upstream: infernetFor(user.coinpay_sub), req: parsed, rawModel: raw?.model, signal: req.signal });
+    return toolChatResponse({ upstream: infernetFor(billingSubject(user)), req: parsed, rawModel: raw?.model, signal: req.signal });
   }
 
   // Chat plugins: with any plugin on (and not `plugins: false`), the server
@@ -106,7 +107,7 @@ export async function POST(req: Request) {
   }
 
   if (withPlugins) {
-    return pluginChatResponse({ userId: user.id, upstream: infernetFor(user.coinpay_sub), req: parsed, approvals, events: raw?.plugin_events === true, signal: req.signal });
+    return pluginChatResponse({ userId: user.id, upstream: infernetFor(billingSubject(user)), req: parsed, approvals, events: raw?.plugin_events === true, signal: req.signal });
   }
 
   // Model router (DIP 0035): `model` "auto", "auto:<effort>" or absent picks
@@ -118,7 +119,7 @@ export async function POST(req: Request) {
       const rf = (raw?.response_format ?? null) as { type?: string } | null;
       return await routedChat({
         router: modelRouter(),
-        upstream: infernetFor(user.coinpay_sub),
+        upstream: infernetFor(billingSubject(user)),
         req: parsed,
         route,
         responseFormatJson: rf?.type === "json_object" || rf?.type === "json_schema",
@@ -134,7 +135,7 @@ export async function POST(req: Request) {
   try {
     // Billed to this person's compute balance when they have one; otherwise
     // Infernet serves it on its free tier exactly as before.
-    upstream = await forwardChat(infernetFor(user.coinpay_sub), parsed, req.signal);
+    upstream = await forwardChat(infernetFor(billingSubject(user)), parsed, req.signal);
   } catch (e) {
     return err(502, `network unreachable: ${e instanceof Error ? e.message : e}`);
   }

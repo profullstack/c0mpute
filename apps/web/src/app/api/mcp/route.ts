@@ -11,6 +11,7 @@ import { alertsView, saveAlerts, testAlert } from "@/lib/accounts/alerts-api";
 import { earningsStore } from "@/lib/earnings/server";
 import { recordUsage } from "@/lib/leaderboard/server";
 import { convoStore, currentUser, infernetFor, json, liveStore, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -43,7 +44,7 @@ export async function POST(req: Request) {
   // One count per tool call for the public leaderboard: the tool name, never its arguments.
   for (const m of batch) if (m?.method === "tools/call") recordUsage(user.id, "mcp", (m.params as { name?: unknown } | undefined)?.name);
   // Billed to this person's compute balance, same as the HTTP chat API.
-  const upstream = infernetFor(user.coinpay_sub);
+  const upstream = infernetFor(billingSubject(user));
   const plugins = {
     store: pluginStore(),
     site: siteUrl(),

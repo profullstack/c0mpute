@@ -1,6 +1,7 @@
 import { gateGeneration } from "@/lib/chat/adult";
 import { isVideoJobId, parseVideoRequest, preferWait } from "@/lib/chat/videos";
 import { balanceFor, currentUser, env, headerTimeout, infernet, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 export const dynamic = "force-dynamic";
 // A held request (Prefer: wait=N) can stay open up to 2 h.
@@ -45,7 +46,7 @@ export async function POST(req: Request) {
 
   let upstream: Response;
   try {
-    upstream = await infernetFor(user.coinpay_sub)("/api/chat/video", {
+    upstream = await infernetFor(billingSubject(user))("/api/chat/video", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(parsed),

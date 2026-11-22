@@ -1,6 +1,7 @@
 // How a resumable turn talks to the network, on whichever server runs it: the
 // first time (from the completions route) or after a restart (recovery).
 
+import { billingSubject } from "./billed-subject";
 import { forwardChat, parseChatRequest, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
 import type { Router } from "@/lib/router";
 import { pluginChatResponse } from "./plugin-http";
@@ -32,7 +33,9 @@ export function chatRunOpener(upstreamFor: (subject: string | null) => Upstream,
   return async (req, signal, cont) => {
     const parsed = parseChatRequest(req.body);
     if (typeof parsed === "string") throw new Error(parsed);
-    const upstream = upstreamFor(req.coinpaySub);
+    // The CoinPay sub when linked, else the signed `c0mpute:<id>`: without it
+    // an unlinked person was metered as our server's IP, one shared allowance.
+    const upstream = upstreamFor(billingSubject({ id: req.userId, coinpay_sub: req.coinpaySub }));
     if (req.withPlugins) {
       // A plugin turn runs again after a restart. Approvals are dropped then: an
       // approved destructive call may already have run, so it asks again.

@@ -1,6 +1,7 @@
 import { gateGeneration } from "@/lib/chat/adult";
 import { musicPolicyRequest, parseMusicRequest } from "@/lib/chat/music";
 import { currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
 
   let upstream: Response;
   try {
-    upstream = await infernetFor(user.coinpay_sub)("/api/chat/music", {
+    upstream = await infernetFor(billingSubject(user))("/api/chat/music", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(parsed),

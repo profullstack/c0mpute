@@ -1,6 +1,7 @@
 import { gateGeneration } from "@/lib/chat/adult";
 import { parsePublicPromoRequest } from "@/lib/chat/promo-guard";
 import { currentUser, infernetFor, json, rateLimit, recordJob, sameOrigin, unauthorized } from "@/lib/chat/server";
+import { billingSubject } from "@/lib/chat/billed-subject";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
   if (!gate.ok) return json({ error: { message: gate.message, type: "content_policy", code: gate.code } }, gate.status);
   let upstream: Response;
   try {
-    upstream = await infernetFor(user.coinpay_sub)("/api/chat/promo", {
+    upstream = await infernetFor(billingSubject(user))("/api/chat/promo", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(parsed),
