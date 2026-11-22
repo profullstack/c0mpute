@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { subjectSignature } from "./billed-subject";
 import { houseLaneChat, houseLaneConfig, houseStream, wantsHouseLane, type HouseLaneDeps } from "./house-lane";
 
 /**
@@ -18,6 +19,7 @@ const ENV: Record<string, string> = {
   INFERNET_CLIENT_KEY: "ifc_trusted",
   C0MPUTE_HOUSE_LANE_MODEL: "qwen3:8b",
   INFERNET_URL: "https://infernet.test",
+  C0MPUTE_INFERNET_SUBJECT_SECRET: "h".repeat(48),
 };
 const TOP_UP = "https://c0mpute.com/checkout";
 const req = (stream = false) => ({ messages: [{ role: "user" as const, content: "what was my last A1c?" }], stream, max_tokens: 400 });
@@ -75,6 +77,12 @@ describe("houseLaneChat", () => {
     expect(h.authorization).toBe("Bearer ifr_res_testkey");
     expect(h["x-infernet-client-key"]).toBe("ifc_trusted");
     expect(h["x-infernet-billed-subject"]).toBe("cp-sub-1");
+    // Signed: subject|ts|request id with the shared secret.
+    expect(h["x-infernet-subject-ts"]).toMatch(/^\d+$/);
+    expect(h["x-infernet-request-id"]).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
+    expect(h["x-infernet-subject-sig"]).toBe(
+      subjectSignature(ENV.C0MPUTE_INFERNET_SUBJECT_SECRET, "cp-sub-1", h["x-infernet-subject-ts"], h["x-infernet-request-id"]),
+    );
     const sent = JSON.parse(String(calls[0].init.body));
     expect(sent.model).toBe("qwen3:8b");
     expect(sent.p2p_only).toBeUndefined();
