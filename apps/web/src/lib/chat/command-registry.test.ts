@@ -104,7 +104,7 @@ describe("expansion", () => {
     expect(out).toHaveLength(2);
     expect(out[0].role).toBe("system");
     expect(out[0].content.startsWith("HOUSE\n\n/analyze instructions:\n")).toBe(true);
-    expect(out[0].content).toContain("Validate before you answer");
+    expect(out[0].content).toContain("**Checks**");
     expect(out[1]).toEqual({ role: "user", content: "How many signups in total?" });
   });
 
