@@ -70,6 +70,9 @@ export function catalogFor(_site = siteUrl()): CatalogEntry[] {
     title: e.name,
     description: e.description ?? "",
     url: e.url,
+    // CheapestWayz is on by default (chat-plugins 0.3.1): sign-in on first use, never a shared account.
+    ...(e.icon ? { icon: e.icon } : {}),
+    ...(e.default ? { default: true } : {}),
   }));
   return [...money, ...pkg];
 }
