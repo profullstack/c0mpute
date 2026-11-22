@@ -41,7 +41,7 @@ describe("the web chat's parsers are the web chat's", () => {
   // without the web app). Keep them identical so a command means the same
   // thing in both.
   const web = join(import.meta.dir, "../../../web/src/lib/chat");
-  for (const f of ["images", "music", "album", "promo", "push-shared", "videos"]) {
+  for (const f of ["images", "music", "album", "promo", "push-shared", "videos", "command-registry", "command-defs.generated"]) {
     it(`${f}.ts matches apps/web`, () => {
       if (!existsSync(web)) return;
       expect(readFileSync(join(import.meta.dir, `../web/${f}.ts`), "utf8")).toBe(readFileSync(join(web, `${f}.ts`), "utf8"));
@@ -53,6 +53,10 @@ describe("commands", () => {
   it("routes each slash command like the web chat", () => {
     expect(parseLine("hello there")).toEqual({ kind: "chat", text: "hello there" });
     expect(parseLine("/image a red bicycle")).toEqual({ kind: "image", prompt: "a red bicycle" });
+    // Prompt commands (commands/*.md) are chat turns the server expands.
+    expect(parseLine("/analyze how many signups?")).toEqual({ kind: "chat", text: "/analyze how many signups?" });
+    expect(parseLine("/runway")).toEqual({ kind: "chat", text: "/runway" });
+    expect(parseLine("/analyze")).toEqual({ kind: "error", message: "usage: /analyze <question>" });
     expect(parseLine("/draw a cat")).toEqual({ kind: "image", prompt: "a cat" });
     expect(parseLine("/album synthwave about a drowned city")).toEqual({ kind: "album", album: { prompt: "synthwave about a drowned city" } });
     expect(parseLine("/music lo-fi beats")).toEqual({ kind: "music", music: { prompt: "lo-fi beats", lyrics: "" } });

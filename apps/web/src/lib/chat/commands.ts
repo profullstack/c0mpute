@@ -1,9 +1,12 @@
 // The web chat's slash commands: the list /help shows, and what a line that
 // starts with "/" but matches no generation command means. Such a line never
 // goes to the LLM: it is /help, a usage hint for a command typed without its
-// argument, or "unknown command".
+// argument, or "unknown command". Prompt commands (commands/*.md, e.g.
+// /analyze) are the exception: they go to the server, which expands them.
 
-export const CHAT_COMMANDS: [string, string][] = [
+import { commandRows, commandUsage, COMMANDS, needsArgument, splitCommand } from "./command-registry";
+
+export const BUILTIN_COMMANDS: [string, string][] = [
   ["/image <prompt>", "draw a picture on a c0mpute CPU worker (~2 min)"],
   ["/video <prompt> [--model wan2.2-ti2v-5b]", "a short clip (Wan 2.1 on CPU, 20-30 min once a worker is free; also /clip, /vid)"],
   ["/music <style>", "a song (ACE-Step 1.5); a line \"lyrics:\" then the words adds vocals"],
@@ -14,6 +17,17 @@ export const CHAT_COMMANDS: [string, string][] = [
   ["/plugin add <url|name> | ls | on|off|rm <name>", "give the model tools from any remote MCP server (chat plugins)"],
   ["/help", "this list"],
 ];
+
+/** Built-in commands plus the prompt commands from commands/*.md. */
+export const CHAT_COMMANDS: [string, string][] = [...BUILTIN_COMMANDS.slice(0, -1), ...commandRows(), BUILTIN_COMMANDS[BUILTIN_COMMANDS.length - 1]];
+
+/** What the "/" autocomplete offers: name (no slash), usage line, description. */
+export type Suggestion = { name: string; usage: string; description: string; pack?: string };
+
+export const SUGGESTIONS: Suggestion[] = [
+  ...BUILTIN_COMMANDS.map(([usage, description]) => ({ name: usage.slice(1).split(/\s/)[0], usage, description })),
+  ...COMMANDS.map((c) => ({ name: c.name, usage: commandUsage(c), description: c.description, pack: c.packTitle ?? c.pack })),
+].sort((a, b) => a.name.localeCompare(b.name));
 
 export function commandList(): string {
   const w = Math.max(...CHAT_COMMANDS.map(([c]) => c.length));
@@ -45,6 +59,10 @@ export function slashCommand(text: string): SlashReply | null {
   if (!s.startsWith("/")) return null;
   const name = (/^\/(\S*)/.exec(s)?.[1] ?? "").toLowerCase();
   if (name === "help" || name === "h" || name === "?" || name === "commands") return { kind: "help" };
+  // A prompt command goes to the model (the server expands it); without its
+  // required argument it gets a usage hint instead.
+  const prompt = splitCommand(s);
+  if (prompt) return needsArgument(prompt.command) && !prompt.arg ? { kind: "usage", message: `usage: ${commandUsage(prompt.command)}` } : null;
   if (USAGE[name]) return { kind: "usage", message: USAGE[name] };
   return { kind: "unknown", name };
 }

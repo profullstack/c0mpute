@@ -49,7 +49,8 @@ export function chatRunOpener(upstreamFor: (subject: string | null) => Upstream,
 
     // The web chat asks for grounding (`web: true`); API clients keep the plain path.
     const question = lastUserText(parsed.messages);
-    if (!web || !needsWeb(question)) return open(messages);
+    // A prompt command (/analyze, /runway...) works from the person's data and plugins, not a web search.
+    if (!web || parsed.command || !needsWeb(question)) return open(messages);
 
     // Stream at once: where the search is, then the sources, then the answer.
     let inner: ReadableStreamDefaultReader<Uint8Array> | null = null;

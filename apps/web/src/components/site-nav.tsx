@@ -16,6 +16,7 @@ const NAV_GROUPS: NavGroup[] = [
     links: [
       { href: "/chat", label: "chat", desc: "open models on the network" },
       { href: "/experts", label: "experts", desc: "security, sales, automation, legal, tax" },
+      { href: "/advisor/finance", label: "finance advisor", desc: "cash flow, runway, P&L from your accounts" },
       { href: "/gallery", label: "gallery", desc: "what people built on c0mpute" },
       { href: "/gallery/submit", label: "get listed", desc: "add your build to the gallery" },
       { href: "/train", label: "train an AI agent", desc: "fine-tune on rented nodes" },

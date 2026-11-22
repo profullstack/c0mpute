@@ -9,7 +9,8 @@ import { describeAlbumStage, sanitizeAlbum, trackFileBase, parseAlbumCommand, ty
 import { describePromoProgress, detectPromoRequest, parsePromoCommand, type PromoCommand, type PromoScene } from "@/lib/chat/promo";
 import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "@/lib/chat/push-shared";
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
-import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
+import { adultModeActive, slashCommand, slashReplyText, SUGGESTIONS } from "@/lib/chat/commands";
+import { completeCommands, FINANCE_DISCLAIMER, splitCommand } from "@/lib/chat/command-registry";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
 import { Markdown, SourceCards, type SourceCard } from "./markdown";
 import { adopt, serverIsNewer, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
@@ -428,6 +429,10 @@ export function ChatApp({ error }: { error: string | null }) {
   const [convos, setConvos] = useState<Convo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  // "/" autocomplete: the highlighted row, and whether Escape closed the list.
+  const [pick, setPick] = useState(0);
+  const [pickClosed, setPickClosed] = useState(false);
+  const suggestions = pickClosed ? [] : completeCommands(input, SUGGESTIONS);
   const [busy, setBusy] = useState(false);
   // Lines sent while busy (an answer, its plugin tool calls, or a generation):
   // they go out in order once the work in front of them finishes. Stop ends
@@ -1837,7 +1842,7 @@ export function ChatApp({ error }: { error: string | null }) {
           )}
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm leading-7">
             {(!active || active.messages.length === 0) && (
-              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /plugin add &lt;url&gt; gives the model tools from any remote MCP server. /help lists every command.</p>
+              <p className="comment">// ask anything. Answers stream from a provider node on the network. /image &lt;prompt&gt; draws a picture. /video &lt;prompt&gt; renders a short clip (/clip, /vid). /music &lt;style&gt; makes a song (add a line &quot;lyrics:&quot; then the words for vocals). /album &lt;idea&gt; makes a whole album: a band, 8 named songs with lyrics, cover art and a zip download. /promo &lt;url&gt; [pixar|anime|claymation|flat] [vertical] makes a promo video with narration and music. /analyze &lt;question&gt; answers a data question from pasted data or your plugins; /cashflow, /runway, /pnl, /spend and /forecast are the Agentic Advisor: Finance pack (Mercury, CoinPay, QuickBooks or a CSV). Type / to see every command. /push hosting &lt;name&gt; publishes everything this chat made as a site on the c0mpute network (/connect hosting links the node that publishes it). /plugin add &lt;url&gt; gives the model tools from any remote MCP server. /help lists every command.</p>
             )}
             {active?.messages.map((m, i) => (
               <div key={i} className={m.role === "user" ? "text-[var(--color-fg)]" : "text-[var(--color-fg)] opacity-90"}>
@@ -1846,7 +1851,17 @@ export function ChatApp({ error }: { error: string | null }) {
                 </div>
                 {m.role === "assistant" && m.sources?.length ? <SourceCards sources={m.sources} /> : null}
                 {m.role === "assistant" && m.content ? (
-                  <Markdown text={m.content} cites={m.sources} />
+                  <>
+                    <Markdown text={m.content} cites={m.sources} />
+                    {/* Agentic Advisor: Finance answers always carry the disclaimer, even when a small model drops it. */}
+                    {i > 0 &&
+                    active.messages[i - 1].role === "user" &&
+                    splitCommand(active.messages[i - 1].content)?.command.pack === "finance" &&
+                    !m.content.includes(FINANCE_DISCLAIMER) &&
+                    !(busy && i === active.messages.length - 1) ? (
+                      <p className="text-xs text-[var(--color-dim)]">{FINANCE_DISCLAIMER}</p>
+                    ) : null}
+                  </>
                 ) : (
                   <div className="whitespace-pre-wrap break-words">
                     {m.content ||
@@ -2042,16 +2057,66 @@ export function ChatApp({ error }: { error: string | null }) {
             <div ref={bottom} />
           </div>
           <form
-            className="border-t border-[var(--color-rule)] p-3 flex gap-2"
+            className="relative border-t border-[var(--color-rule)] p-3 flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               send();
             }}
           >
+            {suggestions.length > 0 && (
+              <ul
+                role="listbox"
+                aria-label="commands"
+                className="absolute bottom-full left-3 right-3 mb-1 max-h-72 overflow-y-auto border border-[var(--color-rule)] bg-[var(--color-card)] text-sm shadow-lg z-10"
+              >
+                {suggestions.map((c, k) => (
+                  <li key={c.name} role="option" aria-selected={k === pick}>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setInput(`/${c.name} `);
+                        setPick(0);
+                      }}
+                      className={`w-full text-left px-3 py-1.5 flex flex-wrap gap-x-3 ${k === pick ? "bg-[var(--color-accent-dim)]" : "hover:bg-[var(--color-accent-dim)]"}`}
+                    >
+                      <span className="accent whitespace-nowrap">{c.usage}</span>
+                      <span className="text-[var(--color-dim)] min-w-0">
+                        {c.description}
+                        {c.pack ? <span className="ml-2 text-xs opacity-80">[{c.pack}]</span> : null}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <textarea
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                setPick(0);
+                setPickClosed(false);
+              }}
               onKeyDown={(e) => {
+                if (suggestions.length) {
+                  const sel = suggestions[Math.min(pick, suggestions.length - 1)];
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setPick((p) => (p + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    setPickClosed(true);
+                    return;
+                  }
+                  // Tab, or Enter on a partly typed name, completes it ("/an" -> "/analyze ").
+                  if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && input !== `/${sel.name}`)) {
+                    e.preventDefault();
+                    setInput(`/${sel.name} `);
+                    setPick(0);
+                    return;
+                  }
+                }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   send();
