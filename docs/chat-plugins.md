@@ -27,6 +27,7 @@ this repo is the c0mpute side.
 /plugin ls                           # yours + the catalog
 /plugin off threatcrush              # keep it, stop using it
 /plugin connect threatcrush          # sign in again
+/plugin paper|live moomoo            # brokerage: paper trading (default) or live
 /plugin rm threatcrush
 ```
 
@@ -88,6 +89,41 @@ whenever the account has a plugin on, for every client. Extra request fields:
 Every model step of a plugin turn is a normal completion billed to the person
 (`infernetFor(coinpay_sub)`), same as a turn without plugins. At most 6 steps
 per turn.
+
+## Money plugins (banking, crypto, trading)
+
+| plugin | server | for everyone |
+|---|---|---|
+| Mercury (business banking) | `https://mcp.mercury.com/mcp` | on, not connected |
+| CoinPay (crypto payments) | `https://coinpayportal.com/api/mcp` | on, not connected |
+| moomoo (brokerage and trading) | `https://mcp.moomoo.com/mcp` | in the catalog, off |
+
+- **Defaults**: every account gets Mercury and CoinPay switched on the first
+  time its plugins are read: listed, on, and *not signed in*. Each person signs
+  in to their own account the first time they use one (OAuth discovery waits
+  until then). Removing one is remembered; it does not come back. No shared
+  account is ever attached.
+- **Confirmation gate** (`plugin-policy.ts`, keyed on the server URL, not the
+  slug): a tool on the plugin's read-only allowlist (balances, transactions,
+  invoices, quotes, positions, order history) runs on its own. Every other
+  tool, including any name the allowlist has never seen, is marked destructive
+  before the tool loop sees it, whatever the server's annotations say, so the
+  turn stops at an approval card. The card shows the exact action (amount,
+  currency, from, to, memo; for orders symbol, side, quantity, order type,
+  limit/stop price, estimated cost, account and PAPER/LIVE) and only the
+  signed approval for that one call runs it.
+- **Mercury** asks for `read offline_access transactions:request
+  transfers:request` only. Payment and transfer requests still need an
+  approver inside Mercury; reimbursement approval (which pays at once) and the
+  Books write scopes are not requested.
+- **moomoo**: a new connection starts on paper trading. Paper mode offers the
+  reads plus `sim_trade_*` orders and hides the live order tools. Live is the
+  person's own switch: `/plugin live moomoo` (or the panel, or
+  `POST /api/v1/chat/plugins/<slug>/mode {"mode":"live","confirm":true}`);
+  `/plugin paper moomoo` goes back. Every order still asks. The model can be
+  wrong; the person decides.
+- **Logs**: plugin errors go through `redactLog` (tokens, JWTs, long opaque
+  strings, long digit runs and amounts are masked).
 
 ## How it works
 
