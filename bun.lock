@@ -58,7 +58,7 @@
         "@profullstack/cross-promo": "^0.2.0",
         "@profullstack/footer": "latest",
         "@profullstack/modern-css": "0.2.0",
-        "@profullstack/x402-gateway": "^0.18.2",
+        "@profullstack/x402-gateway": "^0.18.4",
         "@sqlitecloud/drivers": "^1.0.982",
         "ioredis": "^6.0.0",
         "next": "16.4.3",
@@ -312,7 +312,7 @@
 
     "@profullstack/modern-css": ["@profullstack/modern-css@0.2.0", "", {}, "sha512-cp67ad4kHyIKjmI68hC5zTycIevSsVI47zBFKPO5DItE1kxl8qTSlrOZ+VYcrUef71JKbzdpcK7bK9xcuiGegg=="],
 
-    "@profullstack/x402-gateway": ["@profullstack/x402-gateway@0.18.2", "", { "dependencies": { "@profullstack/keys": "^0.1.0" } }, "sha512-PM0S2ADXPKPvPLLlWVbEqMq+EhKxiNxg1wp0jeGf9S5tz2ZGaNIFqun69cO5lJGZgfh03ST4UkJZGr8CmvCWyg=="],
+    "@profullstack/x402-gateway": ["@profullstack/x402-gateway@0.18.4", "", { "dependencies": { "@profullstack/keys": "^0.1.0" } }, "sha512-Glff1R6FvaYbiZK+zJv+vB11DOxUU7zQt9yIw/aLrVnta9OTqkULnGzqLy62egL6BZbxtVfW3kx/yHXiZOKVAw=="],
 
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
 

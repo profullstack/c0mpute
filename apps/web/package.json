@@ -16,7 +16,7 @@
     "@profullstack/cross-promo": "^0.2.0",
     "@profullstack/footer": "latest",
     "@profullstack/modern-css": "0.2.0",
-    "@profullstack/x402-gateway": "^0.18.2",
+    "@profullstack/x402-gateway": "^0.18.4",
     "@sqlitecloud/drivers": "^1.0.982",
     "ioredis": "^6.0.0",
     "next": "16.4.3",
