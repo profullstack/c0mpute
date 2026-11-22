@@ -1,12 +1,13 @@
 ---
 dip: 0036
 title: "Layer moderation: network, operator-chosen labelers, space authority"
-status: Draft
+status: Accepted
 authors:
   - anthony@profullstack.com
 created: 2026-11-22
 updated: 2026-11-22
 discussion:
+  - https://github.com/profullstack/c0mpute/pull/437
 implementation:
 supersedes:
 superseded-by:
@@ -275,22 +276,24 @@ they get the choice.
 Revert path: steps 3 and 4 are config. Emptying `labelers` returns a
 node to today's behavior. No data migration.
 
-## Open questions
+## Resolved questions
 
-- **Reference-client default.** Empty (pure opt-in, as written) or
-  ThreatCrush pre-filled for `malware` only? Opt-in is the honest
-  default. Pre-filled protects naive operators.
-- **Marking refusing workers.** DIP-0016 asks the same question. Should
-  a site owner see that some of their replicas refused under policy, and
-  why? Probably yes, in `hosting_push_status`.
-- **Label vocabulary governance.** Each labeler defines its own values.
-  Do we want a small shared core (`malware`, `phishing`, `spam`) so
-  operator configs carry across labelers?
-- **Where the reports queue lives** for a static site with no app
-  backend: in the owner's c0mpute DM inbox, or in a hosted object only
-  the owner can decrypt?
-- **atproto interop** once opensocial.group publishes lexicons: map the
-  roles record and reports onto them, or bridge?
+Settled when the DIP was accepted (2026-11-22):
+
+- **Reference-client default:** empty. Labelers are pure opt-in for
+  third-party workers. The nodes we operate (canonical gateway, shared
+  cloud node) subscribe to ThreatCrush, as described above.
+- **Marking refusing workers:** yes. `hosting_push_status` shows a
+  site owner how many replicas refused under policy, and which labeler
+  and value caused it. Refusing workers are not named publicly.
+- **Shared core vocabulary:** yes, four values with fixed meanings
+  that every labeler should use when they apply: `malware`, `phishing`,
+  `cryptominer`, `spam`. Labelers may add their own values beyond these.
+- **Reports for a static site:** delivered to the space authority's
+  c0mpute DM inbox (`c0mpute dm`), encrypted to the owner DID.
+- **atproto interop:** bridge later. Revisit when opensocial.group
+  publishes lexicons for roles and reports. The label field names
+  already match.
 
 ## Out of scope
 
