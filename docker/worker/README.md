@@ -22,6 +22,8 @@ docker run -d --name c0mpute-worker --restart unless-stopped \
   ghcr.io/profullstack/c0mpute-worker:latest
 ```
 
+![Status page](status-page.png)
+
 Open `http://<host>:8080` for the status page: worker state, node id, roles,
 earnings, and forms for the payout address and nickname. It has no login, so
 publish it only on a trusted network (or behind your platform's auth).
