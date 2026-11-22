@@ -156,10 +156,34 @@ export async function checkBadge(url: string, deps: SafeFetchDeps = {}, first?: 
   return { state: "missing", checked, note: `no c0mpute badge on ${checked.join(" or ")}` };
 }
 
-export type Reputation = { listed: boolean; reasons: string[]; error?: string };
+export type Reputation = { listed: boolean; reasons: string[]; notes?: string[]; error?: string };
 export type ReputationLookup = (host: string) => Promise<Reputation>;
 
-/** NicheDB's keyless domain reputation (Spamhaus DBL, URIBL, SURBL, ThreatCrush indicators). */
+type NichedbReputation = {
+  listed?: boolean;
+  reasons?: unknown[];
+  dnsbl?: { list?: string; status?: string }[];
+  indicators?: unknown[];
+  surbl?: { listed?: boolean } | null;
+  addresses?: { ip?: string; listed?: boolean }[];
+};
+
+/**
+ * Only DOMAIN-level signals block a listing (Spamhaus DBL, URIBL, SURBL,
+ * indicators on the domain). NicheDB's top-level `listed` also turns true
+ * when the host's IP is on an IP list (Spamhaus ZEN, SpamCop), which shared
+ * hosting and cloud ranges hit all the time and says nothing about the site,
+ * so an IP listing comes back as a note.
+ */
+export function readReputation(b: NichedbReputation): Reputation {
+  const lists = (b.dnsbl ?? []).filter((d) => d.status && d.status !== "clear").map((d) => `${d.list}: ${d.status}`);
+  const indicators = (b.indicators ?? []).map((i) => (typeof i === "string" ? i : JSON.stringify(i)));
+  const reasons = [...new Set([...lists, ...(b.surbl?.listed ? ["SURBL: listed"] : []), ...indicators])];
+  const ips = (b.addresses ?? []).filter((a) => a.listed).map((a) => a.ip);
+  return { listed: reasons.length > 0, reasons, notes: ips.length ? [`host IP ${ips.join(", ")} is on an IP blocklist (not held against the site)`] : [] };
+}
+
+/** NicheDB's keyless domain reputation. */
 export const nichedbReputation: ReputationLookup = async (host) => {
   try {
     const res = await fetch(`https://nichedb.dev/api/v1/reputation/${encodeURIComponent(host)}`, {
@@ -167,15 +191,7 @@ export const nichedbReputation: ReputationLookup = async (host) => {
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return { listed: false, reasons: [], error: `reputation lookup HTTP ${res.status}` };
-    const b = (await res.json()) as {
-      listed?: boolean;
-      reasons?: unknown[];
-      dnsbl?: { list?: string; status?: string }[];
-      indicators?: unknown[];
-    };
-    const lists = (b.dnsbl ?? []).filter((d) => d.status && d.status !== "clear").map((d) => `${d.list}: ${d.status}`);
-    const reasons = [...(b.reasons ?? []).map(String), ...lists];
-    return { listed: b.listed === true || lists.length > 0, reasons };
+    return readReputation((await res.json()) as NichedbReputation);
   } catch (e) {
     return { listed: false, reasons: [], error: `reputation lookup failed: ${e instanceof Error ? e.message : e}` };
   }
@@ -225,6 +241,7 @@ export async function runChecks(
   const host = new URL(url).hostname.replace(/^www\./, "");
   const rep = await (deps.reputation ?? nichedbReputation)(host);
   if (rep.error) notes.push(rep.error);
+  if (rep.notes) notes.push(...rep.notes);
   if (rep.listed) {
     return { ok: false, refuse: true, hold: false, status: 200, notes: [...notes, `domain is blocklisted (${rep.reasons.join("; ") || "listed"})`], page };
   }

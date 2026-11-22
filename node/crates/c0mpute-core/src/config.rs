@@ -97,6 +97,10 @@ pub struct Config {
     /// CoinPay to the operator's wallet (`x402` plugin). Off by default.
     #[serde(default)]
     pub x402: crate::x402::X402Config,
+    /// DIP-0036 operator policy: refuse (or warn on) hosted files a chosen
+    /// labeler flagged. Off by default (no labelers).
+    #[serde(default)]
+    pub moderation: crate::moderation::ModerationConfig,
     /// Write the gateway access log ThreatCrush tails (`threatcrush`
     /// plugin). Off by default.
     #[serde(default)]
@@ -919,6 +923,7 @@ impl Default for Config {
             payments: Default::default(),
             crowdgpt: Default::default(),
             x402: Default::default(),
+            moderation: Default::default(),
             threatcrush: Default::default(),
             adult: Default::default(),
             swarm: Default::default(),

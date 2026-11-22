@@ -10,6 +10,7 @@ import { collectPushFiles, parseConnectCommand, parsePushCommand, type ConnectCo
 import { describeVideoProgress, parseVideoCommand, videoPollOutcome, videoRequestBody, type VideoCommand } from "@/lib/chat/videos";
 import { adultModeActive, slashCommand, slashReplyText } from "@/lib/chat/commands";
 import { parsePluginCommand, PLUGIN_EVENT_OBJECT, PLUGIN_HELP, type PluginCommand, type PluginEvent } from "@/lib/chat/plugin-shared";
+import { Markdown, SourceCards, type SourceCard } from "./markdown";
 import { adopt, serverIsNewer, slimForSync, syncPlan, type ServerSummary } from "@/lib/chat/sync-merge";
 import { PluginsPanel, pluginsApi, signInPopup, ToolCard, type ToolView } from "./plugins-panel";
 
@@ -146,6 +147,10 @@ type Msg = {
   tools?: ToolView[];
   /** A resumable turn still streaming: reattached after a reload or a dropped connection. */
   run?: string;
+  /** Where a turn is before its first word (queued, running on a node): shown until text arrives. */
+  status?: string;
+  /** The web pages a grounded answer drew on (photo cards, [n] citations). */
+  sources?: SourceCard[];
 };
 type VideoView = {
   /** null until POST /api/v1/videos answers. */
@@ -302,7 +307,7 @@ function save(c: Convo[]) {
   try {
     const slim = c.slice(0, 100).map((cv) => ({
       ...cv,
-      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, revealed: _revealed, ...m }) => m),
+      messages: cv.messages.map(({ image: _image, audio: _audio, audioType: _audioType, revealed: _revealed, status: _status, ...m }) => m),
     }));
     localStorage.setItem(STORE, JSON.stringify(slim));
   } catch {}
@@ -318,19 +323,78 @@ const newConvo = (model: string): Convo => ({
 /** An error the server put in the stream (not a dropped connection, so not worth reattaching). */
 class StreamError extends Error {}
 
+/** The stream went silent: a dead connection (the server sends a keepalive every 15 s), so reattach. */
+class StreamStalled extends Error {}
+
+/** No byte for this long means the connection is dead (server keepalives come every 15 s). */
+const STREAM_IDLE_MS = 45_000;
+
+/** The human line in a `: status {...}` SSE comment (where the turn is: queued, running on a node). */
+function statusLine(line: string): string | null {
+  if (!line.startsWith(": status")) return null;
+  try {
+    const s = JSON.parse(line.slice(8).trim()) as { message?: unknown };
+    return typeof s.message === "string" && s.message ? s.message : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep only well-formed http(s) sources from the stream (they come from web pages). */
+function cleanSources(raw: unknown[]): SourceCard[] {
+  const out: SourceCard[] = [];
+  for (const r of raw) {
+    const s = r as Record<string, unknown>;
+    if (typeof s?.url !== "string" || !/^https?:\/\//.test(s.url) || typeof s.n !== "number") continue;
+    out.push({
+      n: s.n,
+      url: s.url,
+      title: String(s.title ?? s.url).slice(0, 200),
+      host: String(s.host ?? "").slice(0, 100),
+      image: typeof s.image === "string" && /^https:\/\//.test(s.image) ? s.image : null,
+      snippet: String(s.snippet ?? "").slice(0, 300),
+    });
+  }
+  return out.slice(0, 8);
+}
+
 /** Read an OpenAI-style SSE body, calling onDelta with each content piece. */
-async function readStream(res: Response, onDelta: (t: string) => void, onEvent?: (e: PluginEvent) => void) {
+async function readStream(
+  res: Response,
+  onDelta: (t: string) => void,
+  onEvent?: (e: PluginEvent) => void,
+  onStatus?: (s: string) => void,
+  onSources?: (s: SourceCard[]) => void,
+) {
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
   for (;;) {
-    const { done, value } = await reader.read();
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<never>((_, reject) => {
+      idle = setTimeout(() => reject(new StreamStalled("the connection went quiet")), STREAM_IDLE_MS);
+    });
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await Promise.race([reader.read(), stalled]);
+    } catch (e) {
+      if (e instanceof StreamStalled) void reader.cancel().catch(() => {});
+      throw e;
+    } finally {
+      clearTimeout(idle);
+    }
+    const { done, value } = chunk;
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) !== -1) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
+      const status = statusLine(line);
+      if (status) {
+        onStatus?.(status);
+        continue;
+      }
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (data === "[DONE]") return;
@@ -343,6 +407,10 @@ async function readStream(res: Response, onDelta: (t: string) => void, onEvent?:
       if (j.error) throw new StreamError(j.error.message ?? "stream error");
       if (j.object === PLUGIN_EVENT_OBJECT) {
         if (j.event && onEvent) onEvent(j.event as PluginEvent);
+        continue;
+      }
+      if (j.object === "c0mpute.sources") {
+        if (Array.isArray(j.sources) && onSources) onSources(cleanSources(j.sources));
         continue;
       }
       const t = j.choices?.[0]?.delta?.content;
@@ -1288,6 +1356,8 @@ export function ChatApp({ error }: { error: string | null }) {
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
           plugin_events: true,
+          // Factual questions get searched on the web first (sources shown as cards).
+          web: true,
           // The server finishes the turn even if this tab closes or the
           // connection drops; the run id lets us (or a reload) reattach.
           resumable: true,
@@ -1435,8 +1505,32 @@ export function ChatApp({ error }: { error: string | null }) {
             setTools((ts) => [...ts.filter((t) => t.id !== e.id), { id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments, status: "approval", approval: e.approval }]);
           }
         },
+        (s) =>
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            if (!last || last.role !== "assistant" || last.status === s) return c;
+            msgs[msgs.length - 1] = { ...last, status: s };
+            return { ...c, messages: msgs };
+          }),
+        (sources) =>
+          update(id, (c) => {
+            const msgs = c.messages.slice();
+            const last = msgs[msgs.length - 1];
+            if (!last || last.role !== "assistant") return c;
+            msgs[msgs.length - 1] = { ...last, sources };
+            return { ...c, messages: msgs, updated: Date.now() };
+          }),
       );
     }
+    // Finished (or failed): the progress line is not part of the answer.
+    update(id, (c) => {
+      const msgs = c.messages.slice();
+      const last = msgs[msgs.length - 1];
+      if (!last?.status) return c;
+      msgs[msgs.length - 1] = { ...last, status: undefined };
+      return { ...c, messages: msgs };
+    });
   }
 
   /** Approve or deny a destructive tool call the model asked for (only on the chat's last turn). */
@@ -1646,9 +1740,19 @@ export function ChatApp({ error }: { error: string | null }) {
                 <div className={`text-xs mb-1 ${m.role === "user" ? "accent" : "text-[var(--color-dim)]"}`}>
                   {m.role === "user" ? "> you" : "< c0mpute"}
                 </div>
-                <div className="whitespace-pre-wrap break-words">
-                  {m.content || (busy && i === active.messages.length - 1 ? "▍" : "")}
-                </div>
+                {m.role === "assistant" && m.sources?.length ? <SourceCards sources={m.sources} /> : null}
+                {m.role === "assistant" && m.content ? (
+                  <Markdown text={m.content} cites={m.sources} />
+                ) : (
+                  <div className="whitespace-pre-wrap break-words">
+                    {m.content ||
+                      (busy && i === active.messages.length - 1 ? (
+                        <span className="text-[var(--color-dim)]">{m.status ? `// ${m.status} ▍` : "// sending it to the network… ▍"}</span>
+                      ) : (
+                        ""
+                      ))}
+                  </div>
+                )}
                 {m.tools?.map((t) => (
                   <ToolCard
                     key={t.id}
