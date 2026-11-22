@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SignInOptions } from "@/components/sign-in-options";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
 import { audioExtension, describeNodeProgress, parseMusicCommand, sanitizeNodeProgress, type MusicCommand } from "@/lib/chat/music";
@@ -1691,15 +1692,10 @@ export function ChatApp({ error }: { error: string | null }) {
         {error && <p className="border border-[var(--color-warn)] text-[var(--color-warn)] p-3 text-sm">{error}</p>}
         <section className="space-y-4 text-sm leading-7">
           <p>
-            Every answer is generated on a provider node (Infernet, on c0mpute), not a hosted API. Sign-in is CoinPay
-            only, and your CoinPay account needs a DID: that DID is your c0mpute chat identity.
+            Every answer is generated on a provider node (Infernet, on c0mpute), not a hosted API. Sign in with CoinPay
+            (your CoinPay DID becomes your identity and your compute balance is billed) or with a passkey.
           </p>
-          <a
-            href="/api/auth/coinpay/login?next=/chat"
-            className="inline-block !border border-[var(--color-accent)] px-4 py-2 accent hover:bg-[var(--color-accent-dim)]"
-          >
-            Sign in with CoinPay
-          </a>
+          <SignInOptions next="/chat" />
           <p className="text-[var(--color-dim)]">
             No DID yet? Sign in at <a href="https://coinpayportal.com">coinpayportal.com</a> and create one, or run{" "}
             <code>c0mpute coinpay reputation did setup</code>.

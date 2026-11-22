@@ -92,18 +92,21 @@ export interface Dashboard extends Report {
   claims: (OperatorNode & { online: boolean; on_board_name: string | null })[];
 }
 
-export async function dashboardFor(user: { id: string; coinpay_sub: string }, range: RangeKey, now = Date.now()): Promise<Dashboard> {
+export async function dashboardFor(user: { id: string; coinpay_sub: string | null }, range: RangeKey, now = Date.now()): Promise<Dashboard> {
   const store = earningsStore();
   const { ms, bucketMs } = RANGES[range];
   const from = now - ms;
   const claims = await operatorNodes(user.id);
   const [board, inf, historyFrom] = await Promise.all([
     getNodesPayload().catch(() => null),
-    infernetHours(
-      user.coinpay_sub,
-      from,
-      claims.map((c) => c.node),
-    ),
+    // Infernet credits are read by CoinPay subject: none until CoinPay is connected.
+    user.coinpay_sub
+      ? infernetHours(
+          user.coinpay_sub,
+          from,
+          claims.map((c) => c.node),
+        )
+      : Promise.resolve(null),
     store.firstJobAt().catch(() => null),
   ]);
   const online = new Map<string, NodeRow>((board?.nodes ?? []).map((n) => [n.id, n]));

@@ -1,5 +1,6 @@
 // The c0mpute.com account this machine is signed in to. `c0mpute chat login`
-// (CoinPay device flow, DID required) writes the key to ~/.c0mpute/chat.json
+// (= `c0mpute login`: device flow, approved on c0mpute.com with CoinPay, a
+// passkey or a password) writes the key to ~/.c0mpute/chat.json
 // (0600); the app reads it from there and never keeps a copy of its own.
 // C0MPUTE_API_KEY / C0MPUTE_URL override it, as they do for the CLI
 // (node/crates/c0mpute-cli/src/ai_chat.rs).

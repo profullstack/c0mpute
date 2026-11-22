@@ -25,6 +25,8 @@ mod apps_mcp;
 mod autoscale;
 mod container_cli;
 mod ai_chat;
+mod account_cli;
+mod fleet_agent;
 mod chat_connect;
 mod chat_history;
 mod chat_plugins;
@@ -493,8 +495,41 @@ enum Cmd {
         args: Vec<String>,
     },
 
-    /// Sign in to every c0mpute network (coinpay + infernet), one at a time.
-    Login,
+    /// Sign in to your c0mpute account (device flow: approve the code on
+    /// c0mpute.com with CoinPay, a passkey or a password). The key is shared
+    /// with `c0mpute chat`. `--networks` also signs in to coinpay, infernet and
+    /// huggingface (the old `c0mpute login`).
+    Login {
+        /// c0mpute site URL (default https://c0mpute.com, or $C0MPUTE_URL).
+        #[arg(long)]
+        url: Option<String>,
+        /// Also sign in to the peer networks: coinpay + infernet + huggingface.
+        #[arg(long)]
+        networks: bool,
+    },
+    /// Forget this machine's c0mpute key.
+    Logout,
+    /// The signed-in account: CoinPay DID, balance, linked nodes.
+    Whoami {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// This node and your account: `c0mpute node link [--token c0e_...]`
+    /// (proves control by signing a challenge with the node's identity key),
+    /// `unlink`, `status`.
+    Node {
+        #[command(subcommand)]
+        cmd: account_cli::NodeCmd,
+    },
+    /// Run a fleet of nodes: `ls`, `show`, `pause|resume|update|restart`,
+    /// `tag|untag|set-tags`, `rename`, `unlink`, `earnings`, `audit`,
+    /// `token create|ls|revoke`. Node ids, `--tag <t>` or `--all`; `--json`.
+    Fleet {
+        #[command(subcommand)]
+        cmd: account_cli::FleetCmd,
+    },
 
     /// Chat with open models on the c0mpute network (`c0mpute chat login`,
     /// then `c0mpute chat "prompt"`, or no prompt for a session). Also
@@ -2052,7 +2087,22 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Update { check, feed } => run_update(check, feed).await,
         Cmd::Uninstall { all, purge, yes } => run_uninstall(all, purge, yes),
         Cmd::Coinpay { args } => delegate("coinpay", &args),
-        Cmd::Login => run_login(),
+        Cmd::Login { url, networks } => {
+            let mut rest = Vec::new();
+            if let Some(u) = url {
+                rest.push("--url".to_string());
+                rest.push(u);
+            }
+            ai_chat::login(&rest).await?;
+            if networks {
+                run_login()?;
+            }
+            Ok(())
+        }
+        Cmd::Logout => ai_chat::logout(),
+        Cmd::Whoami { json, url } => account_cli::whoami(url.as_deref(), json).await,
+        Cmd::Node { cmd } => account_cli::node(cmd).await,
+        Cmd::Fleet { cmd } => account_cli::fleet(cmd).await,
         Cmd::Webhook { args } => webhook::run(&args).await,
         Cmd::Infernet { args } if args.first().map(String::as_str) == Some("text") => {
             text::run(&args[1..]).await
@@ -2616,6 +2666,9 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                     }
                 });
             }
+            // Fleet commands from the operator's account (pause, resume,
+            // update, restart), once this node is linked (`c0mpute node link`).
+            fleet_agent::spawn();
             let sup = Supervisor::boot(cfg).await?;
             sup.run().await
         }

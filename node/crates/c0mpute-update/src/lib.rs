@@ -756,6 +756,26 @@ mod drain_tests {
     }
 }
 
+/// Restart the worker in place on request (a fleet `restart`, or after a
+/// fleet `update` installed a new binary): stop bidding, let running jobs
+/// finish (up to [`MAX_DRAIN`]), then re-execute the binary on disk. Only
+/// returns on failure, with bidding switched back on.
+#[cfg(unix)]
+pub async fn drain_and_reexec() -> anyhow::Error {
+    let Some(exe) = current_exe_path() else {
+        return anyhow::anyhow!("cannot locate the running executable");
+    };
+    set_draining(true);
+    let still = drain(MAX_DRAIN, Duration::from_secs(5)).await;
+    if still > 0 {
+        warn!(still, "restart: jobs still running after the drain limit; re-executing anyway");
+    }
+    info!("restart: re-executing the worker");
+    let e = reexec(&exe);
+    set_draining(false);
+    e
+}
+
 /// Replace the current process with the (freshly swapped) binary at `exe`,
 /// preserving PID, session, and the daemon's redirected stdio. Detach flags are
 /// dropped — we are already the detached worker, so re-running `-d`/`-a` would

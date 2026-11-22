@@ -52,8 +52,12 @@ export interface AggregatorJob {
   paid_usd: number;
 }
 
-/** How a claim got here: from the node's own API key, the browser, or a hosting link. */
-export type ClaimVia = "key" | "web" | "hosting";
+/**
+ * How a claim got here: from the node's own API key, the browser, a hosting
+ * link, or "signed": the node's identity key signed a link to this account
+ * (`c0mpute node link`), the only kind that proves the node is yours.
+ */
+export type ClaimVia = "key" | "web" | "hosting" | "signed";
 
 export interface OperatorNode {
   node: string;
@@ -229,6 +233,22 @@ export function createEarningsStore(sql: Sql) {
       }));
     },
 
+    /** Jobs and agreed takings per node for these nodes since `sinceMs` (the fleet view). */
+    async totalsFor(nodes: string[], sinceMs: number): Promise<Map<string, { jobs: number; paid_usd: number }>> {
+      await init();
+      const out = new Map<string, { jobs: number; paid_usd: number }>();
+      for (let i = 0; i < nodes.length; i += 200) {
+        const chunk = nodes.slice(i, i + 200);
+        const rows = await sql.all(
+          `SELECT node, COUNT(*) AS jobs, SUM(paid_usd) AS paid_usd FROM node_jobs
+            WHERE completed_at >= ? AND node IN (${chunk.map(() => "?").join(", ")}) GROUP BY node`,
+          [sinceMs, ...chunk],
+        );
+        for (const r of rows) out.set(String(r.node), { jobs: Number(r.jobs) || 0, paid_usd: Number(r.paid_usd) || 0 });
+      }
+      return out;
+    },
+
     /** The hardware class each claimed node last reported, across all accounts. */
     async claimedClasses(): Promise<Map<string, string>> {
       await init();
@@ -257,8 +277,9 @@ export function createEarningsStore(sql: Sql) {
       await init();
       const existing = (await sql.all(`SELECT * FROM operator_nodes WHERE user_id = ? AND node = ?`, [userId, c.node]))[0];
       if (existing) {
-        // A claim from the node itself outranks one typed into a browser.
-        const via = existing.via === "key" || c.via === "key" ? "key" : (existing.via as ClaimVia);
+        // A signed link outranks a claim from the node's API key, which outranks one typed into a browser.
+        const rank = (v: unknown) => (v === "signed" ? 3 : v === "key" ? 2 : 1);
+        const via = rank(c.via) > rank(existing.via) ? c.via : (existing.via as ClaimVia);
         await sql.run(
           `UPDATE operator_nodes SET peer_id = COALESCE(?, peer_id), label = COALESCE(?, label), class = COALESCE(?, class), via = ? WHERE user_id = ? AND node = ?`,
           [c.peer_id ?? null, c.label ?? null, c.class ?? null, via, userId, c.node],

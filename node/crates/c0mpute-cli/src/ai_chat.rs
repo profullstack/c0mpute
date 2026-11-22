@@ -144,7 +144,7 @@ pub(crate) fn api_key() -> Option<String> {
 }
 
 pub(crate) fn require_key() -> Result<String> {
-    api_key().ok_or_else(|| anyhow!("not signed in: run `c0mpute chat login` (or set C0MPUTE_API_KEY)"))
+    api_key().ok_or_else(|| anyhow!("not signed in: run `c0mpute login` (or set C0MPUTE_API_KEY)"))
 }
 
 pub(crate) fn client() -> Result<reqwest::Client> {
@@ -929,7 +929,7 @@ pub(crate) async fn login(rest: &[String]) -> Result<()> {
         match arg.as_str() {
             "--url" => url_flag = it.next().cloned(),
             "-h" | "--help" => {
-                println!("c0mpute chat login [--url https://c0mpute.com]\n\nSigns this machine in: approve the code on c0mpute.com with CoinPay (a DID is required).");
+                println!("c0mpute login [--url https://c0mpute.com]   (also: c0mpute chat login)\n\nSigns this machine in to your c0mpute account: approve the code on c0mpute.com with CoinPay, a passkey or a password.");
                 return Ok(());
             }
             other => bail!("unknown argument: {other}"),
@@ -961,7 +961,7 @@ pub(crate) async fn login(rest: &[String]) -> Result<()> {
     let interval = d["interval"].as_u64().unwrap_or(3).max(1);
     let expires = d["expires_in"].as_u64().unwrap_or(600);
 
-    println!("Open this link and sign in with CoinPay (a DID is required):\n\n  {link}\n\nand check it shows the code  {code}\n");
+    println!("Open this link and sign in (CoinPay, a passkey or a password):\n\n  {link}\n\nand check it shows the code  {code}\n");
     open_browser(link);
     eprint!("waiting for approval");
     let deadline = std::time::Instant::now() + Duration::from_secs(expires);
@@ -985,7 +985,7 @@ pub(crate) async fn login(rest: &[String]) -> Result<()> {
                 let path = store(&saved)?;
                 eprintln!();
                 println!("signed in; key saved to {}", path.display());
-                return whoami(&url).await;
+                return crate::account_cli::whoami(Some(&url), false).await;
             }
             428 | 429 => continue,
             410 => break,
@@ -997,7 +997,7 @@ pub(crate) async fn login(rest: &[String]) -> Result<()> {
         }
     }
     eprintln!();
-    bail!("the code expired before it was approved; run `c0mpute chat login` again")
+    bail!("the code expired before it was approved; run `c0mpute login` again")
 }
 
 pub(crate) fn open_browser(link: &str) {
@@ -1012,11 +1012,11 @@ pub(crate) fn open_browser(link: &str) {
         .spawn();
 }
 
-fn logout() -> Result<()> {
+pub(crate) fn logout() -> Result<()> {
     let path = config_path()?;
     if path.exists() {
         std::fs::remove_file(&path)?;
-        println!("signed out (removed {}). Revoke the key itself at https://c0mpute.com/chat → CLI / API / MCP keys.", path.display());
+        println!("signed out (removed {}). Revoke the key itself at https://c0mpute.com/account (API keys).", path.display());
     } else {
         println!("not signed in");
     }

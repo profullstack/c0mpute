@@ -108,7 +108,8 @@ async function confirmPage(ticketUser: string, slug: string, ticket: string) {
     pluginStore().get(ticketUser, slug).catch(() => null),
   ]);
   if (!account || !plugin) return page("Cannot connect the plugin", `No chat plugin ${slug} on this account. Add it again for a fresh link.`, 404);
-  const who = account.name ? `${account.name} (${account.did})` : account.did;
+  const id = account.did ?? account.id;
+  const who = account.name ? `${account.name} (${id})` : id;
   const action = `/api/v1/chat/plugins/${encodeURIComponent(slug)}/connect`;
   return new Response(
     `${HEAD}<h1>Connect ${esc(plugin.title || plugin.name)}?</h1>` +

@@ -1,6 +1,6 @@
 {
   "name": "c0mpute",
-  "version": "0.3.102",
+  "version": "0.3.104",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,6 +17,8 @@
     "@profullstack/footer": "latest",
     "@profullstack/modern-css": "0.2.0",
     "@profullstack/x402-gateway": "^0.18.2",
+    "@simplewebauthn/browser": "14.0.0",
+    "@simplewebauthn/server": "14.0.3",
     "@sqlitecloud/drivers": "^1.0.982",
     "ioredis": "^6.0.0",
     "next": "16.4.3",

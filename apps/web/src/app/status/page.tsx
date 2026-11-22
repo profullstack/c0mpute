@@ -27,7 +27,11 @@ export default async function StatusPage() {
   // ── earnings: c0mpute jobs + Infernet inference, never double counted ──
   const usd = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : n >= 0.01 || n === 0 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`);
   const windowLabel: Record<WindowKey, string> = { "24h": "last 24h", "7d": "last 7 days", "30d": "last 30 days", all: "all time" };
-  const earned = (k: WindowKey) => (earnings?.c0mpute?.[k]?.earned_usd ?? 0) + (earnings?.infernet?.[k]?.earned_usd ?? 0);
+  // "Paid" is settled money only: Infernet credits. c0mpute auction prices are
+  // agreed, not settled, until market settlement launches (same split as the
+  // operator dashboard), so they get their own card and column.
+  const earned = (k: WindowKey) => earnings?.infernet?.[k]?.earned_usd ?? 0;
+  const agreed = (k: WindowKey) => earnings?.c0mpute?.[k]?.earned_usd ?? 0;
   const allInf = earnings?.infernet?.all;
   const allC0 = earnings?.c0mpute?.all;
   const earningCards: OverviewCard[] = earnings && (earnings.c0mpute || earnings.infernet)
@@ -35,12 +39,12 @@ export default async function StatusPage() {
         {
           label: "Paid to node operators",
           value: usd(earned("all")),
-          note: `all time · c0mpute jobs ${usd(allC0?.earned_usd ?? 0)} · Infernet inference ${usd(allInf?.earned_usd ?? 0)}`,
+          note: `settled, all time · ${usd(earned("30d"))} in 30 days · ${usd(earned("7d"))} in 7 days · ${usd(earned("24h"))} in 24h`,
         },
         {
-          label: "Last 30 days",
-          value: usd(earned("30d")),
-          note: `${usd(earned("7d"))} in 7 days · ${usd(earned("24h"))} in 24h`,
+          label: "Agreed on c0mpute jobs",
+          value: usd(agreed("all")),
+          note: `${(allC0?.paid_jobs ?? 0).toLocaleString()} priced jobs after the ${MARKET_FEE_PCT}% fee · paid out when market settlement launches`,
         },
         {
           label: "House commission",
@@ -55,21 +59,20 @@ export default async function StatusPage() {
           note: `${allInf?.earning_referrers ?? 0} referrers earning · paid from the house fee, never the operator's share`,
         },
         {
-          label: "Operators who earned",
-          value: Math.max(allC0?.earning_nodes ?? 0, allInf?.earning_nodes ?? 0),
-          note: `best node ${usd(Math.max(allC0?.best_node_usd ?? 0, allInf?.best_node_usd ?? 0))} · paid out ${usd(allInf?.paid_out_usd ?? 0)} to wallets`,
+          label: "Operators who were paid",
+          value: allInf?.earning_nodes ?? 0,
+          note: `best node ${usd(allInf?.best_node_usd ?? 0)} · paid out ${usd(allInf?.paid_out_usd ?? 0)} to wallets`,
         },
       ]
     : [];
   const earningRows = (["24h", "7d", "30d", "all"] as WindowKey[]).map((k) => ({
     id: k,
     window: windowLabel[k],
-    c0mpute: earnings?.c0mpute ? `${usd(earnings.c0mpute[k].earned_usd)} · ${earnings.c0mpute[k].paid_jobs.toLocaleString()} paid jobs` : "—",
-    infernet: earnings?.infernet ? `${usd(earnings.infernet[k].earned_usd)} · ${earnings.infernet[k].jobs.toLocaleString()} jobs` : "—",
-    total: usd(earned(k)),
+    infernet: earnings?.infernet ? `${usd(earned(k))} · ${earnings.infernet[k].jobs.toLocaleString()} jobs` : "—",
+    c0mpute: earnings?.c0mpute ? `${usd(agreed(k))} · ${earnings.c0mpute[k].paid_jobs.toLocaleString()} jobs` : "—",
     commission: earnings?.infernet ? usd(earnings.infernet[k].house_fee_usd) : "—",
     referral: earnings?.infernet ? usd(earnings.infernet[k].commissions_usd) : "—",
-    median: usd(Math.max(earnings?.c0mpute?.[k]?.median_node_usd ?? 0, earnings?.infernet?.[k]?.median_node_usd ?? 0)),
+    median: usd(earnings?.infernet?.[k]?.median_node_usd ?? 0),
   }));
 
   const overviewCards: OverviewCard[] = [
@@ -198,15 +201,14 @@ export default async function StatusPage() {
             <OverviewGrid cards={earningCards} />
             <ResourceTable
               title="[ earnings by window ]"
-              description="Money nodes kept, by where the work came from. Median is the typical earning node in that window."
+              description="Paid is settled money in the operator's balance. Agreed is what c0mpute buyers accepted, which settles once market settlement launches. Median is the typical paid node in that window."
               columns={[
                 { key: "window", label: "Window" },
-                { key: "c0mpute", label: "c0mpute jobs" },
-                { key: "infernet", label: "Infernet inference" },
-                { key: "total", label: "Total to operators" },
+                { key: "infernet", label: "Paid (Infernet inference)" },
+                { key: "c0mpute", label: "Agreed (c0mpute jobs)" },
                 { key: "commission", label: "House commission" },
                 { key: "referral", label: "Referral commissions" },
-                { key: "median", label: "Median node" },
+                { key: "median", label: "Median paid node" },
               ]}
               rows={earningRows}
               emptyMessage="No earnings yet."
@@ -214,19 +216,17 @@ export default async function StatusPage() {
           </>
         )}
         <p className="text-xs text-[var(--color-dim)] leading-6">
-          Real money, not estimates. c0mpute jobs (speech, images, music and other
-          c0mpute-native work) come from the signed accept and
-          receipt each node gossips, copied into our ledger so history outlives the
-          aggregator&apos;s 24h window
-          {earnings?.history_from ? ` (on file since ${new Date(earnings.history_from).toISOString().slice(0, 10)})` : ""};
-          shown after the {MARKET_FEE_PCT}% fee, as on <Link href="/nodes#jobs">/nodes</Link>. Infernet
-          inference is the operator&apos;s net from the{" "}
+          Paid is real, settled money: the operator&apos;s net from the{" "}
           <a href="https://infernetprotocol.com/api/v1/network/earnings">Infernet earnings ledger</a>, with
-          house subsidies and voided jobs left out. Chat inference a c0mpute node serves for
-          Infernet is counted from that ledger only: its auction record on c0mpute is left out,
-          so each dollar is counted once. Referral commissions come
-          out of the house commission. No node, account or wallet is named. Demand is early:
-          these are real numbers, not a promise.
+          house subsidies and voided jobs left out. That includes LLM chat a c0mpute node
+          serves, which is paid through Infernet only. Agreed is the price c0mpute buyers
+          accepted on speech, image, music and other jobs, from the signed accept and receipt
+          each node gossips
+          {earnings?.history_from ? ` (on file since ${new Date(earnings.history_from).toISOString().slice(0, 10)})` : ""},
+          after the {MARKET_FEE_PCT}% fee, as on <Link href="/nodes#jobs">/nodes</Link>. It is not paid out
+          until market settlement launches. Referral commissions come out of the house
+          commission. No node, account or wallet is named. Demand is early: these are real
+          numbers, not a promise.
         </p>
       </section>
 

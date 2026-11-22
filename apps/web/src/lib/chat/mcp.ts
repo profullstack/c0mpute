@@ -12,6 +12,7 @@ import type { PluginEvent } from "./plugin-shared";
 import { GALLERY_TOOL_NAMES, GALLERY_TOOLS, galleryTool } from "../gallery/mcp";
 import type { GalleryService } from "../gallery/service";
 import { REFERRAL_TOOL_NAMES, REFERRAL_TOOLS, referralTool } from "../referrals-mcp";
+import { FLEET_TOOL_NAMES, FLEET_TOOLS, fleetTool, type FleetMcpDeps } from "../accounts/mcp";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const site = () => (process.env.C0MPUTE_SITE_URL || "https://c0mpute.com").replace(/\/$/, "");
@@ -80,7 +81,7 @@ export const TOOLS = [
   },
   {
     name: "whoami",
-    description: "The signed-in c0mpute account (CoinPay DID).",
+    description: "The signed-in c0mpute account: id, name, CoinPay DID (when CoinPay is connected), and how many nodes it has.",
     inputSchema: { type: "object", properties: {} },
     annotations: { title: "Who am I", readOnlyHint: true, openWorldHint: false },
   },
@@ -88,7 +89,7 @@ export const TOOLS = [
 
 type Rpc = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
 export type McpCtx = {
-  user: { id: string; did: string; name: string | null };
+  user: { id: string; did: string | null; name: string | null; coinpay_sub?: string | null };
   upstream: Upstream;
   push?: PushStore;
   /** Chat plugins: the store plus the add/run functions (plugins.ts), when wired. */
@@ -104,6 +105,8 @@ export type McpCtx = {
   jobs?: { record: (userId: string, kind: "promo", jobId: unknown) => Promise<void>; owns: (userId: string, jobId: string) => Promise<boolean> };
   /** The gallery ("Get listed"), when wired: gallery_submit, gallery_status, gallery_list. */
   gallery?: GalleryService;
+  /** Fleet management (list_my_nodes, my_earnings, fleet_*), when wired. */
+  fleet?: FleetMcpDeps;
 };
 
 export const CONVO_TOOLS = [
@@ -161,7 +164,7 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
       return null;
     }
     case "tools/list":
-      return ok(id, { tools: [...TOOLS, ...REFERRAL_TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : [])] });
+      return ok(id, { tools: [...TOOLS, ...REFERRAL_TOOLS, ...(ctx.convos ? CONVO_TOOLS : []), ...(ctx.push ? HOSTING_TOOLS : []), ...(ctx.plugins ? PLUGIN_TOOLS : []), ...(ctx.gallery ? GALLERY_TOOLS : []), ...(ctx.fleet ? FLEET_TOOLS : [])] });
     case "tools/call": {
       const name = params.name as string;
       const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -204,7 +207,15 @@ export async function handleRpc(msg: Rpc, ctx: McpCtx): Promise<object | null> {
           const r = await referralTool(name, ctx.upstream);
           return ok(id, text(r.text, r.isError));
         }
-        if (name === "whoami") return ok(id, text(JSON.stringify({ did: ctx.user.did, name: ctx.user.name })));
+        if (FLEET_TOOL_NAMES.has(name)) {
+          if (!ctx.fleet) return fail(id, -32602, `unknown tool: ${name}`);
+          const r = await fleetTool(name, args, ctx.user.id, ctx.fleet);
+          return ok(id, text(r.text, r.isError));
+        }
+        if (name === "whoami") {
+          const nodes = ctx.fleet ? await ctx.fleet.fleet(ctx.user.id).then((f) => f.totals).catch(() => null) : null;
+          return ok(id, text(JSON.stringify({ id: ctx.user.id, did: ctx.user.did, name: ctx.user.name, coinpay: !!ctx.user.coinpay_sub, ...(nodes ? { nodes } : {}) })));
+        }
         if (name === "list_models") return ok(id, text((await listModels(ctx.upstream)).join("\n") || "(no models online)"));
         if (name === "promo_video") {
           const req = parsePublicPromoRequest(args);
