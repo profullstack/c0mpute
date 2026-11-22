@@ -71,7 +71,7 @@ c0mpute chat login   # the same thing, kept for scripts that use it`}
           API and MCP take <code>Authorization: Bearer c0k_...</code> (a key from <code>c0mpute login</code> or the account page). MCP clients
           (Claude, ChatGPT) can instead connect to <code>https://c0mpute.com/api/mcp</code> and sign in through OAuth; tools include{" "}
           <code>whoami</code>, <code>list_my_nodes</code>, <code>my_earnings</code>, <code>fleet_list</code>, <code>fleet_action</code>,{" "}
-          <code>fleet_earnings</code> and <code>link_node</code>.
+          <code>fleet_earnings</code>, <code>fleet_alerts_get</code>, <code>fleet_alerts_set</code> and <code>link_node</code>.
         </P>
         <Code>
 {`curl -H "authorization: Bearer $C0MPUTE_API_KEY" https://c0mpute.com/api/v1/me?nodes=1
@@ -111,6 +111,37 @@ c0mpute fleet tag <node...> --set vast,home  c0mpute fleet untag <node...> --set
 c0mpute fleet rename <node> "den 3060"       c0mpute fleet unlink <node...>
 c0mpute fleet earnings [--json]              c0mpute fleet audit
 c0mpute fleet token create|ls|revoke`}
+        </Code>
+        <P>
+          Node settings are signed commands too. The node writes them to <code>fleet-settings.json</code> in its config dir (never to your
+          config.toml), and reports its new state on the next poll, so the fleet view shows what each node really serves. Models and the
+          house/uncensored switches take effect at once; hosting and storage restart the worker after its running jobs finish. A
+          command-line <code>--no-storage</code> / <code>--no-hosting</code> on the node still wins. <code>default</code> hands a setting back to
+          the node&apos;s own config.
+        </P>
+        <Code>
+{`c0mpute fleet models <node...|--tag T|--all> --set qwen3:4b,llama3:8b   # serve only these (--clear: all)
+c0mpute fleet house-models on|off|default <node...|--tag T|--all>
+c0mpute fleet uncensored on|off|default <node...|--tag T|--all>
+c0mpute fleet hosting on|off|default <node...|--tag T|--all>
+c0mpute fleet storage on|off|default <node...|--tag T|--all>
+# API: POST /api/v1/fleet/actions {"action":"hosting","tag":"rack-a","args":{"on":false}}
+#      {"action":"models","nodes":["AbCd1234"],"args":{"models":["qwen3:4b"]}}`}
+        </Code>
+      </Section>
+
+      <Section h="alerts" title="[ fleet alerts ]">
+        <P>
+          Email when a node goes offline (default after 15 minutes), the fleet&apos;s earnings drop (the last 24 hours against the trailing
+          7-day daily average, default 50% down), an update fails, or a disk runs low (default under 10 GB or 5% free). One email when it
+          starts and one when it is fixed; a node that flaps inside the cooldown (default 60 minutes) does not send more. The address is
+          confirmed by a link first. Set it on <Link href="/account#alerts">your account</Link>, or:
+        </P>
+        <Code>
+{`c0mpute fleet alerts set --email you@example.com --offline-minutes 15 --disk-min-gb 20 --off earnings
+c0mpute fleet alerts get [--json]
+c0mpute fleet alerts test
+# API: GET|PUT /api/v1/fleet/alerts, POST {"test":true}   MCP: fleet_alerts_get, fleet_alerts_set`}
         </Code>
       </Section>
 

@@ -12,6 +12,22 @@ import { Api, ApiError, errorMessage, LOGIN_HINT, type SyncConvo, type SyncSumma
 import { loadBench } from "./bench.ts";
 import { parseLine, HELP_COMMANDS, type Command } from "./commands.ts";
 import { expandHome, loadCreds, paths, saveCreds, saveSettings, writeJson, type PreviewMode } from "./config.ts";
+import {
+  buildRequest,
+  confirmText,
+  fetchFleet,
+  FLEET_ACTIONS,
+  flipValue,
+  parseModels,
+  pickAll,
+  postAction,
+  targets,
+  togglePick,
+  TOGGLE_ACTIONS,
+  type FleetAction,
+  type TextAction,
+  type ToggleAction,
+} from "./fleet.ts";
 import { JobRunner, KIND_LABEL, startBody, type Job, type JobKind } from "./jobs.ts";
 import {
   c0mputeBin,
@@ -24,7 +40,7 @@ import {
   readJobTimes,
 } from "./node.ts";
 import { fetchMe, fetchModels, fetchNodes, fetchPricing, fetchStatus, load } from "./network.ts";
-import { activeModel, adultActive, jobById, newConvo, SETTINGS_ROWS, TABS, type AppState, type ChatMsg, type Convo, type Tab } from "./state.ts";
+import { activeModel, adultActive, jobById, newConvo, SETTINGS_ROWS, TABS, type AppState, type ChatMsg, type Convo, type FleetState, type Tab } from "./state.ts";
 import { textHistory } from "./web/images.ts";
 import { collectPushFiles, type PushCommand, type ConnectCommand, type PushMsg } from "./web/push-shared.ts";
 
@@ -109,6 +125,8 @@ export class Controller {
     every(30_000, () => (this.state.tab === "network" ? void this.refreshNetwork() : undefined));
     every(120_000, () => (this.state.tab !== "network" ? void this.refreshNetwork() : undefined));
     every(60_000, () => void this.refreshAccount());
+    // The fleet only while its tab is open: one GET every 20 s.
+    every(20_000, () => (this.state.tab === "fleet" ? void this.refreshFleet() : undefined));
     every(60_000, () => void this.syncConvo());
     setTimeout(() => void this.syncConvo(), 1500);
     every(30 * 60_000, () => void this.refreshVersion());
@@ -153,6 +171,7 @@ export class Controller {
     this.set({ tab, preview: null, editing: null });
     if (tab === "node") void this.refreshLogs();
     if (tab === "network" && !this.state.net.status.at) void this.refreshNetwork();
+    if (tab === "fleet") void this.refreshFleet();
   }
 
   cycleTab(delta: number): void {
@@ -937,5 +956,144 @@ export class Controller {
 
   cancelLogin(): void {
     if (this.state.login) this.set({ login: null });
+  }
+
+  // ─── fleet ────────────────────────────────────────────────────────────
+
+  private setFleet(patch: Partial<FleetState>): void {
+    this.set({ fleet: { ...this.state.fleet, ...patch } });
+  }
+
+  /** GET /api/v1/fleet, keeping the highlight on the same node across a refresh. */
+  refreshFleet(): Promise<void> {
+    return this.once("fleet", async () => {
+      if (!this.deps.api.signedIn) {
+        this.setFleet({ list: { data: null, error: LOGIN_HINT, at: this.now(), loading: false } });
+        return;
+      }
+      const before = this.state.fleet;
+      const was = before.list.data?.nodes[before.sel]?.node;
+      this.setFleet({ list: { ...before.list, loading: true } });
+      const list = await load(before.list, () => fetchFleet(this.deps.api), () => this.now());
+      const nodes = list.data?.nodes ?? [];
+      const at = was ? nodes.findIndex((n) => n.node === was) : -1;
+      const ids = new Set(nodes.map((n) => n.node));
+      this.setFleet({
+        list,
+        sel: at >= 0 ? at : Math.max(0, Math.min(this.state.fleet.sel, nodes.length - 1)),
+        picked: this.state.fleet.picked.filter((id) => ids.has(id)),
+      });
+    });
+  }
+
+  private fleetNodes() {
+    return this.state.fleet.list.data?.nodes ?? [];
+  }
+
+  moveFleet(delta: number): void {
+    const n = this.fleetNodes().length;
+    this.setFleet({ sel: Math.max(0, Math.min(n - 1, this.state.fleet.sel + delta)) });
+  }
+
+  toggleFleetPick(): void {
+    const node = this.fleetNodes()[this.state.fleet.sel];
+    if (node) this.setFleet({ picked: togglePick(this.state.fleet.picked, node.node) });
+  }
+
+  pickAllFleet(): void {
+    this.setFleet({ picked: pickAll(this.fleetNodes(), this.state.fleet.picked) });
+  }
+
+  clearFleetPick(): void {
+    this.setFleet({ picked: [], outcome: null });
+  }
+
+  openFleetMenu(): void {
+    if (this.fleetNodes().length) this.setFleet({ menu: 0 });
+  }
+
+  moveFleetMenu(delta: number): void {
+    const m = this.state.fleet.menu;
+    if (m === null) return;
+    this.setFleet({ menu: Math.max(0, Math.min(FLEET_ACTIONS.length - 1, m + delta)) });
+  }
+
+  chooseFleetMenu(index = this.state.fleet.menu ?? 0): void {
+    const a = FLEET_ACTIONS[index];
+    this.setFleet({ menu: null });
+    if (a) this.startFleetAction(a.action);
+  }
+
+  /**
+   * The first step of every action: tags and models ask for text, the rest
+   * go straight to the confirmation. Nothing is sent from here.
+   */
+  startFleetAction(action: FleetAction): void {
+    const nodes = this.fleetNodes();
+    const ids = targets(nodes, this.state.fleet.sel, this.state.fleet.picked);
+    if (!ids.length) return this.toast("no nodes to act on", "info");
+    if (action === "tag" || action === "untag" || action === "models") {
+      const node = nodes[this.state.fleet.sel];
+      const value = action === "models" ? (node?.node_state?.settings.models ?? []).join(", ") : "";
+      this.setFleet({ menu: null, prompt: { action: action as TextAction, nodes: ids, input: { value, cursor: value.length } } });
+      return;
+    }
+    const value = (TOGGLE_ACTIONS as string[]).includes(action) ? flipValue(nodes[this.state.fleet.sel], action as ToggleAction) : undefined;
+    const req = buildRequest(action, ids, value);
+    this.setFleet({ menu: null, confirm: { req, text: confirmText(req) } });
+  }
+
+  setFleetInput(input: TextEditState): void {
+    const p = this.state.fleet.prompt;
+    if (p) this.setFleet({ prompt: { ...p, input } });
+  }
+
+  /** Enter on the tags/models prompt: on to the confirmation. */
+  submitFleetPrompt(): void {
+    const p = this.state.fleet.prompt;
+    if (!p) return;
+    const text = p.input.value;
+    if (p.action !== "models" && !text.trim()) {
+      this.setFleet({ prompt: null });
+      return this.toast("no tags given: nothing sent", "info");
+    }
+    const req = buildRequest(p.action, p.nodes, p.action === "models" ? parseModels(text) : text);
+    this.setFleet({ prompt: null, confirm: { req, text: confirmText(req) } });
+  }
+
+  /** t in a toggle's confirmation: set the other value instead. */
+  flipFleetConfirm(): void {
+    const c = this.state.fleet.confirm;
+    if (!c || !(TOGGLE_ACTIONS as string[]).includes(c.req.action)) return;
+    const req = { ...c.req, args: { on: !c.req.args.on } };
+    this.setFleet({ confirm: { req, text: confirmText(req) } });
+  }
+
+  /** n, Esc or Enter (the default is No): drop the prompt, menu or confirmation, send nothing. */
+  cancelFleet(): void {
+    const f = this.state.fleet;
+    if (f.confirm || f.prompt || f.menu !== null) {
+      this.setFleet({ confirm: null, prompt: null, menu: null });
+      this.toast("cancelled: nothing sent", "info");
+    }
+  }
+
+  /** y: the only path that POSTs. */
+  confirmFleet(): Promise<void> {
+    const c = this.state.fleet.confirm;
+    if (!c) return Promise.resolve();
+    this.setFleet({ confirm: null, sending: c.req.action });
+    return this.once("fleet-action", async () => {
+      try {
+        const outcome = await postAction(this.deps.api, c.req);
+        this.setFleet({ outcome, sending: null, picked: outcome.refused ? this.state.fleet.picked : [] });
+        if (outcome.refused) this.toast(`${c.req.action}: every node refused`, "error");
+        else this.toast(`${c.req.action}: ${outcome.ok} ok${outcome.failed ? `, ${outcome.failed} failed` : ""}${outcome.nodeSide ? " · runs on each node's next poll (about a minute)" : ""}`, outcome.failed ? "error" : "ok");
+      } catch (e) {
+        this.setFleet({ sending: null });
+        this.toast(`${c.req.action}: ${e instanceof Error ? e.message : String(e)}`, "error");
+      }
+      await this.refreshFleet();
+    });
   }
 }

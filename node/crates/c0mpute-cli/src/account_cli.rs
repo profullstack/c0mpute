@@ -355,6 +355,21 @@ pub enum FleetCmd {
     Update(TargetArgs),
     /// Restart the worker (finishes running jobs first).
     Restart(TargetArgs),
+    /// Chat models to serve: `c0mpute fleet models <node...|--tag T|--all> --set qwen3:4b,llama3:8b` (`--clear`: every model the node has).
+    Models(ModelsArgs),
+    /// Serve the network's house models: `c0mpute fleet house-models off <node...|--tag T|--all>`.
+    HouseModels(ToggleArgs),
+    /// Serve uncensored / abliterated models: `c0mpute fleet uncensored off ...`.
+    Uncensored(ToggleArgs),
+    /// Hold sites for the network (the node restarts after running jobs finish).
+    Hosting(ToggleArgs),
+    /// Store shards for the network (the node restarts after running jobs finish).
+    Storage(ToggleArgs),
+    /// Alerts by email (and SMS for Profullstack admin accounts): node offline, earnings drop, update failed, disk low.
+    Alerts {
+        #[command(subcommand)]
+        cmd: AlertsCmd,
+    },
     /// Add tags: `c0mpute fleet tag <node...|--tag T|--all> --set vast,home`.
     Tag(TagArgs),
     /// Remove tags.
@@ -397,6 +412,174 @@ pub struct TargetArgs {
     pub target: Target,
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+    /// Hand the setting back to the node's own config.
+    Default,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ToggleArgs {
+    /// on, off, or default (the node's own config decides).
+    #[arg(value_enum)]
+    pub state: OnOff,
+    #[command(flatten)]
+    pub target: Target,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ModelsArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// The models, comma separated (exact ids as `/v1/models` lists them).
+    #[arg(long = "set", value_name = "MODELS", conflicts_with = "clear")]
+    pub models: Option<String>,
+    /// Serve every model the node has again.
+    #[arg(long)]
+    pub clear: bool,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AlertsCmd {
+    /// Current settings, open alerts and recent notices.
+    Get {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change settings: `c0mpute fleet alerts set --email me@example.com --offline-minutes 15 --off earnings`.
+    Set(AlertsSetArgs),
+    /// Send a test notice to the alert email (and SMS when on).
+    Test,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct AlertsSetArgs {
+    /// Where alerts go (a confirmation link is sent first). `--email none` removes it.
+    #[arg(long)]
+    pub email: Option<String>,
+    /// A node counts as offline after this many minutes without being heard (default 15).
+    #[arg(long)]
+    pub offline_minutes: Option<u32>,
+    /// Alert when the last 24h earned this much less (%) than the trailing 7-day daily average (default 50).
+    #[arg(long)]
+    pub earnings_drop_pct: Option<u32>,
+    /// Ignore earnings drops while the 7-day daily average is under this (USD, default 0.05).
+    #[arg(long)]
+    pub earnings_min_usd: Option<f64>,
+    /// Disk low under this many GB free (0 = off; default 10).
+    #[arg(long)]
+    pub disk_min_gb: Option<f64>,
+    /// Disk low under this % free (0 = off; default 5).
+    #[arg(long)]
+    pub disk_min_pct: Option<f64>,
+    /// After a recovery, a new alert for the same thing waits this long (default 60).
+    #[arg(long)]
+    pub cooldown_minutes: Option<u32>,
+    /// Turn alert kinds on: offline,earnings,update,disk.
+    #[arg(long)]
+    pub on: Option<String>,
+    /// Turn alert kinds off.
+    #[arg(long)]
+    pub off: Option<String>,
+    /// SMS through the fleet alert line (Profullstack admin accounts only).
+    #[arg(long, value_enum)]
+    pub sms: Option<OnOff>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The JSON body for PUT /api/v1/fleet/alerts.
+pub fn alerts_body(a: &AlertsSetArgs) -> Result<Value> {
+    let mut b = json!({});
+    if let Some(e) = &a.email {
+        b["email"] = if e.eq_ignore_ascii_case("none") || e.is_empty() { Value::Null } else { json!(e) };
+    }
+    let mut num = |k: &str, v: Option<f64>| {
+        if let Some(v) = v {
+            b[k] = json!(v);
+        }
+    };
+    num("offline_minutes", a.offline_minutes.map(f64::from));
+    num("earnings_drop_pct", a.earnings_drop_pct.map(f64::from));
+    num("earnings_min_usd", a.earnings_min_usd);
+    num("disk_min_gb", a.disk_min_gb);
+    num("disk_min_pct", a.disk_min_pct);
+    num("cooldown_minutes", a.cooldown_minutes.map(f64::from));
+    let kinds = ["offline", "earnings", "update", "disk"];
+    let mut k = json!({});
+    for (list, on) in [(&a.on, true), (&a.off, false)] {
+        for w in list.iter().flat_map(|l| l.split(',')).map(str::trim).filter(|w| !w.is_empty()) {
+            if !kinds.contains(&w) {
+                bail!("alert kinds: offline, earnings, update, disk (not {w})");
+            }
+            k[w] = json!(on);
+        }
+    }
+    if k.as_object().is_some_and(|o| !o.is_empty()) {
+        b["kinds"] = k;
+    }
+    match a.sms {
+        Some(OnOff::On) => b["sms"] = json!(true),
+        Some(OnOff::Off) | Some(OnOff::Default) => b["sms"] = json!(false),
+        None => {}
+    }
+    if b.as_object().is_some_and(|o| o.is_empty()) {
+        bail!("nothing to change: see `c0mpute fleet alerts set --help`");
+    }
+    Ok(b)
+}
+
+fn toggle_args(s: OnOff) -> Value {
+    match s {
+        OnOff::On => json!({"on": true}),
+        OnOff::Off => json!({"on": false}),
+        OnOff::Default => json!({"on": null}),
+    }
+}
+
+/// `--set a,b` as a list; `--clear` (or nothing) as an empty list = every model.
+pub fn models_args(a: &ModelsArgs) -> Result<Value> {
+    if a.models.is_none() && !a.clear {
+        bail!("say which models: --set qwen3:4b,llama3:8b (or --clear for every model)");
+    }
+    let list: Vec<String> = a.models.iter().flat_map(|m| m.split(',')).map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    Ok(json!({ "models": list }))
+}
+
+fn print_alerts(v: &Value) {
+    let s = &v["settings"];
+    let email = match (s["email"].as_str(), s["email_verified"].as_bool()) {
+        (Some(e), Some(true)) => e.to_string(),
+        (Some(e), _) => format!("{e} (not confirmed yet: open the link we emailed)"),
+        _ => "none (set one: c0mpute fleet alerts set --email you@example.com)".into(),
+    };
+    println!("email: {email}");
+    if s["sms_available"].as_bool() == Some(true) {
+        println!("sms: {}", if s["sms"].as_bool() == Some(true) { "on" } else { "off" });
+    }
+    let k = &s["kinds"];
+    let on = |n: &str| if k[n].as_bool() == Some(false) { "off" } else { "on" };
+    println!("offline: {} after {} min", on("offline"), s["offline_minutes"]);
+    println!("earnings drop: {} at {}% under the 7-day daily average (ignored under ${}/day)", on("earnings"), s["earnings_drop_pct"], s["earnings_min_usd"]);
+    println!("update failed: {}", on("update"));
+    println!("disk low: {} under {} GB or {}% free", on("disk"), s["disk_min_gb"], s["disk_min_pct"]);
+    println!("cooldown: {} min", s["cooldown_minutes"]);
+    let active = v["active"].as_array().cloned().unwrap_or_default();
+    println!("open alerts: {}", if active.is_empty() { "none".to_string() } else { active.len().to_string() });
+    for a in active {
+        println!("  {:9} {:8} since {}  {}", a["kind"].as_str().unwrap_or(""), a["node"].as_str().unwrap_or(""), a["since"].as_str().unwrap_or("").get(..16).unwrap_or(""), a["detail"].as_str().unwrap_or(""));
+    }
+    for l in v["log"].as_array().cloned().unwrap_or_default().into_iter().take(10) {
+        println!("  {}  {:8} {:9} {:8} {}", l["at"].as_str().unwrap_or("").get(..16).unwrap_or(""), l["event"].as_str().unwrap_or(""), l["kind"].as_str().unwrap_or(""), l["node"].as_str().unwrap_or(""), l["detail"].as_str().unwrap_or(""));
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -492,7 +675,7 @@ async fn action(name: &str, t: &Target, args: Value, as_json: bool) -> Result<()
     for r in v["results"].as_array().cloned().unwrap_or_default() {
         println!("{} {}  {}", if r["ok"].as_bool() == Some(true) { "ok " } else { "-- " }, r["node"].as_str().unwrap_or(""), r["detail"].as_str().unwrap_or(""));
     }
-    if matches!(name, "pause" | "resume" | "update" | "restart") {
+    if matches!(name, "pause" | "resume" | "update" | "restart" | "models" | "house-models" | "uncensored" | "hosting" | "storage") {
         println!("queued: each node runs it on its next poll (about a minute); follow with `c0mpute fleet audit`.");
     }
     Ok(())
@@ -518,6 +701,33 @@ fn print_node(n: &Value) {
         if n["verified"].as_bool() == Some(true) { "" } else { " (unverified)" },
         if n["paused"].as_bool() == Some(true) { " PAUSED" } else { "" },
     );
+    if let Some(line) = settings_line(&n["node_state"]) {
+        println!("    {line}");
+    }
+}
+
+/// What a node reported about its settings, in one line (None before it reported).
+pub fn settings_line(st: &Value) -> Option<String> {
+    if !st.is_object() {
+        return None;
+    }
+    let e = &st["effective"];
+    let onoff = |v: &Value| match v.as_bool() {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "-",
+    };
+    let served = e["served_models"].as_array().map(|a| a.len()).unwrap_or(0);
+    let allow = st["settings"]["models"].as_array().map(|a| format!(" (allowlist {})", a.len())).unwrap_or_default();
+    let disk = st["disk"]["free_bytes"].as_f64().map(|f| format!("  disk {:.0} GB free", f / 1e9)).unwrap_or_default();
+    let upd = st["update_error"]["error"].as_str().map(|e| format!("  UPDATE FAILED: {}", e.chars().take(80).collect::<String>())).unwrap_or_default();
+    Some(format!(
+        "models {served}{allow}  house {}  uncensored {}  hosting {}  storage {}{disk}{upd}",
+        onoff(&e["house_models"]),
+        onoff(&e["uncensored"]),
+        onoff(&e["hosting"]),
+        onoff(&e["storage"])
+    ))
 }
 
 pub async fn fleet(cmd: FleetCmd) -> Result<()> {
@@ -557,6 +767,39 @@ pub async fn fleet(cmd: FleetCmd) -> Result<()> {
         FleetCmd::Resume(a) => action("resume", &a.target, json!({}), a.json).await,
         FleetCmd::Update(a) => action("update", &a.target, json!({}), a.json).await,
         FleetCmd::Restart(a) => action("restart", &a.target, json!({}), a.json).await,
+        FleetCmd::Models(a) => action("models", &a.target, models_args(&a)?, a.json).await,
+        FleetCmd::HouseModels(a) => action("house-models", &a.target, toggle_args(a.state), a.json).await,
+        FleetCmd::Uncensored(a) => action("uncensored", &a.target, toggle_args(a.state), a.json).await,
+        FleetCmd::Hosting(a) => action("hosting", &a.target, toggle_args(a.state), a.json).await,
+        FleetCmd::Storage(a) => action("storage", &a.target, toggle_args(a.state), a.json).await,
+        FleetCmd::Alerts { cmd } => match cmd {
+            AlertsCmd::Get { json } => {
+                let v = api(Method::GET, "/api/v1/fleet/alerts", None).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    print_alerts(&v);
+                }
+                Ok(())
+            }
+            AlertsCmd::Set(a) => {
+                let v = api(Method::PUT, "/api/v1/fleet/alerts", Some(alerts_body(&a)?)).await?;
+                if a.json {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    if let Some(n) = v["notice"].as_str() {
+                        println!("{n}");
+                    }
+                    print_alerts(&v);
+                }
+                Ok(())
+            }
+            AlertsCmd::Test => {
+                let v = api(Method::POST, "/api/v1/fleet/alerts", Some(json!({"test": true}))).await?;
+                println!("{}", v["detail"].as_str().unwrap_or("sent"));
+                Ok(())
+            }
+        },
         FleetCmd::Unlink(a) => action("unlink", &a.target, json!({}), a.json).await,
         FleetCmd::Tag(a) => action("tag", &a.target, json!({"tags": a.tags}), a.json).await,
         FleetCmd::Untag(a) => action("untag", &a.target, json!({"tags": a.tags}), a.json).await,
@@ -680,6 +923,29 @@ mod tests {
         assert!(check_link_message(&ok, "https://c0mpute.com", "12D3KooWy").is_err());
         assert!(check_link_message("c0mpute node poll v1\nsite: https://c0mpute.com\nnode: 12D3KooWx\nts: 1", "https://c0mpute.com", "12D3KooWx").is_err());
         assert!(check_link_message(&format!("{ok}\nextra: 1"), "https://c0mpute.com", "12D3KooWx").is_err());
+    }
+
+    #[test]
+    fn settings_and_alert_bodies() {
+        let m = ModelsArgs { target: Target::default(), models: Some("qwen3:4b, llama3:8b,".into()), clear: false, json: false };
+        assert_eq!(models_args(&m).unwrap(), json!({"models": ["qwen3:4b", "llama3:8b"]}));
+        let c = ModelsArgs { target: Target::default(), models: None, clear: true, json: false };
+        assert_eq!(models_args(&c).unwrap(), json!({"models": []}));
+        let none = ModelsArgs { target: Target::default(), models: None, clear: false, json: false };
+        assert!(models_args(&none).is_err());
+        assert_eq!(toggle_args(OnOff::Off), json!({"on": false}));
+        assert_eq!(toggle_args(OnOff::Default), json!({"on": null}));
+        let a = AlertsSetArgs { email: Some("ops@example.com".into()), offline_minutes: Some(10), off: Some("earnings, disk".into()), on: Some("offline".into()), sms: Some(OnOff::On), ..Default::default() };
+        assert_eq!(
+            alerts_body(&a).unwrap(),
+            json!({"email": "ops@example.com", "offline_minutes": 10.0, "kinds": {"offline": true, "earnings": false, "disk": false}, "sms": true})
+        );
+        assert_eq!(alerts_body(&AlertsSetArgs { email: Some("none".into()), ..Default::default() }).unwrap(), json!({"email": null}));
+        assert!(alerts_body(&AlertsSetArgs { on: Some("weather".into()), ..Default::default() }).is_err());
+        assert!(alerts_body(&AlertsSetArgs::default()).is_err());
+        let st = json!({"effective": {"served_models": ["a", "b"], "house_models": true, "uncensored": false, "hosting": false, "storage": true}, "settings": {"models": ["a", "b"]}, "disk": {"free_bytes": 50e9}});
+        assert_eq!(settings_line(&st).unwrap(), "models 2 (allowlist 2)  house on  uncensored off  hosting off  storage on  disk 50 GB free");
+        assert_eq!(settings_line(&Value::Null), None);
     }
 
     #[test]

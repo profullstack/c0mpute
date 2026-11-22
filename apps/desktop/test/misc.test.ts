@@ -85,9 +85,9 @@ describe("account", () => {
   test("chat.json key, env overrides", () => {
     const f = join(scratch(), "chat.json");
     writeFileSync(f, JSON.stringify({ url: "https://example.test/", key: "test-key-value" }));
-    expect(readCreds(f, {})).toEqual({ url: "https://example.test", key: "test-key-value", source: "chat.json" });
+    expect(readCreds(f, {})).toEqual({ url: "https://example.test", key: "test-key-value", source: "chat.json", keychain: false });
     expect(readCreds(f, { C0MPUTE_API_KEY: "envkey" })).toMatchObject({ key: "envkey", source: "env" });
-    expect(readCreds(join(scratch(), "none.json"), {})).toEqual({ url: "https://c0mpute.com", source: "none" });
+    expect(readCreds(join(scratch(), "none.json"), {})).toEqual({ url: "https://c0mpute.com", source: "none", keychain: false });
   });
 });
 

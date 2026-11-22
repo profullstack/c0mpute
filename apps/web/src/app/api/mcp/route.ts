@@ -4,6 +4,7 @@ import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } 
 import { gallery } from "@/lib/gallery/server";
 import { accountStore, fleetFor, fleetService } from "@/lib/accounts/server";
 import { isFleetAction, runAction, selectNodes } from "@/lib/accounts/fleet";
+import { alertsView, saveAlerts, testAlert } from "@/lib/accounts/alerts-api";
 import { earningsStore } from "@/lib/earnings/server";
 import { recordUsage } from "@/lib/leaderboard/server";
 import { convoStore, currentUser, infernetFor, json, liveStore, mcpUnauthorized, ownsJob, pluginStore, pushStore, rateLimit, recordJob, siteUrl } from "@/lib/chat/server";
@@ -61,12 +62,17 @@ function fleetDeps(user: { coinpay_sub: string | null; did: string | null; name:
     fleet: (userId: string) => fleetFor(userId),
     account: async () => ({ coinpay: !!user.coinpay_sub, did: user.did, name: user.name, sign_in: null }),
     action: async (userId: string, body: { action: string; nodes?: unknown; tag?: unknown; all?: unknown; args?: Record<string, unknown> }) => {
-      if (!isFleetAction(body.action)) return { error: "action: pause, resume, update, restart, rename, tag, untag, set-tags, cost or unlink" };
+      if (!isFleetAction(body.action)) return { error: "action: pause, resume, update, restart, models, house-models, uncensored, hosting, storage, rename, tag, untag, set-tags, cost or unlink" };
       const f = await fleetFor(userId);
       const targets = selectNodes(f.nodes, body);
       if (typeof targets === "string") return { error: targets };
       if (!targets.length) return { error: "no nodes matched" };
       return runAction({ userId, actor: "mcp", action: body.action, args: body.args ?? {}, targets, fleet: fleetService(), accounts: accountStore(), earnings: earningsStore() });
+    },
+    alerts: {
+      get: (userId: string) => alertsView(userId),
+      set: (userId: string, patch: Record<string, unknown>) => saveAlerts(userId, patch),
+      test: (userId: string) => testAlert(userId),
     },
   };
 }

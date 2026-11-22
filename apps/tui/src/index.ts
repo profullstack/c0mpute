@@ -9,6 +9,8 @@
  *               running jobs, log, version, bench
  *   4 Network   workers online, per-role counts, node board, prices, balance
  *   5 Settings  sign-in, default model, downloads dir, 18+ mode, previews
+ *   6 Fleet     the account's nodes: pause/resume/update/restart, tags,
+ *               models and toggles, each confirmed before it is sent
  *
  * The first frame draws from local files only; everything on the network or
  * in a subprocess arrives after. See dips/0008-ui-strategy.md.
@@ -31,7 +33,7 @@ const VERSION: string = pkg.version;
 function usage(): void {
   process.stdout.write(`c0mpute tui ${VERSION}: chat, jobs, your node and the network, in the terminal
 
-  c0mpute tui              start (Tab / 1-5 switch tabs, ? for keys)
+  c0mpute tui              start (Tab / 1-6 switch tabs, ? for keys)
   c0mpute tui --version
 
 Sign in once with \`c0mpute chat login\` (or L in Settings).
@@ -90,7 +92,8 @@ async function main(): Promise<void> {
   });
   app.on("paste", (e) => {
     const s = ctl.state;
-    if (s.editing) ctl.setEditing(insertText(s.editing, e.text));
+    if (s.fleet.prompt) ctl.setFleetInput(insertText(s.fleet.prompt.input, e.text));
+    else if (s.editing) ctl.setEditing(insertText(s.editing, e.text));
     else if (s.tab === "chat") {
       ctl.setTyping(true);
       ctl.setInput(insertText(ctl.state.chat.input, e.text));
@@ -119,6 +122,11 @@ async function main(): Promise<void> {
         onSelect: (i) => {
           ctl.moveSetting(i - ctl.state.settingsSel);
         },
+      },
+      fleet: {
+        onSelect: (i) => ctl.moveFleet(i - ctl.state.fleet.sel),
+        onScroll: (d) => ctl.moveFleet(d),
+        onCancel: () => ctl.cancelFleet(),
       },
     });
   });

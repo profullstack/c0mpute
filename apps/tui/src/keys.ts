@@ -6,6 +6,7 @@
  */
 import { editText, matchKey, type KeyEvent } from "@profullstack/hqtui";
 import type { Controller } from "./controller.ts";
+import { FLEET_ACTIONS } from "./fleet.ts";
 import { SETTINGS_ROWS, TABS } from "./state.ts";
 
 const is = (e: KeyEvent, ...keys: string[]) => keys.some((k) => matchKey(e, k));
@@ -42,6 +43,32 @@ export function handleKey(ctl: Controller, e: KeyEvent): "quit" | void {
     }
     return;
   }
+  // The fleet's confirmation, prompt and action menu: nothing else while one is up.
+  if (s.fleet.confirm) {
+    if (e.char === "y" || e.char === "Y") void ctl.confirmFleet();
+    else if (e.char === "t" && !e.ctrl && !e.alt) ctl.flipFleetConfirm();
+    else if (is(e, "escape", "enter") || e.char === "n" || e.char === "N") ctl.cancelFleet();
+    return;
+  }
+  if (s.fleet.prompt) {
+    if (is(e, "enter")) ctl.submitFleetPrompt();
+    else if (is(e, "escape")) ctl.cancelFleet();
+    else {
+      const input = s.fleet.prompt.input;
+      const next = editText(input, e) ?? (e.char && !e.ctrl && !e.alt ? { value: input.value.slice(0, input.cursor) + e.char + input.value.slice(input.cursor), cursor: input.cursor + e.char.length } : null);
+      if (next) ctl.setFleetInput(next);
+    }
+    return;
+  }
+  if (s.fleet.menu !== null) {
+    const direct = e.char && !e.ctrl && !e.alt ? FLEET_ACTIONS.findIndex((a) => a.key === e.char) : -1;
+    if (is(e, "up", "k")) ctl.moveFleetMenu(-1);
+    else if (is(e, "down", "j")) ctl.moveFleetMenu(1);
+    else if (is(e, "enter")) ctl.chooseFleetMenu();
+    else if (direct >= 0) ctl.chooseFleetMenu(direct);
+    else if (is(e, "escape", "q")) ctl.cancelFleet();
+    return;
+  }
 
   // Global, even while typing.
   if (is(e, "tab")) return ctl.cycleTab(1);
@@ -55,7 +82,7 @@ export function handleKey(ctl: Controller, e: KeyEvent): "quit" | void {
   if (s.login && is(e, "escape")) return ctl.cancelLogin();
   if (is(e, "q")) return "quit";
   if (is(e, "?")) return ctl.toggleHelp();
-  if (e.char && /^[1-5]$/.test(e.char) && !e.ctrl && !e.alt) return ctl.setTab(TABS[Number(e.char) - 1]!);
+  if (e.char && /^[1-9]$/.test(e.char) && Number(e.char) <= TABS.length && !e.ctrl && !e.alt) return ctl.setTab(TABS[Number(e.char) - 1]!);
 
   switch (s.tab) {
     case "chat":
@@ -98,7 +125,37 @@ export function handleKey(ctl: Controller, e: KeyEvent): "quit" | void {
       else if ((e.char === "X" || e.char === "x") && SETTINGS_ROWS[s.settingsSel] === "adult") void ctl.revokeAdult();
       else if (is(e, "r")) void ctl.refreshAccount();
       return;
+    case "fleet":
+      return fleetKeys(ctl, e);
   }
+}
+
+function fleetKeys(ctl: Controller, e: KeyEvent): void {
+  const s = ctl.state;
+  if (!s.creds.key) {
+    if (e.char === "L" || e.char === "l") {
+      ctl.setTab("settings");
+      void ctl.login();
+    }
+    return;
+  }
+  if (is(e, "up", "k")) return ctl.moveFleet(-1);
+  if (is(e, "down", "j")) return ctl.moveFleet(1);
+  if (is(e, "pageup")) return ctl.moveFleet(-10);
+  if (is(e, "pagedown")) return ctl.moveFleet(10);
+  if (is(e, "home", "g")) return ctl.moveFleet(-1e6);
+  if (is(e, "end", "G")) return ctl.moveFleet(1e6);
+  if (is(e, "space")) return ctl.toggleFleetPick();
+  if (e.char === "a" && !e.ctrl && !e.alt) return ctl.pickAllFleet();
+  if (is(e, "escape")) return ctl.clearFleetPick();
+  if (is(e, "enter")) return ctl.openFleetMenu();
+  if (is(e, "r")) {
+    void ctl.refreshFleet();
+    return ctl.toast("refreshing the fleet…");
+  }
+  if (!s.fleet.list.data?.nodes.length || !e.char || e.ctrl || e.alt) return;
+  const a = FLEET_ACTIONS.find((x) => x.key === e.char);
+  if (a) ctl.startFleetAction(a.action);
 }
 
 function chatTyping(ctl: Controller, e: KeyEvent): void {
