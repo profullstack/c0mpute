@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import type { Sql } from "./store";
 import { createPluginStore, publicPlugin } from "./plugin-store";
-import { applyPolicy, DEFAULT_PLUGINS, describeAction, FINANCE_CATALOG, needsConfirmation, POLICIES, policyFor, redactLog } from "./plugin-policy";
+import { applyPolicy, DEFAULT_PLUGINS, describeAction, DOCS_CATALOG, FINANCE_CATALOG, mcpAddCommand, needsConfirmation, POLICIES, policyFor, redactLog } from "./plugin-policy";
 
 function memSql(): Sql {
   const db = new Database(":memory:");
@@ -17,7 +17,7 @@ function memSql(): Sql {
 
 describe("money plugin catalog", () => {
   test("Mercury and CoinPay are on by default; moomoo is listed but off", () => {
-    expect(DEFAULT_PLUGINS.map((d) => d.slug).sort()).toEqual(["coinpay", "mercury"]);
+    expect(DEFAULT_PLUGINS.map((d) => d.slug).sort()).toEqual(["coinpay", "mercury", "microsoft-learn"]);
     const moomoo = FINANCE_CATALOG.find((e) => e.slug === "moomoo")!;
     expect(moomoo.default).toBe(false);
     expect(moomoo.description).toContain("you decide");
@@ -118,7 +118,31 @@ describe("approval card", () => {
 });
 
 describe("default plugins in the store", () => {
-  const defaults = DEFAULT_PLUGINS.map((d) => ({ slug: d.slug, name: d.name, url: d.url }));
+  // The money defaults (sign-in on first use); the docs default is tested below.
+  const defaults = DEFAULT_PLUGINS.filter((d) => d.auth !== "none").map((d) => ({ slug: d.slug, name: d.name, url: d.url }));
+
+  test("Microsoft Learn is seeded on and ready to use, with no sign-in", async () => {
+    const ms = DOCS_CATALOG.find((e) => e.slug === "microsoft-learn")!;
+    expect(ms.url).toBe("https://learn.microsoft.com/api/mcp");
+    expect(policyFor(ms.url)).toBeNull();
+    expect(mcpAddCommand(ms)).toBe("claude mcp add --transport http microsoft-learn https://learn.microsoft.com/api/mcp");
+    const sql = memSql();
+    const s = createPluginStore(sql, { key: randomBytes(32), defaults: DEFAULT_PLUGINS });
+    const list = await s.list("u1");
+    expect(list.map((p) => p.slug).sort()).toEqual(["coinpay", "mercury", "microsoft-learn"]);
+    const p = list.find((x) => x.slug === "microsoft-learn")!;
+    expect(p.auth).toBe("none");
+    const pub = publicPlugin(p, "https://c0mpute.com");
+    expect(pub.status).toBe("on");
+    expect(pub.connected).toBe(true);
+    expect(pub.auth).toBe("none");
+    expect(pub.connect_url).toBeNull();
+    expect(pub.icon).toBe(ms.icon);
+    // Removed stays removed, in a fresh process too.
+    expect(await s.remove("u1", "microsoft-learn")).toBe(true);
+    const again = createPluginStore(sql, { key: randomBytes(32), defaults: DEFAULT_PLUGINS });
+    expect((await again.list("u1")).some((x) => x.slug === "microsoft-learn")).toBe(false);
+  });
 
   test("every account (existing or new) gets them on and not connected, with no account attached", async () => {
     const s = createPluginStore(memSql(), { key: randomBytes(32), defaults });
