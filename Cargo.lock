@@ -486,7 +486,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "c0mpute-api"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-bench"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "blake3",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-cli"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-core"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-doctor"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "serde",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-envelope"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "blake3",
  "bs58",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-gateway"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "axum",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-market"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "c0mpute-envelope",
  "serde",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-net"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-placement"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-proto"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "blake3",
  "hex",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-sealed"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-secure-chat"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-store"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "blake3",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-transcode"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "c0mpute-proto",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-update"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "hex",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "c0mpute-verify"
-version = "0.3.105"
+version = "0.3.106"
 dependencies = [
  "anyhow",
  "blake3",
