@@ -20,7 +20,7 @@
     },
     "apps/desktop": {
       "name": "@c0mpute/desktop",
-      "version": "0.3.67",
+      "version": "0.3.94",
       "devDependencies": {
         "@modelcontextprotocol/sdk": "^1.32.2",
         "@types/bun": "latest",
@@ -36,7 +36,7 @@
     },
     "apps/tui": {
       "name": "@c0mpute/tui",
-      "version": "0.3.67",
+      "version": "0.3.94",
       "bin": {
         "c0mpute-tui": "./src/index.ts",
       },
@@ -50,12 +50,12 @@
     },
     "apps/web": {
       "name": "c0mpute",
-      "version": "0.3.67",
+      "version": "0.3.94",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
         "@profullstack/chat-plugins": "^0.1.0",
         "@profullstack/footer": "latest",
-        "@profullstack/x402-gateway": "^0.18.1",
+        "@profullstack/x402-gateway": "^0.18.2",
         "@sqlitecloud/drivers": "^1.0.982",
         "ioredis": "^6.0.0",
         "next": "16.4.3",
@@ -76,14 +76,14 @@
     },
     "packages/captcha": {
       "name": "@profullstack/c0mpute-captcha",
-      "version": "0.3.67",
+      "version": "0.3.94",
       "bin": {
         "c0mpute-captcha": "./bin/c0mpute-captcha.js",
       },
     },
     "packages/shared": {
       "name": "@c0mpute/shared",
-      "version": "0.3.67",
+      "version": "0.3.94",
       "devDependencies": {
         "typescript": "^7.0.2",
       },
@@ -303,7 +303,7 @@
 
     "@profullstack/keys": ["@profullstack/keys@0.1.0", "", {}, "sha512-Vys47LvS5ivhdZu4SYOxh9Le3DEmWhjP0+CtrU45RhXAbY0ZFG/2Dk9V1bIIUGDp8UWMJqctvUD21JrNjfh04w=="],
 
-    "@profullstack/x402-gateway": ["@profullstack/x402-gateway@0.18.1", "", { "dependencies": { "@profullstack/keys": "^0.1.0" } }, "sha512-zc2JGLXMX8eCk7Mp4X91E175enOTNcWPZncKf3LXzoGE+XEhHDJHM1LRZkkY3x2pjLYX3AB11Vx/TP3cobSQ/g=="],
+    "@profullstack/x402-gateway": ["@profullstack/x402-gateway@0.18.2", "", { "dependencies": { "@profullstack/keys": "^0.1.0" } }, "sha512-PM0S2ADXPKPvPLLlWVbEqMq+EhKxiNxg1wp0jeGf9S5tz2ZGaNIFqun69cO5lJGZgfh03ST4UkJZGr8CmvCWyg=="],
 
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
 

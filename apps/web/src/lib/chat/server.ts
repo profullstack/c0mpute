@@ -217,6 +217,9 @@ export function unauthorized() {
 }
 
 // ── CoinPay OAuth ────────────────────────────────────────────────────────────
+/** Who CoinPay sees calling: every fleet app shares one host and one IP. */
+const COINPAY_UA = `c0mpute.com${process.env.npm_package_version ? `/${process.env.npm_package_version}` : ""} (+https://c0mpute.com)`;
+
 export const coinpay = {
   base: () => (env("COINPAY_URL") || "https://coinpayportal.com").replace(/\/$/, ""),
   clientId: () => env("COINPAY_OAUTH_CLIENT_ID") || "",
@@ -233,7 +236,7 @@ export function pkce() {
 export async function exchangeCode(code: string, verifier: string) {
   const res = await fetch(`${coinpay.base()}/api/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json", "user-agent": COINPAY_UA },
     body: new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -251,7 +254,7 @@ export async function exchangeCode(code: string, verifier: string) {
 
 export async function coinpayUserinfo(accessToken: string) {
   const res = await fetch(`${coinpay.base()}/api/oauth/userinfo`, {
-    headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    headers: { authorization: `Bearer ${accessToken}`, accept: "application/json", "user-agent": COINPAY_UA },
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`userinfo HTTP ${res.status}`);
