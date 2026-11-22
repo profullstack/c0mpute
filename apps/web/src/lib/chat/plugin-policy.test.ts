@@ -181,7 +181,7 @@ describe("default plugins in the store", () => {
     await plain.add("u1", { slug: "bank", url: "https://mcp.mercury.com/mcp", name: "My Mercury", auth: "none" });
     const seeded = createPluginStore(sql, { key: null, defaults });
     const list = await seeded.list("u1");
-    expect(list.map((p) => p.slug).sort()).toEqual(["bank", "coinpay"]);
+    expect(list.map((p) => p.slug).sort()).toEqual(["bank", "cheapestwayz", "coinpay"]);
   });
 
   test("brokerage starts on paper; removing and re-adding starts on paper again", async () => {

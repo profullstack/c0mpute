@@ -32,7 +32,7 @@ describe("chat music", () => {
     const p = sanitizeNodeProgress({ stage: "rendering", worker: "12D3KooWG9TmqCHN63oFoxb2bwTGRYqwW8e1C2Ua9e14XtPja8R9", eta_s: 600, stage_elapsed_s: 125, attempt: 1, junk: 1 });
     expect(p).toMatchObject({ stage: "rendering", eta_s: 600 });
     expect(describeNodeProgress(p!)).toBe("rendering on node …XtPja8R9 · 2:05 in · ~7:55 left (node's estimate)");
-    expect(describeNodeProgress({ stage: "queued", stage_elapsed_s: 61 })).toBe("every music worker is busy; queued 1:01");
+    expect(describeNodeProgress({ stage: "queued", stage_elapsed_s: 61 })).toBe("queued for a c0mpute music worker · 1:01");
     expect(describeNodeProgress({ stage: "retrying", worker: "abcdefgh12345678", detail: "worker failed" })).toContain("trying another worker");
   });
 });
