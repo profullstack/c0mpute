@@ -406,10 +406,23 @@ impl SessionStore {
                 Ok(spoken)
             }
             Err(error) => {
-                // A broken worker is not worth keeping: drop the session so
-                // the next call opens a fresh one instead of failing forever.
-                warn!(session = %session_id, err = %error, "dropping a broken warm speech session");
-                self.close(session_id).await;
+                // A broken worker is not worth keeping. Every session on the
+                // same engine shares it, so drop all of them: dropping only
+                // this one leaves the dead worker in a sibling, and the next
+                // `open` would find it there and hand it straight back, so a
+                // reopen fails forever (board-saas voice calls, 2026-11-22).
+                warn!(session = %session_id, err = %error, "dropping a broken warm speech worker and every session sharing it");
+                let sharing: Vec<String> = {
+                    let sessions = self.inner.read().await;
+                    sessions
+                        .iter()
+                        .filter(|(_, s)| Arc::ptr_eq(&s.worker, &session.worker))
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+                for id in sharing {
+                    self.close(&id).await;
+                }
                 Err(error)
             }
         }
