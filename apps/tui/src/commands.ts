@@ -10,6 +10,7 @@ import { parseMusicCommand, type MusicCommand } from "./web/music.ts";
 import { detectPromoRequest, parsePromoCommand, type PromoCommand } from "./web/promo.ts";
 import { parseConnectCommand, parsePushCommand, type ConnectCommand, type PushCommand } from "./web/push-shared.ts";
 import { parseVideoCommand, type VideoCommand } from "./web/videos.ts";
+import { commandRows, commandUsage, needsArgument, splitCommand } from "./web/command-registry.ts";
 
 // The /video grammar lives with the web chat (src/web/videos.ts) so both agree.
 export { parseVideoCommand, type VideoCommand };
@@ -48,6 +49,8 @@ export const HELP_COMMANDS: [string, string][] = [
   ["/promo <url> [pixar|anime|…] [vertical]", "a promo video with narration and music"],
   ["/push hosting <name> | ls | rm <name>", "publish this chat's files as a site on the network"],
   ["/connect hosting [node]", "link or pick the node that publishes your sites"],
+  // Prompt commands from commands/*.md (/analyze, the finance pack): the server expands them.
+  ...commandRows(),
   ["/model [id]", "pick the model (no id: open the picker)"],
   ["/models", "list the live models"],
   ["/new", "start a new conversation"],
@@ -75,6 +78,12 @@ export function parseLine(input: string): Command | null {
   const video = parseVideoCommand(text);
   if (typeof video === "string") return { kind: "error", message: video };
   if (video) return { kind: "video", video };
+  const prompt = splitCommand(text);
+  if (prompt) {
+    return needsArgument(prompt.command) && !prompt.arg
+      ? { kind: "error", message: `usage: ${commandUsage(prompt.command)}` }
+      : { kind: "chat", text };
+  }
   const local = /^\/(\w+)(?:\s+([\s\S]*))?$/.exec(text);
   if (local) {
     const [, name, arg] = local;

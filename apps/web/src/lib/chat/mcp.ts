@@ -2,6 +2,7 @@
 // Tools: chat, list_models, whoami, promo_video, promo_status. Auth is the same
 // c0k_ API key as the REST API.
 import { chatText, listModels, parseChatRequest, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
+import { commandRows } from "./command-registry";
 import { describePromoProgress, sanitizePromoProgress, PROMO_STYLES } from "./promo";
 import { parsePublicPromoRequest } from "./promo-guard";
 import { HOSTING_TOOL_NAMES, HOSTING_TOOLS, hostingTool } from "./push-mcp";
@@ -25,11 +26,13 @@ export const TOOLS = [
   {
     name: "chat",
     description:
-      "Ask a model running on the c0mpute network (Infernet provider nodes). Returns the answer text. Pass `messages` for a multi-turn conversation, or just `prompt`.",
+      "Ask a model running on the c0mpute network (Infernet provider nodes). Returns the answer text. Pass `messages` for a multi-turn conversation, or just `prompt`. " +
+      `A prompt may start with a slash command, which the server expands: ${commandRows().map(([u]) => u).join(", ")} ` +
+      "(the Agentic Advisor: Finance pack works from the account's chat plugins such as Mercury, CoinPay and QuickBooks, or from pasted CSV; list: GET https://c0mpute.com/api/v1/chat/commands).",
     inputSchema: {
       type: "object",
       properties: {
-        prompt: { type: "string", description: "The user message." },
+        prompt: { type: "string", description: "The user message. May start with a slash command such as `/analyze <question>` or `/runway`." },
         system: { type: "string", description: "Optional system prompt." },
         messages: {
           type: "array",

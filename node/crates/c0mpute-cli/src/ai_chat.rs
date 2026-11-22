@@ -188,6 +188,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         Some("push") => return crate::chat_push::run(args.get(1..).unwrap_or_default()).await,
         Some("plugins") | Some("plugin") => return crate::chat_plugins::run(args.get(1..).unwrap_or_default()).await,
         Some("history") => return history(&base_url(None)).await,
+        Some("commands") => return commands_help(&base_url(None)).await,
         _ => {}
     }
     let a = Args::try_parse_from(std::iter::once("c0mpute chat".to_string()).chain(args.iter().cloned()))
@@ -231,6 +232,9 @@ pub async fn run(args: &[String]) -> Result<()> {
             return P2pChat::boot(&a).await?.repl(&a, convo).await;
         }
         return repl(&url, &require_key()?, &a, convo).await;
+    }
+    if is_help(prompt.trim()) {
+        return commands_help(&url).await;
     }
     messages.push(json!({"role": "user", "content": prompt}));
     if p2p {
@@ -767,7 +771,7 @@ async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
     }
     let resumed = !convo.messages.is_empty() && convo.messages.iter().any(|m| m["role"] == "user");
     eprintln!(
-        "c0mpute chat · {} · /model <id>, /models, /plugin, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
+        "c0mpute chat · {} · /help, /model <id>, /models, /plugin, /reset, /exit · type while it answers to queue · Ctrl+C stops an answer",
         convo.model_opt().as_deref().unwrap_or("any live model")
     );
     let account = Some((url, key));
@@ -812,6 +816,12 @@ async fn repl(url: &str, key: &str, a: &Args, mut convo: Convo) -> Result<()> {
             _ if line == "/plugins" || line == "/plugin" || line.starts_with("/plugin ") || line.starts_with("/plugins ") => {
                 let words: Vec<String> = line.split_whitespace().skip(1).map(str::to_string).collect();
                 if let Err(e) = repl_plugin(&mut input, words).await {
+                    eprintln!("error: {e:#}");
+                }
+                continue;
+            }
+            _ if is_help(line) => {
+                if let Err(e) = commands_help(url).await {
                     eprintln!("error: {e:#}");
                 }
                 continue;
@@ -1134,6 +1144,34 @@ async fn whoami(url: &str) -> Result<()> {
         Some(n) => println!("{n}  {}", v["did"].as_str().unwrap_or_default()),
         None => println!("{}", v["did"].as_str().unwrap_or_default()),
     }
+    Ok(())
+}
+
+fn is_help(line: &str) -> bool {
+    matches!(line, "/help" | "/h" | "/?" | "/commands")
+}
+
+/// `/help`: the session commands plus the server's prompt commands
+/// (GET /api/v1/chat/commands: /analyze, the finance pack, ...), which the
+/// server expands when a message starts with one.
+async fn commands_help(url: &str) -> Result<()> {
+    println!("session:\n  /model [id]   pick a model (none: any live model)\n  /models       list live models\n  /plugin       chat plugins (ls, add <url>, on/off/rm <name>)\n  /reset        new conversation\n  /exit         quit");
+    let res = client()?.get(format!("{url}/api/v1/chat/commands")).send().await?;
+    let status = res.status();
+    let text = res.text().await?;
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let list = v["data"].as_array().cloned().unwrap_or_default();
+    let width = list.iter().filter_map(|c| c["usage"].as_str()).map(str::len).max().unwrap_or(0);
+    println!("prompt commands (start a message with one):");
+    for c in &list {
+        let usage = c["usage"].as_str().unwrap_or_default();
+        let pack = c["pack_title"].as_str().map(|p| format!("  [{p}]")).unwrap_or_default();
+        println!("  {usage:width$}  {}{pack}", c["description"].as_str().unwrap_or_default());
+    }
+    println!("example: c0mpute chat \"/analyze which month grew most?\" < signups.csv");
     Ok(())
 }
 

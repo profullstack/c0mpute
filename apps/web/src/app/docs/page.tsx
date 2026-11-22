@@ -448,6 +448,30 @@ curl -sS https://c0mpute.com/v1/chat/completions \\
         <Code>{commandList()}</Code>
       </Section>
 
+      <Section h="prompt-commands" title="[ prompt commands: /analyze and the finance pack ]">
+        <P>
+          Some commands are prompts, defined as markdown files in the repo&apos;s{" "}
+          <code>commands/</code> directory (frontmatter <code>name</code>,{" "}
+          <code>description</code>, <code>argument-hint</code>). They do go to
+          the model: the server expands <code>/analyze &lt;question&gt;</code>{" "}
+          into the command&apos;s instructions (added to the system turn) plus
+          your question, then runs a normal turn with your chat plugins as
+          tools. The expansion happens on the server, so it works the same in
+          the web chat (type <code>/</code> for the list), <code>c0mpute chat
+          &quot;/analyze ...&quot;</code>, the TUI, <code>POST /v1/chat/completions</code>{" "}
+          and the MCP <code>chat</code> tool. The list is public at{" "}
+          <code>GET /api/v1/chat/commands</code>. <code>/cashflow</code>,{" "}
+          <code>/runway</code>, <code>/pnl</code>, <code>/spend</code>,{" "}
+          <code>/forecast</code> and <code>/board</code> are the{" "}
+          <Link href="/advisor/finance">Agentic Advisor: Finance</Link> pack:
+          they read your Mercury, CoinPay or QuickBooks plugin, or a pasted CSV,
+          validate the numbers and end with &quot;Analysis, not financial, tax
+          or legal advice.&quot; To add a command, add one file to{" "}
+          <code>commands/</code> and run{" "}
+          <code>bun scripts/gen-chat-commands.ts</code>.
+        </P>
+      </Section>
+
       <Section h="videos" title="[ generate video (API) ]">
         <P>
           <code>POST /api/v1/videos</code> renders a clip on a c0mpute worker

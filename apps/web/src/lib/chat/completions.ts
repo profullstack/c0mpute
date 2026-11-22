@@ -4,6 +4,7 @@
 
 import { parseAutoModel } from "@/lib/router";
 import { parseTooling, renderMessages, type Tooling } from "./tools";
+import { expandCommands, usedCommand } from "./command-registry";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ChatRequest = {
@@ -16,13 +17,16 @@ export type ChatRequest = {
   tooling?: Tooling;
   /** stream_options.include_usage */
   include_usage?: boolean;
+  /** The prompt command (`/analyze`, commands/*.md) this conversation used last. Never forwarded. */
+  command?: string;
 };
 
 const MAX_CHARS = 200_000;
 const MAX_MESSAGES = 200;
 
 /**
- * Validate a client body and strip it down to what we forward. Messages come
+ * Validate a client body and strip it down to what we forward. Prompt
+ * commands in user turns are expanded (lib/chat/command-registry.ts). Messages come
  * back as plain system/user/assistant strings: content-part arrays are
  * flattened to their text, and tool history (assistant tool_calls, role
  * "tool") is rendered into the `<tool_call>` / `<tool_response>` format the
@@ -33,8 +37,11 @@ export function parseChatRequest(body: unknown): ChatRequest | string {
   const b = body as Record<string, unknown>;
   if (!Array.isArray(b.messages) || b.messages.length === 0) return "messages[] is required";
   if (b.messages.length > MAX_MESSAGES) return `at most ${MAX_MESSAGES} messages`;
-  const messages = renderMessages(b.messages);
-  if (typeof messages === "string") return messages;
+  const rendered = renderMessages(b.messages);
+  if (typeof rendered === "string") return rendered;
+  // Prompt commands (`/analyze <question>`, commands/*.md): the command's
+  // instructions join the system turn and the user turn keeps the question.
+  const messages = expandCommands(rendered, C0_SYSTEM_PROMPT);
   const chars = messages.reduce((n, m) => n + m.content.length, 0);
   if (chars > MAX_CHARS) return `messages total more than ${MAX_CHARS} characters`;
   const tooling = parseTooling(b);
@@ -48,6 +55,8 @@ export function parseChatRequest(body: unknown): ChatRequest | string {
     else messages.unshift({ role: "system", content: `${C0_SYSTEM_PROMPT}\n\n${jsonNote}` });
   }
   const out: ChatRequest = { messages, stream: b.stream === true };
+  const cmd = usedCommand(rendered);
+  if (cmd) out.command = cmd.name;
   if (tooling && tooling.choice !== "none") out.tooling = tooling;
   const so = b.stream_options as Record<string, unknown> | undefined;
   if (so && typeof so === "object" && so.include_usage === true) out.include_usage = true;
@@ -85,7 +94,7 @@ export function responseFormatNote(rf: unknown): string | null | { error: string
 
 /** The request as Infernet takes it: only the fields it reads. */
 function wireBody(req: ChatRequest) {
-  const { tooling: _t, include_usage: _u, ...rest } = req;
+  const { tooling: _t, include_usage: _u, command: _c, ...rest } = req;
   return rest;
 }
 

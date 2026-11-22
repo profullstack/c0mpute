@@ -4,6 +4,8 @@ import { notFound } from "next/navigation";
 import { Markdown, SourceCards } from "@/app/chat/markdown";
 import { shareStore, siteUrl } from "@/lib/chat/server";
 import type { Share } from "@/lib/chat/share-store";
+import { advisorLink } from "@/lib/advisor";
+import { splitCommand } from "@/lib/chat/command-registry";
 
 // A shared chat, read by anyone with the link: no sign-in, no app. Written for
 // the person Anthony shares with (his mom is 81): big type, plain labels
@@ -53,6 +55,8 @@ export default async function SharePage({ params }: { params: Promise<{ id: stri
   void shareStore()
     .view(id)
     .catch(() => {});
+  // Agentic Advisor: Finance answers carry where they were made (with a referral handle).
+  const advisor = share.messages.some((m) => m.role === "user" && splitCommand(m.content)?.command.pack === "finance");
   const date = new Date(share.updated).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
   return (
     <main className="max-w-2xl mx-auto px-4 sm:px-6 py-8 text-[19px] leading-[1.65]">
@@ -81,6 +85,12 @@ export default async function SharePage({ params }: { params: Promise<{ id: stri
       <p className="mt-10 text-[15px] text-[var(--color-dim)]">
         Answers are written by an AI and can be wrong. Numbers in brackets like [1] link to the web pages the answer used, so you can check them.
       </p>
+
+      {advisor ? (
+        <p className="mt-4 text-[15px] text-[var(--color-dim)]">
+          Analyzed on c0mpute: <a href={advisorLink()} className="underline break-all">{advisorLink()}</a> · Analysis, not financial, tax or legal advice.
+        </p>
+      ) : null}
 
       <div className="mt-6 flex flex-col sm:flex-row gap-3">
         <Link
