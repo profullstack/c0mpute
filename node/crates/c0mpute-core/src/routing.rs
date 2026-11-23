@@ -6,13 +6,22 @@
 //!   1. Overloaded bids go last: a queue load at or above
 //!      [`OVERLOAD_THRESHOLD`], or an ETA the deadline cannot absorb. If
 //!      every bid is overloaded, the least loaded wins.
-//!   2. Among the rest, the fastest ETA wins. ETAs within 1.5x of the
-//!      fastest share a bucket. The ETA is measured (recent job time times
-//!      queue depth), so it already says how fast the box runs under its
-//!      real load; a synthetic CPU benchmark does not. 2026-11-14 a node
-//!      at load 32/16 with eta 301 s beat one with eta 60 s on its higher
-//!      bench score, and the job waited a minute for nothing.
-//!   3. Then the highest benchmark score (scores within about 10% of each
+//!   2. A smaller alternative model waits while an idle worker offers the
+//!      asked-for model or a better one. An upgrade (the GPU 9B answering a
+//!      chat for the 4B default) is not a smaller alternative: before
+//!      0.3.112 it waited too, so an idle CPU node at ~67 s a chat beat an
+//!      idle GPU at ~15 s (2026-11-23).
+//!   3. A GPU with room goes before every CPU bid.
+//!   4. Then the fastest ETA. ETAs within 1.5x of the fastest share a
+//!      bucket. The ETA is measured (recent job time times queue depth), so
+//!      it already says how fast the box runs under its real load; a
+//!      synthetic CPU benchmark does not. 2026-11-14 a node at load 32/16
+//!      with eta 301 s beat one with eta 60 s on its higher bench score,
+//!      and the job waited a minute for nothing.
+//!   5. Among those, the bidder that won from this buyer least recently:
+//!      comparable nodes share the work. Before 0.3.112 the higher CPU bench
+//!      score took every job, also between two GPUs, where it says nothing.
+//!   6. Then the highest benchmark score (scores within about 10% of each
 //!      other share a bucket), then the lower ETA, then the lower price,
 //!      then the earlier bid.
 //!
@@ -26,6 +35,7 @@
 //! then runs slowly. Verified benchmarks belong to the reputation layer.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use c0mpute_net::topics::JobBid;
 
@@ -103,33 +113,49 @@ fn price_cmp(a: &JobBid, b: &JobBid) -> Ordering {
     a.price_usd.partial_cmp(&b.price_usd).unwrap_or(Ordering::Equal)
 }
 
-/// True when some bid for the asked-for model (not an alternative) comes
-/// from an idle worker: alternatives then wait their turn.
-pub fn preferred_idle(bids: &[JobBid], deadline_secs: u64) -> bool {
-    bids.iter()
-        .any(|b| b.fallback != Some(true) && load_of(b) == 0.0 && !is_overloaded(b, deadline_secs))
+/// What the buyer knows beyond the bids themselves.
+#[derive(Clone, Debug, Default)]
+pub struct Hints {
+    /// Models at least as good as the asked-for one (the GPU 9B for the 4B
+    /// house default). A bid answering with one is an upgrade, not a smaller
+    /// alternative: it never waits behind the asked-for model.
+    pub upgrades: Vec<String>,
+    /// When each bidder last won a job from this buyer (unix ms). A bidder
+    /// that is absent never won.
+    pub last_won_ms: HashMap<String, u64>,
 }
 
-/// An alternative-model bid while an idle worker offers the asked-for model.
-fn yields(bid: &JobBid, preferred_idle: bool) -> bool {
-    preferred_idle && bid.fallback == Some(true)
+/// A smaller alternative to the asked-for model (an upgrade is not one).
+fn is_downgrade(bid: &JobBid, hints: &Hints) -> bool {
+    bid.fallback == Some(true) && !bid.model.as_ref().is_some_and(|m| hints.upgrades.contains(m))
+}
+
+/// True when some bid for the asked-for model or better (not a smaller
+/// alternative) comes from an idle worker: smaller alternatives then wait
+/// their turn.
+pub fn preferred_idle(bids: &[JobBid], deadline_secs: u64, hints: &Hints) -> bool {
+    bids.iter()
+        .any(|b| !is_downgrade(b, hints) && load_of(b) == 0.0 && !is_overloaded(b, deadline_secs))
+}
+
+/// A smaller-model bid while an idle worker offers the asked-for model.
+fn yields(bid: &JobBid, preferred_idle: bool, hints: &Hints) -> bool {
+    preferred_idle && is_downgrade(bid, hints)
+}
+
+/// The bid does not answer from a GPU (false sorts first). Workers older
+/// than 0.3.112 do not say, and count as CPU.
+fn not_gpu(bid: &JobBid) -> bool {
+    bid.gpu != Some(true)
+}
+
+fn last_won(bid: &JobBid, hints: &Hints) -> u64 {
+    hints.last_won_ms.get(&bid.bidder_peer_id).copied().unwrap_or(0)
 }
 
 /// Order two bids under `policy`, ignoring publish time (the tie-breaker).
-pub fn compare(
-    a: &JobBid,
-    b: &JobBid,
-    policy: SelectionPolicy,
-    deadline_secs: u64,
-    best: u32,
-    fastest: u64,
-) -> Ordering {
-    compare_with(a, b, policy, deadline_secs, best, fastest, false)
-}
-
-/// [`compare`], knowing whether an idle worker offers the asked-for model
-/// ([`preferred_idle`]): smaller alternative models only win once every
-/// worker serving the asked-for one is working.
+/// `preferred_idle` is [`preferred_idle`] over all the bids.
+#[allow(clippy::too_many_arguments)]
 pub fn compare_with(
     a: &JobBid,
     b: &JobBid,
@@ -138,6 +164,7 @@ pub fn compare_with(
     best: u32,
     fastest: u64,
     preferred_idle: bool,
+    hints: &Hints,
 ) -> Ordering {
     match policy {
         SelectionPolicy::Cheapest => price_cmp(a, b),
@@ -151,8 +178,10 @@ pub fn compare_with(
                         Ordering::Equal
                     }
                 })
-                .then_with(|| yields(a, preferred_idle).cmp(&yields(b, preferred_idle)))
+                .then_with(|| yields(a, preferred_idle, hints).cmp(&yields(b, preferred_idle, hints)))
+                .then_with(|| not_gpu(a).cmp(&not_gpu(b)))
                 .then_with(|| eta_bucket(a, fastest).cmp(&eta_bucket(b, fastest)))
+                .then_with(|| last_won(a, hints).cmp(&last_won(b, hints)))
                 .then_with(|| bench_bucket(a, best).cmp(&bench_bucket(b, best)))
                 .then_with(|| a.eta_seconds.cmp(&b.eta_seconds))
                 .then_with(|| price_cmp(a, b))
@@ -160,21 +189,26 @@ pub fn compare_with(
     }
 }
 
+/// [`rank_with`] for a buyer that knows nothing beyond the bids.
+pub fn rank(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64) -> usize {
+    rank_with(bids, policy, deadline_secs, &Hints::default())
+}
+
 /// Sort `bids` best first and return how many share the top spot exactly
 /// (so the caller can rotate among them).
-pub fn rank(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64) -> usize {
+pub fn rank_with(bids: &mut [JobBid], policy: SelectionPolicy, deadline_secs: u64, hints: &Hints) -> usize {
     let best = best_bench(bids);
     let fastest = fastest_eta(bids);
-    let idle = preferred_idle(bids, deadline_secs);
+    let idle = preferred_idle(bids, deadline_secs, hints);
     bids.sort_by(|a, b| {
-        compare_with(a, b, policy, deadline_secs, best, fastest, idle)
+        compare_with(a, b, policy, deadline_secs, best, fastest, idle, hints)
             .then(a.published_at_ms.cmp(&b.published_at_ms))
     });
     match bids.first() {
         None => 0,
         Some(top) => bids
             .iter()
-            .take_while(|b| compare_with(b, top, policy, deadline_secs, best, fastest, idle) == Ordering::Equal)
+            .take_while(|b| compare_with(b, top, policy, deadline_secs, best, fastest, idle, hints) == Ordering::Equal)
             .count(),
     }
 }
@@ -232,6 +266,7 @@ mod tests {
             instance: None,
             model: None,
             fallback: None,
+            gpu: None,
         }
     }
 
@@ -336,6 +371,82 @@ mod tests {
             bid("c", 0.9, 60, Some(10_000), Some(0.1)),
         ];
         assert_eq!(rank(&mut bids, SelectionPolicy::Smart, 900), 2);
+    }
+
+    fn gpu(mut b: JobBid) -> JobBid {
+        b.gpu = Some(true);
+        b
+    }
+
+    fn hints(upgrades: &[&str], won: &[(&str, u64)]) -> Hints {
+        Hints {
+            upgrades: upgrades.iter().map(|m| m.to_string()).collect(),
+            last_won_ms: won.iter().map(|(p, t)| (p.to_string(), *t)).collect(),
+        }
+    }
+
+    #[test]
+    fn an_idle_gpu_goes_before_cpu_bids() {
+        // The CPU node has the better bench score and a similar ETA.
+        let mut bids = vec![bid("cpu", 0.001, 20, Some(11264), Some(0.0)), gpu(bid("gpu", 0.002, 25, Some(1402), Some(0.0)))];
+        rank(&mut bids, SelectionPolicy::Smart, 600);
+        assert_eq!(bids[0].bidder_peer_id, "gpu");
+        // Not when the GPU is overloaded.
+        let mut bids = vec![bid("cpu", 0.001, 20, Some(11264), Some(0.0)), gpu(bid("gpu", 0.002, 25, Some(1402), Some(0.9)))];
+        rank(&mut bids, SelectionPolicy::Smart, 600);
+        assert_eq!(bids[0].bidder_peer_id, "cpu");
+    }
+
+    #[test]
+    fn a_gpu_upgrade_does_not_wait_behind_an_idle_cpu_node() {
+        // 2026-11-23: a chat for the 4B default. The CPU node serves the 4B,
+        // the GPU answers with the 9B (flagged as an alternative).
+        let mut cpu = bid("cpu-4b", 0.001, 67, Some(7254), Some(0.0));
+        cpu.model = Some("4b".into());
+        cpu.fallback = Some(false);
+        let mut up = gpu(bid("gpu-9b", 0.002, 15, Some(1935), Some(0.0)));
+        up.model = Some("9b".into());
+        up.fallback = Some(true);
+        let h = hints(&["9b"], &[]);
+        let mut bids = vec![cpu.clone(), up.clone()];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "gpu-9b");
+        // Without the hint the upgrade still waits (the old behaviour).
+        let mut bids = vec![cpu.clone(), up.clone()];
+        rank(&mut bids, SelectionPolicy::Smart, 600);
+        assert_eq!(bids[0].bidder_peer_id, "cpu-4b");
+        // A smaller model on a GPU still waits for the idle asked-for one,
+        // and for an idle upgrade.
+        let mut small = gpu(bid("gpu-1.5b", 0.001, 5, Some(1402), Some(0.0)));
+        small.model = Some("1.5b".into());
+        small.fallback = Some(true);
+        let mut bids = vec![small.clone(), cpu];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "cpu-4b");
+        let mut bids = vec![small, up];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "gpu-9b");
+    }
+
+    #[test]
+    fn comparable_bids_take_turns() {
+        // Two GPUs with similar ETAs: the higher bench score used to win
+        // every job. Now the one that won longer ago goes first.
+        let bids = || vec![gpu(bid("ours", 0.002, 20, Some(1935), Some(0.0))), gpu(bid("theirs", 0.002, 25, Some(1402), Some(0.0)))];
+        let mut b = bids();
+        rank_with(&mut b, SelectionPolicy::Smart, 600, &hints(&[], &[("ours", 2_000), ("theirs", 1_000)]));
+        assert_eq!(b[0].bidder_peer_id, "theirs");
+        let mut b = bids();
+        rank_with(&mut b, SelectionPolicy::Smart, 600, &hints(&[], &[("ours", 2_000), ("theirs", 3_000)]));
+        assert_eq!(b[0].bidder_peer_id, "ours");
+        // A node that never won goes before one that has.
+        let mut b = bids();
+        rank_with(&mut b, SelectionPolicy::Smart, 600, &hints(&[], &[("ours", 2_000)]));
+        assert_eq!(b[0].bidder_peer_id, "theirs");
+        // A clearly faster node still wins whoever went last.
+        let mut b = vec![bid("slow", 0.001, 90, Some(5000), Some(0.0)), bid("fast", 0.001, 20, Some(5000), Some(0.0))];
+        rank_with(&mut b, SelectionPolicy::Smart, 600, &hints(&[], &[("fast", 9_000)]));
+        assert_eq!(b[0].bidder_peer_id, "fast");
     }
 
     #[test]

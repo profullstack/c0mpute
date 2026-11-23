@@ -147,6 +147,24 @@ pub const FALLBACK_LADDER: &[(&str, &[&str])] = &[
     ("gemma3:4b", &["qwen3:4b", "qwen2.5:3b", "qwen2.5:1.5b"]),
 ];
 
+/// Models that answer a chat for `asked` at least as well: the GPU 9B for the
+/// 4B house default. A bid with one is an upgrade, so routing never makes it
+/// wait behind the asked-for model (see [`crate::routing::Hints`]).
+pub fn upgrades_for(asked: Option<&str>) -> Vec<String> {
+    match asked {
+        Some(HOUSE_DEFAULT_MODEL) => vec![HOUSE_GPU_MODEL.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// Whether this node answers chats on a GPU: it has a real card (any NVIDIA,
+/// a discrete AMD, never an APU) and is not serving from the house CPU
+/// runtime. Said on every inference bid; the card is probed once.
+pub fn answers_on_gpu() -> bool {
+    static CARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !crate::inference_auto::active() && *CARD.get_or_init(|| crate::gpu::detect().is_some())
+}
+
 /// Largest prompt still routed as "plain text" (bytes over all messages).
 pub const PLAIN_TEXT_MAX_BYTES: usize = 16 * 1024;
 
@@ -602,6 +620,14 @@ mod tests {
         assert!(thinks_by_default("huihui_ai/qwen3.5-abliterated:0.8b"));
         assert!(!thinks_by_default(HOUSE_GPU_MODEL), "the 9B image is no-think");
         assert!(!thinks_by_default("qwen2.5:1.5b"));
+    }
+
+    #[test]
+    fn the_gpu_model_is_an_upgrade_for_the_default_only() {
+        assert_eq!(upgrades_for(Some(HOUSE_DEFAULT_MODEL)), vec![HOUSE_GPU_MODEL.to_string()]);
+        assert!(upgrades_for(Some(HOUSE_GPU_MODEL)).is_empty(), "the 4B is no upgrade for the 9B");
+        assert!(upgrades_for(Some("qwen3:4b")).is_empty());
+        assert!(upgrades_for(None).is_empty());
     }
 
     #[test]

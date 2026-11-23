@@ -31,6 +31,32 @@ pub const PROBE_CAP_USD: f64 = 1.0;
 // selecting the same earliest bidder when several workers have equal prices.
 static NEXT_EQUAL_PRICE_BID: AtomicUsize = AtomicUsize::new(0);
 
+/// When each worker last won a job from this process, per workload (unix
+/// ms). Routing gives comparable bids to whoever won least recently, so two
+/// similar nodes share the work instead of one taking all of it.
+static LAST_WON: std::sync::Mutex<Option<std::collections::HashMap<String, std::collections::HashMap<String, u64>>>> =
+    std::sync::Mutex::new(None);
+/// Past this many workers for one workload, wins older than a day are dropped.
+const LAST_WON_PRUNE_AT: usize = 2048;
+
+fn last_wins(workload: &str) -> std::collections::HashMap<String, u64> {
+    LAST_WON
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(workload).cloned()))
+        .unwrap_or_default()
+}
+
+fn note_win(workload: &str, peer: &str, now_ms: u64) {
+    let Ok(mut g) = LAST_WON.lock() else { return };
+    let wins = g.get_or_insert_with(Default::default).entry(workload.to_string()).or_default();
+    wins.insert(peer.to_string(), now_ms);
+    if wins.len() > LAST_WON_PRUNE_AT {
+        let day_ago = now_ms.saturating_sub(24 * 60 * 60 * 1000);
+        wins.retain(|_, t| *t >= day_ago);
+    }
+}
+
 /// Auction inputs the buyer assembles before publishing the offer.
 pub struct JobAuction {
     pub workload_type: String,
@@ -460,7 +486,15 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
 
     // ── pick winner: smart routing (most capable, not overloaded) or
     //    cheapest, per auction.policy; exact ties rotate across chunks. ─
-    let tied = crate::routing::rank(&mut bids, auction.policy, auction.deadline.as_secs());
+    let hints = crate::routing::Hints {
+        upgrades: if auction.workload_type == crate::inference::WORKLOAD {
+            crate::inference::upgrades_for(auction.spec_inline.get("model").and_then(|m| m.as_str()))
+        } else {
+            Vec::new()
+        },
+        last_won_ms: last_wins(&auction.workload_type),
+    };
+    let tied = crate::routing::rank_with(&mut bids, auction.policy, auction.deadline.as_secs(), &hints);
     if tied > 1 {
         let offset = NEXT_EQUAL_PRICE_BID.fetch_add(1, Ordering::Relaxed) % tied;
         bids[..tied].rotate_left(offset);
@@ -680,9 +714,12 @@ async fn award(
         bench = ?winner.bench_score,
         load = ?winner.load,
         eta = winner.eta_seconds,
+        gpu = ?winner.gpu,
+        model = ?winner.model,
         policy = ?auction.policy,
         "buyer: winner chosen"
     );
+    note_win(&auction.workload_type, &winner.bidder_peer_id, unix_ms());
     let winner_peer: c0mpute_net::PeerId = winner
         .bidder_peer_id
         .parse()
@@ -870,6 +907,7 @@ pub async fn resume_auction(
             instance: None,
             model: None,
             fallback: None,
+            gpu: None,
         },
         receipt,
         external_ref: job.external_ref.clone(),
@@ -1170,6 +1208,7 @@ mod tests {
             instance: None,
             model: None,
             fallback: None,
+            gpu: None,
         }
     }
 
