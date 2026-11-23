@@ -75,11 +75,19 @@ pub fn assets_for(kind: GpuKind) -> Option<Vec<Asset>> {
     })
 }
 
+/// What an "8 GB" card reports at least (MiB). `nvidia-smi` gives the usable
+/// total, a little under the round number: 7982 on an RTX 2070, 8119 on a
+/// GTX 1070, 8188 on an RTX 4060. Compared with 8192 those cards fell a tier
+/// and served a model few chats ask for.
+pub const VRAM_8GB_MIB: u64 = 7800;
+/// The same for a "6 GB" card (6078 on a GTX 1060).
+pub const VRAM_6GB_MIB: u64 = 5900;
+
 /// The chat models a card with `vram_mib` serves, biggest-value first.
 pub fn models_for_vram(vram_mib: u64) -> &'static [&'static str] {
-    if vram_mib >= 8 * 1024 {
+    if vram_mib >= VRAM_8GB_MIB {
         &[crate::inference::HOUSE_GPU_MODEL]
-    } else if vram_mib >= 6 * 1024 {
+    } else if vram_mib >= VRAM_6GB_MIB {
         &["qwen3:4b"]
     } else {
         &["qwen2.5:1.5b"]
@@ -446,6 +454,12 @@ mod tests {
         assert_eq!(models_for_vram(12 * 1024), ["eriktonon/qwen3.8-uncensored:9b"]);
         assert_eq!(models_for_vram(8 * 1024), ["eriktonon/qwen3.8-uncensored:9b"]);
         assert_eq!(models_for_vram(6 * 1024), ["qwen3:4b"]);
+        // Cards report a little under the round number.
+        for mib in [7982, 8119, 8188] {
+            assert_eq!(models_for_vram(mib), ["eriktonon/qwen3.8-uncensored:9b"], "{mib} MiB is an 8 GB card");
+        }
+        assert_eq!(models_for_vram(6078), ["qwen3:4b"], "a GTX 1060 6GB");
+        assert_eq!(models_for_vram(5000), ["qwen2.5:1.5b"]);
         assert_eq!(models_for_vram(4 * 1024), ["qwen2.5:1.5b"]);
         for v in [4, 6, 8, 12, 24] {
             assert!(!models_for_vram(v * 1024).contains(&"qwen2.5:7b"));

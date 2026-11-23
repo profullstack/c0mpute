@@ -827,6 +827,7 @@ async fn handle_offer(
         instance: Some(net.instance_id().to_string()),
         model: pick.as_ref().map(|(m, _)| m.clone()),
         fallback: pick.as_ref().map(|(_, f)| *f),
+        gpu: (offer.workload_type == crate::inference::WORKLOAD && crate::inference::answers_on_gpu()).then_some(true),
     };
     let payload = match serde_json::to_vec(&bid) {
         Ok(b) => b,

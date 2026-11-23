@@ -281,6 +281,11 @@ pub struct JobBid {
     /// is idle; once those are all working, a free alternative wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<bool>,
+    /// True when the worker would run the job on a GPU (inference bids from
+    /// a node with a real card). Buyers send work to a GPU with room before
+    /// any CPU node. `None` from CPU nodes and workers older than 0.3.112.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<bool>,
 }
 
 impl JobBid {
@@ -411,6 +416,7 @@ mod tests {
             instance: None,
             model: None,
             fallback: None,
+            gpu: None,
         };
         let json = serde_json::to_value(&bid).unwrap();
         assert_eq!(json["expires_at_ms"], 1000);
@@ -461,6 +467,7 @@ mod tests {
             instance: None,
             model: None,
             fallback: None,
+            gpu: None,
         };
         assert!(bid.is_live(u64::MAX), "old bids never expire");
         bid.expires_at_ms = Some(100);
