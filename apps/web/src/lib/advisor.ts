@@ -2,6 +2,8 @@
 // copy shared by the landing page (/advisor/finance), shared chats and docs.
 // Referral handles ride the EXISTING c0mpute referral program (/r/<code>,
 // `c0mpute worker register --ref`); there is no second commission system.
+// A paid code in ?ref= is kept as the visitor's first touch (lib/referral-cookie.ts)
+// and earns its owner a share of the house fee on what they spend.
 import { sanitizeRef } from "./nodes-core";
 
 /** Profullstack's own handle: the default when a link has none. */

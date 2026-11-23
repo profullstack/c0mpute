@@ -1,6 +1,8 @@
 import { handleCallback, readSaved } from "@/lib/accounts/coinpay-callback";
 import { signInCookie } from "@/lib/accounts/server";
 import { coinpayUserinfo, currentUser, exchangeCode, linkInfernetAccount, siteUrl, store } from "@/lib/chat/server";
+import { refFromCookieHeader } from "@/lib/referral-cookie";
+import { forwardedIp } from "@/lib/referrals";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +18,10 @@ export async function GET(req: Request) {
     // Make sure the network that serves this person can bill them: without an
     // Infernet account bound to their CoinPay sub, their balance and their
     // nodes' earnings cannot pay for anything here. Non-fatal by design.
-    afterSignIn: (info) => linkInfernetAccount(info),
+    // The first-touch referral code rides along: Infernet records the referrer
+    // only if this sign-in creates the account (spend referrals).
+    afterSignIn: (info) =>
+      linkInfernetAccount({ ...info, ref: refFromCookieHeader(req.headers.get("cookie")) }, forwardedIp(req)),
   });
   const headers = new Headers({ location: `${siteUrl()}${r.redirect}`, "cache-control": "no-store" });
   headers.append("set-cookie", CLEAR);

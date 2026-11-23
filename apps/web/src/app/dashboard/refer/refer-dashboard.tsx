@@ -4,7 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { ReferralTerms } from "@/components/referral-terms";
 
 // Mirrors Infernet's GET /api/v1/referrals (kept loose: this is a client file).
-type Balance = { pending_usd: number; confirmed_usd: number; requested_usd: number; paid_usd: number; available_usd: number; commissions: number };
+type KindTotals = { pending_usd: number; confirmed_usd: number; commissions: number };
+type Balance = {
+  pending_usd: number;
+  confirmed_usd: number;
+  requested_usd: number;
+  paid_usd: number;
+  available_usd: number;
+  commissions: number;
+  by_kind?: { node: KindTotals; spend: KindTotals };
+};
 type Overview = {
   has_code: boolean;
   code?: string;
@@ -15,8 +24,11 @@ type Overview = {
   nodes?: { node: string; via: string; attributed_at: string; first_paid_job_at: string | null }[];
   referred_nodes?: number;
   active_nodes_7d?: number;
+  people?: { person: string; via: string; joined_at: string; first_spend_at: string | null }[];
+  referred_people?: number;
+  spending_people?: number;
   balance?: Balance;
-  recent?: { id: string; node: string; fee_usd: number; amount_usd: number; status: string; earned_at: string }[];
+  recent?: { id: string; kind?: "node" | "spend"; node: string | null; person?: string | null; fee_usd: number; amount_usd: number; status: string; earned_at: string }[];
   payouts?: { id: string; amount_usd: number; coin: string; status: string; created_at: string; tx_hash: string | null; error: string | null }[];
 };
 
@@ -116,8 +128,12 @@ export function ReferDashboard() {
         <section className="space-y-3">
           <p className="leading-7">
             When a node you referred serves paid jobs, you get {o.terms?.commission_pct_of_house_fee ?? 5}% of the house fee on each
-            one. It comes out of the house&apos;s cut, never the operator&apos;s earnings. One link works on c0mpute.com and
-            infernetprotocol.com.
+            one.
+            {o.terms?.spend?.enabled
+              ? ` When someone who signed up through your link spends on c0mpute or Infernet, you get ${o.terms.spend.commission_pct_of_house_fee}% of our ${o.terms.house_fee_pct ?? 5}% fee on what they spend.`
+              : ""}{" "}
+            It all comes out of the house&apos;s cut, never the operator&apos;s earnings, and the people you refer pay the normal
+            price. One link works on c0mpute.com and infernetprotocol.com.
           </p>
           <button type="button" disabled={busy} className="!border border-[var(--color-accent)] px-4 py-2 accent" onClick={() => act(() => call("/api/v1/referrals", { method: "POST", body: "{}" }), "your referral link is ready")}>
             create my referral link
@@ -133,6 +149,7 @@ export function ReferDashboard() {
             </p>
             {o.links && <Cmd text={o.links.c0mpute} />}
             {o.links && <Cmd text={o.links.infernet} />}
+            <p className="comment">// a person is credited to you when they create their account after opening your link (first touch)</p>
             <p className="comment">// a node is credited to you when it registers with your code, before its first paid job</p>
             {o.install && (
               <>
@@ -146,6 +163,10 @@ export function ReferDashboard() {
             {[
               ["referred nodes", String(o.referred_nodes ?? 0)],
               ["active (7 days)", String(o.active_nodes_7d ?? 0)],
+              ["referred people", String(o.referred_people ?? 0)],
+              ["people who spent", String(o.spending_people ?? 0)],
+              ["from nodes", usd((b?.by_kind?.node.confirmed_usd ?? 0) + (b?.by_kind?.node.pending_usd ?? 0))],
+              ["from people's spend", usd((b?.by_kind?.spend.confirmed_usd ?? 0) + (b?.by_kind?.spend.pending_usd ?? 0))],
               ["pending", usd(b?.pending_usd)],
               ["available", usd(b?.available_usd)],
               ["confirmed", usd(b?.confirmed_usd)],
@@ -191,6 +212,21 @@ export function ReferDashboard() {
             )}
           </section>
           <section className="space-y-2">
+            <h2 className="text-lg font-bold accent">referred people</h2>
+            {(o.people ?? []).length === 0 ? (
+              <p className="text-[var(--color-dim)]">none yet</p>
+            ) : (
+              <ul className="space-y-1 text-[var(--color-dim)]">
+                {(o.people ?? []).map((p) => (
+                  <li key={p.person}>
+                    <span className="accent">{p.person}</span> · joined {p.joined_at.slice(0, 10)}
+                    {p.first_spend_at ? ` · first paid use ${p.first_spend_at.slice(0, 10)}` : " · no paid use yet"}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <section className="space-y-2">
             <h2 className="text-lg font-bold accent">referred nodes</h2>
             {(o.nodes ?? []).length === 0 ? (
               <p className="text-[var(--color-dim)]">none yet</p>
@@ -207,13 +243,13 @@ export function ReferDashboard() {
             {(o.recent ?? []).length > 0 && (
               <table className="w-full text-xs text-left">
                 <thead className="text-[var(--color-dim)]">
-                  <tr><th className="py-1">when</th><th>node</th><th>house fee</th><th>commission</th><th>status</th></tr>
+                  <tr><th className="py-1">when</th><th>from</th><th>house fee</th><th>commission</th><th>status</th></tr>
                 </thead>
                 <tbody>
                   {(o.recent ?? []).map((c) => (
                     <tr key={c.id}>
                       <td className="py-1">{c.earned_at.slice(0, 16).replace("T", " ")}</td>
-                      <td>{c.node}</td>
+                      <td>{c.kind === "spend" ? `spend · ${c.person ?? "a person"}` : c.node}</td>
                       <td>{usd(c.fee_usd)}</td>
                       <td className="accent">{usd(c.amount_usd)}</td>
                       <td>{c.status}</td>

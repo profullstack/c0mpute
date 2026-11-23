@@ -4,7 +4,7 @@ const TABS = [
   { href: "/dashboard/disk", label: "hosting: sites, apps, disk" },
   { href: "/dashboard/nodes", label: "nodes: compute" },
   { href: "/dashboard/live", label: "live streams" },
-  { href: "/dashboard/refer", label: "refer a node" },
+  { href: "/dashboard/refer", label: "refer" },
 ] as const;
 
 /** The parts of "my dashboard", one click apart. */

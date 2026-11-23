@@ -107,9 +107,11 @@ export default async function AdvisorFinancePage({ searchParams }: Props) {
         <h2 className="font-semibold">[ earn by sharing ]</h2>
         <p>
           Every link to the advisor carries a referral handle. Shared answers end with &quot;Analyzed on c0mpute&quot; and
-          the link. Referrals run on c0mpute&apos;s referral program: when someone you refer runs a node, you earn a share
-          of the house fee on the paid jobs it serves (it comes out of the house&apos;s cut, never the operator&apos;s).
-          Get your code at <Link href="/dashboard/refer">dashboard/refer</Link>.
+          the link. With a referral code from <Link href="/dashboard/refer">dashboard/refer</Link>, you earn 50% of our
+          5% fee on what the people you refer spend (2.5% of their spend), and 5% of our fee on paid jobs served by
+          nodes you refer. It comes out of our cut: the people you refer pay the normal price and operators keep their
+          share. A person counts as referred when they create their account from your link. This is a share of fees
+          actually collected, not a promise of any income.
         </p>
         <CodeBlock>{advisorLink(handle)}</CodeBlock>
         <p className="text-[var(--color-dim)]">

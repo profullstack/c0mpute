@@ -1,5 +1,6 @@
 import { gate } from "@/lib/crawl-gateway";
 import { NextResponse, type NextRequest } from "next/server";
+import { REF_COOKIE, REF_COOKIE_OPTIONS, refFromUrl } from "@/lib/referral-cookie";
 
 export async function proxy(request: NextRequest) {
   // Crawl gateway first: AI training crawlers get 402 Payment Required (or the
@@ -8,7 +9,15 @@ export async function proxy(request: NextRequest) {
   const answer = await gate(request);
   if (answer) return answer;
 
-  return NextResponse.next();
+  const response = NextResponse.next();
+  // Spend referrals: keep the FIRST referral code a visitor arrives with
+  // (?ref=<code> or /r/<code>) so the CoinPay sign-in can credit their
+  // referrer when the account is created. Never overwritten.
+  if (!request.cookies.get(REF_COOKIE)) {
+    const code = refFromUrl(request.nextUrl);
+    if (code) response.cookies.set(REF_COOKIE, code, REF_COOKIE_OPTIONS);
+  }
+  return response;
 }
 
 export const config = {

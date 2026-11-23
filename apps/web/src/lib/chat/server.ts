@@ -382,14 +382,19 @@ export function infernetFor(subject: string | null | undefined) {
  * still gets into chat, just on the free tier until the next sign-in links
  * them. Idempotent upstream, so calling it on every sign-in is fine.
  */
-export async function linkInfernetAccount(info: { sub?: string; email?: string | null; name?: string | null }) {
+export async function linkInfernetAccount(
+  info: { sub?: string; email?: string | null; name?: string | null; ref?: string | null },
+  ip: string | null = null,
+) {
   const sub = typeof info?.sub === "string" ? info.sub.trim() : "";
   if (!sub) return null;
   try {
     const res = await infernet("/api/v1/coinpay/link-trusted", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sub, email: info.email ?? null, name: info.name ?? null }),
+      headers: { "content-type": "application/json", ...(ip ? { "x-infernet-client-ip": ip } : {}) },
+      // `ref`: the first-touch referral code (lib/referral-cookie.ts). Infernet
+      // records it only for a brand-new account (spend referrals).
+      body: JSON.stringify({ sub, email: info.email ?? null, name: info.name ?? null, ...(info.ref ? { ref: info.ref } : {}) }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {

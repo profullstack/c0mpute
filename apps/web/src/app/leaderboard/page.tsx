@@ -148,14 +148,15 @@ export default async function LeaderboardPage({ searchParams }: { searchParams: 
       <div id="affiliates" className="scroll-mt-24 space-y-4">
         <ResourceTable
           title={`[ top affiliates · ${WINDOW_LABEL[w]} ]`}
-          description="Referral commissions earned (a share of the house fee on the paid jobs of nodes they referred, never the operator's share) and nodes referred in this window."
+          description="Referral commissions earned (a share of the house fee on the paid jobs of nodes they referred and on what people they referred spend, never the operator's share) and nodes and people referred in this window."
           columns={[
             { key: "rank", label: "#" },
             { key: "affiliate", label: "Affiliate" },
             { key: "nodes", label: "Nodes referred" },
+            { key: "people", label: "People referred" },
             { key: "commissions", label: "Commissions" },
           ]}
-          rows={b.affiliates.rows.map((r) => ({ id: r.affiliate, rank: r.rank, affiliate: r.affiliate, nodes: r.nodes_referred, commissions: usd(r.commissions_usd) }))}
+          rows={b.affiliates.rows.map((r) => ({ id: r.affiliate, rank: r.rank, affiliate: r.affiliate, nodes: r.nodes_referred, people: r.people_referred ?? 0, commissions: usd(r.commissions_usd) }))}
           emptyMessage={empty(b.affiliates, "No referral activity in this window yet.")}
         />
         {lb.referral_handles.length > 0 && (
