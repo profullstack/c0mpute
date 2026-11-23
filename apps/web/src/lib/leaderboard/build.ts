@@ -55,7 +55,8 @@ export interface NodeWindowStat {
 export interface InfernetWindow {
   providers: { c0mpute_node?: string; owner?: string | null; provider: string; earned_usd: number; jobs: number }[];
   spenders: { who: string; spent_usd: number; jobs: number }[];
-  referrers: { who: string; commissions_usd: number; nodes: number }[];
+  /** commissions_usd counts node AND spend commissions; people = referred people (Infernet >= #257). */
+  referrers: { who: string; commissions_usd: number; nodes: number; people?: number }[];
   models: { model: string; jobs: number; output_tokens: number; users: number }[];
   totals: { spenders: number; spent_usd: number; billed_jobs: number; earning_providers: number; served_jobs: number; output_tokens: number };
 }
@@ -121,6 +122,7 @@ export interface AffiliateRow {
   rank: number;
   affiliate: string;
   nodes_referred: number;
+  people_referred: number;
   commissions_usd: number;
 }
 export interface UserRow {
@@ -272,11 +274,11 @@ export function buildLeaderboard(inp: LeaderboardInputs): LeaderboardPayload {
       .filter((e) => e.earned_usd > 0)
       .sort((a, b) => b.earned_usd - a.earned_usd || b.jobs - a.jobs);
 
-    // ── affiliates: commissions and nodes referred, pseudonymous ──
+    // ── affiliates: commissions (node + spend) and nodes / people referred, pseudonymous ──
     const affRows = (inf?.referrers ?? [])
       .filter((r) => visibleToken(r.who))
-      .map((r) => ({ affiliate: anon(r.who), nodes_referred: r.nodes, commissions_usd: round6(r.commissions_usd) }))
-      .sort((a, b) => b.commissions_usd - a.commissions_usd || b.nodes_referred - a.nodes_referred);
+      .map((r) => ({ affiliate: anon(r.who), nodes_referred: r.nodes, people_referred: r.people ?? 0, commissions_usd: round6(r.commissions_usd) }))
+      .sort((a, b) => b.commissions_usd - a.commissions_usd || b.nodes_referred + b.people_referred - (a.nodes_referred + a.people_referred));
 
     // ── users: spend (Infernet ledger) + calls on c0mpute.com ──
     const usage = (inp.usage[w] ?? []).filter((u) => visibleToken(u.token));
