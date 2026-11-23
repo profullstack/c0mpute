@@ -90,6 +90,14 @@ describe("approval card", () => {
     expect(s.note).toContain("Mercury");
   });
 
+  test("a discounted CoinPay draft invoice shows subtotal, discount and total, never the discount as the amount", () => {
+    const s = describeAction(POLICIES.coinpay, "invoice_create_draft", { lineItems: [{ description: "Consulting", quantity: 2, unit_price: 150 }], discount: { type: "percent", value: 10 } })!;
+    const get = (l: string) => s.lines.find((x) => x.label === l)?.value;
+    expect(get("Subtotal")).toBe("300 (1 line item)");
+    expect(get("Discount")).toBe("10% = -30");
+    expect(get("Amount")).toBe("270 total (300 subtotal - 30 discount)");
+  });
+
   test("a CoinPay draft invoice totals its line items", () => {
     const s = describeAction(POLICIES.coinpay, "invoice_create_draft", { clientId: "c1", lineItems: [{ description: "work", quantity: 3, unit_price: 100 }] })!;
     expect(s.lines.find((x) => x.label === "Amount")?.value).toContain("300");

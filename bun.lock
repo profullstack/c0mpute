@@ -53,7 +53,7 @@
       "version": "0.3.104",
       "dependencies": {
         "@c0mpute/shared": "workspace:*",
-        "@profullstack/chat-plugins": "^0.3.1",
+        "@profullstack/chat-plugins": "^0.3.2",
         "@profullstack/checkout": "^0.1.0",
         "@profullstack/coinpay-onboard": "^0.5.1",
         "@profullstack/cross-promo": "^0.2.0",
@@ -343,7 +343,7 @@
 
     "@profullstack/c0mpute-sealed": ["@profullstack/c0mpute-sealed@workspace:packages/sealed"],
 
-    "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.3.1", "", {}, "sha512-meSPKTsxbBUof8+a8llzBP1Zui+Vf3iCXbqquYK/af0c/8XJCYFAeJ8prAc0/NrxCOrAqSWAcrppuPoNg2TQtA=="],
+    "@profullstack/chat-plugins": ["@profullstack/chat-plugins@0.3.2", "", {}, "sha512-vu1CObIYGlN716od/azeiEhnQh1PLV8Z/M8eHsexsMmEExPU2q3vkNQghrto2Wz3r0lQBym7VbleTT9yzeNBPA=="],
 
     "@profullstack/checkout": ["@profullstack/checkout@0.1.0", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"] }, "sha512-gPkruQ3Gq+ltQZQaUlCIlL2b7WTyEvBYusrfWGVjSYiuDCdeAtMyEKBEqVgh9d358lSMAl6ht4BbjRcAHaDfRw=="],
 

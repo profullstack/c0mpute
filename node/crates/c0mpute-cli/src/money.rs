@@ -259,6 +259,12 @@ fn norm(k: &str) -> String {
     k.to_lowercase().replace(['_', '-'], "")
 }
 
+/// Keys that hold an adjustment to an amount rather than the amount itself.
+fn is_adjustment_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    ["discount", "tax", "fee", "tip", "coupon", "rebate", "credit", "adjust", "shipping"].iter().any(|w| k.contains(w))
+}
+
 /// The first non-empty value among `names` (case, `_` and `-` ignored), at
 /// the top level, else one object level down.
 fn pick(args: &Value, names: &[&str]) -> String {
@@ -278,7 +284,12 @@ fn pick(args: &Value, names: &[&str]) -> String {
     if !top.is_empty() {
         return top;
     }
-    for v in obj.values() {
+    // One level down for wrapped arguments, never into a discount, tax or fee
+    // object: its `value`/`amount` adjusts the amount, it is not the amount.
+    for (k, v) in obj {
+        if is_adjustment_key(k) {
+            continue;
+        }
         if let Some(inner) = v.as_object() {
             let s = scan(inner);
             if !s.is_empty() {
@@ -383,6 +394,137 @@ fn trading_summary(tool: &str, args: &Value) -> Summary {
     Summary { title, lines, account: Some(if paper { "paper" } else { "live" }.into()), note: MODEL_CAN_BE_WRONG.into() }
 }
 
+pub const AMOUNT_SEE_DETAILS: &str = "see details";
+
+/// An itemised invoice's totals, in cents.
+#[derive(Debug, PartialEq)]
+pub struct InvoiceTotals {
+    pub subtotal: i128,
+    pub discount: i128,
+    pub discount_label: String,
+    pub tax: i128,
+    pub taxed_lines: usize,
+    pub total: i128,
+    pub lines: usize,
+}
+
+fn to_num(v: Option<&Value>) -> Option<f64> {
+    match v? {
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()),
+        Value::String(s) if !s.trim().is_empty() => num(s),
+        _ => None,
+    }
+}
+
+fn cents(n: f64) -> i128 {
+    (n * 100.0).round() as i128
+}
+
+/// Half away from zero, for non-negative a and positive b.
+fn div_round(a: i128, b: i128) -> i128 {
+    (a * 2 + b) / (b * 2)
+}
+
+fn money_str(c: i128) -> String {
+    format_num(c as f64 / 100.0, 2)
+}
+
+/// CoinPay's invoice arithmetic (computeInvoiceTotals) in integer cents, as
+/// in @profullstack/chat-plugins invoiceTotals(): subtotal of quantity x
+/// unit_price, the discount (percent of the subtotal or fixed), each line's
+/// tax_rate on its share of the discounted subtotal. Err when the arguments
+/// do not pin the total down.
+pub fn invoice_totals(items: &Value, discount: Option<&Value>) -> Result<InvoiceTotals, String> {
+    let items = items.as_array().filter(|a| !a.is_empty()).ok_or("no line items")?;
+    let mut lines: Vec<(i128, f64)> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let n = i + 1;
+        let o = it.as_object().ok_or(format!("line {n} is not an item"))?;
+        let q = to_num(o.get("quantity")).filter(|q| *q >= 0.0).ok_or(format!("line {n} has no usable quantity"))?;
+        let p = to_num(o.get("unit_price").or_else(|| o.get("unitPrice")))
+            .filter(|p| *p >= 0.0)
+            .ok_or(format!("line {n} has no usable unit_price"))?;
+        let rate = match o.get("tax_rate").or_else(|| o.get("taxRate")) {
+            None | Some(Value::Null) => 0.0,
+            Some(Value::String(s)) if s.is_empty() => 0.0,
+            r => to_num(r).filter(|r| *r >= 0.0).ok_or(format!("line {n} has an unusable tax_rate"))?,
+        };
+        lines.push((div_round((q * 1e4).round() as i128 * cents(p), 10_000), rate));
+    }
+    let subtotal: i128 = lines.iter().map(|l| l.0).sum();
+    let (mut off, mut discount_label) = (0i128, String::new());
+    if let Some(d) = discount.filter(|d| !d.is_null()) {
+        let typ = d.get("type").and_then(Value::as_str);
+        let value = to_num(d.get("value")).filter(|v| *v >= 0.0);
+        let (Some(typ @ ("percent" | "fixed")), Some(value)) = (typ, value) else {
+            return Err("the discount is not {type: percent|fixed, value}".into());
+        };
+        if typ == "percent" && value > 100.0 {
+            return Err("the discount is over 100%".into());
+        }
+        off = if typ == "percent" { div_round(subtotal * (value * 1000.0).round() as i128, 100_000) } else { cents(value) };
+        if off > subtotal {
+            return Err("the discount is larger than the subtotal".into());
+        }
+        discount_label = if typ == "percent" {
+            format!("{}% = -{}", format_num(value, 6), money_str(off))
+        } else {
+            format!("fixed -{}", money_str(off))
+        };
+    }
+    let mut share = vec![0i128; lines.len()];
+    if off > 0 {
+        let (mut given, mut last) = (0i128, None);
+        for (i, l) in lines.iter().enumerate() {
+            if l.0 == 0 {
+                continue;
+            }
+            last = Some(i);
+            share[i] = l.0 * off / subtotal;
+            given += share[i];
+        }
+        if let Some(i) = last {
+            share[i] += off - given;
+        }
+    }
+    let tax: i128 = lines
+        .iter()
+        .zip(&share)
+        .map(|(l, s)| if l.1 > 0.0 { div_round((l.0 - s) * (l.1 * 1000.0).round() as i128, 100_000) } else { 0 })
+        .sum();
+    let taxed_lines = lines.iter().filter(|l| l.1 > 0.0).count();
+    Ok(InvoiceTotals { subtotal, discount: off, discount_label, tax, taxed_lines, total: subtotal - off + tax, lines: lines.len() })
+}
+
+fn clip(s: String, max: usize) -> String {
+    if s.chars().count() > max { format!("{}…", s.chars().take(max - 1).collect::<String>()) } else { s }
+}
+
+fn describe_lines(items: &Value) -> String {
+    let parts: Vec<String> = items
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|it| {
+                    let d = value_str(it.get("description").or_else(|| it.get("name")).unwrap_or(&Value::Null));
+                    let price = it.get("unit_price").or_else(|| it.get("unitPrice")).unwrap_or(&Value::Null);
+                    let tax = match it.get("tax_rate") {
+                        Some(t) if !t.is_null() && t != &Value::from(0) && value_str(t) != "0" && value_str(t) != "" => format!(" (+{}% tax)", value_str(t)),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "{} x {}{}{tax}",
+                        value_str(it.get("quantity").unwrap_or(&Value::Null)),
+                        value_str(price),
+                        if d.is_empty() { String::new() } else { format!(" {d}") }
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    clip(parts.join("; "), 300)
+}
+
 fn money_summary(kind: &str, tool: &str, args: &Value) -> Summary {
     let mut lines: Vec<(String, String)> = Vec::new();
     let add = |lines: &mut Vec<(String, String)>, label: &str, value: String| {
@@ -390,33 +532,64 @@ fn money_summary(kind: &str, tool: &str, args: &Value) -> Summary {
             lines.push((label.into(), value));
         }
     };
-    let mut amount = pick(args, &["amount", "amountUsd", "value", "total", "paymentAmount"]);
+    let given = pick(args, &["amount", "amountUsd", "value", "total", "paymentAmount"]);
     let mut currency = pick(args, &["currency", "currencyCode", "asset", "coin"]);
-    if amount.is_empty()
-        && let Some(items) = args.get("lineItems").and_then(Value::as_array)
-    {
-        let f = |v: Option<&Value>| -> f64 {
-            match v {
-                Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
-                Some(Value::String(s)) => num(s).unwrap_or(0.0),
-                _ => 0.0,
-            }
-        };
-        let t: f64 = items.iter().map(|i| f(i.get("quantity")) * f(i.get("unit_price"))).sum();
-        amount = format!(
-            "{} before tax and discount ({} line item{})",
-            format_num(t, 8),
-            items.len(),
-            if items.len() == 1 { "" } else { "s" }
-        );
-        if currency.is_empty() {
-            currency = "USD".into();
-        }
-    }
     if let Some(m) = args.get("minutes").filter(|m| m.is_number()) {
         add(&mut lines, "Time", format!("{} minutes", value_str(m)));
     }
-    add(&mut lines, "Amount", amount);
+    if let Some(items) = args.get("lineItems").or_else(|| args.get("line_items")) {
+        // An itemised invoice: the amount is what the items add up to, never
+        // a number found elsewhere in the arguments.
+        let discount = args.get("discount");
+        let t = invoice_totals(items, discount).and_then(|t| match (given.is_empty(), num(&given)) {
+            (true, _) => Ok(t),
+            (false, Some(g)) if cents(g) == t.total => Ok(t),
+            _ => Err(format!("the amount given ({given}) does not match the line items")),
+        });
+        match t {
+            Err(why) => {
+                add(&mut lines, "Amount", format!("{AMOUNT_SEE_DETAILS} ({why})"));
+                add(&mut lines, "Line items", clip(items.to_string(), 500));
+                if let Some(d) = discount {
+                    add(&mut lines, "Discount", clip(d.to_string(), 500));
+                }
+            }
+            Ok(t) => {
+                let n = t.lines;
+                let s = if n == 1 { "" } else { "s" };
+                add(&mut lines, "Subtotal", format!("{} ({n} line item{s})", money_str(t.subtotal)));
+                add(&mut lines, "Discount", t.discount_label.clone());
+                if t.taxed_lines > 0 {
+                    add(&mut lines, "Tax", format!("+{} (on {} of {n} line{s})", money_str(t.tax), t.taxed_lines));
+                }
+                let mut how = vec![format!("{} subtotal", money_str(t.subtotal))];
+                if t.discount > 0 {
+                    how.push(format!("- {} discount", money_str(t.discount)));
+                }
+                if t.taxed_lines > 0 {
+                    how.push(format!("+ {} tax", money_str(t.tax)));
+                }
+                let how = if how.len() > 1 { format!(" ({})", how.join(" ")) } else { String::new() };
+                add(&mut lines, "Amount", format!("{} total{how}", money_str(t.total)));
+                add(&mut lines, "Line items", describe_lines(items));
+            }
+        }
+        if currency.is_empty() {
+            currency = "USD".into();
+        }
+    } else {
+        // A discount, tax or fee next to an amount leaves it unclear whether
+        // the amount is before or after it: show the arguments, not a guess.
+        let adjusted = args
+            .as_object()
+            .is_some_and(|o| o.iter().any(|(k, v)| is_adjustment_key(k) && !v.is_null() && v.as_str() != Some("")));
+        if adjusted {
+            add(&mut lines, "Amount", AMOUNT_SEE_DETAILS.into());
+            add(&mut lines, "Details", clip(args.to_string(), 500));
+        } else {
+            add(&mut lines, "Amount", given);
+        }
+    }
     add(&mut lines, "Currency", currency);
     add(
         &mut lines,
@@ -512,7 +685,7 @@ mod tests {
         h.classify(Some("https://coinpayportal.com/api/mcp"));
         let card = render_card(&h);
         assert!(card.contains("Invoice create draft"), "{card}");
-        assert!(card.contains("3,250.25 before tax and discount (2 line items)"), "{card}");
+        assert!(card.contains("3,250.25 total") && card.contains("Subtotal") && card.contains("2 x 1500; 1 x 250.25"), "{card}");
         assert!(card.contains("USD") && card.contains("c_1") && card.contains("Q4"), "{card}");
     }
 
@@ -530,6 +703,74 @@ mod tests {
         let card = render_card(&paper);
         assert!(card.contains("PAPER (simulated, no real money)") && card.contains("[PAPER: simulated]"), "{card}");
         assert!(card.contains("at the market price, not known until it fills"), "{card}");
+    }
+
+    fn coinpay_card(args: Value) -> Summary {
+        describe_action(policy_for_slug("coinpay").unwrap(), "invoice_create_draft", &args)
+    }
+
+    fn line<'a>(s: &'a Summary, label: &str) -> Option<&'a str> {
+        s.lines.iter().find(|(l, _)| l == label).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn percent_discount_is_never_the_amount() {
+        let s = coinpay_card(json!({"clientId": "c1", "lineItems": [{"description": "Consulting", "quantity": 2, "unit_price": 150}], "discount": {"type": "percent", "value": 10}}));
+        assert_eq!(line(&s, "Subtotal"), Some("300 (1 line item)"));
+        assert_eq!(line(&s, "Discount"), Some("10% = -30"));
+        assert_eq!(line(&s, "Amount"), Some("270 total (300 subtotal - 30 discount)"));
+        assert_eq!(line(&s, "Line items"), Some("2 x 150 Consulting"));
+        assert_eq!(line(&s, "Tax"), None);
+    }
+
+    #[test]
+    fn fixed_discount() {
+        let s = coinpay_card(json!({"lineItems": [{"description": "a", "quantity": 1, "unit_price": 100}, {"description": "b", "quantity": 3, "unit_price": "50.5"}], "discount": {"type": "fixed", "value": 25}}));
+        assert_eq!(line(&s, "Subtotal"), Some("251.5 (2 line items)"));
+        assert_eq!(line(&s, "Discount"), Some("fixed -25"));
+        assert_eq!(line(&s, "Amount"), Some("226.5 total (251.5 subtotal - 25 discount)"));
+    }
+
+    #[test]
+    fn tax_on_the_discounted_share_like_coinpay() {
+        let s = coinpay_card(json!({
+            "lineItems": [{"description": "taxed", "quantity": 2, "unit_price": 150, "tax_rate": 8}, {"description": "exempt", "quantity": 1, "unit_price": 100}],
+            "discount": {"type": "percent", "value": 10}
+        }));
+        assert_eq!(line(&s, "Subtotal"), Some("400 (2 line items)"));
+        assert_eq!(line(&s, "Discount"), Some("10% = -40"));
+        assert_eq!(line(&s, "Tax"), Some("+21.6 (on 1 of 2 lines)"));
+        assert_eq!(line(&s, "Amount"), Some("381.6 total (400 subtotal - 40 discount + 21.6 tax)"));
+        assert_eq!(invoice_totals(&json!([{"quantity": 1, "unit_price": 10, "tax_rate": 5}]), None).unwrap().total, 1050);
+    }
+
+    #[test]
+    fn no_line_items_plain_amount_or_see_details() {
+        let card = |tool: &str, a: Value| describe_action(policy_for_slug("coinpay").unwrap(), tool, &a);
+        assert_eq!(line(&card("payment_create", json!({"amount": 42, "currency": "USDC"})), "Amount"), Some("42"));
+        let adj = card("payment_create", json!({"amount": 42, "discount": {"type": "fixed", "value": 2}}));
+        assert_eq!(line(&adj, "Amount"), Some("see details"));
+        assert!(line(&adj, "Details").unwrap().contains("\"discount\""));
+        assert_eq!(line(&card("thing_create", json!({"discount": {"value": 10}})), "Amount"), Some("see details"));
+        assert_eq!(line(&card("thing_create", json!({"order": {"amount": 7}})), "Amount"), Some("7"));
+        assert_eq!(line(&card("invoice_send", json!({"invoiceId": "inv_1"})), "Amount"), None);
+    }
+
+    #[test]
+    fn ambiguous_line_items_show_raw_items_not_a_number() {
+        for args in [
+            json!({"lineItems": [{"quantity": "two", "unit_price": 150}]}),
+            json!({"lineItems": [{"quantity": 1}]}),
+            json!({"lineItems": [{"quantity": 1, "unit_price": 10}], "discount": {"value": 10}}),
+            json!({"lineItems": [{"quantity": 1, "unit_price": 10}], "discount": {"type": "fixed", "value": 50}}),
+            json!({"lineItems": [{"quantity": 1, "unit_price": 10}], "amount": 99}),
+            json!({"lineItems": []}),
+        ] {
+            let s = coinpay_card(args.clone());
+            assert!(line(&s, "Amount").unwrap().starts_with("see details"), "{args}: {s:?}");
+            assert_eq!(line(&s, "Line items"), Some(args["lineItems"].to_string().as_str()));
+        }
+        assert_eq!(line(&coinpay_card(json!({"lineItems": [{"quantity": 1, "unit_price": 10}], "amount": 10})), "Amount"), Some("10 total"));
     }
 
     #[test]
