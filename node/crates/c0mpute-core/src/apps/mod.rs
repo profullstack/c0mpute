@@ -1216,6 +1216,11 @@ impl Apps {
                         l.host_port = Some(port);
                         l.volume_epoch = Some(l.epoch);
                         l.failures = 0;
+                        // It runs again, so the reason it was last stopped
+                        // (over its disk limit) no longer describes it. The
+                        // field is persisted and shown in the status API;
+                        // left set, a recovered app kept reporting "stopped".
+                        l.error = None;
                         info!(app = %id, epoch = l.epoch, port, "apps: running as primary");
                     }
                     Err(e) => {
