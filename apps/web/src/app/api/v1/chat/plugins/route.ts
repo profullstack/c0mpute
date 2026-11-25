@@ -21,9 +21,11 @@ export async function GET(req: Request) {
 }
 
 /**
- * POST /api/v1/chat/plugins {url} or {slug: <catalog name>}: add a remote MCP
- * server. Answers 201 with the plugin; when it needs a sign-in, `connect_url`
- * is a one-time link (10 minutes) that works in any browser.
+ * POST /api/v1/chat/plugins {url} or {slug: <catalog name>}, optional
+ * `api_key` (servers that take a bearer key instead of an OAuth sign-in) and
+ * `title`: add a remote MCP server. Answers 201 with the plugin; when it needs
+ * a sign-in, `connect_url` is a one-time link (10 minutes) that works in any
+ * browser.
  */
 export async function POST(req: Request) {
   const user = await currentUser(req);
@@ -33,8 +35,10 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   const target = typeof body?.url === "string" ? body.url : typeof body?.slug === "string" ? body.slug : "";
   if (!target) return json({ error: { message: "url (an https MCP server) or slug (a catalog name) is required", code: 400 } }, 400);
+  if (body?.api_key != null && typeof body.api_key !== "string") return json({ error: { message: "api_key must be a string", code: 400 } }, 400);
+  if (body?.title != null && typeof body.title !== "string") return json({ error: { message: "title must be a string", code: 400 } }, 400);
   try {
-    const p = await addPlugin(user.id, target);
+    const p = await addPlugin(user.id, target, undefined, { apiKey: (body?.api_key as string | undefined) ?? null, title: (body?.title as string | undefined) ?? null });
     const pub = publicPlugin(p, siteUrl());
     return json({ plugin: pub, connect_url: pub.connected ? null : connectLink(user.id, p.slug) }, 201);
   } catch (e) {

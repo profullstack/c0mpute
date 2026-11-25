@@ -89,6 +89,8 @@ export type PluginTokens = {
   client_secret?: string;
   token_endpoint?: string;
   resource?: string;
+  /** A static API key the owner pasted (sent as Authorization: Bearer), not an OAuth sign-in. */
+  api_key?: boolean;
 };
 
 export type ChatPlugin = {
@@ -359,6 +361,14 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
       return store.get(userId, slug);
     },
 
+    /** Rename (the label shown in lists); null or empty goes back to the server's own name. */
+    async setTitle(userId: string, slug: string, title: string | null): Promise<ChatPlugin | null> {
+      await init();
+      const t = title ? String(title).trim().slice(0, 120) : "";
+      await sql.run(`UPDATE chat_plugins SET title = ?, updated_at = ? WHERE user_id = ? AND slug = ?`, [t || null, now(), userId, slug]);
+      return store.get(userId, slug);
+    },
+
     async setTokens(userId: string, slug: string, t: PluginTokens) {
       await init();
       const key = needKey();
@@ -458,9 +468,11 @@ export function publicPlugin(p: ChatPlugin, site: string) {
     kind: policy?.kind ?? null,
     ...(policy?.kind === "trading" ? { trading_mode: p.trading_mode } : {}),
     enabled: p.enabled,
-    auth: needsAuth ? "oauth" : offersAuth ? "optional" : "none",
+    auth: p.tokens?.api_key ? "api_key" : needsAuth ? "oauth" : offersAuth ? "optional" : "none",
     connected,
     signed_in: !!p.token,
+    /** True when it uses an API key the owner pasted; the key itself is never returned. */
+    api_key: !!p.tokens?.api_key,
     status: !connected ? "needs_sign_in" : p.enabled ? "on" : "off",
     connect_url: offersAuth ? `${site}/api/v1/chat/plugins/${p.slug}/connect` : null,
     tools: (p.tools ?? []).map((t) => ({ name: t.name, description: t.description ?? "", destructive: !!t.destructive })),

@@ -86,7 +86,16 @@ function withPolicyScopes(url: string, auth: PluginAuth): PluginAuth {
 // ── add ─────────────────────────────────────────────────────────────────────
 
 /** Add a plugin by https URL or catalog name. Re-adding the same URL refreshes it. */
-export async function addPlugin(userId: string, target: string, store: PluginStoreDb = pluginStore()): Promise<ChatPlugin> {
+export type AddOptions = {
+  /** A static API key, for servers that take `Authorization: Bearer <key>` instead of (or as well as) OAuth. */
+  apiKey?: string | null;
+  /** The label to show instead of the server's own name. */
+  title?: string | null;
+  net?: cp.NetOptions;
+};
+
+export async function addPlugin(userId: string, target: string, store: PluginStoreDb = pluginStore(), opts: AddOptions = {}): Promise<ChatPlugin> {
+  const net = opts.net ?? NET;
   const catalog = catalogFor();
   const raw = String(target ?? "").trim();
   const looksUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) || raw.includes(".") || raw.includes("/");
@@ -97,20 +106,121 @@ export async function addPlugin(userId: string, target: string, store: PluginSto
   }
   if (isOwnHost(input.url)) throw new PluginError("that is c0mpute's own MCP server: its tools are already built into this chat");
   const u = checkPluginUrl(input.url);
-  const d = await cp.discover(u.href, NET);
+  const apiKey = opts.apiKey ? cleanKey(opts.apiKey) : null;
+  let d: Pick<cp.DiscoveredServer, "url" | "name" | "auth"> & { title?: string; instructions?: string };
+  try {
+    d = await cp.discover(u.href, net);
+  } catch (e) {
+    // A server that answers 401 and publishes no OAuth metadata takes a key, not a sign-in.
+    if (!(e instanceof cp.PluginError && e.code === "no_oauth_metadata")) throw e;
+    if (!apiKey) throw new PluginError(`${u.host} needs a key and has no OAuth sign-in: add it with its API key (api_key)`);
+    const r = await withKey(u.href, apiKey, (conn) => cp.initialize(conn, net));
+    const si = (r.info?.serverInfo ?? {}) as { name?: unknown; title?: unknown };
+    d = {
+      url: u.href,
+      name: typeof si.name === "string" && si.name ? si.name : u.hostname.split(".")[0],
+      title: typeof si.title === "string" ? si.title : undefined,
+      auth: "none",
+    };
+  }
   const auth: PluginAuth = withPolicyScopes(d.url, d.auth === "none" ? "none" : { ...d.auth });
-  const p = await store.add(userId, {
+  const title = opts.title?.trim() || null;
+  let p = await store.add(userId, {
     slug: input.slug,
     url: d.url,
     name: d.name || input.name,
-    title: d.title || input.entry?.name || null,
+    title: title || d.title || input.entry?.name || null,
     instructions: d.instructions || null,
     auth,
   });
+  if (title) p = (await store.setTitle(userId, p.slug, title)) ?? p;
+  if (apiKey) return setApiKey(store, p, apiKey, net);
   if (auth === "none" || auth.required === false) {
-    await refreshTools(store, p).catch((e) => console.warn(`chat plugin ${p.slug}: tools/list failed: ${redactLog(e)}`));
+    await refreshTools(store, p, net).catch((e) => console.warn(`chat plugin ${p.slug}: tools/list failed: ${redactLog(e)}`));
     return (await store.get(userId, p.slug)) ?? p;
   }
+  return p;
+}
+
+// ── API keys and edits ──────────────────────────────────────────────────────
+
+const KEY_MAX = 4096;
+
+/** One opaque token: a pasted "Bearer " prefix is dropped; whitespace or control characters are refused. */
+export function cleanKey(raw: unknown): string {
+  const k = String(raw ?? "")
+    .trim()
+    .replace(/^bearer\s+/i, "");
+  if (!k || k.length > KEY_MAX || /[\s\u0000-\u001f\u007f]/.test(k)) throw new PluginError(`api_key must be one token with no spaces, at most ${KEY_MAX} characters`);
+  return k;
+}
+
+/** Run one MCP call with a key; a 401/403 becomes "that key was refused". */
+async function withKey<T>(url: string, key: string, fn: (conn: { url: string; token: string }) => Promise<T>): Promise<T> {
+  try {
+    return await fn({ url, token: key });
+  } catch (e) {
+    if (e instanceof cp.PluginError && (e.code === "unauthorized" || e.code === "forbidden")) throw new PluginError(`${hostOf(url)} refused that API key`, 400);
+    throw e;
+  }
+}
+
+/**
+ * Check a static API key against the server (tools/list with it as the
+ * bearer token), then keep it sealed like an OAuth token. No API ever
+ * returns the key.
+ */
+export async function setApiKey(store: PluginStoreDb, p: ChatPlugin, rawKey: string, net: cp.NetOptions = NET): Promise<ChatPlugin> {
+  const key = cleanKey(rawKey);
+  await withKey(p.url, key, (conn) => cp.listTools(conn, { ...net, maxTools: MAX_TOOLS }));
+  await store.setTokens(p.user_id, p.slug, { access_token: key, token_type: "Bearer", api_key: true });
+  const fresh = (await store.get(p.user_id, p.slug)) ?? p;
+  await refreshTools(store, fresh, net).catch((e) => console.warn(`chat plugin ${p.slug}: tools/list failed: ${redactLog(e)}`));
+  return (await store.get(p.user_id, p.slug)) ?? fresh;
+}
+
+export type PluginPatch = {
+  /** New label; null or "" goes back to the server's own name. */
+  title?: string | null;
+  enabled?: boolean;
+  /** A new API key, or null to forget the stored key (or OAuth sign-in). */
+  api_key?: string | null;
+};
+
+/** Read a PATCH body into a PluginPatch, refusing anything else. */
+export function readPatch(body: unknown): PluginPatch {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new PluginError("send a JSON object: {title?, enabled?, api_key?}");
+  const b = body as Record<string, unknown>;
+  for (const k of Object.keys(b)) if (!["title", "enabled", "api_key"].includes(k)) throw new PluginError(`unknown field "${k}" (title, enabled, api_key)`);
+  const out: PluginPatch = {};
+  if ("title" in b) {
+    if (b.title !== null && typeof b.title !== "string") throw new PluginError("title must be a string or null");
+    out.title = b.title as string | null;
+  }
+  if ("enabled" in b) {
+    if (typeof b.enabled !== "boolean") throw new PluginError("enabled must be true or false");
+    out.enabled = b.enabled;
+  }
+  if ("api_key" in b) {
+    if (b.api_key !== null && typeof b.api_key !== "string") throw new PluginError("api_key must be a string, or null to remove it");
+    out.api_key = b.api_key === null ? null : cleanKey(b.api_key);
+  }
+  if (!Object.keys(out).length) throw new PluginError("nothing to change: send title, enabled or api_key");
+  return out;
+}
+
+/** Edit a plugin: rename it, switch it on/off, set or clear its API key. */
+export async function updatePlugin(userId: string, slug: string, patch: PluginPatch, store: PluginStoreDb = pluginStore(), net: cp.NetOptions = NET): Promise<ChatPlugin> {
+  let p = await store.get(userId, slug);
+  if (!p) throw new PluginError(`no chat plugin ${slug} on this account`, 404);
+  // The key first: a refused key changes nothing else.
+  if (typeof patch.api_key === "string") p = await setApiKey(store, p, patch.api_key, net);
+  else if (patch.api_key === null) {
+    await store.clearTokens(userId, slug);
+    p = (await store.get(userId, slug)) ?? p;
+  }
+  if ("title" in patch) p = (await store.setTitle(userId, slug, patch.title ?? null)) ?? p;
+  if (typeof patch.enabled === "boolean") p = (await store.setEnabled(userId, slug, patch.enabled)) ?? p;
   return p;
 }
 
@@ -235,6 +345,8 @@ export async function finishConnect(state: string, code: string, store: PluginSt
 /** The bearer token for this plugin, refreshed (and saved) first when it is about to expire. */
 async function tokenFor(store: PluginStoreDb, p: ChatPlugin): Promise<string | undefined> {
   if (!p.tokens) return undefined;
+  // A pasted API key has no refresh flow.
+  if (p.tokens.api_key) return p.tokens.access_token;
   try {
     const { tokens, refreshed } = await cp.ensureFresh(p.tokens as cp.Tokens, NET);
     if (refreshed) await store.setTokens(p.user_id, p.slug, tokens as PluginTokens);
@@ -249,9 +361,9 @@ async function tokenFor(store: PluginStoreDb, p: ChatPlugin): Promise<string | u
 
 const MAX_TOOLS = 64;
 
-export async function refreshTools(store: PluginStoreDb, p: ChatPlugin) {
+export async function refreshTools(store: PluginStoreDb, p: ChatPlugin, net: cp.NetOptions = NET) {
   const token = await tokenFor(store, p);
-  const tools = applyPolicy(policyFor(p.url), await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...NET, maxTools: MAX_TOOLS }), p.trading_mode);
+  const tools = applyPolicy(policyFor(p.url), await cp.listTools({ url: p.url, ...(token ? { token } : {}) }, { ...net, maxTools: MAX_TOOLS }), p.trading_mode);
   await store.setTools(
     p.user_id,
     p.slug,

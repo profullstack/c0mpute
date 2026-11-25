@@ -1,6 +1,6 @@
 import { handleRpc } from "@/lib/chat/mcp";
 import { CORS } from "@/lib/chat/oauth";
-import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, runPluginChat } from "@/lib/chat/plugins";
+import { addPlugin, catalogFor, connectLink, hasEnabledPlugins, readPatch, runPluginChat, updatePlugin } from "@/lib/chat/plugins";
 import { gallery } from "@/lib/gallery/server";
 import { experts } from "@/lib/experts/catalog";
 import { expertPriceUsd, expertsConfig } from "@/lib/experts/config";
@@ -49,7 +49,8 @@ export async function POST(req: Request) {
     store: pluginStore(),
     site: siteUrl(),
     catalog: () => catalogFor(siteUrl()),
-    add: (userId: string, target: string) => addPlugin(userId, target),
+    add: (userId: string, target: string, opts?: { apiKey?: string | null; title?: string | null }) => addPlugin(userId, target, undefined, opts),
+    update: (userId: string, slug: string, body: Record<string, unknown>) => updatePlugin(userId, slug, readPatch(body)),
     connectLink,
     hasEnabled: (userId: string) => hasEnabledPlugins(userId),
     run: runPluginChat,

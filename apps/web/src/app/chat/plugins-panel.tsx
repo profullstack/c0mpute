@@ -17,7 +17,9 @@ export type PluginRow = {
   kind?: "banking" | "crypto" | "trading" | null;
   trading_mode?: "paper" | "live";
   enabled: boolean;
-  auth: "oauth" | "none";
+  auth: "oauth" | "optional" | "api_key" | "none";
+  /** Uses an API key the owner pasted (never sent back). */
+  api_key?: boolean;
   connected: boolean;
   status: "on" | "off" | "needs_sign_in";
   tools: { name: string; description: string; destructive: boolean }[];
@@ -96,11 +98,14 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const pluginsApi = {
   list: () => api<{ plugins: PluginRow[]; catalog: CatalogRow[] }>("/api/v1/chat/plugins"),
-  add: (target: string) =>
+  add: (target: string, opts: { api_key?: string; title?: string } = {}) =>
     api<{ plugin: PluginRow; connect_url: string | null }>("/api/v1/chat/plugins", {
       method: "POST",
-      body: JSON.stringify(/^https?:\/\//i.test(target) ? { url: target } : { slug: target }),
+      body: JSON.stringify({ ...(/^https?:\/\//i.test(target) ? { url: target } : { slug: target }), ...opts }),
     }),
+  /** Rename, on/off, set an API key, or `api_key: null` to forget the key or sign-in. */
+  update: (slug: string, patch: { title?: string | null; enabled?: boolean; api_key?: string | null }) =>
+    api<{ plugin: PluginRow }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   remove: (slug: string) => api<{ ok: boolean }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}`, { method: "DELETE" }),
   mode: (slug: string, mode: "paper" | "live") =>
     api<{ plugin: PluginRow }>(`/api/v1/chat/plugins/${encodeURIComponent(slug)}/mode`, {
@@ -118,6 +123,7 @@ export function PluginsPanel() {
   const [plugins, setPlugins] = useState<PluginRow[]>([]);
   const [catalog, setCatalog] = useState<CatalogRow[]>([]);
   const [url, setUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -135,12 +141,13 @@ export function PluginsPanel() {
     void refresh();
   }, [refresh]);
 
-  async function add(target: string) {
+  async function add(target: string, key?: string) {
     setErr(null);
     setNote(null);
     setBusy(target);
     try {
-      const r = await pluginsApi.add(target);
+      const r = await pluginsApi.add(target, key ? { api_key: key } : {});
+      setApiKey("");
       if (r.connect_url) {
         setNote(`signing in to ${r.plugin.name}…`);
         const ok = await signInPopup(r.connect_url, r.plugin.slug);
@@ -177,7 +184,7 @@ export function PluginsPanel() {
       <header className="space-y-1">
         <h2 className="accent text-base">chat plugins</h2>
         <p className="comment">
-          // a plugin is a remote MCP server. Add one and the model can use its tools in your chats. Sign-in is automatic. Or type /plugin add &lt;url&gt; in the chat.
+          // a plugin is a remote MCP server. Add one and the model can use its tools in your chats. Sign-in is automatic; servers that take an API key get one in the key box. Or type /plugin add &lt;url&gt; in the chat.
         </p>
       </header>
       {err && <p className="text-[var(--color-warn)] break-words">{err}</p>}
@@ -208,6 +215,32 @@ export function PluginsPanel() {
                       {p.enabled ? "on" : "off"}
                     </label>
                   )}
+                  <button
+                    disabled={busy === p.slug}
+                    className="text-[var(--color-dim)] hover:text-[var(--color-accent)]"
+                    title="change the label it shows"
+                    onClick={() => {
+                      const t = window.prompt(`New label for ${p.slug} (empty for the server's own name):`, p.title || p.name);
+                      if (t !== null) void act(p.slug, () => pluginsApi.update(p.slug, { title: t }));
+                    }}
+                  >
+                    rename
+                  </button>
+                  <button
+                    disabled={busy === p.slug}
+                    className="text-[var(--color-dim)] hover:text-[var(--color-accent)]"
+                    title="for servers that take an API key (Authorization: Bearer) instead of a sign-in"
+                    onClick={() => {
+                      const k = window.prompt(
+                        p.api_key ? `New API key for ${p.slug} (leave empty to remove the stored key):` : `API key for ${p.slug} (sent as Authorization: Bearer; stored encrypted, never shown again):`,
+                      );
+                      if (k === null) return;
+                      if (k.trim()) void act(p.slug, () => pluginsApi.update(p.slug, { api_key: k.trim() }));
+                      else if (p.api_key) void act(p.slug, () => pluginsApi.update(p.slug, { api_key: null }));
+                    }}
+                  >
+                    {p.api_key ? "key ✓" : "key"}
+                  </button>
                   <button
                     disabled={busy === p.slug}
                     className="text-[var(--color-dim)] hover:text-[var(--color-warn)]"
@@ -284,7 +317,7 @@ export function PluginsPanel() {
         className="space-y-2"
         onSubmit={(e) => {
           e.preventDefault();
-          if (url.trim()) void add(url.trim());
+          if (url.trim()) void add(url.trim(), apiKey.trim() || undefined);
         }}
       >
         <h3 className="text-xs text-[var(--color-dim)]">any MCP server</h3>
@@ -300,6 +333,14 @@ export function PluginsPanel() {
             add
           </button>
         </div>
+        <input
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          type="password"
+          autoComplete="off"
+          placeholder="API key (optional: only for servers that take a key instead of a sign-in)"
+          className="w-full bg-[var(--color-card)] border border-[var(--color-rule)] px-2 py-1 text-xs"
+        />
       </form>
     </section>
   );

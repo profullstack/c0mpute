@@ -248,3 +248,89 @@ describe("money plugins: confirmation gate in the tool-call layer", () => {
     expect(c.find((e) => e.slug === "cheapestwayz")).toMatchObject({ url: "https://cheapestwayz.com/mcp", default: true });
   });
 });
+
+// A key-protected MCP server: 401 without `Authorization: Bearer sk-good`, and no OAuth metadata.
+describe("API-key plugins and edits (PATCH)", () => {
+  const net = { allowPrivate: true };
+  const seenAuth: (string | null)[] = [];
+  let keyed: ReturnType<typeof Bun.serve>;
+  beforeAll(() => {
+    keyed = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        if (req.method !== "POST") return new Response("not found", { status: 404 });
+        seenAuth.push(req.headers.get("authorization"));
+        if (req.headers.get("authorization") !== "Bearer sk-good") return new Response("unauthorized", { status: 401 });
+        const m = (await req.json()) as { id?: number; method: string };
+        const reply = (result: unknown) => Response.json({ jsonrpc: "2.0", id: m.id, result });
+        if (m.id === undefined) return new Response(null, { status: 202 });
+        if (m.method === "initialize") return reply({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "acme", version: "1" } });
+        if (m.method === "tools/list") return reply({ tools: [{ name: "lookup", description: "Look something up", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }] });
+        if (m.method === "tools/call") return reply({ content: [{ type: "text", text: "found it" }] });
+        return Response.json({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "nope" } });
+      },
+    });
+  });
+  afterAll(() => keyed.stop(true));
+
+  async function setup() {
+    const { updatePlugin } = await import("./plugins");
+    const store = createPluginStore(memSql(), { key: randomBytes(32) });
+    await store.add("u1", { url: `http://127.0.0.1:${keyed.port}/mcp`, name: "acme", auth: "none" });
+    return { store, updatePlugin };
+  }
+
+  test("a refused key changes nothing; a good one is stored sealed, never shown, and used for tool calls", async () => {
+    const { store, updatePlugin } = await setup();
+    await expect(updatePlugin("u1", "acme", { api_key: "sk-bad", title: "Acme" }, store, net)).rejects.toThrow(/refused that API key/);
+    const before = (await store.get("u1", "acme"))!;
+    expect(before.token).toBeNull();
+    expect(before.title).toBeNull();
+
+    const p = await updatePlugin("u1", "acme", { api_key: "Bearer sk-good" }, store, net);
+    expect(p.token).toBe("sk-good");
+    expect(p.tokens?.api_key).toBe(true);
+    expect(p.tools?.map((t) => t.name)).toEqual(["lookup"]);
+    const { publicPlugin } = await import("./plugin-store");
+    const pub = publicPlugin(p, "https://c0mpute.com");
+    expect(pub).toMatchObject({ auth: "api_key", api_key: true, connected: true, status: "on", connect_url: null });
+    expect(JSON.stringify(pub)).not.toContain("sk-good");
+
+    seenAuth.length = 0;
+    const { upstream } = fakeModel(JSON.stringify({ name: "acme__lookup", arguments: {} }));
+    const events: PluginEvent[] = [];
+    const r = await runPluginChat({ userId: "u1", upstream, req: { messages: [{ role: "user", content: "look it up" }] }, emit: (e) => events.push(e), store, net });
+    expect(r.text).toContain("found it");
+    expect(seenAuth.length).toBeGreaterThan(0);
+    expect(seenAuth.every((a) => a === "Bearer sk-good")).toBe(true);
+  });
+
+  test("rename, off/on, and clearing the key", async () => {
+    const { store, updatePlugin } = await setup();
+    await updatePlugin("u1", "acme", { api_key: "sk-good" }, store, net);
+    let p = await updatePlugin("u1", "acme", { title: "  Acme Search  ", enabled: false }, store, net);
+    expect(p.title).toBe("Acme Search");
+    expect(p.enabled).toBe(false);
+    p = await updatePlugin("u1", "acme", { title: "", enabled: true }, store, net);
+    expect(p.title).toBeNull();
+    expect(p.enabled).toBe(true);
+    p = await updatePlugin("u1", "acme", { api_key: null }, store, net);
+    expect(p.token).toBeNull();
+    await expect(updatePlugin("u1", "nope", { enabled: true }, store, net)).rejects.toThrow(/no chat plugin nope/);
+    await expect(updatePlugin("u2", "acme", { enabled: false }, store, net)).rejects.toThrow(/no chat plugin acme/);
+  });
+
+  test("PATCH bodies are checked", async () => {
+    const { readPatch, cleanKey } = await import("./plugins");
+    expect(readPatch({ title: "x", enabled: true, api_key: "Bearer abc" })).toEqual({ title: "x", enabled: true, api_key: "abc" });
+    expect(readPatch({ api_key: null })).toEqual({ api_key: null });
+    expect(() => readPatch({})).toThrow(/nothing to change/);
+    expect(() => readPatch(null)).toThrow(/JSON object/);
+    expect(() => readPatch({ url: "https://x" })).toThrow(/unknown field "url"/);
+    expect(() => readPatch({ enabled: "yes" })).toThrow(/true or false/);
+    expect(() => readPatch({ api_key: 5 })).toThrow(/api_key must be/);
+    expect(() => cleanKey("two words")).toThrow(/one token/);
+    expect(() => cleanKey("a\nb")).toThrow(/one token/);
+    expect(() => cleanKey("x".repeat(5000))).toThrow(/at most/);
+  });
+});

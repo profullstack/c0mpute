@@ -48,7 +48,7 @@ c0mpute chat models | whoami | logout\n  \
 c0mpute chat mcp                  # stdio MCP server for Claude Code, Cursor, ...\n  \
 c0mpute chat connect hosting --name <node>  # publish what you /push hosting in the chat\n  \
 c0mpute chat push hosting ls | nodes | status <name> -w | rm <name> | <name> <dir>\n  \
-c0mpute chat plugins ls | add <url|name> | rm | on | off <name>  # tools from remote MCP servers\n  \
+c0mpute chat plugins ls | add <url|name> [--key] | rm | on | off | key | rename <name>  # tools from remote MCP servers\n  \
 c0mpute plugins paper moomoo | live moomoo --confirm  # brokerage orders: paper (default) or real money\n\n\
 A money action (Mercury payment, CoinPay invoice, moomoo order) shows its card and runs only after you\n\
 type y at the terminal. --yes approves the other held tool calls, never a money one.\n\n\

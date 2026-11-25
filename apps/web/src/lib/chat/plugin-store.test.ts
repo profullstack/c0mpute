@@ -147,4 +147,13 @@ describe("/plugin command", () => {
     expect(parsePluginCommand("/pluginx")).toBeNull();
     expect(parsePluginCommand("plugin add x")).toBeNull();
   });
+  test("/plugin rename and /plugin key (the key is never typed into the chat)", () => {
+    expect(parsePluginCommand("/plugin rename acme Acme Docs")).toEqual({ kind: "rename", slug: "acme", title: "Acme Docs" });
+    expect(parsePluginCommand("/plugin key acme")).toEqual({ kind: "key", slug: "acme", clear: false });
+    expect(parsePluginCommand("/plugin key acme clear")).toEqual({ kind: "key", slug: "acme", clear: true });
+    const r = parsePluginCommand("/plugin key acme sk-live-123");
+    expect(r?.kind).toBe("help");
+    expect(JSON.stringify(r)).not.toContain("sk-live-123");
+    expect(parsePluginCommand("/plugin key")?.kind).toBe("help");
+  });
 });
