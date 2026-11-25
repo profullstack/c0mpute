@@ -72,6 +72,9 @@ rand = "0.8"
 # Default features off: the node brings its own HTTP client (reqwest) instead of ureq.
 x402-gateway = { git = "https://github.com/profullstack/x402-ports", rev = "5d0cd434c0a4556c264cb0c8ecd2f5791501abde", default-features = false }
 zeroize = { version = "1", features = ["derive"] }
+# Noise Protocol (the implementation libp2p-noise already uses) for the
+# Scallion circuit handshake. Same version as the lockfile holds.
+snow = "0.9.6"
 base64 = "0.22"
 bs58 = "0.5"
 rpassword = "7"
