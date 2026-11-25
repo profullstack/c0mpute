@@ -642,6 +642,9 @@ async fn advertise(
         }
         last = tokio::time::Instant::now();
         let mut hw = with_instance(hardware.clone(), net.instance_id());
+        // This node's signed Scallion relay descriptor, when it participates
+        // (`scallion_node::start`); re-signed there before it expires.
+        crate::scallion_node::attach(&mut hw, &net);
         // Buyers holding queued jobs re-auction only on this marker, not on
         // every periodic ad (which would spend their retries for nothing).
         let freed_now = if freed { recently_freed() } else { serde_json::Map::new() };
@@ -734,6 +737,9 @@ pub struct Registry {
     /// Per peer: instance id -> its latest ad's `published_at_ms`. More than
     /// one fresh instance is one identity running twice.
     instances: Arc<RwLock<HashMap<PeerId, HashMap<String, u64>>>>,
+    /// Scallion relay descriptors heard in ads, verified. A list of who
+    /// advertises which relay role; nothing routes through it yet.
+    relays: Arc<std::sync::RwLock<c0mpute_net::scallion_participation::RelayDirectory>>,
 }
 
 impl Registry {
@@ -741,11 +747,18 @@ impl Registry {
         Self::default()
     }
 
+    /// The Scallion relays this node has heard advertise, with verified
+    /// descriptors that are still valid.
+    pub fn scallion_relays(&self) -> Vec<c0mpute_net::scallion_participation::RelayRecord> {
+        self.relays.read().unwrap_or_else(|e| e.into_inner()).list(unix_now_ms())
+    }
+
     /// Take the gossipsub broadcast stream and feed messages into the
     /// registry. Spawns a task that runs until the network is dropped.
     pub fn run(&self, net: Arc<Libp2pNetwork>) {
         let inner = self.inner.clone();
         let instances = self.instances.clone();
+        let relays = self.relays.clone();
         tokio::spawn(async move {
             // Subscribe so we receive the topic.
             if let Err(e) = net.subscribe(CAPABILITY_TOPIC).await {
@@ -790,6 +803,9 @@ impl Registry {
                     debug!("registry: discard ad with unknown source peer");
                     continue;
                 };
+                // The ad's Scallion relay descriptor, kept only if it
+                // verifies and names the peer that signed this message.
+                crate::scallion_node::observe(&relays, &source, &ad.hardware, now_ms);
                 if let Some(id) = ad.hardware.get("instance").and_then(|v| v.as_str()) {
                     let mut seen = instances.write().await;
                     let mine = seen.entry(source).or_default();
@@ -820,10 +836,15 @@ impl Registry {
         // MAX_AD_AGE every 30s.
         let inner = self.inner.clone();
         let instances = self.instances.clone();
+        let relays = self.relays.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
             loop {
                 ticker.tick().await;
+                relays
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .prune(unix_now_ms(), MAX_AD_AGE.as_millis() as u64);
                 let cutoff = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)

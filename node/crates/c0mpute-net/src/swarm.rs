@@ -446,6 +446,9 @@ pub struct Libp2pNetwork {
     job_secret: Arc<zeroize::Zeroizing<[u8; 32]>>,
     /// This swarm's random instance id ([`Self::instance_id`]).
     instance_id: String,
+    /// Where this node's key material lives (the Scallion relay key is
+    /// loaded from here on demand).
+    identity_dir: PathBuf,
 }
 
 /// A fresh instance id: zero-padded unix-ms start time, `-`, 8 random hex
@@ -474,6 +477,7 @@ impl Libp2pNetwork {
         };
         let job_secret = Arc::new(id_mod::load_or_create_job_secret(&config.identity_dir)?);
         let peer_id = keypair.public().to_peer_id();
+        let identity_dir = config.identity_dir.clone();
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
         let (gossip_tx, _) = broadcast::channel::<GossipMessage>(256);
@@ -535,6 +539,7 @@ impl Libp2pNetwork {
             keypair,
             job_secret,
             instance_id: new_instance_id(),
+            identity_dir,
         })
     }
 
@@ -562,6 +567,22 @@ impl Libp2pNetwork {
     /// our peer id with [`crate::identity::verify_peer_signature`].
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         self.keypair.sign(msg).map_err(|e| anyhow!("sign: {e}"))
+    }
+
+    /// This node's persisted Scallion relay static key, created on first
+    /// use beside the identity key (mode 600).
+    pub fn scallion_relay_key(&self) -> Result<crate::scallion_handshake::RelayStaticKey> {
+        let bytes = id_mod::load_or_create_scallion_relay_key(&self.identity_dir)?;
+        Ok(crate::scallion_handshake::RelayStaticKey::from_bytes(*bytes))
+    }
+
+    /// Sign a Scallion relay descriptor with this node's identity key. Fails
+    /// unless the descriptor names this node's peer id.
+    pub fn sign_relay_descriptor(
+        &self,
+        descriptor: &crate::scallion_handshake::RelayDescriptor,
+    ) -> Result<crate::scallion_handshake::SignedRelayDescriptor> {
+        descriptor.sign(&self.keypair)
     }
 
     /// Serve `service` over `/c0mpute/rpc/1.0.0`. Replaces any handler

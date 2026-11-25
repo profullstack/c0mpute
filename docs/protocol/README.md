@@ -88,6 +88,7 @@ from a provider that claimed the capabilities relied on.
 | [scallion-frames.md](scallion-frames.md) | Experimental X25519/HKDF/AES-GCM hop frames, replay tests and unimplemented security boundaries |
 | [scallion-threat-model.md](scallion-threat-model.md) | Threat model v0.1 (draft): goals, non-goals, adversaries, known weaknesses, release gates |
 | [scallion-handshake.md](scallion-handshake.md) | Experimental circuit handshake: signed relay descriptors, Noise NK per hop with forward secrecy, telescoped three-hop build, sliding replay window |
+| [scallion-participation.md](scallion-participation.md) | Relay participation, advertise only: guard and middle on by default, exit opt-in, the `[scallion]` config, environment switches, `c0mpute scallion relay/exit/status/relays`, and the verified relay directory. Nothing is relayed yet |
 | [scallion-bootstrap.md](scallion-bootstrap.md) | Independent bootstrap: public, community and offline modes, and every environment variable |
 
 The site page for all of the above is <https://c0mpute.com/scallion>.

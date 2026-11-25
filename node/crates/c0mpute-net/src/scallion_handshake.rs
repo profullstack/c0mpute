@@ -53,7 +53,8 @@ pub const MAX_DATA: usize = 16 * 1024;
 const MAX_CELL: usize = MAX_DATA + 256;
 const MAX_PEER_ID: usize = 128;
 const MAX_OPERATOR: usize = 64;
-const MAX_EXIT_PORTS: usize = 64;
+/// Most exit ports one descriptor may list.
+pub const MAX_EXIT_PORTS: usize = 64;
 const MAX_KEY_BYTES: usize = 512;
 const MAX_SIG_BYTES: usize = 512;
 const MAX_DESCRIPTOR_BYTES: usize = 1024;
@@ -347,6 +348,10 @@ impl VerifiedRelay {
 
     pub fn operator(&self) -> &str {
         &self.descriptor.operator
+    }
+
+    pub fn issued_at_ms(&self) -> u64 {
+        self.descriptor.issued_at_ms
     }
 
     pub fn expires_at_ms(&self) -> u64 {

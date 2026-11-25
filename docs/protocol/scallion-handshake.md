@@ -167,7 +167,9 @@ is torn down and the other side is told.
 - No exit. `Data` is opaque; connecting it to
   [`scallion_exit`](scallion-exit-policy.md) and a stream protocol is the next
   slice.
-- No descriptor distribution, revocation or relay key persistence.
+- No revocation. Descriptor publication in the capability ad and relay key
+  persistence are in [scallion-participation.md](scallion-participation.md);
+  that slice only advertises and verifies, it relays nothing.
 - No bandwidth or byte quotas per circuit; only counts, rates and timeouts.
 - No review. The weaknesses we already know are listed in the threat model.
 
