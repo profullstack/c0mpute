@@ -32,7 +32,7 @@
 [module]
 id          = "git"
 name        = "Git — p2p repo hosting"
-version     = "0.3.114"
+version     = "0.3.115"
 kind        = "service"
 category    = "data"
 status      = "partial"
