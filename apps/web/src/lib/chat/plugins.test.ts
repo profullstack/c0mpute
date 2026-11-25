@@ -249,6 +249,94 @@ describe("money plugins: confirmation gate in the tool-call layer", () => {
   });
 });
 
+describe("brakes: auto-disable, step caps", () => {
+  const net = { allowPrivate: true };
+
+  test("a plugin that keeps failing is switched off after 5 in a row, and the person is told", async () => {
+    const { resetBrakes } = await import("./plugins");
+    resetBrakes();
+    const store = createPluginStore(memSql(), { key: null });
+    // Nothing listens on port 1: every turn's tools/list fails.
+    await store.add("u1", { url: "http://127.0.0.1:1/mcp", name: "dead", auth: "none" });
+    const { upstream } = fakeModel("{}");
+    const all: PluginEvent[] = [];
+    for (let i = 0; i < 5; i++) {
+      await runPluginChat({ userId: "u1", upstream, req: { messages: [{ role: "user", content: "hi" }] }, emit: (e) => all.push(e), store, net });
+      expect((await store.get("u1", "dead"))!.enabled).toBe(i < 4);
+    }
+    const last = all.filter((e) => e.type === "plugin_error").pop() as Extract<PluginEvent, { type: "plugin_error" }>;
+    expect(last.message).toContain("switched off after 5 failed calls");
+    expect(last.message).toContain("/plugin on dead");
+    // Switching it back on starts the count again.
+    await store.setEnabled("u1", "dead", true);
+    expect(await store.noteCall("u1", "dead", false)).toBe(1);
+  });
+
+  test("a success resets the count", async () => {
+    const store = createPluginStore(memSql(), { key: null });
+    await store.add("u1", { url: "http://127.0.0.1:1/mcp", name: "x", auth: "none" });
+    expect(await store.noteCall("u1", "x", false)).toBe(1);
+    expect(await store.noteCall("u1", "x", false)).toBe(2);
+    expect(await store.noteCall("u1", "x", true)).toBe(0);
+    expect(await store.noteCall("u1", "x", false)).toBe(1);
+  });
+
+  test("tool-step cap: a turn over the hourly cap is refused with 429 before any model step", async () => {
+    const { resetBrakes, countStep, stepBudget } = await import("./plugins");
+    const { PluginError } = await import("./plugin-store");
+    resetBrakes();
+    process.env.C0MPUTE_PLUGIN_STEPS_PER_HOUR = "3";
+    try {
+      const t0 = Date.now();
+      for (let i = 0; i < 3; i++) countStep("capped", t0);
+      const b = stepBudget("capped", t0);
+      expect(b.ok).toBe(false);
+      if (!b.ok) expect(b.message).toContain("3 plugin tool steps an hour");
+      expect(stepBudget("someone-else", t0).ok).toBe(true);
+      expect(stepBudget("capped", t0 + 3_600_001).ok).toBe(true);
+
+      const store = createPluginStore(memSql(), { key: null });
+      await store.add("capped", { url: `http://127.0.0.1:${server.port}/mcp`, name: "weather", auth: "none" });
+      let modelCalls = 0;
+      const upstream = async () => {
+        modelCalls++;
+        return Response.json({ model: "fake-1", choices: [{ message: { role: "assistant", content: "x" } }] });
+      };
+      const err = await runPluginChat({ userId: "capped", upstream, req: { messages: [{ role: "user", content: "hi" }] }, emit: () => {}, store, net }).catch((e) => e);
+      expect(err).toBeInstanceOf(PluginError);
+      expect((err as InstanceType<typeof PluginError>).status).toBe(429);
+      expect(modelCalls).toBe(0);
+    } finally {
+      delete process.env.C0MPUTE_PLUGIN_STEPS_PER_HOUR;
+      resetBrakes();
+    }
+  });
+
+  test("the HTTP answer keeps a brake's status", async () => {
+    const { pluginChatResponse } = await import("./plugin-http");
+    const { resetBrakes, countStep } = await import("./plugins");
+    resetBrakes();
+    process.env.C0MPUTE_PLUGIN_STEPS_PER_HOUR = "1";
+    try {
+      countStep("h1");
+      const store = createPluginStore(memSql(), { key: null });
+      await store.add("h1", { url: `http://127.0.0.1:${server.port}/mcp`, name: "weather", auth: "none" });
+      // runPluginChat uses the module's store; this only checks the status mapping via a thrown brake.
+      const res = await pluginChatResponse({
+        userId: "h1",
+        upstream: async () => Response.json({}),
+        req: { messages: [{ role: "user", content: "hi" }] },
+        approvals: [],
+        run: (o) => runPluginChat({ ...o, store, net }),
+      } as never);
+      expect(res.status).toBe(429);
+    } finally {
+      delete process.env.C0MPUTE_PLUGIN_STEPS_PER_HOUR;
+      resetBrakes();
+    }
+  });
+});
+
 // A key-protected MCP server: 401 without `Authorization: Bearer sk-good`, and no OAuth metadata.
 describe("API-key plugins and edits (PATCH)", () => {
   const net = { allowPrivate: true };

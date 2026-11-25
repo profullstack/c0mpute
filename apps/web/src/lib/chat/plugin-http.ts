@@ -4,16 +4,21 @@ import { randomBytes } from "node:crypto";
 import type { ChatRequest, Upstream } from "./completions";
 import { runPluginChat } from "./plugins";
 import { PLUGIN_EVENT_OBJECT, type PluginEvent } from "./plugin-shared";
+import { PluginError } from "./plugin-store";
 import { json } from "./server";
 
-export function pluginChatResponse(opts: { userId: string; upstream: Upstream; req: ChatRequest; approvals: unknown[]; events?: boolean; signal?: AbortSignal }) {
+/** A brake (step cap 429, capacity 503) keeps its status; anything else is an upstream failure. */
+const statusOf = (e: unknown) => (e instanceof PluginError && (e.status === 429 || e.status === 503) ? e.status : 502);
+
+export function pluginChatResponse(opts: { userId: string; upstream: Upstream; req: ChatRequest; approvals: unknown[]; events?: boolean; signal?: AbortSignal; /** Tests only. */ run?: typeof runPluginChat }) {
+  const run = opts.run ?? runPluginChat;
   const id = `chatcmpl-${randomBytes(12).toString("hex")}`;
   const created = Math.floor(Date.now() / 1000);
   if (!opts.req.stream) {
     return (async () => {
       const events: PluginEvent[] = [];
       try {
-        const r = await runPluginChat({ ...opts, emit: (e) => events.push(e) });
+        const r = await run({ ...opts, emit: (e) => events.push(e) });
         if (!opts.events) r.text += approvalNote(events);
         return json({
           id,
@@ -24,7 +29,8 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
           ...(opts.events ? { plugin_events: events } : {}),
         });
       } catch (e) {
-        return json({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_error", code: 502 }, plugin_events: events }, 502);
+        const code = statusOf(e);
+        return json({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_error", code }, plugin_events: events }, code);
       }
     })();
   }
@@ -53,7 +59,7 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
         // Plugin event chunks have no `choices`, so only clients that asked
         // (plugin_events: true: the web chat, CLI, desktop) get them.
         const asked: PluginEvent[] = [];
-        const r = await runPluginChat({
+        const r = await run({
           ...opts,
           signal,
           emit: (event) => (opts.events ? send({ object: PLUGIN_EVENT_OBJECT, event }) : asked.push(event)),
@@ -69,7 +75,7 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
         send(chunk({ role: "assistant", content: r.text }, null));
         send(chunk({}, r.stopped === "approval" ? "approval_needed" : "stop"));
       } catch (e) {
-        send({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_error", code: 502 } });
+        send({ error: { message: e instanceof Error ? e.message : String(e), type: "c0mpute_error", code: statusOf(e) } });
       } finally {
         clearInterval(ping);
         try {

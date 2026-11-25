@@ -394,6 +394,7 @@ export async function livePlugins(
       } catch (e) {
         const reauth = e instanceof cp.PluginError && e.code === "unauthorized";
         emit({ type: "plugin_error", plugin: p.slug, message: reauth ? `${p.slug} needs you to sign in again (/plugin connect ${p.slug})` : `${p.slug} is unavailable: ${e instanceof Error ? e.message : e}` });
+        await noteOutcome(store, userId, p.slug, false, emit);
         return null;
       }
     }),
@@ -450,6 +451,82 @@ export function withSignal(net: cp.NetOptions, signal?: AbortSignal): cp.NetOpti
   return { ...net, fetch: wrapped };
 }
 
+// ── brakes (board meeting 2026-11-25: caps, auto-disable, capacity throttle) ──────
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const intEnv = (k: string, d: number) => {
+  const n = Number(env(k));
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : d;
+};
+/** Consecutive failed calls before a plugin is switched off for the account. */
+export const failLimit = () => intEnv("C0MPUTE_PLUGIN_FAIL_LIMIT", 5);
+const stepsPerHour = () => intEnv("C0MPUTE_PLUGIN_STEPS_PER_HOUR", 120);
+const stepsPerDay = () => intEnv("C0MPUTE_PLUGIN_STEPS_PER_DAY", 600);
+/** Plugin turns running at once on this server; more get a "busy, try again" answer, not a queue that grows. */
+const maxTurns = () => intEnv("C0MPUTE_PLUGIN_CONCURRENCY", 12);
+
+type StepWindow = { start: number; n: number };
+const stepWindows = new Map<string, StepWindow>();
+let activeTurns = 0;
+
+function stepWindow(key: string, span: number, at: number): StepWindow {
+  const w = stepWindows.get(key);
+  return !w || at - w.start >= span ? { start: at, n: 0 } : w;
+}
+
+/** Can this account start another tool-using turn? (per-hour and per-day tool-step caps) */
+export function stepBudget(userId: string, at = Date.now()): { ok: true } | { ok: false; retryAfter: number; message: string } {
+  for (const [suffix, span, max, label] of [
+    ["h", HOUR, stepsPerHour(), "an hour"],
+    ["d", DAY, stepsPerDay(), "a day"],
+  ] as const) {
+    const w = stepWindow(`${userId}:${suffix}`, span, at);
+    if (w.n >= max) {
+      const retryAfter = Math.ceil((w.start + span - at) / 1000);
+      return { ok: false, retryAfter, message: `you have used this account's ${max} plugin tool steps ${label}; plugins work again in ${Math.ceil(retryAfter / 60)} min (plain chat still works: plugins: false or /plugin off)` };
+    }
+  }
+  return { ok: true };
+}
+
+/** Count one tool call against the account's caps. */
+export function countStep(userId: string, at = Date.now()) {
+  if (stepWindows.size > 50_000) for (const [k, w] of stepWindows) if (at - w.start >= DAY) stepWindows.delete(k);
+  for (const [suffix, span] of [
+    ["h", HOUR],
+    ["d", DAY],
+  ] as const) {
+    const key = `${userId}:${suffix}`;
+    const w = stepWindow(key, span, at);
+    w.n++;
+    stepWindows.set(key, w);
+  }
+}
+
+/** Tests only. */
+export function resetBrakes() {
+  stepWindows.clear();
+  activeTurns = 0;
+}
+
+/**
+ * Record one call's outcome; after failLimit() failures in a row the plugin is switched off for
+ * this account and the person is told how to turn it back on.
+ */
+async function noteOutcome(store: PluginStoreDb, userId: string, slug: string, ok: boolean, emit: (e: PluginEvent) => void) {
+  try {
+    const n = await store.noteCall(userId, slug, ok);
+    if (!ok && n >= failLimit()) {
+      await store.setEnabled(userId, slug, false);
+      await store.noteCall(userId, slug, true);
+      emit({ type: "plugin_error", plugin: slug, message: `${slug} was switched off after ${n} failed calls in a row; fix it (/plugin key or /plugin connect) and turn it back on with /plugin on ${slug}` });
+    }
+  } catch (e) {
+    console.warn(`chat plugin ${slug}: failure count not saved: ${redactLog(e)}`);
+  }
+}
+
 export async function runPluginChat(opts: {
   userId: string;
   upstream: Upstream;
@@ -467,12 +544,31 @@ export async function runPluginChat(opts: {
   const net = withSignal(opts.net ?? NET, opts.signal);
   const policy = opts.policy ?? policyFor;
   const plugins = await livePlugins(opts.userId, store, opts.emit, net, policy);
-  let model = opts.req.model ?? "auto";
   if (!plugins.length) {
     const r = await chatText(opts.upstream, { ...opts.req, stream: false }, opts.signal);
     return { text: r.text, model: r.model, stopped: "done" };
   }
+  const budget = stepBudget(opts.userId);
+  if (!budget.ok) throw new PluginError(budget.message, 429);
+  if (activeTurns >= maxTurns())
+    throw new PluginError("tool-using chats on c0mpute are at capacity right now; nothing was charged, try again in a minute (plain chat still works: plugins: false)", 503);
+  activeTurns++;
+  try {
+    return await pluginTurn(opts, store, net, policy, plugins);
+  } finally {
+    activeTurns--;
+  }
+}
 
+async function pluginTurn(
+  opts: Parameters<typeof runPluginChat>[0],
+  store: PluginStoreDb,
+  net: cp.NetOptions,
+  policy: typeof policyFor,
+  plugins: cp.Plugin[],
+): Promise<PluginChatResult> {
+  let model = opts.req.model ?? "auto";
+  const outcomes: Promise<void>[] = [];
   const complete = async (msgs: { role: string; content: string }[]) => {
     if (opts.signal?.aborted) throw new Error("cancelled");
     const messages = msgs
@@ -504,6 +600,7 @@ export async function runPluginChat(opts: {
         annotations: tool.annotations ?? {},
         kind: "prompt",
       };
+      countStep(opts.userId);
       opts.emit({ type: "tool_call", id: call.id, plugin: call.plugin, tool: call.tool, arguments: call.arguments });
       resume = { pending: { call, remaining: [], step: 1, messages: [] }, decision: "allow" };
     }
@@ -520,9 +617,11 @@ export async function runPluginChat(opts: {
     ...(resume ? { resume } : {}),
     onEvent: (e) => {
       if (e.type === "tool_call") {
+        countStep(opts.userId);
         opts.emit({ type: "tool_call", id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments });
       } else if (e.type === "tool_result") {
         opts.emit({ type: "tool_result", id: e.id, plugin: e.plugin, tool: e.tool, ok: !e.isError, text: (e.text || "").slice(0, UI_TEXT) });
+        outcomes.push(noteOutcome(store, opts.userId, e.plugin, !e.isError, opts.emit));
       } else if (e.type === "approval_needed") {
         const c = e.call;
         const url = plugins.find((p) => p.slug === c.plugin)?.url ?? "";
@@ -539,5 +638,6 @@ export async function runPluginChat(opts: {
       }
     },
   });
+  await Promise.all(outcomes);
   return { text: r.text, model, stopped: r.status === "pending" ? "approval" : "done" };
 }

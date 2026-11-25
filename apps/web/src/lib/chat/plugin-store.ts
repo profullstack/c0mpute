@@ -358,6 +358,8 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
     async setEnabled(userId: string, slug: string, enabled: boolean): Promise<ChatPlugin | null> {
       await init();
       await sql.run(`UPDATE chat_plugins SET enabled = ?, updated_at = ? WHERE user_id = ? AND slug = ?`, [enabled ? 1 : 0, now(), userId, slug]);
+      // Switching it back on is a fresh start for the auto-disable brake.
+      if (enabled) await sql.run(`DELETE FROM chat_plugin_prefs WHERE user_id = ? AND slug = ? AND key = 'failures'`, [userId, slug]);
       return store.get(userId, slug);
     },
 
@@ -367,6 +369,22 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
       const t = title ? String(title).trim().slice(0, 120) : "";
       await sql.run(`UPDATE chat_plugins SET title = ?, updated_at = ? WHERE user_id = ? AND slug = ?`, [t || null, now(), userId, slug]);
       return store.get(userId, slug);
+    },
+
+    /**
+     * Consecutive failed calls to a plugin (auto-disable brake): a success resets it to 0, a
+     * failure adds 1. Returns the new count. Kept in chat_plugin_prefs so a restart keeps it.
+     */
+    async noteCall(userId: string, slug: string, ok: boolean): Promise<number> {
+      await init();
+      if (ok) {
+        await sql.run(`DELETE FROM chat_plugin_prefs WHERE user_id = ? AND slug = ? AND key = 'failures'`, [userId, slug]);
+        return 0;
+      }
+      const r = (await sql.all(`SELECT value FROM chat_plugin_prefs WHERE user_id = ? AND slug = ? AND key = 'failures'`, [userId, slug]))[0];
+      const n = (Number(r?.value) || 0) + 1;
+      await sql.run(`INSERT OR REPLACE INTO chat_plugin_prefs (user_id, slug, key, value, updated_at) VALUES (?, ?, 'failures', ?, ?)`, [userId, slug, String(n), now()]);
+      return n;
     },
 
     async setTokens(userId: string, slug: string, t: PluginTokens) {
