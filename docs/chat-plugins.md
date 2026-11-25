@@ -214,3 +214,41 @@ by c0mpute. Removing it is remembered.
 
 20 plugins per account, 64 tools per plugin, 60 plugin changes per hour,
 60 s per tool call, 6 model steps per turn.
+
+## Brakes
+
+Set after the launch board meeting (2026-11-25) so a busy day can't run away
+on a few GPU nodes or a broken server:
+
+| brake | default | env | what the person sees |
+|---|---|---|---|
+| tool steps per account per hour | 120 | `C0MPUTE_PLUGIN_STEPS_PER_HOUR` | 429: "you have used this account's 120 plugin tool steps an hour; plugins work again in N min". Plain chat keeps working. |
+| tool steps per account per day | 600 | `C0MPUTE_PLUGIN_STEPS_PER_DAY` | the same, per day |
+| plugin turns running at once (server) | 12 | `C0MPUTE_PLUGIN_CONCURRENCY` | 503: "at capacity right now; nothing was charged, try again in a minute" |
+| failed calls in a row before a plugin is switched off | 5 | `C0MPUTE_PLUGIN_FAIL_LIMIT` | a `plugin_error` event: "switched off after 5 failed calls in a row; fix it and /plugin on <name>" |
+
+A refused turn makes no model call, so it costs nothing. The step caps are
+counted per server process (in memory) and reset on a deploy; the failure
+count is stored per plugin and reset by any success or by switching the plugin
+back on. Caps bound spend: at most 600 billed tool steps a day per account.
+
+## Connecting with a key: FAQ
+
+- **"needs a key and has no OAuth sign-in"**: the server answered 401 and
+  publishes no OAuth metadata. Add it with its key: the key box in the
+  plugins panel, `/plugin add <url>` (it asks), `c0mpute chat plugins add
+  <url> --key`, or `POST /api/v1/chat/plugins {url, api_key}`.
+- **"refused that API key"**: the server answered 401/403 to `tools/list`
+  with the key as `Authorization: Bearer <key>`. Check the key, and that the
+  server takes it as a Bearer token (a server that wants a custom header such
+  as `X-API-Key` is not supported yet). Nothing was saved.
+- **Paste the key alone.** A leading `Bearer ` is removed for you; spaces or
+  line breaks inside it are refused.
+- **Rotate a key**: `/plugin key <name>` again (or PATCH `{api_key}`); it is
+  checked before the old one is replaced. Remove it with `/plugin key <name>
+  clear`.
+- **A stdio-only MCP server** (one you run with `npx …` locally) has no URL to
+  add. Host it behind HTTPS (for example supergateway's Streamable HTTP mode
+  behind a Bearer check) and add that URL with its key.
+- **Switched off by itself?** Five failed calls in a row turn a plugin off.
+  Fix the cause (key, sign-in, server down) and `/plugin on <name>`.
