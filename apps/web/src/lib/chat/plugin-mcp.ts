@@ -21,9 +21,27 @@ export const PLUGIN_TOOLS = [
       properties: {
         url: { type: "string", description: "https URL of a remote MCP server (Streamable HTTP)." },
         name: { type: "string", description: "Or a catalog name (see chat_plugins_list)." },
+        api_key: { type: "string", description: "Optional: an API key for servers that take `Authorization: Bearer <key>` instead of an OAuth sign-in. Checked against the server, stored sealed, never returned." },
+        title: { type: "string", description: "Optional: the label to show instead of the server's own name." },
       },
     },
     annotations: { title: "Add a chat plugin", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: "chat_plugins_update",
+    description:
+      "Edit a chat plugin on this account: rename it (`title`, empty for the server's own name), switch it on or off (`enabled`), set its API key (`api_key`, checked against the server first) or forget its key or sign-in (`api_key: null`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The plugin's slug." },
+        title: { type: ["string", "null"], description: "New label." },
+        enabled: { type: "boolean", description: "Use it in chat, or not." },
+        api_key: { type: ["string", "null"], description: "New API key, or null to remove the stored key or sign-in." },
+      },
+      required: ["name"],
+    },
+    annotations: { title: "Edit a chat plugin", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
     name: "chat_plugins_remove",
@@ -39,7 +57,9 @@ export type PluginMcpDeps = {
   store: PluginStoreDb;
   site: string;
   catalog: () => { slug: string; name: string; title: string; description: string; url: string }[];
-  add: (userId: string, target: string) => Promise<import("./plugin-store").ChatPlugin>;
+  add: (userId: string, target: string, opts?: { apiKey?: string | null; title?: string | null }) => Promise<import("./plugin-store").ChatPlugin>;
+  /** Edit (plugins.ts readPatch + updatePlugin). Optional so older wirings keep working. */
+  update?: (userId: string, slug: string, body: Record<string, unknown>) => Promise<import("./plugin-store").ChatPlugin>;
   connectLink: (userId: string, slug: string) => string;
 };
 
@@ -60,7 +80,8 @@ export async function pluginTool(name: string, args: Record<string, unknown>, us
   if (name === "chat_plugins_add") {
     const target = typeof args.url === "string" && args.url ? args.url : typeof args.name === "string" ? args.name : "";
     if (!target) return { text: "chat_plugins_add needs `url` (https MCP server) or `name` (catalog)", isError: true };
-    const p = await d.add(userId, target);
+    const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+    const p = await d.add(userId, target, { apiKey: str(args.api_key), title: str(args.title) });
     const pub = publicPlugin(p, d.site);
     return {
       text: JSON.stringify({
@@ -70,6 +91,14 @@ export async function pluginTool(name: string, args: Record<string, unknown>, us
         ...(pub.connected ? {} : { connect_url: d.connectLink(userId, p.slug), next: "give the person connect_url to open in a browser and sign in" }),
       }),
     };
+  }
+  if (name === "chat_plugins_update") {
+    const slug = typeof args.name === "string" ? args.name.toLowerCase() : "";
+    if (!slug) return { text: "chat_plugins_update needs `name`", isError: true };
+    if (!d.update) return { text: "editing chat plugins is not available on this server", isError: true };
+    const { name: _n, ...body } = args;
+    const pub = publicPlugin(await d.update(userId, slug, body), d.site);
+    return { text: JSON.stringify({ slug: pub.slug, title: pub.title || pub.name, status: pub.status, auth: pub.auth, tools: pub.tools.map((t) => t.name) }) };
   }
   if (name === "chat_plugins_remove") {
     const slug = typeof args.name === "string" ? args.name.toLowerCase() : "";

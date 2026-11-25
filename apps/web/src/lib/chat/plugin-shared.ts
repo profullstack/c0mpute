@@ -8,6 +8,9 @@ export type PluginCommand =
   | { kind: "on" | "off"; slug: string }
   | { kind: "connect"; slug: string }
   | { kind: "paper" | "live"; slug: string }
+  | { kind: "rename"; slug: string; title: string }
+  /** The key itself is asked for in a prompt, never typed into the chat (the transcript is saved). */
+  | { kind: "key"; slug: string; clear: boolean }
   | { kind: "help"; error?: string };
 
 const SLUGISH = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -38,6 +41,19 @@ export function parsePluginCommand(text: string): PluginCommand | null {
   if (verb === "off" || verb === "disable") return need("off");
   if (verb === "connect" || verb === "signin" || verb === "login") return need("connect");
   if (verb === "paper" || verb === "live") return need(verb);
+  if (verb === "rename" || verb === "title") {
+    const title = words.slice(2).join(" ").trim();
+    if (!SLUGISH.test(slug)) return { kind: "help", error: "usage: /plugin rename <name> <new title>" };
+    return { kind: "rename", slug, title };
+  }
+  if (verb === "key" || verb === "apikey" || verb === "api-key") {
+    if (!SLUGISH.test(slug)) return { kind: "help", error: "usage: /plugin key <name> (asks for the key) | /plugin key <name> clear" };
+    // A key pasted after the name is refused: it would be saved in the chat.
+    const rest = words.slice(2);
+    if (rest.length && !(rest.length === 1 && /^(clear|rm|remove|none)$/i.test(rest[0])))
+      return { kind: "help", error: "do not type the key into the chat (it is saved with the conversation): run /plugin key <name> and paste it into the box that opens" };
+    return { kind: "key", slug, clear: rest.length === 1 };
+  }
   return { kind: "help", error: `unknown /plugin command "${verbRaw}"` };
 }
 
@@ -46,6 +62,8 @@ export const PLUGIN_HELP = [
   "/plugin ls                 your plugins and the catalog",
   "/plugin on|off <name>      use it in chat, or not",
   "/plugin connect <name>     sign in again",
+  "/plugin key <name>         set its API key (servers that take a key, not a sign-in); `clear` removes it",
+  "/plugin rename <name> <t>  change the label it shows",
   "/plugin paper|live <name>  brokerage plugins: paper trading (the default) or your live account",
   "/plugin rm <name>          remove it",
 ].join("\n");

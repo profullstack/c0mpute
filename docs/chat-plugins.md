@@ -27,6 +27,9 @@ this repo is the c0mpute side.
 /plugin ls                           # yours + the catalog
 /plugin off threatcrush              # keep it, stop using it
 /plugin connect threatcrush          # sign in again
+/plugin key acme                     # set its API key (asked for in a box; never typed into the chat)
+/plugin key acme clear               # forget the key
+/plugin rename acme Acme Search      # change the label it shows
 /plugin paper|live moomoo            # brokerage: paper trading (default) or live
 /plugin rm threatcrush
 ```
@@ -43,6 +46,9 @@ c0mpute chat plugins ls
 c0mpute chat plugins add threatcrush        # prints the sign-in link and opens it
 c0mpute chat plugins add https://example.com/mcp
 c0mpute chat plugins on|off|connect|rm <name>
+c0mpute chat plugins add https://example.com/mcp --key   # a server that takes an API key
+c0mpute chat plugins key <name> [--clear]   # hidden prompt, piped stdin or C0MPUTE_PLUGIN_API_KEY; never argv
+c0mpute chat plugins rename <name> <title>
 c0mpute chat "scan example.com for exposed services"   # uses whatever is on
 ```
 
@@ -53,8 +59,9 @@ and asks `approve …? [y/N]` on the terminal for destructive tools.
 `/plugin` and the plugins panel work there too.
 
 **MCP** (`https://c0mpute.com/api/mcp`): `chat_plugins_list`,
-`chat_plugins_add` (returns `connect_url` for the person to open),
-`chat_plugins_remove`; the `chat` tool runs with the account's plugins on
+`chat_plugins_add` (returns `connect_url` for the person to open; takes an
+optional `api_key` and `title`), `chat_plugins_update` (`title`, `enabled`,
+`api_key` or `api_key: null`), `chat_plugins_remove`; the `chat` tool runs with the account's plugins on
 (`plugins: false` turns them off for a call). Destructive tools are not run
 from MCP: the answer says which call is waiting for approval in the chat.
 
@@ -62,13 +69,23 @@ from MCP: the answer says which call is waiting for approval in the chat.
 
 ```text
 GET    /api/v1/chat/plugins                    # {plugins, catalog}
-POST   /api/v1/chat/plugins {url} | {slug}     # 201 {plugin, connect_url?}
+POST   /api/v1/chat/plugins {url} | {slug} [, api_key, title]   # 201 {plugin, connect_url?}
 GET    /api/v1/chat/plugins/<slug>
+PATCH  /api/v1/chat/plugins/<slug> {title?, enabled?, api_key?}  # api_key: null forgets the key/sign-in
 DELETE /api/v1/chat/plugins/<slug>
 POST   /api/v1/chat/plugins/<slug>/toggle [{enabled}]
 GET    /api/v1/chat/plugins/<slug>/connect     # browser: redirect to sign-in; API key: {connect_url}
 GET    /api/v1/chat/plugins/callback           # where the plugin's sign-in returns
 ```
+
+**API keys.** Some MCP servers take a static key (`Authorization: Bearer
+<key>`) instead of an OAuth sign-in. Add them with `api_key` (or set it later
+with PATCH, the panel's *key* button, `/plugin key` or `c0mpute chat plugins
+key`). The key is checked against the server (`tools/list`) before it is kept,
+sealed in the same encrypted column as OAuth tokens, and no API returns it;
+`publicPlugin` shows only `auth: "api_key"` and `api_key: true`. A server that
+answers 401 with no OAuth metadata is refused without a key, with an error
+that says to add one.
 
 `POST /api/v1/chat/completions` (and `/v1/chat/completions`) runs the tool loop
 whenever the account has a plugin on, for every client. Extra request fields:

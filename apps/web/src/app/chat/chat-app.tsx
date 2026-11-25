@@ -1650,7 +1650,16 @@ export function ChatApp({ error }: { error: string | null }) {
             .join("\n"),
         );
       } else if (cmd.kind === "add") {
-        const r = await pluginsApi.add(cmd.target);
+        let r;
+        try {
+          r = await pluginsApi.add(cmd.target);
+        } catch (e) {
+          // A server that takes an API key instead of a sign-in: ask for it in a box, never in the chat.
+          if (!(e instanceof Error && /needs a key/.test(e.message))) throw e;
+          const k = window.prompt(`${e.message}\n\nPaste its API key (sent as Authorization: Bearer, stored encrypted, never shown again):`);
+          if (!k?.trim()) return say(`// ${e.message}`);
+          r = await pluginsApi.add(cmd.target, { api_key: k.trim() });
+        }
         if (r.connect_url) {
           say(`// ${r.plugin.slug} added; signing in (a window opened; if not, open ${r.connect_url})…`);
           const ok = await signInPopup(r.connect_url, r.plugin.slug);
@@ -1674,6 +1683,19 @@ export function ChatApp({ error }: { error: string | null }) {
       } else if (cmd.kind === "connect") {
         const ok = await signInPopup(`/api/v1/chat/plugins/${encodeURIComponent(cmd.slug)}/connect`, cmd.slug);
         say(ok ? `// ${cmd.slug} connected` : `// ${cmd.slug}: sign-in not finished`);
+      } else if (cmd.kind === "rename") {
+        const r = await pluginsApi.update(cmd.slug, { title: cmd.title || null });
+        say(`// ${r.plugin.slug} now shows as "${r.plugin.title || r.plugin.name}"`);
+      } else if (cmd.kind === "key") {
+        if (cmd.clear) {
+          await pluginsApi.update(cmd.slug, { api_key: null });
+          say(`// ${cmd.slug}: key removed`);
+        } else {
+          const k = window.prompt(`API key for ${cmd.slug} (sent as Authorization: Bearer, stored encrypted, never shown again):`);
+          if (!k?.trim()) return say(`// ${cmd.slug}: no key set`);
+          const r = await pluginsApi.update(cmd.slug, { api_key: k.trim() });
+          say(`// ${r.plugin.slug}: key saved, ${r.plugin.tools.length} tools on`);
+        }
       }
     } catch (e) {
       say(`// ${e instanceof Error ? e.message : String(e)}`);

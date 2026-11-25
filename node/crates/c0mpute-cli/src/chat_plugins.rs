@@ -8,6 +8,9 @@
 //! c0mpute chat plugins add https://x.dev/mcp  # any remote MCP server
 //! c0mpute chat plugins on|off <name>          # use it in chat, or not
 //! c0mpute chat plugins connect <name>         # sign in again
+//! c0mpute chat plugins add https://x.dev/mcp --key   # a server that takes an API key (asked for, never argv)
+//! c0mpute chat plugins key <name> [--clear]   # set (hidden prompt / stdin / C0MPUTE_PLUGIN_API_KEY) or remove its key
+//! c0mpute chat plugins rename <name> <title>  # change the label it shows
 //! c0mpute chat plugins rm <name>
 //! c0mpute chat plugins paper moomoo          # brokerage orders go to the paper account (the default)
 //! c0mpute chat plugins live moomoo --confirm # ... or to the live one (real money; each order still asks)
@@ -24,7 +27,7 @@ use serde_json::{Value, json};
 
 use crate::ai_chat::{api_error, base_url, client, open_browser, require_key};
 
-const USAGE: &str = "usage: c0mpute chat plugins ls | add <url|name> | rm <name> | on <name> | off <name> | connect <name> | paper <name> | live <name> --confirm";
+const USAGE: &str = "usage: c0mpute chat plugins ls | add <url|name> [--key] | rm <name> | on <name> | off <name> | connect <name> | key <name> [--clear] | rename <name> <title> | paper <name> | live <name> --confirm";
 
 pub(crate) const LIVE_WARNING: &str = "Live trading places orders with real money. Every order still shows its card and needs your y; the model can be wrong.";
 
@@ -130,9 +133,31 @@ pub async fn run(args: &[String]) -> Result<()> {
         let (slug, body) = req?;
         return apply_mode(&h, &slug, body).await;
     }
+    if let Some(edit) = edit_request(&words) {
+        let (slug, edit) = edit?;
+        let body = match edit {
+            Edit::Title(t) => json!({ "title": t }),
+            Edit::ClearKey => json!({ "api_key": Value::Null }),
+            Edit::SetKey => json!({ "api_key": read_api_key(&format!("API key for {slug} (sent as Authorization: Bearer; stored encrypted): "))? }),
+        };
+        let v = h.send(reqwest::Method::PATCH, &format!("/api/v1/chat/plugins/{slug}"), Some(body)).await?;
+        let p = &v["plugin"];
+        println!(
+            "{slug}: {} · {} · {} tools{}",
+            p["title"].as_str().or(p["name"].as_str()).unwrap_or("?"),
+            p["status"].as_str().unwrap_or("?"),
+            p["tools"].as_array().map(Vec::len).unwrap_or(0),
+            if p["api_key"].as_bool() == Some(true) { " · API key set" } else { "" }
+        );
+        return Ok(());
+    }
     match words.as_slice() {
         [] | ["ls"] | ["list"] => ls(&h).await,
-        ["add", target] | ["install", target] => add(&h, target).await,
+        ["add", target] | ["install", target] => add(&h, target, None).await,
+        ["add", target, "--key"] | ["add", "--key", target] => {
+            let key = read_api_key(&format!("API key for {target} (sent as Authorization: Bearer; stored encrypted): "))?;
+            add(&h, target, Some(key)).await
+        }
         [verb, slug] if valid_slug(slug) => match *verb {
             "rm" | "remove" | "delete" => {
                 h.send(reqwest::Method::DELETE, &format!("/api/v1/chat/plugins/{slug}"), None).await?;
@@ -168,8 +193,77 @@ fn sign_in(slug: &str, link: &str) {
     println!("its tools turn on in your chats once you finish; check with `c0mpute chat plugins ls`");
 }
 
-async fn add(h: &Http, target: &str) -> Result<()> {
-    let v = h.send(reqwest::Method::POST, "/api/v1/chat/plugins", Some(add_body(target))).await?;
+/// An edit to a plugin (PATCH /api/v1/chat/plugins/<slug>).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Edit {
+    Title(String),
+    /// Ask for the key (hidden prompt, stdin, or C0MPUTE_PLUGIN_API_KEY): never from argv.
+    SetKey,
+    ClearKey,
+}
+
+/// `key <name> [--clear]` and `rename <name> <title...>`; None for any other command.
+pub(crate) fn edit_request(words: &[&str]) -> Option<Result<(String, Edit)>> {
+    let (verb, rest) = words.split_first()?;
+    let edit = match *verb {
+        "key" | "api-key" | "apikey" => match rest {
+            [slug] => (slug, Edit::SetKey),
+            [slug, "--clear" | "clear"] => (slug, Edit::ClearKey),
+            [_, _, ..] => {
+                return Some(Err(anyhow::anyhow!(
+                    "the key is not taken on the command line (it would land in your shell history): run `c0mpute chat plugins key <name>` and paste it, pipe it on stdin, or set C0MPUTE_PLUGIN_API_KEY"
+                )));
+            }
+            [] => return Some(Err(anyhow::anyhow!("{USAGE}"))),
+        },
+        "rename" | "title" => match rest {
+            [slug, title @ ..] => (slug, Edit::Title(title.join(" "))),
+            [] => return Some(Err(anyhow::anyhow!("{USAGE}"))),
+        },
+        _ => return None,
+    };
+    let (slug, e) = edit;
+    if !valid_slug(slug) {
+        return Some(Err(anyhow::anyhow!("{USAGE}")));
+    }
+    Some(Ok((slug.to_string(), e)))
+}
+
+/// The API key: C0MPUTE_PLUGIN_API_KEY, else one line of piped stdin, else a hidden prompt.
+fn read_api_key(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal};
+    if let Ok(k) = std::env::var("C0MPUTE_PLUGIN_API_KEY")
+        && !k.trim().is_empty()
+    {
+        return Ok(k.trim().to_string());
+    }
+    let key = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(prompt)?
+    } else {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        line
+    };
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        bail!("no API key given");
+    }
+    Ok(key)
+}
+
+async fn add(h: &Http, target: &str, api_key: Option<String>) -> Result<()> {
+    let mut body = add_body(target);
+    if let Some(k) = api_key {
+        body["api_key"] = Value::String(k);
+    }
+    let v = match h.send(reqwest::Method::POST, "/api/v1/chat/plugins", Some(body.clone())).await {
+        Err(e) if e.to_string().contains("needs a key") && std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            eprintln!("{e}");
+            body["api_key"] = Value::String(read_api_key(&format!("API key for {target} (sent as Authorization: Bearer; stored encrypted): "))?);
+            h.send(reqwest::Method::POST, "/api/v1/chat/plugins", Some(body)).await?
+        }
+        r => r?,
+    };
     let p = &v["plugin"];
     let slug = p["slug"].as_str().unwrap_or("?");
     match v["connect_url"].as_str() {
@@ -255,6 +349,20 @@ mod tests {
         assert_eq!(live_needs_confirm(&w(&["paper", "moomoo"])), None);
         assert!(mode_line("moomoo", "live").contains("LIVE"));
         assert!(mode_line("moomoo", "paper").contains("hidden"));
+    }
+
+    #[test]
+    fn edits() {
+        assert_eq!(edit_request(&["key", "acme"]).unwrap().unwrap(), ("acme".into(), Edit::SetKey));
+        assert_eq!(edit_request(&["key", "acme", "--clear"]).unwrap().unwrap(), ("acme".into(), Edit::ClearKey));
+        assert_eq!(edit_request(&["rename", "acme", "Acme", "Docs"]).unwrap().unwrap(), ("acme".into(), Edit::Title("Acme Docs".into())));
+        assert_eq!(edit_request(&["rename", "acme"]).unwrap().unwrap(), ("acme".into(), Edit::Title(String::new())));
+        // a key on argv is refused (shell history)
+        let e = edit_request(&["key", "acme", "sk-secret"]).unwrap().unwrap_err().to_string();
+        assert!(e.contains("shell history") && !e.contains("sk-secret"), "{e}");
+        assert!(edit_request(&["key"]).unwrap().is_err());
+        assert!(edit_request(&["key", "Bad_Slug"]).unwrap().is_err());
+        assert!(edit_request(&["on", "acme"]).is_none());
     }
 
     #[test]
