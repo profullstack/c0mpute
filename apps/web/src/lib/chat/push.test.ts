@@ -189,6 +189,46 @@ describe("push store", () => {
     await expect(s.report("u1", node.id, p.id, { rev: 1, ok: true, site_id: "abcdef1234" })).rejects.toThrow(/stale/);
   });
 
+  test("a live report says how many replicas refused under policy and why, never who (DIP-0036)", async () => {
+    const { s, node } = await setup();
+    const p = await s.upsertPush("u1", { target: "hosting", name: "site", node, files: FILES });
+    await s.claimJobs("u1", node.id);
+    const live = await s.report("u1", node.id, p.id, {
+      rev: 1,
+      ok: true,
+      site_id: "abcdef1234",
+      copies: 3,
+      refused: 2,
+      refused_by: [
+        { labeler: "did:web:threatcrush.com", val: "phishing", count: 2 },
+        // Dropped: text that is not a DID or label value, a zero count, junk, and anything naming a peer.
+        { labeler: "not a did", val: "phishing", count: 1 },
+        { labeler: "did:web:a", val: "malware", count: 0 },
+        "junk",
+        { peer: "12D3KooWRefuser" },
+      ],
+    });
+    if (live === "deleted") throw new Error("unreachable");
+    const cause = { labeler: "did:web:threatcrush.com", val: "phishing", count: 2 };
+    expect(publicPush(live)).toMatchObject({ status: "live", copies: 3, refused: 2, refused_by: [cause] });
+    expect(JSON.stringify(publicPush(live))).not.toContain("12D3KooWRefuser");
+    // Stored, not only echoed.
+    const stored = await s.push("u1", "hosting", "site");
+    expect(stored && publicPush(stored)).toMatchObject({ refused: 2, refused_by: [cause] });
+
+    // A node from before refusals were reported sends neither field: zero, not null.
+    const q = await s.upsertPush("u1", { target: "hosting", name: "older", node, files: FILES });
+    expect(publicPush(q)).toMatchObject({ refused: 0, refused_by: [] });
+    await s.claimJobs("u1", node.id);
+    const old = await s.report("u1", node.id, q.id, { rev: 1, ok: true, site_id: "abcdef5678", copies: 3 });
+    expect(old !== "deleted" && publicPush(old)).toMatchObject({ copies: 3, refused: 0, refused_by: [] });
+    // A count without causes still counts; causes without a count add up.
+    const r = await s.upsertPush("u1", { target: "hosting", name: "bare", node, files: FILES });
+    await s.claimJobs("u1", node.id);
+    const bare = await s.report("u1", node.id, r.id, { rev: 1, ok: true, site_id: "abcdef9999", copies: 3, refused: "1" });
+    expect(bare !== "deleted" && publicPush(bare)).toMatchObject({ refused: 1, refused_by: [] });
+  });
+
   test("a site stays with the node that signed it", async () => {
     const { s, node } = await setup();
     const other = await s.registerNode("u1", { name: "laptop", payments: "coinpay" });

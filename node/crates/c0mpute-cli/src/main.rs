@@ -5015,7 +5015,7 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                 }
             };
             let choice = site_owner::for_publish(&dir, &name, key, &gateway, move_to_account, new_site).await?;
-            let (record, copies) = c0mpute_core::hosting::publish_dir_as(
+            let published = c0mpute_core::hosting::publish_dir_report(
                 choice.owner.signer(),
                 &dir,
                 &name,
@@ -5024,6 +5024,7 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
                 market,
             )
             .await?;
+            let (record, copies, refused) = (published.record, published.copies, published.refused);
             site_owner::write_link(
                 &dir,
                 &site_owner::Link {
@@ -5037,6 +5038,12 @@ async fn run_hosting(cmd: HostingCmd) -> Result<()> {
             println!("owner:   {} ({}…)", choice.owner.kind.label(), &record.owner[..12]);
             println!("version: {}", record.seq);
             println!("copies:  {copies}/{}", c0mpute_core::hosting::TARGET_REPLICAS);
+            // DIP-0036: replicas that would not hold the site under their
+            // operators' content policy. Other nodes take those copies; the
+            // owner is told how many refused and why, never which peers.
+            if let Some(line) = chat_connect::refused_line(&refused) {
+                println!("refused: {line}");
+            }
             if !record.preferred_hosts.is_empty() {
                 println!(
                     "paid:    {} preferred host(s) at ${}/GiB-month, paid by {}",

@@ -15,7 +15,13 @@
 //! ```
 //!
 //! Off by default: with no labelers the layer is never installed. One
-//! operator's choice binds only that operator's gateway (DIP-0036 L1).
+//! operator's choice binds only that operator's node (DIP-0036 L1).
+//!
+//! The same table is a hosting worker's policy (DIP-0036 step 4): a node with
+//! the hosting role does not hold a copy of a site that has a file with a
+//! `refuse` label, and lets go of one it holds (`hosting::policy`). `warn`
+//! is a gateway action; a worker acts on `refuse` only. `refuse_replicas =
+//! false` under `[moderation]` keeps the policy to what the gateway serves.
 //!
 //! How a response is judged:
 //! - only successful GET/HEAD responses of web content (HTML, JS, SVG) up to
@@ -87,6 +93,15 @@ pub struct ModerationConfig {
     /// How long a decision is trusted before it is refreshed in the background.
     #[serde(default = "default_recheck_secs")]
     pub recheck_secs: u64,
+    /// On a node with the hosting role: also refuse to hold copies of sites
+    /// that have a file with a `refuse` label (DIP-0036 step 4). On by
+    /// default; `false` keeps the policy to what the gateway serves.
+    #[serde(default = "yes")]
+    pub refuse_replicas: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_max_scan_bytes() -> usize {
@@ -107,6 +122,7 @@ impl Default for ModerationConfig {
             max_scan_bytes: default_max_scan_bytes(),
             timeout_ms: default_timeout_ms(),
             recheck_secs: default_recheck_secs(),
+            refuse_replicas: true,
         }
     }
 }
@@ -277,7 +293,17 @@ pub trait LabelerClient: Send + Sync {
         src: &LabelerSource,
         sha256_hex: &str,
     ) -> BoxFuture<'static, Result<Vec<Label>, String>>;
+    /// Labels in force for several SHA-256s, in one call (at most
+    /// [`QUERY_BATCH`]).
+    fn query_many(
+        &self,
+        src: &LabelerSource,
+        sha256_hex: &[String],
+    ) -> BoxFuture<'static, Result<Vec<Label>, String>>;
 }
+
+/// Subjects per `/query` call: well inside the labeler's 64 KiB body cap.
+pub const QUERY_BATCH: usize = 50;
 
 #[derive(Deserialize)]
 struct LabelsBody {
@@ -369,7 +395,15 @@ impl LabelerClient for HttpLabeler {
         src: &LabelerSource,
         sha256_hex: &str,
     ) -> BoxFuture<'static, Result<Vec<Label>, String>> {
-        let body = serde_json::json!({ "uris": [format!("sha256:{sha256_hex}")] });
+        self.query_many(src, &[sha256_hex.to_string()])
+    }
+    fn query_many(
+        &self,
+        src: &LabelerSource,
+        sha256_hex: &[String],
+    ) -> BoxFuture<'static, Result<Vec<Label>, String>> {
+        let uris: Vec<String> = sha256_hex.iter().map(|h| format!("sha256:{h}")).collect();
+        let body = serde_json::json!({ "uris": uris });
         self.post(
             format!("{}/api/v1/labels/query", src.url.trim_end_matches('/')),
             None,
@@ -434,7 +468,7 @@ impl Gate {
             .collect();
         tracing::info!(
             labelers = cfg.labelers.len(),
-            "moderation: gateway honours DIP-0036 labels"
+            "moderation: this node honours DIP-0036 labels"
         );
         Some(Arc::new(Self {
             cfg,
@@ -598,6 +632,144 @@ impl Gate {
     }
 }
 
+impl Gate {
+    /// How long a decision is trusted before it is asked for again.
+    pub fn recheck(&self) -> Duration {
+        Duration::from_secs(self.cfg.recheck_secs.max(30))
+    }
+
+    /// Whether the policy also covers the copies a hosting node holds
+    /// (`[moderation] refuse_replicas`, on unless turned off) and some
+    /// action refuses: `warn` alone is a gateway matter.
+    pub fn refuses_replicas(&self) -> bool {
+        self.cfg.refuse_replicas && self.cfg.actions.values().any(|a| *a == Action::Refuse)
+    }
+
+    /// The largest file sent to a labeler's `/scan`.
+    pub fn max_scan_bytes(&self) -> usize {
+        self.cfg.max_scan_bytes
+    }
+
+    /// Whether some labeler has a scan token (files can be sent, not only
+    /// asked about by hash).
+    pub fn scans(&self) -> bool {
+        self.tokens.iter().any(|t| !t.is_empty())
+    }
+
+    /// [`Self::decide`] for a caller with no visitor waiting (a hosting
+    /// worker checking a copy): on a miss it waits for the labelers' answer
+    /// for as long as the client's own timeout allows, instead of serving
+    /// first and learning later. Still fails open when nobody answers.
+    pub async fn decide_patiently(self: &Arc<Self>, name: &str, bytes: &[u8]) -> Decision {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let cached = self.cache.lock().unwrap().get(&digest).cloned();
+        let scanned = match cached {
+            Some(e) if e.fresh_until > Instant::now() => return e.decision,
+            Some(e) => e.scanned,
+            None => false,
+        };
+        let body = if scanned { None } else { Some(Arc::new(bytes.to_vec())) };
+        match self.pending(digest, &hex::encode(digest), name, body).await {
+            Some((d, _)) => d,
+            None => Decision::Clean,
+        }
+    }
+
+    /// Decisions for files known by SHA-256 only, in the order given. What a
+    /// hosting worker asks: it has every file of a site, and the labelers'
+    /// `/query` takes hashes in batches. A fresh cached decision answers;
+    /// the rest are asked, [`QUERY_BATCH`] at a time. Fails open: a file no
+    /// labeler answered for keeps its last decision while a label of it is
+    /// still unexpired, and is otherwise clean (and not remembered as such).
+    pub async fn decide_hashes(self: &Arc<Self>, digests: &[[u8; 32]]) -> Vec<Decision> {
+        let now = Instant::now();
+        // (decision, fresh, scanned) of what is cached.
+        let known: HashMap<[u8; 32], (Decision, bool, bool)> = {
+            let cache = self.cache.lock().unwrap();
+            digests
+                .iter()
+                .filter_map(|d| {
+                    cache
+                        .get(d)
+                        .map(|e| (*d, (e.decision.clone(), e.fresh_until > now, e.scanned)))
+                })
+                .collect()
+        };
+        let mut ask: Vec<[u8; 32]> = digests
+            .iter()
+            .filter(|d| !known.get(*d).is_some_and(|k| k.1))
+            .copied()
+            .collect();
+        ask.sort();
+        ask.dedup();
+        let mut found: HashMap<[u8; 32], Decision> = HashMap::new();
+        for batch in ask.chunks(QUERY_BATCH) {
+            let hexes: Vec<String> = batch.iter().map(hex::encode).collect();
+            let mut hits: HashMap<[u8; 32], Vec<Hit>> = HashMap::new();
+            let mut answered = false;
+            for src in &self.cfg.labelers {
+                match self.client.query_many(src, &hexes).await {
+                    Ok(labels) => {
+                        answered = true;
+                        for (d, h) in batch.iter().zip(&hexes) {
+                            let got = accepted(&labels, src, &self.cfg.actions, h, unix_now());
+                            if !got.is_empty() {
+                                hits.entry(*d).or_default().extend(got);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(labeler = %src.did, error = %e, "moderation: labeler did not answer")
+                    }
+                }
+            }
+            if !answered {
+                continue;
+            }
+            for d in batch {
+                let decision = match hits.remove(d) {
+                    Some(h) => Decision::Flagged(h),
+                    None => Decision::Clean,
+                };
+                // Keep what the gateway knows: a file a labeler scanned is
+                // refreshed by /query there too.
+                self.remember(*d, decision.clone(), known.get(d).is_some_and(|k| k.2));
+                found.insert(*d, decision);
+            }
+        }
+        let now_unix = unix_now();
+        digests
+            .iter()
+            .map(|d| {
+                if let Some(f) = found.get(d) {
+                    return f.clone();
+                }
+                match known.get(d) {
+                    Some((decision, true, _)) => decision.clone(),
+                    // Stale and nobody answered: the labels still in force.
+                    Some((Decision::Flagged(hits), false, _)) => {
+                        let live: Vec<Hit> = hits.iter().filter(|h| h.exp > now_unix).cloned().collect();
+                        if live.is_empty() {
+                            Decision::Clean
+                        } else {
+                            Decision::Flagged(live)
+                        }
+                    }
+                    _ => Decision::Clean,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The first hit of a decision that this operator's policy refuses.
+pub fn refusing(d: &Decision) -> Option<&Hit> {
+    match d {
+        Decision::Flagged(hits) => hits.iter().find(|h| h.action == Action::Refuse),
+        Decision::Clean => None,
+    }
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -606,7 +778,7 @@ fn unix_now() -> i64 {
 }
 
 /// Content types worth judging, and the file name the labeler's rules expect for each.
-fn judged_name(content_type: &str) -> Option<&'static str> {
+pub(crate) fn judged_name(content_type: &str) -> Option<&'static str> {
     let ct = content_type
         .split(';')
         .next()
@@ -1010,6 +1182,14 @@ mod tests {
             self.queries.fetch_add(1, Ordering::SeqCst);
             self.answer()
         }
+        fn query_many(
+            &self,
+            _: &LabelerSource,
+            _: &[String],
+        ) -> BoxFuture<'static, Result<Vec<Label>, String>> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            self.answer()
+        }
     }
 
     impl Fake {
@@ -1238,6 +1418,83 @@ mod tests {
             ),
             (1, 1)
         );
+    }
+
+    #[tokio::test]
+    async fn hashes_are_asked_in_batches_cached_and_fail_open() {
+        let evil: [u8; 32] = Sha256::digest(b"evil").into();
+        let spam: [u8; 32] = Sha256::digest(b"spammy").into();
+        let fine: [u8; 32] = Sha256::digest(b"fine").into();
+        let fake = Fake::new(vec![
+            label(&sha_hex(b"evil"), "malware", false, 3600),
+            label(&sha_hex(b"spammy"), "spam", false, 3600),
+        ]);
+        let g = Gate::new(cfg(), fake.clone()).unwrap();
+        // 120 distinct files: three batches, one call each.
+        let mut many: Vec<[u8; 32]> = (0..117u32)
+            .map(|i| Sha256::digest(i.to_le_bytes()).into())
+            .collect();
+        many.extend([evil, spam, fine]);
+        let out = g.decide_hashes(&many).await;
+        assert_eq!(out.len(), 120);
+        assert_eq!(fake.queries.load(Ordering::SeqCst), 3);
+        assert_eq!(refusing(&out[117]).map(|h| h.val.as_str()), Some("malware"));
+        // `warn` is a decision, but not one a worker refuses on.
+        assert!(matches!(out[118], Decision::Flagged(_)) && refusing(&out[118]).is_none());
+        assert_eq!(out[119], Decision::Clean);
+        assert!(out[..117].iter().all(|d| *d == Decision::Clean));
+        // All cached now: no further call, the same answers, duplicates fine.
+        let again = g.decide_hashes(&[evil, evil, fine]).await;
+        assert_eq!(fake.queries.load(Ordering::SeqCst), 3);
+        assert!(refusing(&again[0]).is_some() && refusing(&again[1]).is_some());
+        assert_eq!(again[2], Decision::Clean);
+        // The gateway's per-file path reads the same cache.
+        assert!(matches!(g.decide("index.html", b"evil").await, Decision::Flagged(_)));
+        assert_eq!(
+            fake.queries.load(Ordering::SeqCst) + fake.scans.load(Ordering::SeqCst),
+            3
+        );
+
+        // A labeler that is down: unknown files are clean (fail open)...
+        let down = Arc::new(Fake {
+            labels: Mutex::new(vec![]),
+            fail: true,
+            delay_ms: 0,
+            scans: AtomicUsize::new(0),
+            queries: AtomicUsize::new(0),
+        });
+        let g2 = Gate::new(cfg(), down).unwrap();
+        assert_eq!(g2.decide_hashes(&[evil]).await, vec![Decision::Clean]);
+        assert!(
+            g2.cache.lock().unwrap().is_empty(),
+            "an unanswered question is not remembered as clean"
+        );
+        // ...but a stale refusal stands while its label is unexpired.
+        let hits = accepted(
+            &[label(&sha_hex(b"evil"), "malware", false, 3600)],
+            &source(),
+            &actions(),
+            &sha_hex(b"evil"),
+            unix_now(),
+        );
+        g2.remember(evil, Decision::Flagged(hits), false);
+        for e in g2.cache.lock().unwrap().values_mut() {
+            e.fresh_until = Instant::now() - Duration::from_secs(1);
+        }
+        assert!(refusing(&g2.decide_hashes(&[evil]).await[0]).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_retracted_label_clears_a_hash_decision_on_recheck() {
+        let evil: [u8; 32] = Sha256::digest(b"evil").into();
+        let fake = Fake::new(vec![label(&sha_hex(b"evil"), "malware", false, 3600)]);
+        let g = Gate::new(cfg(), fake.clone()).unwrap();
+        assert!(refusing(&g.decide_hashes(&[evil]).await[0]).is_some());
+        *fake.labels.lock().unwrap() = vec![];
+        for e in g.cache.lock().unwrap().values_mut() {
+            e.fresh_until = Instant::now() - Duration::from_secs(1);
+        }
+        assert_eq!(g.decide_hashes(&[evil]).await, vec![Decision::Clean]);
     }
 
     #[test]

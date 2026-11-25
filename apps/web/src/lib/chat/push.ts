@@ -46,6 +46,13 @@ export type Push = {
   version: number | null;
   url: string | null;
   copies: number | null;
+  /**
+   * DIP-0036: replicas that refused to hold the site under their operators'
+   * content policy when the publishing node reported, and under which labeler
+   * and label value. Which workers refused is never recorded.
+   */
+  refused: number | null;
+  refused_by: RefusedBy[];
   error: string | null;
   /** The node's latest progress line while publishing or deleting. */
   progress: string | null;
@@ -91,6 +98,34 @@ export const PUSH_SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_chat_pushes_node ON chat_pushes(node_id, status)`,
 ];
 
+// Columns added after chat_pushes first shipped. SQLite has no ADD COLUMN IF
+// NOT EXISTS, so each runs once and "duplicate column" means it already did.
+export const PUSH_MIGRATIONS = [
+  // DIP-0036: replicas that refused the site under policy (count, and a JSON
+  // list of {labeler, val, count}).
+  `ALTER TABLE chat_pushes ADD COLUMN refused INTEGER`,
+  `ALTER TABLE chat_pushes ADD COLUMN refused_by TEXT`,
+];
+
+export type RefusedBy = { labeler: string; val: string; count: number };
+
+const LABEL_TEXT = /^[\x21-\x7e]+$/;
+
+/** A node's `refused_by`, kept only as far as it is well formed: at most 16 causes of printable text. */
+export function cleanRefusedBy(v: unknown): RefusedBy[] {
+  if (!Array.isArray(v)) return [];
+  const out: RefusedBy[] = [];
+  for (const x of v.slice(0, 16)) {
+    if (!x || typeof x !== "object") continue;
+    const { labeler, val, count } = x as Record<string, unknown>;
+    const n = Math.floor(Number(count));
+    if (typeof labeler !== "string" || typeof val !== "string" || !Number.isFinite(n) || n < 1) continue;
+    if (labeler.length > 128 || val.length > 64 || !LABEL_TEXT.test(labeler) || !LABEL_TEXT.test(val)) continue;
+    out.push({ labeler, val, count: Math.min(n, 1000) });
+  }
+  return out;
+}
+
 // ── store ───────────────────────────────────────────────────────────────────
 
 const now = () => new Date().toISOString();
@@ -100,6 +135,10 @@ function toPush(r: Row): Push {
   let files: PushFile[] = [];
   try {
     files = JSON.parse(String(r.files ?? "[]"));
+  } catch {}
+  let refusedBy: RefusedBy[] = [];
+  try {
+    refusedBy = cleanRefusedBy(JSON.parse(String(r.refused_by ?? "[]")));
   } catch {}
   return {
     id: String(r.id),
@@ -116,6 +155,8 @@ function toPush(r: Row): Push {
     version: r.version == null ? null : Number(r.version),
     url: (r.url as string) ?? null,
     copies: r.copies == null ? null : Number(r.copies),
+    refused: r.refused == null ? null : Number(r.refused),
+    refused_by: refusedBy,
     error: (r.error as string) ?? null,
     progress: (r.progress as string) ?? null,
     claimed_at: (r.claimed_at as string) ?? null,
@@ -140,6 +181,10 @@ export function publicPush(p: Push, node?: HostingNode | null) {
     version: p.version,
     url: p.url,
     copies: p.copies,
+    // DIP-0036: how many replicas refused the site under their own content
+    // policy (as of the node's report), and why. Never which workers.
+    refused: p.refused ?? 0,
+    refused_by: p.refused_by,
     error: p.error,
     progress: p.status === "queued" || p.status === "publishing" || p.status === "deleting" ? p.progress : null,
     created_at: p.created_at,
@@ -244,6 +289,11 @@ export function createPushStore(
   const init = () =>
     (ready ??= (async () => {
       for (const q of PUSH_SCHEMA) await sql.run(q);
+      for (const q of PUSH_MIGRATIONS) {
+        await sql.run(q).catch((e: unknown) => {
+          if (!/duplicate column/i.test(String((e as Error)?.message ?? e))) throw e;
+        });
+      }
     })().catch((e) => {
       ready = null;
       throw e;
@@ -507,7 +557,21 @@ export function createPushStore(
       userId: string,
       nodeId: string,
       pid: string,
-      r: { rev?: unknown; progress?: unknown; bytes?: unknown; note?: unknown; ok?: unknown; site_id?: unknown; version?: unknown; url?: unknown; copies?: unknown; error?: unknown; deleted?: unknown },
+      r: {
+        rev?: unknown;
+        progress?: unknown;
+        bytes?: unknown;
+        note?: unknown;
+        ok?: unknown;
+        site_id?: unknown;
+        version?: unknown;
+        url?: unknown;
+        copies?: unknown;
+        refused?: unknown;
+        refused_by?: unknown;
+        error?: unknown;
+        deleted?: unknown;
+      },
     ): Promise<Push | "deleted"> {
       const p = await store.pushForCaller(userId, pid);
       if (!p || p.node_id !== nodeId) throw new PushError("no such push on this node", 404);
@@ -548,14 +612,23 @@ export function createPushStore(
         if (!siteId) throw new PushError("site_id missing");
         const url = typeof r.url === "string" && /^https?:\/\//.test(r.url) ? r.url.slice(0, 500) : null;
         const bytes = Number.isFinite(Number(r.bytes)) ? Math.max(0, Math.floor(Number(r.bytes))) : 0;
+        // Replicas that refused the site under their own policy (DIP-0036).
+        // Nodes from before this was reported send neither field: zero.
+        const refusedBy = cleanRefusedBy(r.refused_by);
+        const refused = Math.max(
+          Number.isFinite(Number(r.refused)) ? Math.min(1000, Math.max(0, Math.floor(Number(r.refused)))) : 0,
+          refusedBy.reduce((n, x) => n + x.count, 0),
+        );
         await sql.run(
-          `UPDATE chat_pushes SET status = 'live', site_id = ?, version = ?, bytes = ?, url = ?, copies = ?, error = ?, progress = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`,
+          `UPDATE chat_pushes SET status = 'live', site_id = ?, version = ?, bytes = ?, url = ?, copies = ?, refused = ?, refused_by = ?, error = ?, progress = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?`,
           [
             siteId,
             Number.isFinite(Number(r.version)) ? Number(r.version) : null,
             bytes,
             url,
             Number(r.copies) || 0,
+            refused,
+            JSON.stringify(refusedBy),
             typeof r.note === "string" && r.note ? r.note.slice(0, 1000) : null, // e.g. files left out
             t,
             p.id,

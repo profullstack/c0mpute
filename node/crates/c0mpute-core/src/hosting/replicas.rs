@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use c0mpute_proto::Hash;
 
+use super::policy::Refusal;
 use super::proof::{self, Receipt};
 use super::site::SiteRecord;
 use crate::payments::{Micros, Payee};
@@ -102,9 +103,76 @@ pub struct ReplicaMap {
     /// false a holder counts only once proven ([`Self::proven`]) and may only
     /// be relied on for a drop once it has standing ([`Self::has_standing`]).
     pub count_claims: bool,
+    /// Site versions each hosting peer says it will not hold under its own
+    /// policy (DIP-0036 `policy_refusal`), by peer then site id, and when it
+    /// last said so. Kept only for peers in [`Self::peers`], and goes when
+    /// the peer does.
+    pub refusals: HashMap<String, (Instant, HashMap<String, Refusal>)>,
+}
+
+/// How many replicas refused a site, per labeler and label value. Which
+/// workers refused is not part of it (DIP-0036: they are not named).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RefusalTally {
+    pub labeler: String,
+    pub val: String,
+    pub count: usize,
 }
 
 impl ReplicaMap {
+    /// What `peer` refuses to hold right now (replaces what it said before;
+    /// an empty list clears it). Ignored from a peer that has not announced
+    /// itself as a host: the table is bounded by the peers table.
+    pub fn apply_refusals(&mut self, peer: &str, list: Vec<Refusal>, now: Instant) {
+        if !self.peers.get(peer).is_some_and(|h| h.hosts) {
+            return;
+        }
+        let sites: HashMap<String, Refusal> = list
+            .into_iter()
+            .take(super::policy::MAX_REFUSALS)
+            .filter(|r| r.sane())
+            .map(|r| (r.site_id.clone(), r))
+            .collect();
+        if sites.is_empty() {
+            self.refusals.remove(peer);
+        } else {
+            self.refusals.insert(peer.to_string(), (now, sites));
+        }
+    }
+
+    /// Whether `peer` refuses the current version of `site_id`. Such a peer
+    /// is not a holder of it, not a candidate for it, and not challenged
+    /// for it.
+    pub fn refuses(&self, site_id: &str, peer: &str) -> bool {
+        let Some(rec) = self.records.get(site_id) else {
+            return false;
+        };
+        self.refusals
+            .get(peer)
+            .and_then(|(_, sites)| sites.get(site_id))
+            .is_some_and(|r| r.manifest == rec.manifest)
+    }
+
+    /// Replicas that refused the current version of `site_id`, counted per
+    /// labeler and value, most first.
+    pub fn refusal_tally(&self, site_id: &str) -> Vec<RefusalTally> {
+        let Some(rec) = self.records.get(site_id) else {
+            return Vec::new();
+        };
+        let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        for (_, sites) in self.refusals.values() {
+            if let Some(r) = sites.get(site_id).filter(|r| r.manifest == rec.manifest) {
+                *counts.entry((r.labeler.clone(), r.val.clone())).or_default() += 1;
+            }
+        }
+        let mut v: Vec<RefusalTally> = counts
+            .into_iter()
+            .map(|((labeler, val), count)| RefusalTally { labeler, val, count })
+            .collect();
+        v.sort_by(|a, b| b.count.cmp(&a.count));
+        v
+    }
+
     /// Keep a record if it verifies and is newer than what we have. Returns
     /// true when it changed the map.
     pub fn apply_record(&mut self, rec: SiteRecord) -> bool {
@@ -360,6 +428,9 @@ impl ReplicaMap {
                 })
             })
             .filter(|p| !self.is_demoted(site_id, p))
+            // A preferred host that refuses the site under its own policy
+            // will never hold it: the rendezvous fill covers for it.
+            .filter(|p| !self.refuses(site_id, p))
             .take(super::site::MAX_PREFERRED_HOSTS)
             .collect()
     }
@@ -490,6 +561,11 @@ impl ReplicaMap {
     pub fn prune(&mut self, now: Instant, ttl: Duration) {
         self.peers
             .retain(|_, h| h.seen.is_some_and(|t| now.duration_since(t) <= ttl));
+        // A refusal is repeated with every holding announcement: one not
+        // repeated was lifted, and one from a peer that left means nothing.
+        let peers = &self.peers;
+        self.refusals
+            .retain(|p, (t, _)| now.duration_since(*t) <= ttl && peers.contains_key(p));
     }
 
     /// Live hosting peers that can take a new copy, sorted.
@@ -559,6 +635,9 @@ impl ReplicaMap {
                     .get(site_id)
                     .is_some_and(|(m, _)| *m == rec.manifest)
             })
+            // A peer that refuses this version is letting it go (it keeps
+            // the chunks only until everyone has seen that): not a copy.
+            .filter(|(p, _)| !self.refuses(site_id, p))
             .map(|(p, _)| p.clone())
             .collect();
         v.sort();
@@ -839,6 +918,10 @@ pub fn decide_counting(
     if !i_host {
         return Action::Nothing;
     }
+    // This node's own policy refuses this version (DIP-0036): never take it.
+    if map.refuses(site_id, me) {
+        return Action::Nothing;
+    }
     // A preferred host takes its copy whatever the count: it is paid to.
     if preferred.iter().any(|p| p == me) {
         return Action::Replicate;
@@ -861,6 +944,9 @@ pub fn decide_counting(
         .into_iter()
         .filter(|p| !holders.contains(p) && !preferred.contains(p))
         .filter(|p| map.room_of(p).is_none_or(|r| r >= size))
+        // A peer that refuses the site under its own policy would be chosen
+        // and never take the copy: the next ranked node takes it instead.
+        .filter(|p| !map.refuses(site_id, p))
         .collect();
     if !candidates.iter().any(|p| p == me) {
         if map.room_of(me).is_some_and(|r| r < size) {
@@ -928,6 +1014,111 @@ mod tests {
             .collect();
         assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
         assert!(!takers.contains(&first));
+    }
+
+    #[test]
+    fn a_peer_that_refuses_a_site_is_no_holder_and_no_candidate_and_is_counted() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let site = r.site_id.clone();
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        let now = Instant::now();
+        let peers: Vec<String> = (0..6).map(|i| format!("h{i}")).collect();
+        for p in &peers {
+            m.apply_holding_meta(p, HashMap::new(), now, true, None, None);
+        }
+        let refusal = |manifest: &str, val: &str| Refusal {
+            site_id: site.clone(),
+            manifest: manifest.to_string(),
+            labeler: "did:web:labeler.test".into(),
+            val: val.to_string(),
+        };
+        // Whoever ranks first for this site refuses it under its own policy.
+        let first = chosen(&site, &peers, 1)[0].clone();
+        // A refusal from a key that never announced itself as a host is
+        // ignored (the table is bounded by the peers table), as is junk.
+        m.apply_refusals("stranger", vec![refusal(&r.manifest, "phishing")], now);
+        m.apply_refusals(&first, vec![refusal("not a hash", "phishing")], now);
+        assert!(m.refusals.is_empty() && !m.refuses(&site, &first));
+        m.apply_refusals(&first, vec![refusal(&r.manifest, "phishing")], now);
+        assert!(m.refuses(&site, &first));
+        // The next ranked nodes fill the site; the refuser never does, even
+        // asked directly.
+        let takers: Vec<String> = peers
+            .iter()
+            .filter(|p| decide(&m, &site, p, true, 3, 5, true) == Action::Replicate)
+            .cloned()
+            .collect();
+        assert_eq!(takers.len(), 3, "three other nodes fill the site: {takers:?}");
+        assert!(!takers.contains(&first));
+        // The owner is told how many refused and why, not who.
+        let second = takers[0].clone();
+        m.apply_refusals(&second, vec![refusal(&r.manifest, "phishing")], now);
+        let other = peers.iter().find(|p| **p != first && **p != second).unwrap().clone();
+        m.apply_refusals(&other, vec![refusal(&r.manifest, "malware")], now);
+        assert_eq!(
+            m.refusal_tally(&site),
+            vec![
+                RefusalTally {
+                    labeler: "did:web:labeler.test".into(),
+                    val: "phishing".into(),
+                    count: 2
+                },
+                RefusalTally {
+                    labeler: "did:web:labeler.test".into(),
+                    val: "malware".into(),
+                    count: 1
+                },
+            ]
+        );
+        m.apply_refusals(&second, Vec::new(), now);
+        m.apply_refusals(&other, Vec::new(), now);
+        // A copy the refuser still announces while it lets it go is not a
+        // copy: it is not counted, so never challenged for it.
+        let held: HashMap<String, (String, u64)> = [(site.clone(), (r.manifest.clone(), r.seq))].into();
+        m.apply_holding_meta(&first, held.clone(), now, true, None, None);
+        assert!(m.holders(&site).is_empty() && m.sources(&site).is_empty());
+        // A refusal of another version says nothing about this one.
+        m.apply_refusals(&first, vec![refusal(&Hash::of(b"older").to_hex(), "phishing")], now);
+        assert!(!m.refuses(&site, &first) && m.refusal_tally(&site).is_empty());
+        assert_eq!(m.holders(&site), vec![first.clone()]);
+        // A refusal the peer stops repeating is lifted after the holder TTL,
+        // and one from a peer that left goes with it.
+        m.apply_refusals(&first, vec![refusal(&r.manifest, "phishing")], now);
+        let ttl = Duration::from_secs(200);
+        m.apply_holding_meta(&first, held, now + Duration::from_secs(150), true, None, None);
+        m.prune(now + Duration::from_secs(100), ttl);
+        assert!(m.refuses(&site, &first));
+        m.prune(now + Duration::from_secs(300), ttl);
+        assert!(m.peers.contains_key(&first) && !m.refuses(&site, &first));
+        m.apply_refusals(&first, vec![refusal(&r.manifest, "phishing")], now + Duration::from_secs(300));
+        m.prune(now + Duration::from_secs(400), ttl);
+        assert!(m.peers.is_empty() && m.refusals.is_empty());
+    }
+
+    #[test]
+    fn a_node_never_takes_a_site_its_own_policy_refuses() {
+        let kp = c0mpute_net::libp2p::identity::Keypair::generate_ed25519();
+        let r = rec(&kp, 1);
+        let mut m = ReplicaMap::default();
+        m.apply_record(r.clone());
+        let now = Instant::now();
+        m.apply_holding_meta("me", HashMap::new(), now, true, None, None);
+        // The only host there is would take it; once its policy refuses the
+        // version it is not a candidate even for itself.
+        assert_eq!(decide(&m, &r.site_id, "me", true, 3, 5, false), Action::Replicate);
+        m.apply_refusals(
+            "me",
+            vec![Refusal {
+                site_id: r.site_id.clone(),
+                manifest: r.manifest.clone(),
+                labeler: "did:web:labeler.test".into(),
+                val: "malware".into(),
+            }],
+            now,
+        );
+        assert_eq!(decide(&m, &r.site_id, "me", true, 3, 5, false), Action::Nothing);
     }
 
     #[test]

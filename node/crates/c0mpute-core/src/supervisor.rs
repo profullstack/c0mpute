@@ -848,7 +848,9 @@ impl Supervisor {
                     r = r.layer(axum::middleware::from_fn_with_state(g.clone(), crate::x402::gate));
                 }
                 // DIP-0036: refuse files a subscribed labeler flagged (off unless configured).
-                if let Some(m) = crate::moderation::Gate::from_config(&self.config) {
+                // The same gate the hosting worker judges copies with, so
+                // both read one cache of decisions.
+                if let Some(m) = h.moderation() {
                     r = r.layer(axum::middleware::from_fn_with_state(m, crate::moderation::gate));
                 }
                 app = app.merge(r);
@@ -984,6 +986,10 @@ impl Supervisor {
                 price: Some(cfg.price_micros()),
                 payout: cfg.payee(),
                 receipts_path: Some(dir.join("receipts.jsonl")),
+                // DIP-0036: `[moderation]` is this operator's policy for the
+                // files its gateway serves and, with the hosting role, for
+                // the copies it holds. Off unless labelers are configured.
+                moderation: crate::moderation::Gate::from_config(&self.config),
                 ..Default::default()
             },
         )

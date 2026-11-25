@@ -27,6 +27,7 @@ mod git_browse;
 pub mod market;
 pub mod meta;
 pub mod origin;
+pub mod policy;
 pub mod proof;
 pub mod relay;
 pub mod replicas;
@@ -211,6 +212,12 @@ pub enum HostingMsg {
     /// A signed availability receipt (proof-of-storage challenge result).
     /// Older nodes do not know this variant and skip it.
     Receipt { receipt: Receipt },
+    /// "These are the site versions my own content policy refuses to hold"
+    /// (DIP-0036 `policy_refusal`): the sender's whole list, replacing what
+    /// it said before. It is then no holder of them and no candidate for
+    /// them, so the refusal is never a failed challenge ([`policy`]). Older
+    /// nodes do not know this variant and skip it.
+    PolicyRefusal { refusals: Vec<policy::Refusal> },
 }
 
 fn one() -> u32 {
@@ -322,6 +329,11 @@ struct Inner {
     disk_override: Option<(u64, u64)>,
     /// This node's failure domain, worked out once (see [`failure_domain`]).
     machine: std::sync::OnceLock<Option<String>>,
+    /// The operator's `[moderation]` policy (DIP-0036), when one is set: a
+    /// hosting node refuses copies of sites it flags (see [`policy`]).
+    moderation: Option<Arc<crate::moderation::Gate>>,
+    /// What that policy refuses and has checked.
+    policy: std::sync::Mutex<policy::State>,
 }
 
 /// Which sites a node challenges.
@@ -415,6 +427,11 @@ pub struct Options {
     /// `[gateway] sandbox_shared_sites`. `None`: as this machine is
     /// configured (on unless turned off).
     pub sandbox_shared_sites: Option<bool>,
+    /// The operator's `[moderation]` policy ([`crate::moderation::Gate`]).
+    /// With it, a hosting node (`hosts`) does not hold copies of sites that
+    /// have a file one of its labelers labelled with a `refuse` action
+    /// (DIP-0036, see [`policy`]). `None` (the default): every site is held.
+    pub moderation: Option<Arc<crate::moderation::Gate>>,
 }
 
 impl Default for Options {
@@ -436,6 +453,7 @@ impl Default for Options {
             disk_override: None,
             site_host_suffix: None,
             sandbox_shared_sites: None,
+            moderation: None,
         }
     }
 }
@@ -545,6 +563,8 @@ impl Hosting {
             receipts_path: opts.receipts_path,
             disk_override: opts.disk_override,
             machine: std::sync::OnceLock::new(),
+            moderation: opts.moderation,
+            policy: std::sync::Mutex::new(policy::State::default()),
         });
         let h = Hosting(inner);
         // Records seen before a restart (each re-verified).
@@ -581,6 +601,7 @@ impl Hosting {
         h.spawn_announcer();
         h.spawn_repair();
         h.spawn_challenger();
+        h.spawn_policy();
         net.register_rpc(RPC_RECORD, Arc::new(RecordRpc(h.clone())));
         Ok(h)
     }
@@ -712,6 +733,10 @@ impl Hosting {
                     }
                     HostingMsg::Receipt { receipt } => {
                         h.0.map.write().await.apply_receipt(receipt);
+                    }
+                    HostingMsg::PolicyRefusal { refusals } => {
+                        // The source speaks for itself only.
+                        h.0.map.write().await.apply_refusals(&source, refusals, Instant::now());
                     }
                 }
             }
@@ -1024,6 +1049,7 @@ impl Hosting {
                     return;
                 }
                 h.announce_holding().await;
+                h.announce_refusals().await;
                 h.refresh_chunk_index().await;
                 h.connect_hosts().await;
                 if last_records.elapsed() >= h.0.timing.records_every {
@@ -1407,7 +1433,9 @@ impl Hosting {
     }
 
     fn spawn_replicate(&self, rec: SiteRecord) {
-        if self.retry_held_back(&rec, Instant::now()) {
+        // This version is refused under this node's own policy (DIP-0036):
+        // not fetched again until the refusal is lifted.
+        if self.retry_held_back(&rec, Instant::now()) || self.policy_refuses(&rec) {
             return;
         }
         let h = self.clone();
@@ -1424,6 +1452,11 @@ impl Hosting {
                     let _ = h.note_replicate(&rec, true, Instant::now());
                     info!(site = %id, name = %rec.name, seq = rec.seq, "hosting: holding a copy");
                     h.announce_holding().await;
+                }
+                // Refused, not failed: nothing to retry or warn about.
+                Err(e) if e.is::<policy::PolicyRefused>() => {
+                    let _ = h.note_replicate(&rec, true, Instant::now());
+                    debug!(site = %id, reason = %e, "hosting: not holding a copy");
                 }
                 Err(e) => h.replicate_failed(&rec, &e),
             }
@@ -1610,6 +1643,10 @@ impl Hosting {
             }
         }
         self.store_manifest(rec, &manifest).await?;
+        // Every chunk is here and nothing is held or announced yet: the
+        // operator's content policy (DIP-0036) has its say now. A refused
+        // copy is deleted and the error is a [`policy::PolicyRefused`].
+        self.policy_admit(rec, &manifest).await?;
         {
             let mut cat = self.0.catalog.write().await;
             cat.sites.insert(rec.site_id.clone(), rec.clone());
@@ -2625,8 +2662,10 @@ impl Hosting {
             self.note_pass(rec, holder).await;
         }
         if !ok && !self.0.map.read().await.holders(&rec.site_id).iter().any(|p| p == holder) {
-            // The holder announced it let the copy go while we were asking:
-            // not a failed proof, just a stale target. No receipt.
+            // The holder announced it let the copy go while we were asking,
+            // or that its policy refuses the site (a `policy_refusal` takes
+            // it out of the holders, DIP-0036): not a failed proof, just a
+            // stale target. No receipt.
             bail!("{holder} no longer holds {}", rec.site_id);
         }
         let rtt_ms = if ok { started.elapsed().as_millis().min(u32::MAX as u128) as u32 } else { 0 };
@@ -3824,6 +3863,13 @@ async fn list_sites(State(h): State<Hosting>) -> Response {
                 "preferred_hosts": r.preferred_hosts,
                 "price_per_gib_month": r.price_per_gib_month,
             });
+        // DIP-0036: replicas that refused this version under their own
+        // policy, and under which labeler and value. Never which peers.
+        let refused = h.refusals(&r.site_id).await;
+        if !refused.is_empty() {
+            v["refused"] = serde_json::json!(refused.iter().map(|t| t.count).sum::<usize>());
+            v["refused_by"] = serde_json::json!(refused);
+        }
         if let Some(x) = health {
             v["striped"] = serde_json::json!(true);
             v["groups"] = serde_json::json!(x.groups);
@@ -4814,6 +4860,31 @@ pub async fn publish_dir_as(
     wait: Duration,
     market: Option<MarketOptions>,
 ) -> Result<(SiteRecord, usize)> {
+    let p = publish_dir_report(signer, dir, name, domains, wait, market).await?;
+    Ok((p.record, p.copies))
+}
+
+/// What [`publish_dir_report`] did.
+pub struct Published {
+    pub record: SiteRecord,
+    /// Network copies when the wait ended.
+    pub copies: usize,
+    /// Replicas that refused the site under their own content policy
+    /// (DIP-0036) as heard by then, per labeler and label value. Which
+    /// peers refused is not part of it.
+    pub refused: Vec<replicas::RefusalTally>,
+}
+
+/// [`publish_dir_as`], also saying how many replicas refused the site under
+/// their operators' policy while the publisher waited for copies.
+pub async fn publish_dir_report(
+    signer: Option<&c0mpute_net::libp2p::identity::Keypair>,
+    dir: &std::path::Path,
+    name: &str,
+    domains: Vec<String>,
+    wait: Duration,
+    market: Option<MarketOptions>,
+) -> Result<Published> {
     for d in &domains {
         if !site::valid_domain(d) {
             bail!("invalid domain {d:?}");
@@ -4990,7 +5061,8 @@ pub async fn publish_dir_as(
     } else {
         wait_whole(&hosting, &record, wait).await
     };
-    Ok((record, copies))
+    let refused = hosting.refusals(&record.site_id).await;
+    Ok(Published { record, copies, refused })
 }
 
 /// What [`download`] did.
