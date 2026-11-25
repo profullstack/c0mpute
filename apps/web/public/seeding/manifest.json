@@ -1,0 +1,22 @@
+{
+  "kind": "c0mpute.seeding.manifest",
+  "v": 1,
+  "seq": 1,
+  "issued_at": 1795605200,
+  "expires_at": 0,
+  "torrents": [
+    {
+      "info_hash": "49306cd55431fe81bc10464e8c0aa36332d138e3",
+      "name": "w3bs-os-0.1.1-x86_64.iso",
+      "bytes": 413138944,
+      "license": "MIT (W3BS OS, W3BS contributors) plus the free licenses of its Alpine Linux packages (GPL-2.0 and others); free to redistribute",
+      "source": "https://w3bs.org/os",
+      "trackers": [
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce"
+      ]
+    }
+  ]
+}
