@@ -128,6 +128,11 @@ pub struct Config {
     /// node downloads and runs for buyers, and the free disk it keeps.
     #[serde(default)]
     pub text: crate::text::TextConfig,
+    /// Scallion relay participation: which relay roles this node advertises.
+    /// Guard and middle are on by default on every worker; exit is off
+    /// until the operator opts in. Advertising only: nothing is relayed yet.
+    #[serde(default)]
+    pub scallion: crate::scallion_node::ScallionConfig,
     /// Jobs at once per role, overriding what the node's resource budget
     /// derives (`crate::budget`): `[capacity] diffusion = 2`, `tts = 8`.
     /// Keys: transcode, tts, stt, workflow, crawl, video, diffusion, music,
@@ -938,6 +943,7 @@ impl Default for Config {
             swarm: Default::default(),
             render: Default::default(),
             text: Default::default(),
+            scallion: Default::default(),
             capacity: Default::default(),
         }
     }

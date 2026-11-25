@@ -99,10 +99,20 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
-    /// Scallion native / OpenVPN client compatibility diagnostics.
+    /// Scallion: client-mode diagnostics, and which relay roles this node
+    /// advertises (guard and middle by default; exit only if you opt in).
     ///
-    /// Neither mode starts an unreviewed tunnel or silently falls back to
-    /// an unprotected Internet connection.
+    /// Scallion carries no traffic yet. Nodes advertise relay roles and
+    /// verify each other's descriptors; nothing is relayed and this is not
+    /// a VPN. Neither client mode starts an unreviewed tunnel or silently
+    /// falls back to an unprotected Internet connection.
+    ///
+    ///   c0mpute scallion status
+    ///   c0mpute scallion relay on|off
+    ///   c0mpute scallion exit on --ports 80,443
+    ///   c0mpute scallion exit off
+    ///   c0mpute scallion relays
+    #[command(verbatim_doc_comment)]
     Scallion {
         #[command(subcommand)]
         cmd: scallion_cli::ScallionCmd,
@@ -2048,7 +2058,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Pool { node: Some(id), .. } => run_pool_node(&id),
         Cmd::Pool { model, node: None } => run_pool(model),
         Cmd::Doctor { fix } => run_doctor(fix).await,
-        Cmd::Scallion { cmd } => scallion_cli::run(cmd),
+        Cmd::Scallion { cmd } => scallion_cli::run(cmd, &config_path).await,
         Cmd::Bench {
             cmd,
             quick,
@@ -2562,6 +2572,11 @@ fn worker_status_json(config_path: &std::path::Path) -> Result<serde_json::Value
         "storage": cfg.storage_enabled(),
         "hosting": cfg.hosting_enabled(),
         "roles": cfg.roles,
+        // Scallion relay roles this node advertises (advertise only).
+        "scallion": c0mpute_core::scallion_node::status_json(&cfg.scallion.resolve(
+            &c0mpute_core::scallion_node::ScallionEnv::from_process(),
+            cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+        )),
         "gateway_bind": cfg.gateway.bind,
         "payments": {
             "enabled": cfg.payments.enabled,
@@ -2671,6 +2686,13 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 None => println!("bench: not run — `c0mpute bench` publishes a capacity score"),
             }
             println!("{}", crowdgpt::status_line(config_path));
+            println!(
+                "{}",
+                c0mpute_core::scallion_node::status_line(&cfg.scallion.resolve(
+                    &c0mpute_core::scallion_node::ScallionEnv::from_process(),
+                    cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+                ))
+            );
             print_served_models_eligibility();
             print_house_models();
             println!("{}", serde_json::to_string_pretty(&cfg)?);

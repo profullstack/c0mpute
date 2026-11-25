@@ -93,6 +93,32 @@ pub fn load_or_create_job_secret(dir: &Path) -> Result<zeroize::Zeroizing<[u8; 3
     Ok(b)
 }
 
+const SCALLION_RELAY_KEY_FILE: &str = "scallion-relay.key";
+
+/// The node's Scallion relay static key (`<dir>/scallion-relay.key`, 32
+/// random bytes, mode 600 like the identity key), created on first use. It
+/// is the Noise static key a relay descriptor names; the identity key signs
+/// that descriptor, so deleting this file rotates the relay key without
+/// changing the peer id. Holding it does not make a node relay anything:
+/// today it is only advertised.
+pub fn load_or_create_scallion_relay_key(dir: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    let path = dir.join(SCALLION_RELAY_KEY_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let b: [u8; 32] = bytes.as_slice().try_into().with_context(|| format!("{} must hold 32 bytes", path.display()))?;
+            return Ok(zeroize::Zeroizing::new(b));
+        }
+        // Present but unreadable: never rotate it behind the operator's back.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Err(unreadable(&path, e)),
+        Err(_) => {}
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut b = zeroize::Zeroizing::new([0u8; 32]);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut *b);
+    write_locked_down(&path, &*b)?;
+    Ok(b)
+}
+
 /// The identity already stored in `<dir>/identity.key`, without generating
 /// one. `None` when there is no (readable) key.
 pub fn existing_keypair(dir: &Path) -> Option<Keypair> {
@@ -202,6 +228,25 @@ mod tests {
         let gone = dir.join("missing").join("identity.key");
         assert!(write_locked_down(&gone, b"x").is_err());
         assert!(!gone.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_scallion_relay_key_persists_and_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("c0-scallion-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = load_or_create_scallion_relay_key(&dir).unwrap();
+        let path = dir.join(SCALLION_RELAY_KEY_FILE);
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // A second load returns the same key instead of rotating it.
+        let second = load_or_create_scallion_relay_key(&dir).unwrap();
+        assert_eq!(*first, *second);
+        // A damaged file is an error, never a silent new key.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"short").unwrap();
+        assert!(load_or_create_scallion_relay_key(&dir).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

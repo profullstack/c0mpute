@@ -95,8 +95,12 @@ Stated here so a reviewer does not have to find them:
 - **Link-level destroy is unauthenticated.** Any hop can tear a circuit down.
   A hop can always drop traffic anyway, so this is denial of service it
   already had.
-- **Descriptor distribution is unspecified.** How a client fetches
-  descriptors without revealing which relays it will use is not designed.
+- **Private descriptor fetching is not designed.** Workers now publish
+  their descriptors in the public capability ad and every node keeps a
+  verified list ([scallion-participation.md](scallion-participation.md)), so
+  all nodes hear all descriptors. How a client that does not sit in that
+  gossip fetches descriptors without revealing which relays it will use is
+  still not designed.
 - **No revocation.** A stolen relay key is valid until its descriptor expires
   (at most 7 days).
 

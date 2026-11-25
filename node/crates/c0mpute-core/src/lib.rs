@@ -68,6 +68,7 @@ pub mod register;
 pub mod resources;
 pub mod routing;
 pub mod runner;
+pub mod scallion_node;
 pub mod sealed_store;
 pub mod speech;
 pub mod speech_gateway;

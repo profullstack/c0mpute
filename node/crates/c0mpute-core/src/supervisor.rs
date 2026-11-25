@@ -170,6 +170,11 @@ impl Supervisor {
         // Private mode keeps the node off the public listing: no ad.
         let policy = crate::private::current();
         if policy.advertises() {
+            // Scallion: put this node's signed relay descriptor in the ad
+            // (guard + middle by default, exit only when the operator opted
+            // in). Advertising only: nothing is relayed.
+            let scallion = self.config.scallion.resolve(&crate::scallion_node::ScallionEnv::from_process(), false);
+            crate::scallion_node::start(&self.libp2p, &scallion);
             // Live tags: TTS can appear a minute or two into the run, once
             // Kokoro finishes provisioning, and should be advertised then
             // rather than at the next restart.
@@ -864,6 +869,9 @@ impl Supervisor {
             if let Some(s) = &swarm {
                 app = app.merge(crate::agent_swarm::router(s.clone()));
             }
+            // Scallion: the relay descriptors this node has heard and
+            // verified (`c0mpute scallion relays`). A read-only listing.
+            app = app.merge(crate::scallion_node::router(self.registry.clone()));
             if let Some(h) = &hosting {
                 let mut r = h.router();
                 if let Some(g) = &x402 {
