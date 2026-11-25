@@ -59,9 +59,18 @@ mod tests {
 
     #[test]
     fn key_arguments_map_to_the_core_choice() {
-        assert_eq!(owner::KeyChoice::from(KeyArg::default()), owner::KeyChoice::Auto);
-        assert_eq!(owner::KeyChoice::from(KeyArg::Account), owner::KeyChoice::Account);
-        assert_eq!(owner::KeyChoice::from(KeyArg::Machine), owner::KeyChoice::Machine);
+        assert_eq!(
+            owner::KeyChoice::from(KeyArg::default()),
+            owner::KeyChoice::Auto
+        );
+        assert_eq!(
+            owner::KeyChoice::from(KeyArg::Account),
+            owner::KeyChoice::Account
+        );
+        assert_eq!(
+            owner::KeyChoice::from(KeyArg::Machine),
+            owner::KeyChoice::Machine
+        );
         assert_eq!(key_from_str(Some("account")), owner::KeyChoice::Account);
         assert_eq!(key_from_str(Some("machine")), owner::KeyChoice::Machine);
         assert_eq!(key_from_str(Some("nonsense")), owner::KeyChoice::Auto);
