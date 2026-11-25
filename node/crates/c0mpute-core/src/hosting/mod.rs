@@ -3625,7 +3625,9 @@ const MAX_SAVED_RECORDS: usize = 20_000;
 /// Room a node must have beyond its floor/budget to call itself not full.
 const FULL_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
-fn free_disk_floor(disk_total: u64) -> u64 {
+/// Free space a node keeps on the disk it stores on: 5% of it, between
+/// 10 and 50 GiB. Hosting and seeding both stop taking data below it.
+pub(crate) fn free_disk_floor(disk_total: u64) -> u64 {
     (disk_total / 20).clamp(10 * GIB_BYTES, 50 * GIB_BYTES)
 }
 

@@ -70,6 +70,7 @@ pub mod routing;
 pub mod runner;
 pub mod scallion_node;
 pub mod sealed_store;
+pub mod seeding_node;
 pub mod speech;
 pub mod speech_gateway;
 pub mod speech_profiles;

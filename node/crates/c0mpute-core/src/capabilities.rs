@@ -645,6 +645,9 @@ async fn advertise(
         // This node's signed Scallion relay descriptor, when it participates
         // (`scallion_node::start`); re-signed there before it expires.
         crate::scallion_node::attach(&mut hw, &net);
+        // How much this node seeds, when seeding is on (a summary; no node
+        // reads another's).
+        crate::seeding_node::attach(&mut hw);
         // Buyers holding queued jobs re-auction only on this marker, not on
         // every periodic ad (which would spend their retries for nothing).
         let freed_now = if freed { recently_freed() } else { serde_json::Map::new() };

@@ -193,6 +193,16 @@ impl Supervisor {
             );
         }
 
+        // Seeding (off unless the operator opted in): seed the torrents
+        // c0mpute publishes, from a signed list verified against the pinned
+        // release key, within the node's disk and upload caps.
+        let seeding = self.config.seeding.resolve(
+            &crate::seeding_node::SeedingEnv::from_process(),
+            !policy.advertises(),
+            &self.config.storage.root,
+        );
+        crate::seeding_node::start(&self.config.seeding, &seeding);
+
         // Job dispatch: subscribe to c0mpute/jobs/<workload> for each
         // workload our roles imply. Today: only ffmpeg.transcode if
         // the Transcode role is enabled.
@@ -872,6 +882,9 @@ impl Supervisor {
             // Scallion: the relay descriptors this node has heard and
             // verified (`c0mpute scallion relays`). A read-only listing.
             app = app.merge(crate::scallion_node::router(self.registry.clone()));
+            // Seeding: what this node seeds (`c0mpute seeding list`). GET
+            // only; no route adds a torrent.
+            app = app.merge(crate::seeding_node::router());
             if let Some(h) = &hosting {
                 let mut r = h.router();
                 if let Some(g) = &x402 {
