@@ -169,6 +169,12 @@ libp2p mesh and advertises its capabilities, benchmark score and (if you set
 them) a nickname and referral handle, which appear on the public
 [node board](https://c0mpute.com/nodes).
 
+Seeding is the one feature that listens on a port of its own (TCP 4241 by
+default), and it is off unless you turn it on (`c0mpute seeding on`). It seeds
+only torrents from a list c0mpute signs with the release key, plus `.torrent`
+files you list yourself; nothing from the network can add one, and it uses at
+most the disk and upload you allow. See [seeding.md](seeding.md).
+
 ## Money: what pays today
 
 - **Paid inference** through Infernet pays out via CoinPay to the address you

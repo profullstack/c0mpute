@@ -626,14 +626,43 @@ pub fn attach(hardware: &mut Value) {
     }
 }
 
+/// Headers a reverse proxy adds; a request carrying one came from elsewhere
+/// even when the connection is from loopback.
+const PROXY_HEADERS: [&str; 4] = ["forwarded", "x-forwarded-for", "x-real-ip", "cf-connecting-ip"];
+
+/// Whether a status request comes from this machine: a loopback connection
+/// with no proxy headers. Unknown peers count as remote.
+fn is_local_request(peer: Option<std::net::SocketAddr>, headers: &axum::http::HeaderMap) -> bool {
+    peer.is_some_and(|p| p.ip().is_loopback()) && !PROXY_HEADERS.iter().any(|h| headers.contains_key(*h))
+}
+
+/// The status a request gets. The full status (data directory, local
+/// `.torrent` paths, errors) is for the operator's own machine; anyone else
+/// (a gateway can be public) gets the summary the capability ad already
+/// carries.
+fn status_for(local: bool, state: Option<&Value>) -> Value {
+    match state {
+        None => json!({ "enabled": false, "note": WHAT_IT_SEEDS }),
+        Some(s) if local => s.clone(),
+        Some(s) => json!({ "enabled": true, "summary": ad_value(s), "note": WHAT_IT_SEEDS }),
+    }
+}
+
 /// Gateway route [`STATUS_PATH`]: what this worker seeds. GET only; there is
 /// no route that adds, removes or changes a torrent.
 pub fn router() -> axum::Router {
+    use axum::extract::{ConnectInfo, Request};
     use axum::routing::get;
     use axum::{Json, Router};
 
-    async fn status() -> Json<Value> {
-        Json(running_status())
+    async fn status(req: Request) -> Json<Value> {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0);
+        let local = is_local_request(peer, req.headers());
+        let state = STATE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        Json(status_for(local, state.as_ref()))
     }
     Router::new().route(STATUS_PATH, get(status))
 }
@@ -967,6 +996,40 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[test]
+    fn only_the_operators_own_machine_sees_the_full_status() {
+        use axum::http::HeaderMap;
+        let loopback: std::net::SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let loopback6: std::net::SocketAddr = "[::1]:50000".parse().unwrap();
+        let remote: std::net::SocketAddr = "203.0.113.9:50000".parse().unwrap();
+        let none = HeaderMap::new();
+        assert!(is_local_request(Some(loopback), &none));
+        assert!(is_local_request(Some(loopback6), &none));
+        assert!(!is_local_request(Some(remote), &none));
+        assert!(!is_local_request(None, &none));
+        // A reverse proxy on the same box connects from loopback.
+        for h in PROXY_HEADERS {
+            let mut headers = HeaderMap::new();
+            headers.insert(h, "203.0.113.9".parse().unwrap());
+            assert!(!is_local_request(Some(loopback), &headers), "{h}");
+        }
+
+        let full = json!({
+            "enabled": true, "max_bytes": 100, "held_bytes": 60,
+            "dir": "/home/op/.local/share/c0mpute/seeding",
+            "torrents": [{ "info_hash": HASH_A, "state": "seeding", "source": "/home/op/mine.torrent" }],
+        });
+        assert_eq!(status_for(true, Some(&full)), full);
+        let public = status_for(false, Some(&full));
+        assert_eq!(public["enabled"], json!(true));
+        assert_eq!(public["summary"], json!({ "v": 1, "torrents": 1, "held_bytes": 60, "max_bytes": 100 }));
+        let text = public.to_string();
+        assert!(!text.contains("/home/op") && !text.contains(HASH_A), "{text}");
+        for local in [true, false] {
+            assert_eq!(status_for(local, None)["enabled"], json!(false));
         }
     }
 

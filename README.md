@@ -372,6 +372,25 @@ topics, and an offer carries its spec inline. Private mode decides who can
 *hire* your node, not who can *see* the offers your own buyers publish. Keep
 secrets out of job specs, or talk to your node directly.
 
+### Seeding: share the torrents c0mpute publishes (opt in)
+
+A node can seed our releases and other files we may redistribute, from a list
+c0mpute signs with its release key. Off until you opt in, because it uses
+disk (up to your cap) and upload bandwidth:
+
+```sh
+c0mpute seeding on --max-bytes 50GiB  # or [seeding] enabled = true, or C0MPUTE_SEEDING=1
+c0mpute seeding status                # on or off, why, the limits
+c0mpute seeding list                  # what the running worker seeds, disk used, what was skipped
+c0mpute seeding off
+```
+
+It seeds only that signed list (checked against the key pinned in the binary)
+and `.torrent` files you list yourself in `[seeding] local_torrents`. Nothing
+from the network can add a torrent: no DHT, no crawling, no add API. Settings,
+env vars (`C0MPUTE_SEEDING`, `C0MPUTE_SEEDING_MAX_BYTES`, ...) and how the list
+is published: [docs/seeding.md](docs/seeding.md).
+
 ### Distributed inference ("Distribute across all nodes") — automatic
 
 The worker automatically makes every node count toward infernet's distributed

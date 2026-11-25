@@ -1,0 +1,50 @@
+name: seeding release-build check (temporary)
+
+# TEMPORARY, for the seeding PR only: librqbit brings aws-lc-sys (C, cmake)
+# into the build. This runs the same `cargo build --release --bin c0mpute`
+# as release.yml on every release target, to prove the static musl, macOS
+# and Windows builds still work. Removed before merge.
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - ".github/workflows/seeding-release-check.yml"
+
+concurrency:
+  group: seeding-release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build c0mpute binary
+        run: cargo build --release --bin c0mpute --target ${{ matrix.target }}
+      - name: Binary size
+        shell: bash
+        run: ls -l target/${{ matrix.target }}/release/c0mpute* | grep -v '\.d$'

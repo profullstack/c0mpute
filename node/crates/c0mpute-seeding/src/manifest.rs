@@ -119,7 +119,9 @@ fn printable(s: &str, max: usize) -> bool {
     !s.trim().is_empty() && s.len() <= max && !s.chars().any(char::is_control)
 }
 
-fn check_entry(e: &mut Entry) -> Result<()> {
+/// Check one entry the way a node does (and lower-case its hash). Used by
+/// `c0mpute seeding entry` so the publisher sees a refusal before signing.
+pub fn check_entry(e: &mut Entry) -> Result<()> {
     e.info_hash = normalize_info_hash(&e.info_hash)
         .with_context(|| format!("'{}' is not a 40-hex info hash", e.info_hash))?;
     ensure!(printable(&e.name, 200), "{}: bad name", e.info_hash);

@@ -2,8 +2,9 @@
 //!
 //! Off by default. `on` / `off` write `[seeding]` in the config; `status`
 //! shows what this node would do and why; `list` shows what a running worker
-//! seeds and how much disk it uses; `verify` checks a manifest file against
-//! the pinned release key before it is published.
+//! seeds and how much disk it uses. For whoever publishes the list, `entry`
+//! prints a manifest entry read from a real `.torrent` file and `verify`
+//! checks a signed manifest against the pinned release key before it goes up.
 //!
 //! There is deliberately no `add`: a node seeds the signed list and the
 //! `.torrent` files its operator lists in `[seeding] local_torrents`.
@@ -55,6 +56,25 @@ pub enum SeedingCmd {
         #[arg(long, default_value = "http://127.0.0.1:7777")]
         gateway: String,
     },
+    /// Print the manifest entry for a .torrent file (info hash, name and
+    /// size read from the file), for whoever publishes the list. Paste the
+    /// output into the manifest's `torrents`, then sign it with
+    /// scripts/sign-seeding-manifest.sh. See docs/seeding.md.
+    Entry {
+        /// The .torrent file of something we publish.
+        torrent: PathBuf,
+        /// The license that lets nodes redistribute it (an SPDX id such as
+        /// GPL-2.0-only or CC-BY-4.0, or a short statement).
+        #[arg(long)]
+        license: String,
+        /// The https page where we publish it.
+        #[arg(long)]
+        source: String,
+        /// A tracker URL (udp, http or https); repeat for more. There is no
+        /// DHT, so list at least one.
+        #[arg(long = "tracker")]
+        trackers: Vec<String>,
+    },
     /// Check a manifest file and its minisign signature the way a node
     /// does, against the release key pinned in this binary. For whoever
     /// publishes the list; see docs/seeding.md.
@@ -99,6 +119,27 @@ pub fn parse_size(raw: &str) -> Result<u64> {
         "'{raw}' is not a size"
     );
     Ok(bytes as u64)
+}
+
+/// The manifest entry for a `.torrent` file, checked the way a node checks it.
+pub fn manifest_entry(
+    torrent: &Path,
+    license: String,
+    source: String,
+    trackers: Vec<String>,
+) -> Result<c0mpute_seeding::Entry> {
+    let bytes = std::fs::read(torrent).with_context(|| format!("read {}", torrent.display()))?;
+    let info = c0mpute_seeding::inspect_torrent(&bytes)?;
+    let mut entry = c0mpute_seeding::Entry {
+        info_hash: info.info_hash,
+        name: info.name,
+        bytes: info.bytes,
+        license,
+        source,
+        trackers,
+    };
+    c0mpute_seeding::manifest::check_entry(&mut entry).context("a node would refuse this entry")?;
+    Ok(entry)
 }
 
 async fn fetch_status(gateway: &str) -> Result<serde_json::Value> {
@@ -302,6 +343,20 @@ pub async fn run(cmd: SeedingCmd, config_path: &Path) -> Result<()> {
             print_list_source(&status);
             print_torrents(&status);
         }
+        SeedingCmd::Entry {
+            torrent,
+            license,
+            source,
+            trackers,
+        } => {
+            let entry = manifest_entry(&torrent, license, source, trackers)?;
+            if entry.trackers.is_empty() {
+                eprintln!(
+                    "warning: no --tracker given; with no DHT, only peers that already know a seeding node will find it"
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&entry)?);
+        }
         SeedingCmd::Verify { manifest, sig } => {
             let sig = sig.unwrap_or_else(|| {
                 let mut p = manifest.clone().into_os_string();
@@ -360,6 +415,16 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(parse(&["verify", "m.json"]).unwrap().command, SeedingCmd::Verify { sig: None, .. }));
+        match parse(&["entry", "x.torrent", "--license", "GPL-2.0-only", "--source", "https://example.org/", "--tracker", "udp://t.example.org:1337/announce", "--tracker", "https://t.example.org/announce"]).unwrap().command {
+            SeedingCmd::Entry { trackers, license, .. } => {
+                assert_eq!(trackers.len(), 2);
+                assert_eq!(license, "GPL-2.0-only");
+            }
+            other => panic!("{other:?}"),
+        }
+        // An entry needs a license and a source page.
+        assert!(parse(&["entry", "x.torrent", "--source", "https://example.org/"]).is_err());
+        assert!(parse(&["entry", "x.torrent", "--license", "CC0-1.0"]).is_err());
         // There is no way to hand the node a torrent from the command line.
         for args in [&["add", "magnet:?xt=urn:btih:aaaa"][..], &["add"], &["magnet:?xt=urn:btih:aaaa"]] {
             assert!(parse(args).is_err(), "{args:?}");
@@ -377,6 +442,16 @@ mod tests {
         for bad in ["", "GiB", "ten", "5 parsecs", "-1", "1.5"] {
             assert!(parse_size(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_entry_is_read_from_a_real_torrent_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.torrent");
+        std::fs::write(&junk, "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let err = manifest_entry(&junk, "CC0-1.0".into(), "https://example.org/".into(), vec![]).unwrap_err();
+        assert!(format!("{err:#}").contains("torrent"), "{err:#}");
+        assert!(manifest_entry(&dir.path().join("missing.torrent"), "CC0-1.0".into(), "https://example.org/".into(), vec![]).is_err());
     }
 
     #[test]
