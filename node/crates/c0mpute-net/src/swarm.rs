@@ -387,6 +387,10 @@ pub struct GossipMessage {
 pub struct NetworkConfig {
     /// Directory holding the persistent identity key.
     pub identity_dir: PathBuf,
+    /// Join as this key instead of the one in `identity_dir` (which then
+    /// only holds the job secret). For a caller whose peer id must be a key
+    /// it derives, like an app owner's account key.
+    pub keypair: Option<identity::Keypair>,
     /// Bootstrap peers to dial on startup.
     pub bootstrap: Vec<Multiaddr>,
     /// libp2p listen addresses. Default: `/ip4/0.0.0.0/tcp/0` (random port).
@@ -400,10 +404,16 @@ impl NetworkConfig {
     pub fn for_dir(identity_dir: impl Into<PathBuf>) -> Self {
         Self {
             identity_dir: identity_dir.into(),
+            keypair: None,
             bootstrap: vec![],
             listen: vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap()],
             local_source: None,
         }
+    }
+
+    pub fn with_keypair(mut self, keypair: identity::Keypair) -> Self {
+        self.keypair = Some(keypair);
+        self
     }
 
     pub fn with_bootstrap(mut self, addrs: Vec<Multiaddr>) -> Self {
@@ -458,7 +468,10 @@ impl Libp2pNetwork {
     /// Spawn the swarm task and return a handle. The task runs until the
     /// returned `Libp2pNetwork` is dropped.
     pub async fn spawn(config: NetworkConfig) -> Result<Self> {
-        let keypair = id_mod::load_or_create(&config.identity_dir)?;
+        let keypair = match config.keypair.clone() {
+            Some(k) => k,
+            None => id_mod::load_or_create(&config.identity_dir)?,
+        };
         let job_secret = Arc::new(id_mod::load_or_create_job_secret(&config.identity_dir)?);
         let peer_id = keypair.public().to_peer_id();
 

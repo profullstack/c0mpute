@@ -48,7 +48,13 @@ pub async fn deploy_commit(local: &Local, sha: &str) -> Result<()> {
             app.name,
             &sha[..12.min(sha.len())]
         );
-        crate::apps::deploy::deploy(app.options(&tree, Duration::from_secs(600))).await
+        // No terminal under git: the account key opens with
+        // C0MPUTE_DM_PASSWORD, and an app this machine's key owns needs none.
+        crate::apps::deploy::deploy(
+            app.options(&tree, Duration::from_secs(600)),
+            &crate::apps::owner::unlock_from_env,
+        )
+        .await
     }
     .await;
     let _ = std::fs::remove_dir_all(&dir);

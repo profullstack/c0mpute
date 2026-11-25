@@ -25,6 +25,7 @@
 //!   over the `apps.http` RPC ([`proxy`]), NAT or not.
 
 pub mod deploy;
+pub mod owner;
 pub mod placement;
 pub mod proxy;
 pub mod record;

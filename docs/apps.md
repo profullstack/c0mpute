@@ -10,12 +10,81 @@ c0mpute apps deploy ./api --name api --port 8080 --state /data   # build, publis
 c0mpute apps secrets set api DATABASE_KEY=...                     # sealed to holders
 c0mpute apps ls                                                  # apps a gateway knows
 c0mpute apps status api
-c0mpute apps logs api                                            # owner only
+c0mpute apps logs api                                            # owner only, from any of your machines
 c0mpute apps destroy api --yes
 ```
 
 The app is then served by every gateway at `http://<gateway>:7777/a/<app_id>/`,
 and on custom domains (below).
+
+## Who owns an app
+
+An app is owned by your **account key**: an ed25519 key derived on your own
+machine from your c0mpute identity (`chat.key`, the one `c0mpute dm` and
+private storage use; the same key that owns your [hosting](hosting.md) sites).
+The app id comes from that key and the name, so `--name api` is the same app
+from every machine that holds the identity. c0mpute.com and node operators
+never hold it.
+
+```sh
+c0mpute storage key init --backup-to id.backup   # once; copy the identity to your other machines
+c0mpute apps deploy ./api --name api             # from the laptop
+c0mpute apps logs api                            # from the server: same app
+c0mpute apps deploy ./api --name api             # from CI: a new version of it
+c0mpute apps destroy api --yes                   # from anywhere
+```
+
+The identity is unlocked with its password: a prompt on a terminal,
+`C0MPUTE_DM_PASSWORD` without one (CI, `git push`, `c0mpute apps mcp`).
+
+| What | Where it lives |
+|---|---|
+| Owner key | Derived from the identity (HKDF, `c0mpute-hosting-owner-v1`). Never stored. |
+| App key (encrypts state snapshots) | Derived from the identity per app name (HKDF, `c0mpute-apps-app-key-v1` + name). Never stored on the network; any machine with the identity rebuilds it. |
+| Secret env values | On the machine they were set on (`<data_dir>/apps/owner/<name>.json`, mode 0600), and sealed on the holders. **They do not follow the identity.** Run `c0mpute apps secrets set` on a machine before you deploy from it; what is set there replaces what the app had. A first deploy from a machine with no secrets set, of an app that is running with some, is refused instead of dropping them. |
+| Last record deployed from here | `<data_dir>/apps/owner/<name>.json`, so `status` and `logs` know the id without asking. |
+
+Logs and secrets are owner-only: a holder answers only the owner's libp2p
+peer. For those calls the CLI joins the network *as* the account key, so the
+holder's check passes from any of your machines and nothing changed on the
+holders (nodes on older versions serve account-owned apps as they are). Run
+one owner command per identity at a time: two processes on one peer id
+disturb each other's connections.
+
+`--key auto|account|machine` (on `deploy`, `logs`, `destroy`) picks the key.
+`auto`, the default, keeps the owner of an app deployed from this machine,
+else uses the account key, else (no identity here, or no way to unlock it)
+this machine's key with a note. An app is never silently forked under a
+second key: if the name was deployed here under another owner, the command
+says so and stops.
+
+### Apps deployed before the account key
+
+An app deployed under a machine's key keeps its id, its domains and its
+state, and that machine keeps deploying, reading logs and deleting it exactly
+as before, with no identity needed. To hand it to your account key, on that
+machine:
+
+```sh
+c0mpute apps deploy ./api --name api --move
+```
+
+This deploys the app under the account key and carries its secret env over.
+Because the id comes from the owner key, **the app id changes once**:
+
+- Repoint custom domains: `TXT _c0mpute-app.<domain> = "app=<new id>"`.
+- Node operators that list your key in `[apps] owners` need the new owner key
+  (printed by the move).
+- **State does not move.** Snapshots belong to an app id and are encrypted
+  with its app key. An app without `state` is replaced: the old one is
+  deleted once the new one answers. An app with `state` starts empty under
+  the new id and the old one is left running, so you can copy the data over
+  (through the app itself) and then delete the old one:
+  `c0mpute apps destroy api --key machine --yes`.
+
+Apps deployed through the c0mpute.com cloud node are signed by that node's
+key for every account: that path is custodial by nature. Producer-only
+control needs your own node and identity.
 
 ## git push to deploy
 
@@ -54,12 +123,12 @@ NODE_ENV = "production"
 
 | Piece | What happens |
 |---|---|
-| Record | The owner signs an app record: image, port, public env, state path, replicas, domains. The app id comes from the owner key + name; the highest `seq` wins. |
+| Record | The owner (your account key, above) signs an app record: image, port, public env, state path, replicas, domains. The app id comes from the owner key + name; the highest `seq` wins. |
 | Image | `docker build`, then `docker save` and gzip, published as a hosting site signed by the owner (three copies, no registry). Or a digest-pinned registry image (`--pull`). Max 1 GiB gzipped. |
 | Placement | Every `apps` node gossips what it holds every 10 s on `c0mpute/apps/v1`. Every node computes the same holders by rendezvous hashing over the live nodes with room. Holders keep their copy, the shortfall is filled, and the surplus lowest-ranked standby lets go. |
 | Primary | One holder runs the container. A live holder claiming primary keeps it (sticky). When two claim it, the higher `(epoch, rank)` wins and the other stops. With no claimant for 35 s, the ready holder with the newest snapshot promotes itself at `epoch + 1`. |
 | State | Every `snapshot_secs` the primary pauses the container, copies the state directory out (crash-consistent), unpauses, and stores it as AES-256-GCM pieces of 1 MiB under the app key. Pieces are convergent, so unchanged pieces are the same chunks and standbys pull only what changed. On failover the new primary restores the newest snapshot. **Recovery point = one snapshot interval.** |
-| Secrets | Secret env plus the app key travel sealed to each holder's X25519 key (`Seal` gossip): from the owner's CLI at deploy, then from any holder to newcomers, so the owner can go offline. The record carries only their blake3. |
+| Secrets | Secret env plus the app key travel sealed to each holder's X25519 key (`Seal` gossip): from the owner's CLI at deploy (holders accept a seal only from the owner's peer or another holder), then from any holder to newcomers, so the owner can go offline. The record carries only their blake3. |
 | Serving | Gateways forward to the primary over the `apps.http` libp2p RPC, so NAT'd primaries work. Requests up to 700 KiB, responses up to 5 MiB, 15 s upstream timeout, no websockets. The app sees `X-Forwarded-For/Host/Proto` and `X-Forwarded-Prefix: /a/<id>`. |
 | Sandbox | `--cap-drop ALL` (plus CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER, NET_BIND_SERVICE), `no-new-privileges`, memory/CPU/pid limits, 64 MiB tmpfs `/tmp`, published on loopback only, no restart policy (the supervisor decides what runs). |
 | Network | On a root worker the container joins the `c0mpute-apps` network behind an egress guard: it reaches the public internet but not private, loopback, link-local (cloud metadata) or CGNAT addresses, and not the host. On a non-root worker there is no guard (see below). |
