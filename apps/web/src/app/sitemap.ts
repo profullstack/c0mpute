@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { listPosts } from "@/lib/blog-db";
+import { SOLUTIONS, solutionPath } from "@/lib/solutions";
 
 const BASE = "https://c0mpute.com";
 
@@ -7,6 +8,8 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: BASE,                         priority: 1.0,  changeFrequency: "weekly"  },
   { url: `${BASE}/getting-started`,    priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/protocol`,           priority: 0.9,  changeFrequency: "monthly" },
+  { url: `${BASE}/solutions`,          priority: 0.9,  changeFrequency: "weekly"  },
+  ...SOLUTIONS.map((s) => ({ url: `${BASE}${solutionPath(s)}`, priority: 0.9, changeFrequency: "weekly" as const })),
   { url: `${BASE}/scallion`,           priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/providers`,          priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/agents`,             priority: 0.8,  changeFrequency: "monthly" },

@@ -3,6 +3,7 @@ import { GALLERY_CATEGORIES, type GalleryCategory } from "@/lib/gallery";
 import { GALLERY_CONFIG } from "@/lib/gallery/config";
 import { galleryEntries } from "@/lib/gallery/server";
 import { normalizeUrl } from "@/lib/gallery/url";
+import { solutionForLabel, solutionPath } from "@/lib/solutions";
 
 // Listings change without a deploy (submissions, badge checks).
 export const dynamic = "force-dynamic";
@@ -104,11 +105,21 @@ export default async function GalleryPage({ searchParams }: { searchParams: Prom
             <p className="text-sm leading-6">{e.tagline}</p>
             <div className="space-y-3">
               <ul className="flex flex-wrap gap-1.5 text-[11px]" aria-label="built with">
-                {e.built_with.map((b) => (
-                  <li key={b} className="px-2 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-dim)]">
-                    {b}
-                  </li>
-                ))}
+                {e.built_with.map((b) => {
+                  // A known feature links to its solution page (install, example, use cases).
+                  const s = solutionForLabel(b);
+                  return (
+                    <li key={b} className="px-2 py-0.5 rounded border border-[var(--color-rule)] text-[var(--color-dim)]">
+                      {s ? (
+                        <Link href={solutionPath(s)} className="!border-0 hover:text-[var(--color-accent)]">
+                          {b}
+                        </Link>
+                      ) : (
+                        b
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
               <p className="flex flex-col gap-1 text-xs">
                 <a href={e.url}>

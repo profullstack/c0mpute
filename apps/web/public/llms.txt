@@ -28,6 +28,21 @@
 
 - [Scallion Network (VPN, experimental)](https://c0mpute.com/scallion): privacy routing for c0mpute: three-hop circuits (guard, middle, opt-in exit) with two client modes, native and OpenVPN Connect. NOT a working VPN yet: no traffic is carried, there is no TUN device, OpenVPN gateway or `.ovpn` download, and no anonymity claim. Built so far: route planner, deny-by-default exit policy, X25519/HKDF/AES-256-GCM hop frames, client mode contracts. `c0mpute scallion modes` and `c0mpute scallion doctor --mode native|openvpn [--json]` report readiness and blockers. Usable today: independent bootstrap (`C0MPUTE_BOOTSTRAP_MODE=community` with `C0MPUTE_BOOTSTRAP_PEERS`). CLI reference at https://c0mpute.com/docs#scallion
 
+## Solutions
+
+- [Solutions](https://c0mpute.com/solutions): every c0mpute solution on its own page with a simple install, a working example and use cases with examples.
+- [c0mpute hosting](https://c0mpute.com/solutions/hosting): publish a folder as a website held by network nodes (`c0mpute hosting publish ./public --name my-site`), custom domains, private sealed sites, publish from chat with `/push hosting <name>`.
+- [c0mpute chat API](https://c0mpute.com/solutions/chat-api): OpenAI-compatible `POST https://c0mpute.com/v1/chat/completions` with a `c0k_` key; streaming, tool calling, JSON output; works with the OpenAI SDKs.
+- [Infernet chat](https://c0mpute.com/solutions/infernet-chat): chat with open models in the browser (c0mpute.com/chat) or the terminal (`c0mpute chat "prompt"`).
+- [c0mpute jobs](https://c0mpute.com/solutions/jobs): batch work as sealed-bid auctions under your price cap: transcoding, distributed scraping (`crawl.fetch`), workflow steps.
+- [c0mpute music](https://c0mpute.com/solutions/music): songs (`/music <style>`, with a `lyrics:` line for vocals) and albums (`/album <idea>`) rendered with ACE-Step 1.5.
+- [c0mpute speech](https://c0mpute.com/solutions/speech): text to speech and speech to text through a local bridge (`c0mpute speech serve`: `/v1/tts`, `/v1/stt`, `/v1/voices`).
+- [c0mpute images](https://c0mpute.com/solutions/images): pictures from a prompt on CPU workers (`/image <prompt>`, about two minutes).
+- [c0mpute video](https://c0mpute.com/solutions/video): short clips (`/video`, `POST /api/v1/videos`) and promo videos of a site (`/promo <url>`).
+- [fine-tune](https://c0mpute.com/solutions/fine-tune): train a LoRA on your own writing on a network worker, then chat with it.
+- [model router](https://c0mpute.com/solutions/model-router): what `model: "auto"` does; free dry run at `POST https://c0mpute.com/api/v1/route`.
+- [c0mpute apps](https://c0mpute.com/solutions/apps): deploy a Dockerfile as a backend (`c0mpute apps deploy ./api --name api --port 8080 --state /data`), deploy on push, owned by your account key.
+
 ## Modules
 
 - [Plugins](https://c0mpute.com/plugins): Three core modules — transcode (FFmpeg-based video encoding), coinpay (DID identity + escrow payments), infernet (AI LLM inference).
