@@ -86,6 +86,9 @@ from a provider that claimed the capabilities relied on.
 | [scallion-exit-policy.md](scallion-exit-policy.md) | Opt-in exit admission guard: block private IPs, local DNS and DNS rebinding |
 | [scallion-clients.md](scallion-clients.md) | Independent native and OpenVPN Connect client modes, profile security requirements and rollout gates |
 | [scallion-frames.md](scallion-frames.md) | Experimental X25519/HKDF/AES-GCM hop frames, replay tests and unimplemented security boundaries |
+| [scallion-bootstrap.md](scallion-bootstrap.md) | Independent bootstrap: public, community and offline modes, and every environment variable |
+
+The site page for all of the above is <https://c0mpute.com/scallion>.
 
 ## Implementation
 

@@ -793,6 +793,35 @@ c0mpute bench --threads 1,8,32         # your own thread ladder`}
         </Code>
       </Section>
 
+      <Section h="scallion" title="[ scallion network / vpn (experimental) ]">
+        <P>
+          <Link href="/scallion">Scallion Network</Link> is the privacy
+          routing layer: three-hop circuits with two client modes, native and
+          OpenVPN Connect. It is a foundation, not a working VPN: neither mode
+          carries traffic yet, and these commands only report what is missing.
+          They start no tunnel, open no listener and change no routes.
+        </P>
+        <Code>
+{`c0mpute scallion modes                         # both modes: ready or the blockers
+c0mpute scallion modes --json
+c0mpute scallion doctor --mode native          # one mode (default: native)
+c0mpute scallion doctor --mode openvpn --json`}
+        </Code>
+        <P>
+          What works today is independent bootstrap: a node joins without an
+          HTTPS check-in to c0mpute.com, and community mode dials only peers
+          you choose (it never falls back to our seeds). A seed you dial still
+          sees your IP address.
+        </P>
+        <Code>
+{`C0MPUTE_BOOTSTRAP_MODE=public|community|offline   # default: public
+C0MPUTE_BOOTSTRAP_PEERS='/dns4/<host>/tcp/4001/p2p/<full-peer-id>'
+C0MPUTE_BOOTSTRAP_FILE=~/.config/c0mpute/scallion-peers.txt   # one multiaddr per line
+C0MPUTE_BOOTSTRAP_URL=https://<host>/bootstrap.json           # opt in to a directory
+C0MPUTE_BOOTSTRAP_FETCH=1                                     # the old c0mpute.com fetch`}
+        </Code>
+      </Section>
+
       <Section h="agents" title="[ ai agents / webmcp ]">
         <P>
           c0mpute.com speaks{" "}

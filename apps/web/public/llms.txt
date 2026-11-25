@@ -26,6 +26,8 @@
 
 - [CLI Reference & Cookbook](https://c0mpute.com/docs): Full CLI walkthrough — identity/wallet, workers, transcode jobs, AI inference, reputation, plugins, health checks.
 
+- [Scallion Network (VPN, experimental)](https://c0mpute.com/scallion): privacy routing for c0mpute: three-hop circuits (guard, middle, opt-in exit) with two client modes, native and OpenVPN Connect. NOT a working VPN yet: no traffic is carried, there is no TUN device, OpenVPN gateway or `.ovpn` download, and no anonymity claim. Built so far: route planner, deny-by-default exit policy, X25519/HKDF/AES-256-GCM hop frames, client mode contracts. `c0mpute scallion modes` and `c0mpute scallion doctor --mode native|openvpn [--json]` report readiness and blockers. Usable today: independent bootstrap (`C0MPUTE_BOOTSTRAP_MODE=community` with `C0MPUTE_BOOTSTRAP_PEERS`). CLI reference at https://c0mpute.com/docs#scallion
+
 ## Modules
 
 - [Plugins](https://c0mpute.com/plugins): Three core modules — transcode (FFmpeg-based video encoding), coinpay (DID identity + escrow payments), infernet (AI LLM inference).
