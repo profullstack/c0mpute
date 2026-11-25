@@ -1,4 +1,4 @@
-import { consentToken, parseScope, redirectMatches, tokenEq } from "@/lib/chat/oauth";
+import { billingClientAllowed, consentToken, parseScope, redirectMatches, tokenEq } from "@/lib/chat/oauth";
 import { currentUser, oauthStore, sessionToken, siteUrl, storageStore } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
@@ -53,7 +53,10 @@ async function check(get: (k: string) => string | null) {
     return { error: back(redirect, { error: "invalid_request", error_description: "PKCE S256 required", state }) } as const;
   }
   const scope = parseScope(get("scope"));
-  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write, live:publish, inference", state }) } as const;
+  if (!scope) return { error: back(redirect, { error: "invalid_scope", error_description: "scopes: mcp, storage:write, live:publish, inference, billing", state }) } as const;
+  if (scope.split(" ").includes("billing") && !billingClientAllowed(client.client_id)) {
+    return { error: back(redirect, { error: "invalid_scope", error_description: "billing is only for apps approved by c0mpute", state }) } as const;
+  }
   const q: Q = { client_id: client.client_id, redirect_uri: redirect, code_challenge: challenge, state, scope };
   return { client, q } as const;
 }
@@ -90,6 +93,11 @@ export async function GET(req: Request) {
     can.push(
       "send prompts to AI models on c0mpute and have each answer charged to your compute balance (it can see your balance, not your chats, files, nodes or other keys)",
       "use the private house lane: prompts it sends that way run only on a node Profullstack operates, never a third-party node, and are deleted once answered. That node, and the app itself, can read them",
+    );
+  }
+  if (scopes.includes("billing")) {
+    can.push(
+      "charge your compute balance for the work it does for you (for example one charge per paid meeting), at the price it shows you first. Each charge appears in your c0mpute usage; disconnecting the app stops it",
     );
   }
   let storageNote = "";

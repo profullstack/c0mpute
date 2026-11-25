@@ -26,8 +26,24 @@ export const SCOPE = "mcp";
  * person's compute balance, including the private house lane, and read that
  * balance (/api/v1/me, /api/v1/balance). No chat plugins, no history, no
  * keys, nothing else on the account.
+ * "billing": charge the person's compute balance for work the app did itself
+ * (POST /api/v1/billing/charge), one charge per call, kinds in
+ * BILLING_KINDS only. Only apps listed in C0MPUTE_BILLING_CLIENTS may ask for
+ * it: open registration must never let a stranger's app spend a balance.
  */
-export const SCOPES = ["mcp", "storage:write", "live:publish", "inference"] as const;
+export const SCOPES = ["mcp", "storage:write", "live:publish", "inference", "billing"] as const;
+
+/** What an app holding "billing" may charge for (Infernet usage-charge kinds billed to the house). */
+export const BILLING_KINDS = ["board.meeting"] as const;
+
+/** The client ids allowed to request "billing", from C0MPUTE_BILLING_CLIENTS (comma separated). */
+export function billingClientAllowed(clientId: string, list = process.env.C0MPUTE_BILLING_CLIENTS ?? ""): boolean {
+  return list
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .includes(clientId);
+}
 
 /** A requested scope string, normalized ("mcp" when absent), or null when it names an unknown scope. */
 export function parseScope(raw: string | null | undefined): string | null {
