@@ -74,7 +74,7 @@ one link, can tell both who the client is and what they are talking to.
 | Lying relay | advertises speed or roles it does not have | routes ranked from the client's own measurements, never self-report; exit role only via signed descriptor | planner implemented; measurement not wired |
 | Malicious exit | reads or alters plaintext, attacks the destination | application TLS is the only defence for content; exit policy limits where an exit will connect | policy implemented, no exit service |
 | Malicious client | uses relays to attack third parties or the relay | exit policy (ports, public addresses only, no rebinding), per-circuit and per-peer quotas, abuse handling | policy implemented; quotas open |
-| Resource exhaustion | opens circuits, never finishes | bounded message sizes are enforced; circuit and handshake rate limits and timeouts are still needed | partly; limits open |
+| Resource exhaustion | opens circuits, never finishes | bounded message sizes; per-peer and total circuit caps, a `Create` rate limit, idle and extend timeouts (`scallion_relay`). Bandwidth and byte quotas are still needed | partly; not wired |
 | Downgrade | forces an older or weaker protocol | one protocol version and one Noise pattern, named in the handshake prologue; no negotiation | implemented |
 | Local leak | DNS, IPv6 or an app bypassing the tunnel | SOCKS5 with remote DNS first; TUN with a kill switch later; leak tests gate release | not implemented |
 | Traffic analysis | cell sizes, counts and timing | not addressed yet. Cells are not padded to a fixed size and there is no cover traffic | open |

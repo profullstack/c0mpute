@@ -139,6 +139,27 @@ Payload at most 16 KiB per cell; handshake messages exactly 48 bytes; peer ids
 at most 128 alphanumeric bytes; descriptors at most 1 KiB; at most 64 exit
 ports. Oversized or truncated input is rejected before allocation.
 
+## Relay limits
+
+`c0mpute_net::scallion_relay::RelayTable` holds every circuit one relay
+carries and enforces what a relay needs before it can face the network. Like
+the handshake it is a state machine: the caller passes each message with the
+authenticated peer id it arrived from and the current time.
+
+| Limit | Default | Effect |
+|---|---|---|
+| circuits in total | 1024 | further `Create`s are refused |
+| circuits per previous peer | 16 | one peer cannot fill the table |
+| `Create`s per peer | 20 per 10 s | a refused `Create` costs no handshake |
+| idle timeout | 120 s | the circuit is destroyed toward both sides |
+| extend timeout | 15 s | the client gets `ExtendFailed`; the circuit stays |
+
+The defaults are starting points, not measured values. A link id must be
+unique per peer in both directions; an `Extend` that would reuse one fails. A
+cell that fails authentication does not refresh the idle timer, so garbage
+cannot keep a circuit open. When a peer disconnects, every circuit through it
+is torn down and the other side is told.
+
 ## What this does not do
 
 - No transport. Nothing here sends a byte; the caller moves messages.
@@ -147,7 +168,7 @@ ports. Oversized or truncated input is rejected before allocation.
   [`scallion_exit`](scallion-exit-policy.md) and a stream protocol is the next
   slice.
 - No descriptor distribution, revocation or relay key persistence.
-- No rate limits or timeouts on circuits and handshakes.
+- No bandwidth or byte quotas per circuit; only counts, rates and timeouts.
 - No review. The weaknesses we already know are listed in the threat model.
 
 ## Tests

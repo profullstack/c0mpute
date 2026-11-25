@@ -22,6 +22,7 @@ pub mod scallion_exit;
 pub mod scallion_clients;
 pub mod scallion_frames;
 pub mod scallion_handshake;
+pub mod scallion_relay;
 pub mod swarm;
 pub mod topics;
 
