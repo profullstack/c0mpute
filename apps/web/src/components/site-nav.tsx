@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { SOLUTIONS, solutionPath } from "@/lib/solutions";
 
 type NavLink = { href: string; label: string; desc: string };
 type NavGroup = { id: string; label: string; links: NavLink[] };
@@ -25,6 +26,15 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/scallion", label: "Scallion (VPN Network)", desc: "private 3-hop routing, experimental" },
       { href: "/dashboard", label: "my dashboard", desc: "balance, keys, jobs" },
       { href: "/dashboard/disk", label: "my hosting", desc: "your sites and apps" },
+    ],
+  },
+  {
+    id: "solutions",
+    label: "solutions",
+    // One page each (install, example, use cases), from lib/solutions.ts.
+    links: [
+      ...SOLUTIONS.map((s) => ({ href: solutionPath(s), label: s.label, desc: s.desc })),
+      { href: "/solutions", label: "all solutions", desc: "everything on one page" },
     ],
   },
   {
@@ -69,9 +79,11 @@ const NAV_GROUPS: NavGroup[] = [
 ];
 
 const isActive = (pathname: string, href: string) =>
-  href === "/dashboard" ? pathname === href : pathname === href || pathname.startsWith(href + "/");
+  // Index pages whose children are listed beside them match exactly, or the
+  // index would light up on every child page.
+  href === "/dashboard" || href === "/solutions" ? pathname === href : pathname === href || pathname.startsWith(href + "/");
 
-// Grouped header. Desktop (lg+): four menus built on <details name="site-nav">,
+// Grouped header. Desktop (lg+): five menus built on <details name="site-nav">,
 // so only one is open at a time and they open and close with JS off; Gallery,
 // dashboard and chat sit beside them as plain links. Below lg: one "menu"
 // <details> that opens a full-screen grouped list. The effect only adds

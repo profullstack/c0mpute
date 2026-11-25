@@ -3,6 +3,7 @@ import Link from "next/link";
 import { CodeBlock } from "@/components/CodeBlock";
 import { getStatusPayload } from "@/lib/status";
 import { NODE_GOAL } from "@/lib/nodes";
+import { SOLUTIONS, solutionPath } from "@/lib/solutions";
 
 // ad.network publisher claim for c0mpute.com: the meta tag lets ad.network
 // verify ownership from the server-rendered HTML. No ad unit on the home page.
@@ -153,6 +154,21 @@ $ c0mpute infernet chat --model huihui_ai/qwen3.5-abliterated:4b "hello"`}</Code
         <p className="comment">// upgrade or remove</p>
         <CodeBlock>{`$ c0mpute update              # check for + apply new release
 $ c0mpute uninstall --all     # remove c0mpute and peer binaries`}</CodeBlock>
+      </section>
+
+      <section className="space-y-3 rule pt-8">
+        <p className="comment">// what you can build: each has a page with the install, an example and use cases</p>
+        <ul className="grid gap-x-6 gap-y-1 sm:grid-cols-2 text-sm leading-6">
+          {SOLUTIONS.map((s) => (
+            <li key={s.slug}>
+              <Link href={solutionPath(s)}>{s.label}</Link>{" "}
+              <span className="text-xs text-[var(--color-dim)]">{s.desc}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="text-sm text-[var(--color-dim)]">
+          → <Link href="/solutions">all solutions</Link> · <Link href="/gallery">what people built</Link>
+        </p>
       </section>
 
       <section className="space-y-2 rule pt-8">
