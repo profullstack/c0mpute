@@ -30,6 +30,10 @@ const nextConfig = {
         destination: "https://c0mpute.com/:path*",
         permanent: true,
       },
+      // /vpn and /openvpn → the Scallion Network page (the only VPN docs).
+      // Temporary: a working VPN may get its own page later.
+      { source: "/vpn", destination: "/scallion", permanent: false },
+      { source: "/openvpn", destination: "/scallion", permanent: false },
       // /releases/latest/<artifact> → GitHub Releases latest download.
       // GitHub maintains the redirect from `latest/download/<file>` to
       // whichever the most recent release is, so we don't have to track

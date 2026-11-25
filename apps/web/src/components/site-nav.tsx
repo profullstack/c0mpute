@@ -48,6 +48,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: "/agents", label: "agents & MCP", desc: "compute for AI agents" },
       { href: "/plugins", label: "plugins", desc: "add workloads to a node" },
       { href: "/protocol", label: "protocol", desc: "how the network works" },
+      { href: "/scallion", label: "scallion (VPN)", desc: "private routing, experimental" },
       { href: "/temporal", label: "temporal policies", desc: "liquid networks" },
     ],
   },

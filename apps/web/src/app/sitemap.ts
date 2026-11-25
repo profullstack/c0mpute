@@ -7,6 +7,7 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: BASE,                         priority: 1.0,  changeFrequency: "weekly"  },
   { url: `${BASE}/getting-started`,    priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/protocol`,           priority: 0.9,  changeFrequency: "monthly" },
+  { url: `${BASE}/scallion`,           priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/providers`,          priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/agents`,             priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/docs`,               priority: 0.9,  changeFrequency: "weekly"  },

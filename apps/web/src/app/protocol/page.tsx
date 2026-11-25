@@ -248,8 +248,13 @@ $ c0mpute run job.json --gateway none      # prove it works without us`}</CodeBl
             <Row k="library (tested, not yet wired into the node)" v="canonical serialization, native identity, signed envelopes, the four signed message types, cross-implementation test vectors, provider directory, offer book, buyer-side selection policies, receipt-derived reputation — c0mpute-envelope and c0mpute-market pass their own tests; the running node does not use them yet" />
             <Row k="in progress" v="wiring signed envelopes into the node, the transport: local daemon, DHT discovery, offer collection over the wire, relay paths for providers behind NAT" />
             <Row k="planned" v="settlement adapters, generic container workloads, private network overlays" />
+            <Row k="experimental (no traffic yet)" v="Scallion Network privacy routing: three-hop route planner, opt-in exit policy, encrypted hop frames, native and OpenVPN client mode contracts. Not a working VPN" />
           </tbody>
         </table>
+        <p className="text-[var(--color-dim)]">
+          <Link href="/scallion">Scallion Network</Link> has its own page,
+          with what each piece does and what is still missing.
+        </p>
         <p>
           The claim that you do not need us is only worth what it is tested
           against, so <code>--gateway none</code> — a job discovered, awarded,
@@ -266,6 +271,7 @@ $ c0mpute run job.json --gateway none      # prove it works without us`}</CodeBl
           <li>→ <a href={`${DOCS}/canonical-json.md`}>canonical-json</a> — the exact bytes a signature covers</li>
           <li>→ <a href={`${DOCS}/identity.md`}>identity</a> — <code>did:c0mpute</code>, and why identity is not payment</li>
           <li>→ <a href={`${DOCS}/envelopes.md`}>envelopes</a> — signing and domain separation</li>
+          <li>→ <a href={`${DOCS}/scallion-network.md`}>scallion-network</a> — experimental privacy routing, native and OpenVPN client modes</li>
           <li>→ <a href={`${REPO}/blob/master/dips/v2.x/0024-protocol-vs-hosted-services.md`}>DIP-0024</a> — protocol vs optional hosted services</li>
           <li>→ <a href={`${REPO}/blob/master/dips/v2.x/0025-signed-envelopes-and-native-identity.md`}>DIP-0025</a> — envelopes and native identity</li>
         </ul>
