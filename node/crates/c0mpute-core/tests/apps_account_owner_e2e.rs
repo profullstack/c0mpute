@@ -131,7 +131,11 @@ async fn an_account_owned_app_takes_secrets_and_logs_from_any_machine_with_the_i
     }
     let app = axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    std::fs::write(fake.join("port"), listener.local_addr().unwrap().port().to_string()).unwrap();
+    std::fs::write(
+        fake.join("port"),
+        listener.local_addr().unwrap().port().to_string(),
+    )
+    .unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let opts = |dir: &Path, hosts: bool| Options {
@@ -147,7 +151,11 @@ async fn an_account_owned_app_takes_secrets_and_logs_from_any_machine_with_the_i
     let d0 = tmp.path().join("n0");
     let (hub_net, hub_store) = node(&d0, vec![], None).await;
     let hub_addr = listen_addr(&hub_net).await;
-    let mut hosts: Vec<Apps> = vec![Apps::start(hub_net, hub_store, opts(&d0, true)).await.unwrap()];
+    let mut hosts: Vec<Apps> = vec![
+        Apps::start(hub_net, hub_store, opts(&d0, true))
+            .await
+            .unwrap(),
+    ];
     for i in 1..3 {
         let d = tmp.path().join(format!("n{i}"));
         let (n, s) = node(&d, vec![hub_addr.clone()], None).await;
@@ -163,7 +171,10 @@ async fn an_account_owned_app_takes_secrets_and_logs_from_any_machine_with_the_i
     let secret_env = BTreeMap::from([("DB_PASSWORD".to_string(), "hunter2".to_string())]);
     let rec = {
         let a = AppOwner::account(ChatKey::from_seed(identity)).unwrap();
-        let secrets = AppSecrets { app_key: a.app_key("api").unwrap(), env: secret_env.clone() };
+        let secrets = AppSecrets {
+            app_key: a.app_key("api").unwrap(),
+            env: secret_env.clone(),
+        };
         AppRecord::sign(
             &a.keypair,
             AppSpec {
@@ -196,35 +207,53 @@ async fn an_account_owned_app_takes_secrets_and_logs_from_any_machine_with_the_i
     assert_eq!(rec.owner_peer(), Some(b.peer_id()));
     let od = tmp.path().join("machine-b");
     let (on, os) = node(&od, vec![hub_addr.clone()], Some(b.keypair.clone())).await;
-    assert_eq!(on.peer_id().to_base58(), b.peer_id(), "it joins as the account key");
+    assert_eq!(
+        on.peer_id().to_base58(),
+        b.peer_id(),
+        "it joins as the account key"
+    );
     let owner = Apps::start(on, os, opts(&od, false)).await.unwrap();
     assert_ne!(stranger.peer_id(), b.peer_id());
 
     tokio::time::sleep(Duration::from_secs(2)).await; // mesh
     stranger.publish_record(rec.clone()).await.unwrap();
     // The secret env is set again on machine B; the key is rebuilt.
-    let secrets = AppSecrets { app_key: b.app_key("api").unwrap(), env: secret_env };
+    let secrets = AppSecrets {
+        app_key: b.app_key("api").unwrap(),
+        env: secret_env,
+    };
     assert_eq!(Some(secrets.hash()), rec.secrets_hash);
     owner.own_secrets(&id, secrets).await;
 
     // The holders take the secrets sealed by the account peer.
-    wait_for("two holders with the secrets and one healthy primary", 60, || {
-        let hosts = hosts.clone();
-        let id = id.clone();
-        async move {
-            let mut held = Vec::new();
-            for h in &hosts {
-                held.push(h.held(&id).await);
+    wait_for(
+        "two holders with the secrets and one healthy primary",
+        60,
+        || {
+            let hosts = hosts.clone();
+            let id = id.clone();
+            async move {
+                let mut held = Vec::new();
+                for h in &hosts {
+                    held.push(h.held(&id).await);
+                }
+                let holders: Vec<_> = held.iter().flatten().collect();
+                holders.len() == 2
+                    && holders.iter().all(|h| h.has_secrets && h.ready)
+                    && holders
+                        .iter()
+                        .filter(|h| h.role == AppRole::Primary && h.healthy)
+                        .count()
+                        == 1
             }
-            let holders: Vec<_> = held.iter().flatten().collect();
-            holders.len() == 2
-                && holders.iter().all(|h| h.has_secrets && h.ready)
-                && holders.iter().filter(|h| h.role == AppRole::Primary && h.healthy).count() == 1
-        }
-    })
+        },
+    )
     .await;
     let log = std::fs::read_to_string(fake.join("log")).unwrap();
-    assert!(log.contains("DB_PASSWORD=hunter2"), "the container got its secret env");
+    assert!(
+        log.contains("DB_PASSWORD=hunter2"),
+        "the container got its secret env"
+    );
 
     // The primary answers the account peer's log request ...
     let mut logs = None;
@@ -237,7 +266,10 @@ async fn an_account_owned_app_takes_secrets_and_logs_from_any_machine_with_the_i
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
-    assert!(logs.expect("the owner reads the logs").contains("app log line"));
+    assert!(
+        logs.expect("the owner reads the logs")
+            .contains("app log line")
+    );
 
     // ... and refuses a peer that is not the owner.
     wait_for("the stranger sees the primary", 30, || {

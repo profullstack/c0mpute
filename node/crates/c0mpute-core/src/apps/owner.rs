@@ -85,14 +85,24 @@ impl AppOwner {
 
     pub fn from_machine_key(keypair: Keypair) -> Result<Self> {
         let owner_hex = site::owner_hex(&keypair).context("apps are signed with an ed25519 key")?;
-        Ok(AppOwner { kind: OwnerKind::Machine, keypair, owner_hex, identity: None })
+        Ok(AppOwner {
+            kind: OwnerKind::Machine,
+            keypair,
+            owner_hex,
+            identity: None,
+        })
     }
 
     /// The account key of an unlocked c0mpute identity.
     pub fn account(key: ChatKey) -> Result<Self> {
         let keypair = hosting::account_keypair(&key)?;
         let owner_hex = site::owner_hex(&keypair).context("apps are signed with an ed25519 key")?;
-        Ok(AppOwner { kind: OwnerKind::Account, keypair, owner_hex, identity: Some(key) })
+        Ok(AppOwner {
+            kind: OwnerKind::Account,
+            keypair,
+            owner_hex,
+            identity: Some(key),
+        })
     }
 
     pub fn app_id(&self, name: &str) -> String {
@@ -107,7 +117,9 @@ impl AppOwner {
     /// The derived app key (hex) of `name`. `None` for a machine owner, whose
     /// app keys are random and kept in its owner file.
     pub fn app_key(&self, name: &str) -> Option<String> {
-        self.identity.as_ref().map(|k| hex::encode(*derive_app_key(k, name)))
+        self.identity
+            .as_ref()
+            .map(|k| hex::encode(*derive_app_key(k, name)))
     }
 
     pub fn owns(&self, rec: &AppRecord) -> bool {
@@ -143,7 +155,9 @@ pub fn unlock_from_env() -> Result<std::result::Result<ChatKey, NoAccount>> {
 }
 
 fn identity_path() -> String {
-    chat::key_file_path().map(|p| p.display().to_string()).unwrap_or_default()
+    chat::key_file_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 pub fn account_required(unlock: Unlock<'_>) -> Result<AppOwner> {
@@ -154,7 +168,9 @@ pub fn account_required(unlock: Unlock<'_>) -> Result<AppOwner> {
              or copy your existing one here (`{}`) to control the same apps you deploy elsewhere",
             identity_path()
         ),
-        Err(NoAccount::Locked) => bail!("set C0MPUTE_DM_PASSWORD to unlock your c0mpute identity (no terminal to ask on)"),
+        Err(NoAccount::Locked) => {
+            bail!("set C0MPUTE_DM_PASSWORD to unlock your c0mpute identity (no terminal to ask on)")
+        }
     }
 }
 
@@ -165,7 +181,12 @@ fn short(owner: &str) -> &str {
 /// The account key, which must be the one that owns `rec`.
 fn account_owning(rec: &AppRecord, unlock: Unlock<'_>) -> Result<AppOwner> {
     let a = account_required(unlock).with_context(|| {
-        format!("{} ({}) was deployed here under an account key ({}…)", rec.name, rec.app_id, short(&rec.owner))
+        format!(
+            "{} ({}) was deployed here under an account key ({}…)",
+            rec.name,
+            rec.app_id,
+            short(&rec.owner)
+        )
     })?;
     if !a.owns(rec) {
         bail!(
@@ -195,7 +216,9 @@ pub fn choose(
     if moving {
         let account = account_required(unlock)?;
         match existing {
-            Some(r) if account.owns(r) => bail!("--move: {name} is already owned by your account key"),
+            Some(r) if account.owns(r) => {
+                bail!("--move: {name} is already owned by your account key")
+            }
             Some(r) if !on_machine => bail!(
                 "--move: {name} was deployed here under another key ({}…), not this machine's",
                 short(&r.owner)
@@ -256,7 +279,13 @@ pub fn resolve(
     unlock: Unlock<'_>,
 ) -> Result<(AppOwner, String)> {
     let is_id = super::record::valid_app_id(name_or_id);
-    let id_under = |o: &AppOwner| if is_id { name_or_id.to_string() } else { o.app_id(name_or_id) };
+    let id_under = |o: &AppOwner| {
+        if is_id {
+            name_or_id.to_string()
+        } else {
+            o.app_id(name_or_id)
+        }
+    };
     let on_machine = existing.filter(|r| machine.owns(r));
     match choice {
         KeyChoice::Machine => {
@@ -369,10 +398,22 @@ mod tests {
         let rec = signed(&a, "api");
         assert!(rec.verify());
         assert_eq!(rec.owner_peer().as_deref(), Some(a.peer_id().as_str()));
-        assert_eq!(rec.owner_peer(), Some(account(7).peer_id()), "any machine with the identity");
+        assert_eq!(
+            rec.owner_peer(),
+            Some(account(7).peer_id()),
+            "any machine with the identity"
+        );
         let m = machine();
-        assert_ne!(rec.owner_peer(), Some(m.peer_id()), "not the deploying machine's key");
-        assert_ne!(rec.owner_peer(), Some(account(8).peer_id()), "not another identity");
+        assert_ne!(
+            rec.owner_peer(),
+            Some(m.peer_id()),
+            "not the deploying machine's key"
+        );
+        assert_ne!(
+            rec.owner_peer(),
+            Some(account(8).peer_id()),
+            "not another identity"
+        );
         // And a machine-owned (legacy) record still names the machine's peer.
         assert_eq!(signed(&m, "api").owner_peer(), Some(m.peer_id()));
     }
@@ -387,11 +428,21 @@ mod tests {
         let hex = m.owner_hex.clone();
         let o = choose("api", KeyChoice::Auto, false, None, m, &missing).unwrap();
         assert_eq!((o.kind, o.owner_hex), (OwnerKind::Machine, hex));
-        assert_eq!(choose("api", KeyChoice::Auto, false, None, machine(), &locked).unwrap().kind, OwnerKind::Machine);
+        assert_eq!(
+            choose("api", KeyChoice::Auto, false, None, machine(), &locked)
+                .unwrap()
+                .kind,
+            OwnerKind::Machine
+        );
         // Asked for by name, it is required.
         assert!(choose("api", KeyChoice::Account, false, None, machine(), &missing).is_err());
         assert!(choose("api", KeyChoice::Account, false, None, machine(), &locked).is_err());
-        assert_eq!(choose("api", KeyChoice::Machine, false, None, machine(), &never).unwrap().kind, OwnerKind::Machine);
+        assert_eq!(
+            choose("api", KeyChoice::Machine, false, None, machine(), &never)
+                .unwrap()
+                .kind,
+            OwnerKind::Machine
+        );
     }
 
     #[test]
@@ -403,13 +454,28 @@ mod tests {
         let o = choose("api", KeyChoice::Auto, false, Some(&rec), again(), &never).unwrap();
         assert_eq!(o.kind, OwnerKind::Machine);
         assert_eq!(o.app_id("api"), rec.app_id);
-        assert_eq!(AppRecord::sign(&o.keypair, spec("api"), 2).unwrap().app_id, rec.app_id);
+        assert_eq!(
+            AppRecord::sign(&o.keypair, spec("api"), 2).unwrap().app_id,
+            rec.app_id
+        );
         // --key account does not quietly fork it.
-        let e = choose("api", KeyChoice::Account, false, Some(&rec), again(), &unlocked).err().unwrap();
+        let e = choose(
+            "api",
+            KeyChoice::Account,
+            false,
+            Some(&rec),
+            again(),
+            &unlocked,
+        )
+        .err()
+        .unwrap();
         assert!(e.to_string().contains("--move"), "{e}");
         // Its owner calls still come from the machine's peer.
         let (o, id) = resolve("api", KeyChoice::Auto, Some(&rec), None, again(), &never).unwrap();
-        assert_eq!((o.kind, id.as_str()), (OwnerKind::Machine, rec.app_id.as_str()));
+        assert_eq!(
+            (o.kind, id.as_str()),
+            (OwnerKind::Machine, rec.app_id.as_str())
+        );
         assert_eq!(rec.owner_peer(), Some(o.peer_id()));
     }
 
@@ -426,14 +492,45 @@ mod tests {
         assert_eq!(moved.app_id, account(7).app_id("api"));
         // It needs the identity, and happens once.
         assert!(choose("api", KeyChoice::Auto, true, Some(&rec), again(), &locked).is_err());
-        assert!(choose("api", KeyChoice::Auto, true, Some(&moved), again(), &unlocked).is_err());
+        assert!(
+            choose(
+                "api",
+                KeyChoice::Auto,
+                true,
+                Some(&moved),
+                again(),
+                &unlocked
+            )
+            .is_err()
+        );
         // Nothing deployed from here yet: --move is just an account deploy.
-        assert_eq!(choose("api", KeyChoice::Auto, true, None, again(), &unlocked).unwrap().kind, OwnerKind::Account);
+        assert_eq!(
+            choose("api", KeyChoice::Auto, true, None, again(), &unlocked)
+                .unwrap()
+                .kind,
+            OwnerKind::Account
+        );
         // After the move the account key is used; the old app is reachable
         // with --key machine until it is destroyed.
-        let (o, id) = resolve("api", KeyChoice::Auto, Some(&moved), Some(&rec), again(), &unlocked).unwrap();
+        let (o, id) = resolve(
+            "api",
+            KeyChoice::Auto,
+            Some(&moved),
+            Some(&rec),
+            again(),
+            &unlocked,
+        )
+        .unwrap();
         assert_eq!((o.kind, id), (OwnerKind::Account, moved.app_id.clone()));
-        let (o, id) = resolve("api", KeyChoice::Machine, Some(&moved), Some(&rec), again(), &never).unwrap();
+        let (o, id) = resolve(
+            "api",
+            KeyChoice::Machine,
+            Some(&moved),
+            Some(&rec),
+            again(),
+            &never,
+        )
+        .unwrap();
         assert_eq!((o.kind, id), (OwnerKind::Machine, rec.app_id.clone()));
     }
 
@@ -441,14 +538,72 @@ mod tests {
     fn an_account_owned_app_is_never_forked_by_another_key() {
         let rec = signed(&account(7), "api");
         // The same identity: fine, from any machine.
-        let o = choose("api", KeyChoice::Auto, false, Some(&rec), machine(), &unlocked).unwrap();
+        let o = choose(
+            "api",
+            KeyChoice::Auto,
+            false,
+            Some(&rec),
+            machine(),
+            &unlocked,
+        )
+        .unwrap();
         assert_eq!(o.app_id("api"), rec.app_id);
         // A different identity, none, or a locked one: refused, not forked.
-        assert!(choose("api", KeyChoice::Auto, false, Some(&rec), machine(), &other_identity).is_err());
-        assert!(choose("api", KeyChoice::Auto, false, Some(&rec), machine(), &missing).is_err());
-        assert!(choose("api", KeyChoice::Auto, false, Some(&rec), machine(), &locked).is_err());
-        assert!(choose("api", KeyChoice::Machine, false, Some(&rec), machine(), &never).is_err());
-        assert!(resolve("api", KeyChoice::Auto, Some(&rec), None, machine(), &other_identity).is_err());
+        assert!(
+            choose(
+                "api",
+                KeyChoice::Auto,
+                false,
+                Some(&rec),
+                machine(),
+                &other_identity
+            )
+            .is_err()
+        );
+        assert!(
+            choose(
+                "api",
+                KeyChoice::Auto,
+                false,
+                Some(&rec),
+                machine(),
+                &missing
+            )
+            .is_err()
+        );
+        assert!(
+            choose(
+                "api",
+                KeyChoice::Auto,
+                false,
+                Some(&rec),
+                machine(),
+                &locked
+            )
+            .is_err()
+        );
+        assert!(
+            choose(
+                "api",
+                KeyChoice::Machine,
+                false,
+                Some(&rec),
+                machine(),
+                &never
+            )
+            .is_err()
+        );
+        assert!(
+            resolve(
+                "api",
+                KeyChoice::Auto,
+                Some(&rec),
+                None,
+                machine(),
+                &other_identity
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -460,8 +615,18 @@ mod tests {
         assert_eq!(signed(&account(7), "api").owner_peer(), Some(o.peer_id()));
         // An app id is passed through.
         let raw = "0123456789abcdef0123";
-        assert_eq!(resolve(raw, KeyChoice::Auto, None, None, machine(), &unlocked).unwrap().1, raw);
-        assert_eq!(resolve(raw, KeyChoice::Machine, None, None, machine(), &never).unwrap().1, raw);
+        assert_eq!(
+            resolve(raw, KeyChoice::Auto, None, None, machine(), &unlocked)
+                .unwrap()
+                .1,
+            raw
+        );
+        assert_eq!(
+            resolve(raw, KeyChoice::Machine, None, None, machine(), &never)
+                .unwrap()
+                .1,
+            raw
+        );
         // No identity: this machine's key, as before.
         let (o, _) = resolve("api", KeyChoice::Auto, None, None, machine(), &missing).unwrap();
         assert_eq!(o.kind, OwnerKind::Machine);
