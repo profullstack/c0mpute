@@ -21,6 +21,7 @@
 //! The plugin form mirrors the URL namespace: c0mpute.com/transcode,
 //! c0mpute.com/coinpay, c0mpute.com/infernet.
 
+mod app_owner;
 mod apps_mcp;
 mod autoscale;
 mod container_cli;
@@ -924,9 +925,15 @@ enum AppsCmd {
     /// Deploy (or redeploy) an app.
     ///
     /// The image is built here (`docker build`), saved, and published to the
-    /// network as a hosting site signed by this machine, so no registry is
-    /// involved; or pass --pull with a digest-pinned registry image. Waits
-    /// until a primary answers on the new version.
+    /// network as a hosting site, so no registry is involved; or pass --pull
+    /// with a digest-pinned registry image. Waits until a primary answers on
+    /// the new version.
+    ///
+    /// The app is signed with your account key (derived from your c0mpute
+    /// identity, which only you hold), so deploying the same --name again
+    /// from ANY machine with that identity ships a new version of the same
+    /// app, and logs and destroy work from there too. Secret values stay on
+    /// the machine they were set on: set them again where you deploy from.
     ///
     ///   c0mpute apps deploy ./api --name api --port 8080 --state /data
     ///   c0mpute apps deploy --pull ghcr.io/me/api@sha256:... --name api
@@ -980,6 +987,17 @@ enum AppsCmd {
         /// Give up waiting for a healthy primary after this many seconds.
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
+        /// Which key signs: `auto` keeps the owner of an app deployed from
+        /// here (else your account key), `account`, or `machine` (how apps
+        /// were owned before the account key).
+        #[arg(long, value_enum, default_value_t = app_owner::KeyArg::Auto)]
+        key: app_owner::KeyArg,
+        /// Hand an app owned by this machine's key to your account key:
+        /// deploy it under the account key, then delete the machine-owned
+        /// one (kept running if it holds state: state does not move). The
+        /// app id changes once, so repoint its custom domains.
+        #[arg(long = "move", conflicts_with = "key")]
+        move_to_account: bool,
     },
     /// List the apps a gateway knows, with holders, primary and health.
     Ls {
@@ -996,10 +1014,17 @@ enum AppsCmd {
         gateway: String,
     },
     /// The primary's container logs (owner only; asked over libp2p).
+    ///
+    /// From any machine holding the c0mpute identity that owns the app.
     Logs {
+        /// App name or app id.
         app: String,
         #[arg(long, default_value_t = 200)]
         tail: u32,
+        /// Which key asks: `auto` (the app's owner here, else your account
+        /// key), `account`, or `machine`.
+        #[arg(long, value_enum, default_value_t = app_owner::KeyArg::Auto)]
+        key: app_owner::KeyArg,
     },
     /// Secret environment variables, sealed to each holder at the next deploy.
     Secrets {
@@ -1017,12 +1042,18 @@ enum AppsCmd {
         /// Required: this cannot be undone (the state goes with it).
         #[arg(long)]
         yes: bool,
+        /// Which key signs the deletion: `auto` (the app's owner here, else
+        /// your account key), `account`, or `machine` (also the app a
+        /// `deploy --move` left running under this machine's key).
+        #[arg(long, value_enum, default_value_t = app_owner::KeyArg::Auto)]
+        key: app_owner::KeyArg,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum AppsSecretsCmd {
-    /// Set KEY=VALUE for an app (takes effect on the next deploy).
+    /// Set KEY=VALUE for an app on this machine (takes effect on the next
+    /// deploy from here).
     Set { app: String, pairs: Vec<String> },
     /// Remove secrets by name.
     Unset { app: String, keys: Vec<String> },
@@ -4801,10 +4832,7 @@ fn parse_kv(pairs: &[String]) -> Result<std::collections::BTreeMap<String, Strin
 }
 
 fn app_id_from(app: &str) -> String {
-    match c0mpute_core::apps::deploy::load_owner(app).record {
-        Some(r) => r.app_id,
-        None => app.to_string(),
-    }
+    c0mpute_core::apps::deploy::app_id_of(app, &app_owner::unlock)
 }
 
 async fn run_apps(cmd: AppsCmd) -> Result<()> {
@@ -4826,6 +4854,8 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             domains,
             hosts,
             wait_secs,
+            key,
+            move_to_account,
         } => {
             let wait = std::time::Duration::from_secs(wait_secs);
             let manifest = match &dir {
@@ -4851,8 +4881,12 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
                     domains: vec![],
                     hosts: vec![],
                     wait,
+                    key: Default::default(),
+                    moving: false,
                 },
             };
+            opts.key = key.into();
+            opts.moving = move_to_account;
             if let Some(n) = name {
                 opts.name = n;
             }
@@ -4893,7 +4927,7 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             opts.domains.extend(domains);
             opts.hosts.extend(hosts);
             opts.wait = wait;
-            let rec = deploy::deploy(opts).await?;
+            let rec = deploy::deploy(opts, &app_owner::unlock).await?;
             println!("{}", rec.app_id);
             for d in &rec.domains {
                 eprintln!("  domain {d}: TXT _c0mpute-app.{d} = \"app={}\"", rec.app_id);
@@ -4933,8 +4967,8 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
             Ok(())
         }
-        AppsCmd::Logs { app, tail } => {
-            print!("{}", deploy::logs(&app, tail).await?);
+        AppsCmd::Logs { app, tail, key } => {
+            print!("{}", deploy::logs(&app, tail, key.into(), &app_owner::unlock).await?);
             Ok(())
         }
         AppsCmd::Secrets { cmd } => match cmd {
@@ -4942,7 +4976,7 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
                 for (k, v) in parse_kv(&pairs)? {
                     deploy::set_secret(&app, &k, Some(&v))?;
                 }
-                eprintln!("saved; run `c0mpute apps deploy` to hand them to the holders");
+                eprintln!("saved on this machine; run `c0mpute apps deploy` from here to hand them to the holders");
                 Ok(())
             }
             AppsSecretsCmd::Unset { app, keys } => {
@@ -4961,11 +4995,11 @@ async fn run_apps(cmd: AppsCmd) -> Result<()> {
             }
         },
         AppsCmd::Mcp { gateway } => apps_mcp::serve(gateway).await,
-        AppsCmd::Destroy { name, yes } => {
+        AppsCmd::Destroy { name, yes, key } => {
             if !yes {
                 anyhow::bail!("this deletes {name} and its state everywhere; pass --yes to confirm");
             }
-            let id = deploy::destroy(&name).await?;
+            let id = deploy::destroy(&name, key.into(), &app_owner::unlock).await?;
             println!("deleted {name} ({id})");
             Ok(())
         }

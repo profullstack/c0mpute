@@ -4,10 +4,12 @@
 //! claude mcp add c0mpute-apps -- c0mpute apps mcp
 //! ```
 //!
-//! Tools deploy, list, inspect, read logs and delete apps with this
-//! machine's own key (the same thing `c0mpute apps ...` does), so an agent can
-//! ship a backend to the network without a server or an API key. Reads go to
-//! a gateway (`--gateway`, default the local node).
+//! Tools deploy, list, inspect, read logs and delete apps the same way
+//! `c0mpute apps ...` does, so an agent can ship a backend to the network
+//! without a server or an API key: signed with the account key when the
+//! c0mpute identity opens (`C0MPUTE_DM_PASSWORD`; stdio has no terminal to
+//! ask on), else with this machine's own key. Reads go to a gateway
+//! (`--gateway`, default the local node).
 
 use std::time::Duration;
 
@@ -82,7 +84,9 @@ fn tools() -> Value {
                     "replicas": {"type": "integer"},
                     "domains": {"type": "array", "items": {"type": "string"}},
                     "hosts": {"type": "array", "items": {"type": "string"}, "description": "Peer ids allowed to hold the app; empty = any apps node (each holder gets the app's secrets)"},
-                    "wait_secs": {"type": "integer"}
+                    "wait_secs": {"type": "integer"},
+                    "key": {"type": "string", "enum": ["auto", "account", "machine"], "description": "Which key signs. auto (default): the owner of an app deployed from this machine, else the account key (needs C0MPUTE_DM_PASSWORD), else this machine's key"},
+                    "move": {"type": "boolean", "description": "Hand an app owned by this machine's key to the account key (new app id; a stateful old app is left running)"}
                 },
                 "required": ["name"]
             }
@@ -110,7 +114,7 @@ fn tools() -> Value {
         {
             "name": "apps_destroy",
             "description": "Delete an app and its state everywhere. Irreversible: pass confirm=true.",
-            "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "confirm": {"type": "boolean"}}, "required": ["name", "confirm"]}
+            "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "confirm": {"type": "boolean"}, "key": {"type": "string", "enum": ["auto", "account", "machine"]}}, "required": ["name", "confirm"]}
         }
     ])
 }
@@ -171,22 +175,23 @@ async fn call(gateway: &str, name: &str, a: &Value) -> Result<String> {
                 opts.domains
                     .extend(d.iter().filter_map(Value::as_str).map(str::to_string));
             }
-            let rec = deploy::deploy(opts).await?;
-            Ok(json!({"app_id": rec.app_id, "path": format!("/a/{}/", rec.app_id), "seq": rec.seq}).to_string())
+            opts.key = crate::app_owner::key_from_str(s("key").as_deref());
+            opts.moving = a.get("move").and_then(Value::as_bool) == Some(true);
+            let rec = deploy::deploy(opts, &crate::app_owner::unlock).await?;
+            Ok(json!({"app_id": rec.app_id, "path": format!("/a/{}/", rec.app_id), "seq": rec.seq, "owner": rec.owner}).to_string())
         }
         "apps_list" => get(&format!("{gateway}/apps/v1/apps")).await,
         "apps_status" => {
             let app = s("app").unwrap_or_default();
-            let id = deploy::load_owner(&app)
-                .record
-                .map(|r| r.app_id)
-                .unwrap_or(app);
+            let id = deploy::app_id_of(&app, &crate::app_owner::unlock);
             get(&format!("{gateway}/apps/v1/apps/{id}")).await
         }
         "apps_logs" => {
             deploy::logs(
                 &s("app").unwrap_or_default(),
                 n("tail").unwrap_or(200) as u32,
+                Default::default(),
+                &crate::app_owner::unlock,
             )
             .await
         }
@@ -196,13 +201,18 @@ async fn call(gateway: &str, name: &str, a: &Value) -> Result<String> {
                 &s("key").unwrap_or_default(),
                 s("value").as_deref(),
             )?;
-            Ok("saved; redeploy to hand it to the holders".into())
+            Ok("saved on this machine; redeploy from here to hand it to the holders".into())
         }
         "apps_destroy" => {
             if a.get("confirm").and_then(Value::as_bool) != Some(true) {
                 anyhow::bail!("refusing without confirm=true");
             }
-            let id = deploy::destroy(&s("name").unwrap_or_default()).await?;
+            let id = deploy::destroy(
+                &s("name").unwrap_or_default(),
+                crate::app_owner::key_from_str(s("key").as_deref()),
+                &crate::app_owner::unlock,
+            )
+            .await?;
             Ok(format!("deleted {id}"))
         }
         _ => anyhow::bail!("unknown tool {name}"),
@@ -224,6 +234,8 @@ fn base(name: &str, source: deploy::Source, wait: Duration) -> deploy::DeployOpt
         domains: vec![],
         hosts: vec![],
         wait,
+        key: Default::default(),
+        moving: false,
     }
 }
 

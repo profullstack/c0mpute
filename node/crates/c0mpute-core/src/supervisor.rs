@@ -60,6 +60,26 @@ impl Supervisor {
     /// missing). Private storage uses a fresh throwaway directory per
     /// session, so its publishes are not tied to this machine's usual peer id.
     pub async fn boot_with_identity(config: Config, identity_dir: std::path::PathBuf) -> Result<Self> {
+        Self::boot_net(config, identity_dir, None).await
+    }
+
+    /// Boot with `keypair` as the libp2p identity (never written to disk).
+    /// An app owner joins as their account key this way, so holders see
+    /// owner-only calls coming from the owner's peer on any machine.
+    /// `state_dir` holds what else a network identity keeps (the job secret).
+    pub async fn boot_with_keypair(
+        config: Config,
+        state_dir: std::path::PathBuf,
+        keypair: c0mpute_net::libp2p::identity::Keypair,
+    ) -> Result<Self> {
+        Self::boot_net(config, state_dir, Some(keypair)).await
+    }
+
+    async fn boot_net(
+        config: Config,
+        identity_dir: std::path::PathBuf,
+        keypair: Option<c0mpute_net::libp2p::identity::Keypair>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&config.storage.root)?;
         let store = ChunkStore::open(&config.storage.root).await?;
 
@@ -85,6 +105,9 @@ impl Supervisor {
         let mut net_cfg = NetworkConfig::for_dir(identity_dir)
             .with_local_source(local_source)
             .with_bootstrap(bootstrap_addrs);
+        if let Some(k) = keypair {
+            net_cfg = net_cfg.with_keypair(k);
+        }
         // A fixed, firewall-opened port for nodes that must be dialable
         // (buyer gateways): C0MPUTE_P2P_LISTEN=/ip4/0.0.0.0/tcp/46341
         let listen =
