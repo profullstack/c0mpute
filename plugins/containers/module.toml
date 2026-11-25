@@ -15,7 +15,7 @@
 [module]
 id          = "containers"
 name        = "Containers — remote docker builds and jobs"
-version     = "0.3.114"
+version     = "0.3.115"
 kind        = "workload"
 category    = "developer"
 status      = "available"
