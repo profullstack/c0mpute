@@ -128,7 +128,11 @@ openvpn: not ready
             />
             <Row
               k="encrypted hop frames"
-              v="three nested layers (guard, middle, exit), each with its own AES-256-GCM key from X25519 and HKDF-SHA256, with replay rejection. A unit-tested primitive that touches no socket; relay key authentication and forward secrecy are still to do."
+              v="the first primitive: three nested layers (guard, middle, exit), each with its own AES-256-GCM key from X25519 and HKDF-SHA256, with replay rejection. It has no relay authentication or forward secrecy; the circuit handshake below replaces it for key agreement."
+            />
+            <Row
+              k="circuit handshake"
+              v="relays publish a descriptor signed by their node identity (Noise key, roles, exit ports, expiry); the client builds a circuit hop by hop with Noise NK, so each relay is authenticated, the client stays anonymous to it and keys are forward secret; each hop learns only its neighbours; replayed, reordered and tampered cells are handled. Tested on a simulated three-relay network; not wired to real connections and not reviewed."
             />
             <Row
               k="OpenVPN profile builder"
@@ -168,8 +172,8 @@ C0MPUTE_BOOTSTRAP_MODE=offline c0mpute worker start`}</CodeBlock>
       <section className="space-y-3 text-sm leading-7">
         <h2 className="font-semibold text-[var(--color-fg)]">[ what has to happen first ]</h2>
         <ol className="list-decimal pl-5 space-y-1">
-          <li>An authenticated relay handshake with forward secrecy, key rotation and circuit teardown, reviewed before it carries traffic.</li>
-          <li>Hop frames carried over real peer streams through three independent nodes, with per-circuit limits.</li>
+          <li>The circuit handshake reviewed against the threat model, with rekeying, rate limits and timeouts added.</li>
+          <li>Circuits carried over real peer streams through three independent nodes, with a stream layer and per-circuit limits.</li>
           <li>The exit role: operator consent, destination policy, quotas and abuse controls, connected to the data plane.</li>
           <li>The native TUN client, with routes, DNS and IPv6 handled per platform and a fail-closed kill switch.</li>
           <li>The opt-in OpenVPN gateway, then signed working <code>.ovpn</code> profiles for stock OpenVPN Connect.</li>
@@ -202,6 +206,8 @@ C0MPUTE_BOOTSTRAP_MODE=offline c0mpute worker start`}</CodeBlock>
         <h2 className="font-semibold text-[var(--color-fg)]">[ specification ]</h2>
         <ul className="space-y-1 text-xs">
           <li>→ <a href={`${DOCS}/scallion-network.md`}>scallion-network</a>: architecture, path scoring, session continuity, roadmap</li>
+          <li>→ <a href={`${DOCS}/scallion-threat-model.md`}>scallion-threat-model</a>: goals, non-goals, adversaries and known weaknesses (draft v0.1)</li>
+          <li>→ <a href={`${DOCS}/scallion-handshake.md`}>scallion-handshake</a>: signed relay descriptors, the per-hop handshake, wire formats</li>
           <li>→ <a href={`${DOCS}/scallion-clients.md`}>scallion-clients</a>: native and OpenVPN client modes, profile rules, release gates</li>
           <li>→ <a href={`${DOCS}/scallion-exit-policy.md`}>scallion-exit-policy</a>: the deny-by-default exit admission contract</li>
           <li>→ <a href={`${DOCS}/scallion-frames.md`}>scallion-frames</a>: hop frame format, threat model and stated limitations</li>

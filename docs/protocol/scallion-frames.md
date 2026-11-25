@@ -7,6 +7,12 @@ privacy network, VPN, OpenVPN server, or audited cryptographic protocol.**
 configured hops and verifies that each relay can open only its own
 layer. It does not connect to any network socket and has no exit path.
 
+> **Superseded for key agreement.** The authenticated, forward-secret
+> successor is the [circuit handshake](scallion-handshake.md)
+> (`c0mpute_net::scallion_handshake`). This module is kept as the v1
+> primitive; follow-up items 1 and 2 below are addressed there, still as an
+> unwired, unreviewed state machine.
+
 ## What is actually implemented
 
 - Exactly three hop layers in the order **guard → middle → exit**.
