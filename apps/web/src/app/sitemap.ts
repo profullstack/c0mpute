@@ -13,6 +13,7 @@ const staticPages: MetadataRoute.Sitemap = [
   { url: `${BASE}/scallion`,           priority: 0.8,  changeFrequency: "monthly" },
   { url: `${BASE}/providers`,          priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/agents`,             priority: 0.8,  changeFrequency: "monthly" },
+  { url: `${BASE}/mcp`,                priority: 0.9,  changeFrequency: "monthly" },
   { url: `${BASE}/docs`,               priority: 0.9,  changeFrequency: "weekly"  },
   { url: `${BASE}/plugins`,            priority: 0.8,  changeFrequency: "weekly"  },
   { url: `${BASE}/chat`,               priority: 0.9,  changeFrequency: "weekly" },

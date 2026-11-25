@@ -26,6 +26,14 @@ describe("referral first touch", () => {
     expect(refFromUrl(new URL("https://c0mpute.com/chat"))).toBeNull();
     expect(refFromUrl(new URL("https://c0mpute.com/r/abcd2345/extra"))).toBeNull();
   });
+  test("?referral= survives an ad click redirect that rewrites ref", () => {
+    // crawlproof's click redirect sets ref=crawlproof-ad-NNN (not a code: it has hyphens).
+    expect(refFromUrl(new URL("https://c0mpute.com/mcp?referral=abcd2345&ref=crawlproof-ad-1900"))).toBe("abcd2345");
+    expect(refFromUrl(new URL("https://c0mpute.com/mcp?referral=abcd2345"))).toBe("abcd2345");
+    // A real ?ref= code still wins.
+    expect(refFromUrl(new URL("https://c0mpute.com/mcp?ref=zzzz9999&referral=abcd2345"))).toBe("zzzz9999");
+    expect(refFromUrl(new URL("https://c0mpute.com/mcp?referral=profullstack"))).toBeNull();
+  });
   test("reads the stored code back from a Cookie header", () => {
     expect(refFromCookieHeader(`a=1; ${REF_COOKIE}=abcd2345; b=2`)).toBe("abcd2345");
     expect(refFromCookieHeader(`${REF_COOKIE}=profullstack`)).toBeNull();

@@ -26,9 +26,13 @@ export function paidRefCode(raw: string | null | undefined): string | null {
   return code;
 }
 
-/** The code a request carries: `?ref=<code>` on any page, or the `/r/<code>` landing path. */
+/**
+ * The code a request carries: `?ref=<code>` on any page, `?referral=<code>` (the same, for links
+ * that pass through an ad network whose click redirect rewrites `ref`, as crawlproof's does), or
+ * the `/r/<code>` landing path.
+ */
 export function refFromUrl(url: URL): string | null {
-  const q = paidRefCode(url.searchParams.get("ref"));
+  const q = paidRefCode(url.searchParams.get("ref")) ?? paidRefCode(url.searchParams.get("referral"));
   if (q) return q;
   const m = /^\/r\/([^/]+)\/?$/.exec(url.pathname);
   return m ? paidRefCode(decodeURIComponent(m[1])) : null;
