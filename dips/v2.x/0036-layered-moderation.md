@@ -5,10 +5,10 @@ status: Accepted
 authors:
   - anthony@profullstack.com
 created: 2026-11-22
-updated: 2026-11-22
+updated: 2026-11-25
 discussion:
   - https://github.com/profullstack/c0mpute/pull/437
-implementation:
+implementation: steps 1-4. Labels + gateway gate = c0mpute-core/src/moderation.rs; cloud-node push check = apps/web/src/lib/chat/moderation.ts; worker replicas + policy_refusal = c0mpute-core/src/hosting/policy.rs. Step 5 (space authority) is not started.
 supersedes:
 superseded-by:
 ---
@@ -140,7 +140,9 @@ Actions:
     next scan. Emit a `policy_refusal` attestation naming the label, so
     the refusal is not counted as a challenge failure. Accrued payout
     for that object is forfeited, as in DIP-0016. The replica
-    reconstitutes on a non-refusing worker.
+    reconstitutes on a non-refusing worker. (How the reference client
+    does this for hosted sites, where copies are pulled, not `PUT`: see
+    "Worker enforcement as built" below.)
   - *gateway:* answer `451` with a page that names the labeler, the
     label value and the labeler's appeal address.
 - **`warn`** (gateway only): serve an interstitial with the same
@@ -150,6 +152,58 @@ Actions:
 No layer above the operator can force an operator to subscribe to a
 labeler. A worker that subscribes to nothing is not slashed and not
 de-peered, the same commitment DIP-0016 makes for its blocklist.
+
+### Worker enforcement as built
+
+The reference client's hosting worker (rollout step 4) reads the same
+`[moderation]` table as its gateway; `refuse_replicas = false` keeps the
+policy to the gateway.
+
+- **Subject.** Hosting workers store blake3 chunks, and v1 labels name a
+  file's SHA-256 (`sha256:<hex>`). The worker puts each file of a site
+  back together from its local chunks, hashes it, and asks its labelers
+  about the hashes (`/query`, in batches; with a scan token small web
+  files go to `/scan` first). It trusts no SHA-256 a publisher states.
+- **When.** Hosted sites are pulled by the worker, so there is no `PUT`
+  to answer `451`: a new copy is judged after its chunks arrive and
+  before it is held or announced, and a refused one is deleted. Held
+  copies are judged again every `recheck_secs`; one that became labelled
+  is let go like a surplus copy (announced first, deleted one holder TTL
+  later, so a challenger with a stale view is still answered).
+- **`policy_refusal`.** The worker gossips its refusals on the hosting
+  topic with every holding announcement:
+
+  ```json
+  { "t": "policy_refusal",
+    "refusals": [ { "site_id": "<site>", "manifest": "<blake3 of the version>",
+                    "labeler": "did:web:threatcrush.com", "val": "phishing" } ] }
+  ```
+
+  It is the refuser's own statement (gossip messages are signed by their
+  source) and replaces what that peer said before; a refusal that stops
+  being repeated lapses with the holder TTL. On receipt, the peer is not
+  a holder of that version, not a candidate for it (the next ranked node
+  takes the copy) and therefore never challenged for it, so a refusal
+  produces no failed receipt. Nodes that predate the message skip it.
+- **What the owner sees.** A count of refusing replicas per labeler and
+  label value: `refused` / `refused_by` on `GET /hosting/v1/sites`, the
+  `refused:` line of `hosting publish`, and `hosting_push_status`. Peers
+  are never named.
+- **Lifting.** When the labels behind a refusal are retracted (`neg`) or
+  expire, the worker stops announcing it and is a candidate again.
+- **Fail open.** Labelers that do not answer never stop a copy; a
+  refusal already made stands while its label is unexpired.
+
+Left for later:
+
+- *Striped sites* (over 1 GiB). A worker holds groups of chunks, not
+  whole files, so it cannot hash them. Labels on a `blake3:` subject
+  (site root or chunk) would let a worker act without reassembly; v1
+  labelers issue `sha256:` only.
+- *Forfeiting accrued payout.* A refusing worker stops being challenged
+  and so stops earning, but passes it earned earlier in the settlement
+  window are still paid.
+- *The storage role's object `PUT`* (DIP-0015 shards) is not gated.
 
 ### The canonical gateway and the shared cloud node
 
@@ -279,7 +333,8 @@ they get the choice.
    matters most and should come first after 1-2.
 4. **Worker `[moderation]` config** in the reference client. The
    default stays empty, so nothing changes for anyone who doesn't opt
-   in.
+   in. *Implemented for hosted sites up to 1 GiB (#444): see "Worker
+   enforcement as built" for what it does and what it leaves out.*
 5. **Space authority:** roles record, report endpoint and queue, first
    in tsbb (`bbs.<name>`) and pit-social (`social.<name>`).
 

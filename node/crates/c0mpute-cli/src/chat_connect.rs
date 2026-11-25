@@ -205,6 +205,41 @@ pub(crate) fn parse_publish(stdout: &str) -> (Option<String>, Option<u64>, Optio
     (site, version, copies, url)
 }
 
+/// The `refused:` line of `hosting publish`: how many replicas would not
+/// hold the site under their operators' content policy (DIP-0036), then each
+/// cause as `<value> by <labeler> x<count>`. None when nobody refused.
+pub(crate) fn refused_line(refused: &[c0mpute_core::hosting::replicas::RefusalTally]) -> Option<String> {
+    let total: usize = refused.iter().map(|t| t.count).sum();
+    if total == 0 {
+        return None;
+    }
+    let causes: Vec<String> = refused
+        .iter()
+        .map(|t| format!("{} by {} x{}", t.val, t.labeler, t.count))
+        .collect();
+    Some(format!("{total} ({})", causes.join(", ")))
+}
+
+/// Read that line back: the count, and the causes as the JSON the chat
+/// account's push report takes (`[{labeler, val, count}]`).
+pub(crate) fn parse_refused(stdout: &str) -> Option<(u64, Vec<Value>)> {
+    let line = stdout.lines().find_map(|l| l.strip_prefix("refused:"))?.trim();
+    let (count, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let count: u64 = count.parse().ok()?;
+    let causes = rest
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(", ")
+        .filter_map(|c| {
+            let (val, rest) = c.split_once(" by ")?;
+            let (labeler, n) = rest.rsplit_once(" x")?;
+            Some(json!({ "labeler": labeler, "val": val, "count": n.parse::<u64>().ok()? }))
+        })
+        .collect();
+    Some((count, causes))
+}
+
 struct Api {
     base: String,
     key: String,
@@ -432,6 +467,8 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
     cmd.args(publish_args(&dir, &job.name, wait_secs, &disks));
     let (ok, stdout, tail) = run_streaming(api, job, cmd).await?;
     let (site, version, copies, url) = parse_publish(&stdout);
+    // Replicas that refused the site under their own policy (DIP-0036).
+    let (refused, refused_by) = parse_refused(&stdout).unwrap_or((0, Vec::new()));
     match (ok, site) {
         (true, Some(site)) => {
             api.report(
@@ -439,6 +476,7 @@ async fn publish(api: &Api, job: &Job, root: &Path, wait_secs: u64) -> Result<()
                 json!({
                     "ok": true, "site_id": site, "version": version, "url": url,
                     "copies": copies.unwrap_or(0), "bytes": bytes,
+                    "refused": refused, "refused_by": refused_by,
                     "note": (!skipped.is_empty()).then(|| format!("left out (expired on the network): {}", skipped.join(", "))),
                 }),
             )
@@ -618,5 +656,45 @@ mod tests {
         assert_eq!(version, Some(1762800000000));
         assert_eq!(copies, Some(3));
         assert_eq!(url.as_deref(), Some("https://gateway.c0mpute.com/s/ec601e419ec508ad0d9b/"));
+        // No replica refused: no line, nothing reported.
+        assert!(parse_refused(out).is_none());
+    }
+
+    #[test]
+    fn the_refused_line_round_trips_into_the_push_report() {
+        use c0mpute_core::hosting::replicas::RefusalTally;
+        assert_eq!(refused_line(&[]), None);
+        let tally = vec![
+            RefusalTally {
+                labeler: "did:web:threatcrush.com".into(),
+                val: "phishing".into(),
+                count: 2,
+            },
+            RefusalTally {
+                labeler: "did:web:labeler.example".into(),
+                val: "malware".into(),
+                count: 1,
+            },
+        ];
+        let line = refused_line(&tally).unwrap();
+        assert_eq!(
+            line,
+            "3 (phishing by did:web:threatcrush.com x2, malware by did:web:labeler.example x1)"
+        );
+        let out = format!("site:    ec601e419ec508ad0d9b\ncopies:  3/3\nrefused: {line}\nurl:     https://g/s/x/\n");
+        // The other fields still read as before.
+        assert_eq!(parse_publish(&out).2, Some(3));
+        let (count, causes) = parse_refused(&out).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(
+            causes,
+            vec![
+                json!({ "labeler": "did:web:threatcrush.com", "val": "phishing", "count": 2 }),
+                json!({ "labeler": "did:web:labeler.example", "val": "malware", "count": 1 }),
+            ]
+        );
+        // A count with no readable causes is still a count.
+        assert_eq!(parse_refused("refused: 1\n"), Some((1, vec![])));
+        assert!(parse_refused("refused: many\n").is_none());
     }
 }

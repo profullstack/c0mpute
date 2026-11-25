@@ -124,9 +124,14 @@ fn line(p: &Value) -> String {
     let status = p["status"].as_str().unwrap_or("?");
     match status {
         "live" => format!(
-            "live: {}{}",
+            "live: {}{}{}",
             p["url"].as_str().unwrap_or(""),
-            p["copies"].as_u64().map(|c| format!(" ({c} copies)")).unwrap_or_default()
+            p["copies"].as_u64().map(|c| format!(" ({c} copies)")).unwrap_or_default(),
+            // DIP-0036: replicas that refused it under their own policy.
+            match p["refused"].as_u64() {
+                Some(n) if n > 0 => format!(" ({n} refused by policy)"),
+                _ => String::new(),
+            }
         ),
         "failed" => format!("failed: {}", p["error"].as_str().unwrap_or("?")),
         _ => format!("{status}: {}", p["progress"].as_str().unwrap_or("waiting for the node")),
@@ -304,6 +309,11 @@ mod tests {
     #[test]
     fn status_lines() {
         assert_eq!(line(&json!({"status": "live", "url": "https://g/s/x/", "copies": 3})), "live: https://g/s/x/ (3 copies)");
+        assert_eq!(line(&json!({"status": "live", "url": "https://g/s/x/", "copies": 3, "refused": 0})), "live: https://g/s/x/ (3 copies)");
+        assert_eq!(
+            line(&json!({"status": "live", "url": "https://g/s/x/", "copies": 3, "refused": 2})),
+            "live: https://g/s/x/ (3 copies) (2 refused by policy)"
+        );
         assert_eq!(line(&json!({"status": "publishing", "progress": "2/3 network copies"})), "publishing: 2/3 network copies");
         assert_eq!(line(&json!({"status": "queued"})), "queued: waiting for the node");
     }

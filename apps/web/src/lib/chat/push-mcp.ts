@@ -39,7 +39,8 @@ export const HOSTING_TOOLS = [
   },
   {
     name: "hosting_push_status",
-    description: "A push's status (queued, publishing, live, failed, deleting), the node's latest progress line, and the site url once live.",
+    description:
+      "A push's status (queued, publishing, live, failed, deleting), the node's latest progress line, and the site url once live. A live push also has `copies` and `refused`: how many replicas declined to hold the site under their operators' own content policy, with the labeler and label value behind each in `refused_by` (never which nodes). Other nodes take those copies, so the site can still be fully replicated.",
     inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
     annotations: { title: "Site status", readOnlyHint: true, openWorldHint: false },
   },

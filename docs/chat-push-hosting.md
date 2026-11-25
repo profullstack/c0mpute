@@ -45,6 +45,17 @@ MCP (`https://c0mpute.com/api/mcp`, Bearer `c0k_` key) has `hosting_nodes`,
 `hosting_push`, `hosting_push_status`, `hosting_pushes` and `hosting_push_rm`,
 on the same per-account pushes.
 
+A live push reports `copies`, and `refused` with `refused_by`: how many
+replicas would not hold the site under their operators' own content policy
+([DIP-0036](../dips/v2.x/0036-layered-moderation.md)), and for each cause the
+labeler, the label value and a count, e.g.
+`"refused": 1, "refused_by": [{"labeler": "did:web:threatcrush.com", "val": "phishing", "count": 1}]`.
+Other nodes take those copies, so a site with refusals can still have all
+three. Which nodes refused is never reported. The numbers are what the
+publishing node had heard when it reported the site live; `/hosting/v1/sites`
+on any gateway has the current ones. `c0mpute chat push hosting status` shows
+`(N refused by policy)` after the copies.
+
 ## Linking a node
 
 c0mpute.com never publishes anything itself. On the machine that should

@@ -438,6 +438,64 @@ payer's own CoinPay business wallet:
 CoinPay has no balance call for an API key, so the round cap is the spending limit.
 Payments move only between the payer and the hosts it chose; c0mpute holds nothing.
 
+## Content policy: a host can refuse labelled sites
+
+A hosting node holds what the network places on it. An operator who does not want to
+hold, say, phishing kits subscribes to a labeler and says so
+([DIP-0036](../dips/v2.x/0036-layered-moderation.md), layer 1). It is the same
+`[moderation]` table the gateway uses for what it serves:
+
+```toml
+# ~/.config/c0mpute/config.toml
+[moderation]
+labelers = [
+  { url = "https://threatcrush.com", did = "did:web:threatcrush.com",
+    public_key = "IbytqclmwUoFutZJHl526ZFWmg_TAVf7K9LNYuYGr4M",
+    appeal = "support@threatcrush.com" },
+]
+# refuse_replicas = false   # keep the policy to the gateway; hold every copy
+
+[moderation.actions]
+malware = "refuse"
+phishing = "refuse"
+cryptominer = "refuse"
+```
+
+Off by default: with no labelers nothing changes. With them, on a node with the
+`hosting` role:
+
+- **A new copy** is fetched, its files are put back together from the chunks and
+  hashed (labels name a file's SHA-256; hosts store blake3 chunks), and the labelers
+  are asked about the hashes, 50 per call. With a scan token (`token_env`) web files
+  up to `max_scan_bytes` are sent to the labeler first, as the gateway does. If a file
+  has a label whose action is `refuse`, the copy is never held or announced and its
+  chunks are deleted.
+- **Copies already held** are asked about again every `recheck_secs` (an hour by
+  default), since a label can arrive after the copy was taken. A refused copy is let
+  go the way a surplus copy is: announced first, deleted one holder TTL later.
+- **A refusal is lifted** when the labels behind it are retracted or expire; the node
+  is then a candidate for the site again.
+- **It fails open.** A labeler that is down or slow never stops a copy; a refusal
+  already made stands while its label is unexpired.
+
+The node gossips what it refuses (`{"t":"policy_refusal","refusals":[{site_id,
+manifest, labeler, val}]}` on the hosting topic, repeated with every holding
+announcement). To every other node it is then not a holder of that version and not a
+candidate for it, so the next ranked node takes the copy, and it is not challenged for
+it: a refusal is never a failed proof and costs no standing. Nodes older than this
+message skip it; they still count the refuser as a candidate, so on a network of mostly
+older nodes a refused copy can take longer to be replaced.
+
+The owner sees how many replicas refused and why, never which: `refused` and
+`refused_by` on `GET /hosting/v1/sites`, a `refused:` line from `hosting publish`,
+and the same on a chat push ([chat-push-hosting.md](chat-push-hosting.md)).
+
+Not covered: striped sites (over 1 GiB), which a host holds in groups and cannot put
+back into files; sites this machine's own publisher key owns or pays for (the key it
+challenges with, so not with `challenge = "off"`); `warn`, which is a gateway action
+only. One operator's policy binds only that operator's node: the
+site lives on the others.
+
 ## Not yet
 
 Escrow (money held until a window is proven) and proof-of-serve challenges from DIP-0015
