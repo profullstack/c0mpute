@@ -48,6 +48,7 @@ mod site_owner;
 mod storage;
 mod swarm_cli;
 mod scallion_cli;
+mod seeding_cli;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 mod mount;
 mod node_status;
@@ -116,6 +117,22 @@ enum Cmd {
     Scallion {
         #[command(subcommand)]
         cmd: scallion_cli::ScallionCmd,
+    },
+    /// Seeding: seed the torrents c0mpute publishes. Off until you opt in.
+    ///
+    /// A node seeds only a signed list it verifies against the release key
+    /// pinned in this binary, plus .torrent files you list yourself in
+    /// `[seeding] local_torrents`. Nothing from the network can add a
+    /// torrent. It uses disk (up to the cap) and upstream bandwidth.
+    ///
+    ///   c0mpute seeding status
+    ///   c0mpute seeding on --max-bytes 20GiB
+    ///   c0mpute seeding off
+    ///   c0mpute seeding list
+    #[command(verbatim_doc_comment)]
+    Seeding {
+        #[command(subcommand)]
+        cmd: seeding_cli::SeedingCmd,
     },
     /// Benchmark this machine (fib / matmul / hash at 1…N threads) and record
     /// a score the worker advertises to the network. Report lands in
@@ -2059,6 +2076,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         Cmd::Pool { model, node: None } => run_pool(model),
         Cmd::Doctor { fix } => run_doctor(fix).await,
         Cmd::Scallion { cmd } => scallion_cli::run(cmd, &config_path).await,
+        Cmd::Seeding { cmd } => seeding_cli::run(cmd, &config_path).await,
         Cmd::Bench {
             cmd,
             quick,
@@ -2577,6 +2595,12 @@ fn worker_status_json(config_path: &std::path::Path) -> Result<serde_json::Value
             &c0mpute_core::scallion_node::ScallionEnv::from_process(),
             cfg.private.enabled || c0mpute_core::private::env_forces_private(),
         )),
+        // Seeding the torrents c0mpute publishes (off unless opted in).
+        "seeding": c0mpute_core::seeding_node::status_json(&cfg.seeding.resolve(
+            &c0mpute_core::seeding_node::SeedingEnv::from_process(),
+            cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+            &cfg.storage.root,
+        )),
         "gateway_bind": cfg.gateway.bind,
         "payments": {
             "enabled": cfg.payments.enabled,
@@ -2691,6 +2715,14 @@ async fn run_worker(cmd: WorkerCmd, config_path: &std::path::Path) -> Result<()>
                 c0mpute_core::scallion_node::status_line(&cfg.scallion.resolve(
                     &c0mpute_core::scallion_node::ScallionEnv::from_process(),
                     cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+                ))
+            );
+            println!(
+                "{}",
+                c0mpute_core::seeding_node::status_line(&cfg.seeding.resolve(
+                    &c0mpute_core::seeding_node::SeedingEnv::from_process(),
+                    cfg.private.enabled || c0mpute_core::private::env_forces_private(),
+                    &cfg.storage.root,
                 ))
             );
             print_served_models_eligibility();

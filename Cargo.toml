@@ -21,6 +21,7 @@ members = [
     "node/crates/c0mpute-transcode",    # in-process transcode workload (FFmpeg)
     "node/crates/c0mpute-secure-chat",  # in-process E2E encrypted p2p messaging (DIP-0018)
     "node/crates/c0mpute-sealed",       # client-side encrypted objects: the private storage tier (DIP-0012)
+    "node/crates/c0mpute-seeding",      # seeding: signed torrent list, disk cap, in-process BitTorrent seeder
 ]
 
 [workspace.package]
@@ -95,6 +96,7 @@ c0mpute-core = { path = "node/crates/c0mpute-core" }
 c0mpute-transcode = { path = "node/crates/c0mpute-transcode" }
 c0mpute-secure-chat = { path = "node/crates/c0mpute-secure-chat" }
 c0mpute-sealed = { path = "node/crates/c0mpute-sealed" }
+c0mpute-seeding = { path = "node/crates/c0mpute-seeding" }
 
 # Dependencies are built optimized even in dev and test builds; our own crates
 # stay at opt-level 0 so they still compile fast and debug well. Unoptimized

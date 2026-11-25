@@ -18,6 +18,7 @@ c0mpute-proto = { workspace = true }
 c0mpute-update = { workspace = true }
 c0mpute-secure-chat = { workspace = true }
 c0mpute-sealed = { workspace = true }
+c0mpute-seeding = { workspace = true }
 zeroize = { workspace = true }
 c0mpute-store = { workspace = true }
 c0mpute-placement = { workspace = true }

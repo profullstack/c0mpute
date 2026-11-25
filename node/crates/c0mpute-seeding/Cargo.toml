@@ -1,0 +1,29 @@
+[package]
+name = "c0mpute-seeding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Seeding for c0mpute nodes: a signed list of torrents we publish, a disk cap, and an in-process BitTorrent seeder."
+
+[dependencies]
+# The manifest is checked with the same minisign code and pinned key as
+# release artifacts.
+c0mpute-update = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+bytes = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+# The BitTorrent engine, in process: no Node.js, no child process and no add
+# API. TCP only (no uTP), no DHT, no local discovery; see `engine.rs`.
+# `rust-tls` keeps OpenSSL out of the static release builds.
+librqbit = { version = "9.1", default-features = false, features = ["rust-tls"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Signs test manifests with a throwaway key (the node only ever verifies).
+minisign = "0.7"

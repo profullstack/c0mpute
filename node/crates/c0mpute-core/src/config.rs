@@ -133,6 +133,11 @@ pub struct Config {
     /// until the operator opts in. Advertising only: nothing is relayed yet.
     #[serde(default)]
     pub scallion: crate::scallion_node::ScallionConfig,
+    /// Seeding: seed the torrents c0mpute publishes (a signed list the node
+    /// verifies), within a disk cap and an upload cap. Off until the
+    /// operator opts in.
+    #[serde(default)]
+    pub seeding: crate::seeding_node::SeedingConfig,
     /// Jobs at once per role, overriding what the node's resource budget
     /// derives (`crate::budget`): `[capacity] diffusion = 2`, `tts = 8`.
     /// Keys: transcode, tts, stt, workflow, crawl, video, diffusion, music,
@@ -944,6 +949,7 @@ impl Default for Config {
             render: Default::default(),
             text: Default::default(),
             scallion: Default::default(),
+            seeding: Default::default(),
             capacity: Default::default(),
         }
     }
