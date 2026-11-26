@@ -35,6 +35,8 @@ const CLIP_TAIL = 400;
 /** Digest of dropped turns appended to the system prompt. */
 const DIGEST_LINE = 160;
 const DIGEST_MAX = 2_000;
+/** Middle turns are dropped in multiples of this, so the cut moves rarely. */
+export const DROP_STEP = 8;
 
 export type ContextReport = {
   /** True when the prompt was changed to fit. */
@@ -49,7 +51,7 @@ export type ContextReport = {
 };
 
 /** Rough tokens: 4 characters each plus a little per message, as tools.ts counts usage. */
-export function estimateTokens(messages: ChatMessage[]): number {
+export function estimateTokens(messages: readonly { content: string }[]): number {
   return Math.ceil(messages.reduce((n, m) => n + m.content.length + 16, 0) / 4);
 }
 
@@ -136,6 +138,11 @@ export function fitContext(messages: ChatMessage[], budget: number): { messages:
     const dropped: ChatMessage[] = [];
     const fits = () => estimateTokens([...head, ...tail]) + Math.ceil((DIGEST_MAX + 400) / 4) <= budget;
     while (tail.length > 1 && !fits()) dropped.push(tail.shift() as ChatMessage);
+    // Drop in steps of DROP_STEP messages. The cut is worked out afresh on
+    // every request, so dropping only what is needed would move it (and the
+    // digest) every turn, and the node could never reuse its cached prefix.
+    // Rounding up keeps one cut, and one prompt prefix, for several turns.
+    while (tail.length > 1 && dropped.length % DROP_STEP !== 0) dropped.push(tail.shift() as ChatMessage);
     // Start the kept tail on a user turn when one is left to start on, so
     // no reply is kept without the question it answered.
     while (tail.length > 1 && tail[0].role !== "user") dropped.push(tail.shift() as ChatMessage);

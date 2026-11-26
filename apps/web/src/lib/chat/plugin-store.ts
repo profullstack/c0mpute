@@ -50,8 +50,20 @@ export const PLUGIN_SCHEMA = [
      updated_at TEXT NOT NULL,
      PRIMARY KEY (user_id, slug, key)
    )`,
+  // Summaries the model wrote with context__collapse (lib/chat/context-tools.ts),
+  // sealed. range = "<from tag>..<to tag>"; kept 30 days.
+  `CREATE TABLE IF NOT EXISTS chat_context_collapses (
+     user_id    TEXT NOT NULL,
+     range      TEXT NOT NULL,
+     summary    TEXT NOT NULL,
+     created_at TEXT NOT NULL,
+     PRIMARY KEY (user_id, range)
+   )`,
   CLAIMS_SCHEMA,
 ];
+
+const COLLAPSE_DAYS = 30;
+const COLLAPSES_LOADED = 200;
 
 export const MAX_PLUGINS = 20;
 export const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
@@ -443,6 +455,39 @@ export function createPluginStore(sql: Sql, opts: { key: Buffer | null; defaults
         seal(key, JSON.stringify(pending), `pending|${h}|${userId}`),
         new Date(Date.now() + PENDING_MINUTES * 60_000).toISOString(),
       ]);
+    },
+
+    /** This account's recent context__collapse summaries, oldest first. None without C0MPUTE_PLUGIN_KEY. */
+    async contextCollapses(userId: string): Promise<{ from: string; to: string; summary: string }[]> {
+      if (!opts.key) return [];
+      await init();
+      const since = new Date(Date.now() - COLLAPSE_DAYS * 86_400_000).toISOString();
+      const rows = await sql.all(
+        `SELECT range, summary, created_at FROM chat_context_collapses WHERE user_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT ${COLLAPSES_LOADED}`,
+        [userId, since],
+      );
+      const out: { from: string; to: string; summary: string }[] = [];
+      for (const r of rows.reverse()) {
+        const [from, to] = String(r.range).split("..");
+        const summary = unseal(opts.key, String(r.summary), `collapse|${userId}|${String(r.range)}`);
+        if (from && to && summary) out.push({ from, to, summary });
+      }
+      return out;
+    },
+
+    /** Keep a context__collapse summary (sealed); a no-op without C0MPUTE_PLUGIN_KEY. Prunes old ones. */
+    async saveContextCollapse(userId: string, c: { from: string; to: string; summary: string }) {
+      if (!opts.key) return;
+      await init();
+      const range = `${c.from}..${c.to}`;
+      await sql.run(`INSERT OR REPLACE INTO chat_context_collapses (user_id, range, summary, created_at) VALUES (?, ?, ?, ?)`, [
+        userId,
+        range,
+        seal(opts.key, c.summary, `collapse|${userId}|${range}`),
+        now(),
+      ]);
+      const cutoff = new Date(Date.now() - COLLAPSE_DAYS * 86_400_000).toISOString();
+      await sql.run(`DELETE FROM chat_context_collapses WHERE user_id = ? AND created_at < ?`, [userId, cutoff]);
     },
 
     /** One-shot claim for a sign-in ticket (the connect link): true once per ticket. */

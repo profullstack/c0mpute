@@ -9,6 +9,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as cp from "@profullstack/chat-plugins";
 import { chatText, type ChatRequest, type Upstream } from "./completions";
+import { contextTokensFromEnv, promptBudget } from "./context-budget";
+import { CONTEXT_SLUG, ContextSession, contextPlugin, contextToolsEnabled, stripLabels } from "./context-tools";
 import { checkPluginUrl, pluginGuard, PluginUrlError } from "./plugin-net";
 import { PluginError, type ChatPlugin, type PluginAuth, type PluginStoreDb, type PluginTokens } from "./plugin-store";
 import type { PluginEvent } from "./plugin-shared";
@@ -569,15 +571,34 @@ async function pluginTurn(
 ): Promise<PluginChatResult> {
   let model = opts.req.model ?? "auto";
   const outcomes: Promise<void>[] = [];
+  // Model-driven context (lib/chat/context-tools.ts): context__collapse /
+  // context__recall ride with the person's plugins unless one of theirs is
+  // already called "context" or CHAT_CONTEXT_TOOLS is off.
+  const ctx =
+    contextToolsEnabled() && !plugins.some((p) => p.slug === CONTEXT_SLUG)
+      ? new ContextSession({
+          budget: promptBudget(contextTokensFromEnv(), opts.req.max_tokens),
+          saved: await store.contextCollapses(opts.userId).catch(() => []),
+          persist: (c) => store.saveContextCollapse(opts.userId, c),
+          model: () => model,
+        })
+      : null;
   const complete = async (msgs: { role: string; content: string }[]) => {
     if (opts.signal?.aborted) throw new Error("cancelled");
-    const messages = msgs
+    const plain = msgs
       .filter((m) => m.role === "system" || m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "system" | "user" | "assistant", content: typeof m.content === "string" ? m.content : "" }));
+    const messages = ctx ? (ctx.view(plain) as typeof plain) : plain;
     const r = await chatText(opts.upstream, { ...opts.req, messages, stream: false }, opts.signal);
     model = r.model;
-    return r.text;
+    return ctx ? stripLabels(r.text) : r.text;
   };
+  const callTool: cp.ToolLoopOptions["callTool"] = ctx
+    ? (plugin, tool, args) =>
+        plugin.slug === CONTEXT_SLUG
+          ? ctx.call(tool, (args ?? {}) as Record<string, unknown>)
+          : cp.callTool({ url: plugin.url, token: plugin.token }, tool, args, { ...net, timeoutMs: 60_000, modelTextLimit: cp.MODEL_TEXT_LIMIT })
+    : undefined;
 
   // A call the person approved: resume as if the model had just asked for it.
   let messages: { role: string; content: string }[] = opts.req.messages.slice();
@@ -608,8 +629,9 @@ async function pluginTurn(
 
   const r = await cp.runToolLoop({
     messages,
-    plugins,
+    plugins: ctx ? [...plugins, contextPlugin] : plugins,
     complete,
+    ...(callTool ? { callTool } : {}),
     protocol: "prompt",
     maxSteps: MAX_STEPS,
     net: { ...net, timeoutMs: 60_000 },
@@ -621,7 +643,8 @@ async function pluginTurn(
         opts.emit({ type: "tool_call", id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments });
       } else if (e.type === "tool_result") {
         opts.emit({ type: "tool_result", id: e.id, plugin: e.plugin, tool: e.tool, ok: !e.isError, text: (e.text || "").slice(0, UI_TEXT) });
-        outcomes.push(noteOutcome(store, opts.userId, e.plugin, !e.isError, opts.emit));
+        // The built-in context tools are not a server that can fail or be switched off.
+        if (e.plugin !== CONTEXT_SLUG || !ctx) outcomes.push(noteOutcome(store, opts.userId, e.plugin, !e.isError, opts.emit));
       } else if (e.type === "approval_needed") {
         const c = e.call;
         const url = plugins.find((p) => p.slug === c.plugin)?.url ?? "";

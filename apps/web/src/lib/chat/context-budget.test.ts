@@ -78,6 +78,20 @@ describe("fitContext", () => {
     expect(r.messages[2].role).toBe("user");
   });
 
+  test("the cut moves in steps, so the prompt prefix holds for several turns", () => {
+    const convo: ChatMessage[] = [sys, u("TASK")];
+    for (let i = 0; i < 40; i++) convo.push(u(`q${i} ${big(1_500)}`), a(`a${i} ${big(1_500)}`));
+    const systems: string[] = [];
+    for (let turn = 0; turn < 4; turn++) {
+      const msgs = [...convo, ...Array.from({ length: turn }, (_, k) => [a(`late answer ${k} ${big(1_500)}`), u(`late q ${k} ${big(1_500)}`)]).flat()];
+      const r = fitContext([...msgs, u("now?")], 8_000);
+      expect(r.report.droppedMessages % 8 === 0 || r.messages[2].role === "user").toBe(true);
+      systems.push(r.messages[0].content);
+    }
+    const changes = systems.filter((s, i) => i > 0 && s !== systems[i - 1]).length;
+    expect(changes).toBeLessThanOrEqual(1);
+  });
+
   test("tool-result turns are not quoted in the digest", () => {
     const msgs: ChatMessage[] = [sys, u("task")];
     for (let i = 0; i < 10; i++) msgs.push(a("```tool_call\n{}\n```"), u(clientResult(`r${i} ${big(3_000)}`)));
