@@ -78,6 +78,10 @@ pub struct JobAuction {
     /// bids" (dev2's gateway, 2026-11-09: 114 bids from two benched nodes
     /// dropped in six minutes while image and song auctions failed).
     pub fallback_bidders: Vec<String>,
+    /// Bidders to rank first among comparable bids (routing::Hints::preferred):
+    /// the node that served a conversation's previous turn, whose prompt cache
+    /// is warm. A preference, not a filter: anyone may still win.
+    pub preferred_bidders: Vec<String>,
     /// The job's id in the system that bills it (Infernet job id, CoinPay
     /// invoice id). Carried on the offer, accept and receipt; billing keys
     /// on it, not on the per-auction `job_id` (see
@@ -124,6 +128,7 @@ impl JobAuction {
             allowed_bidders: Vec::new(),
             excluded_bidders: Vec::new(),
             fallback_bidders: Vec::new(),
+            preferred_bidders: Vec::new(),
             external_ref: None,
             policy: crate::routing::SelectionPolicy::default(),
             accept_notify: None,
@@ -179,6 +184,11 @@ impl JobAuction {
 
     pub fn with_fallback_bidders(mut self, peers: Vec<String>) -> Self {
         self.fallback_bidders = peers;
+        self
+    }
+
+    pub fn with_preferred_bidders(mut self, peers: Vec<String>) -> Self {
+        self.preferred_bidders = peers;
         self
     }
 
@@ -493,6 +503,7 @@ pub async fn run_auction(net: Arc<Libp2pNetwork>, auction: JobAuction) -> Result
             Vec::new()
         },
         last_won_ms: last_wins(&auction.workload_type),
+        preferred: auction.preferred_bidders.clone(),
     };
     let tied = crate::routing::rank_with(&mut bids, auction.policy, auction.deadline.as_secs(), &hints);
     if tied > 1 {

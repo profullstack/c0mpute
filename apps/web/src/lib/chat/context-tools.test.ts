@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { ContextSession, OFFER_AT, contextToolsEnabled, stripLabels, tagOf, type Collapse } from "./context-tools";
+import { ContextSession, OFFER_AT, contextToolsEnabled, stripLabels, tagOf, tagsOf, type Collapse } from "./context-tools";
 import { createPluginStore } from "./plugin-store";
 import type { Sql } from "./store";
 
@@ -99,6 +99,23 @@ describe("collapse + recall", () => {
     // A collapse whose messages are gone does nothing.
     const other = new ContextSession({ budget: 1_000_000, saved: [{ from: "abcdef", to: "fedcba", summary: "?" }] });
     expect(other.view(later)).toEqual(later);
+  });
+
+  test("identical messages get different tags, so a run of them collapses whole", async () => {
+    // Found live 2026-11-26: ten identical tool results shared one tag and
+    // `to` resolved to the first copy, collapsing 2 messages instead of 14.
+    const msgs: Msg[] = [sys, u("TASK")];
+    for (let i = 0; i < 10; i++) msgs.push(a(`call ${i}`), u(`<tool_result name="x" status="ok">\n${big(3_000)}\n</tool_result>`));
+    msgs.push(u("total?"));
+    const tags = tagsOf(msgs);
+    expect(new Set(tags).size).toBe(tags.length);
+    expect(tags[3]).toBe(tagOf(msgs[3]));
+    const s = new ContextSession({ budget: 9_000 });
+    s.view(msgs);
+    const r = await s.call("collapse", { from: tags[2], to: tags[15], summary: "pages 0-6 fine" });
+    expect(r.text).toContain("Collapsed 14 messages");
+    // Tags hold when the conversation grows.
+    expect(tagsOf([...msgs, a("ok"), u("more")]).slice(0, msgs.length)).toEqual(tags);
   });
 
   test("a wider collapse replaces the ones inside it", async () => {

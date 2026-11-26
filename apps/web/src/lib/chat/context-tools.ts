@@ -48,6 +48,21 @@ export function tagOf(m: Msg): string {
   return createHash("sha256").update(`${m.role}\n${m.content}`).digest("hex").slice(0, 6);
 }
 
+/**
+ * Tags for a whole conversation. Identical messages (the same tool result
+ * twice) would share a tag, so the n-th repeat gets the hash of its tag and
+ * n. History only grows at the end, so every message keeps its tag across turns.
+ */
+export function tagsOf(msgs: readonly Msg[]): string[] {
+  const seen = new Map<string, number>();
+  return msgs.map((m) => {
+    const base = tagOf(m);
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return n === 0 ? base : createHash("sha256").update(`${base}#${n}`).digest("hex").slice(0, 6);
+  });
+}
+
 const LABEL_RE = /⟦[ms]:[0-9a-f.]+⟧ ?/g;
 /** Remove context labels a model copied into its answer. */
 export const stripLabels = (t: string) => t.replace(LABEL_RE, "");
@@ -121,7 +136,7 @@ export class ContextSession {
 
   /** Where each applicable collapse sits in `msgs`, in order, without overlaps. */
   private spans(msgs: Msg[]): Span[] {
-    const tags = msgs.map(tagOf);
+    const tags = tagsOf(msgs);
     const out: Span[] = [];
     for (const c of this.collapses) {
       const from = tags.findIndex((t, i) => t === c.from && msgs[i].role !== "system");
@@ -137,6 +152,7 @@ export class ContextSession {
 
   private render(msgs: Msg[], labels: boolean): Msg[] {
     const spans = this.spans(msgs);
+    const tags = tagsOf(msgs);
     const out: Msg[] = [];
     for (let i = 0; i < msgs.length; i++) {
       const s = spans.find((x) => x.from === i);
@@ -150,7 +166,7 @@ export class ContextSession {
         continue;
       }
       const m = msgs[i];
-      out.push(labels && m.role !== "system" ? { ...m, content: `⟦m:${tagOf(m)}⟧ ${m.content}` } : m);
+      out.push(labels && m.role !== "system" ? { ...m, content: `⟦m:${tags[i]}⟧ ${m.content}` } : m);
     }
     return out;
   }
@@ -185,14 +201,14 @@ export class ContextSession {
   private recall(args: Record<string, unknown>): ToolResult {
     const want = tagsIn(args.tag);
     if (!want.length) return fail("Give the tag of a message, e.g. a1b2c3 (or a1b2c3..d4e5f6 for a collapsed run).");
-    const tags = this.raw.map(tagOf);
+    const tags = tagsOf(this.raw);
     const from = tags.indexOf(want[0]);
     if (from < 0) return fail(`No message with tag ${want[0]} in this conversation.`);
     const to = want[1] ? tags.findIndex((t, i) => i >= from && t === want[1]) : from;
     if (to < 0) return fail(`No message with tag ${want[1]} after ${want[0]}.`);
     const text = this.raw
       .slice(from, to + 1)
-      .map((m) => `[${m.role} ${tagOf(m)}]\n${m.content}`)
+      .map((m, k) => `[${m.role} ${tags[from + k]}]\n${m.content}`)
       .join("\n\n");
     return ok(text.length > RECALL_MAX ? `${text.slice(0, RECALL_MAX)}\n[… recall cut at ${RECALL_MAX} characters]` : text);
   }
@@ -209,7 +225,7 @@ export class ContextSession {
     if (!fromTag || !toTag) return fail("from and to must be message tags, e.g. a1b2c3.");
     if (!summary) return fail("Write a summary of what you still need from those messages.");
     if (summary.length > SUMMARY_MAX) return fail(`Keep the summary under ${SUMMARY_MAX} characters.`);
-    const tags = this.raw.map(tagOf);
+    const tags = tagsOf(this.raw);
     const from = tags.findIndex((t, i) => t === fromTag && this.raw[i].role !== "system");
     if (from < 0) return fail(`No message with tag ${fromTag}. Use the ⟦m:tag⟧ labels as shown.`);
     const to = tags.findIndex((t, i) => i >= from && t === toTag);
