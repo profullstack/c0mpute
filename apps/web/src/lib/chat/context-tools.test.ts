@@ -60,7 +60,8 @@ describe("collapse + recall", () => {
     const v = s.view(msgs);
     expect(v).toHaveLength(msgs.length - 13);
     const sum = v.find((m) => m.content.includes("[Summary of 14 earlier messages"));
-    expect(sum?.content).toContain(`⟦s:${from}..${to}⟧`);
+    // Back under the offer line after the collapse, so no labels any more.
+    expect(sum?.content.startsWith("[Summary of 14")).toBe(true);
     expect(sum?.content).toContain("total $1,234");
 
     const back = await s.call("recall", { tag: `${from}..${to}` });
@@ -141,7 +142,8 @@ describe("store", () => {
     const store = createPluginStore(sql, { key: randomBytes(32) });
     await store.saveContextCollapse("u1", { from: "aaaaaa", to: "bbbbbb", summary: "secret summary one" });
     await store.saveContextCollapse("u1", { from: "cccccc", to: "dddddd", summary: "two" });
-    expect(await store.contextCollapses("u1")).toEqual([
+    const got = (await store.contextCollapses("u1")).sort((x, y) => x.from.localeCompare(y.from));
+    expect(got).toEqual([
       { from: "aaaaaa", to: "bbbbbb", summary: "secret summary one" },
       { from: "cccccc", to: "dddddd", summary: "two" },
     ]);
