@@ -67,7 +67,7 @@ describe("collapse + recall", () => {
     const back = await s.call("recall", { tag: `${from}..${to}` });
     expect(back.isError).toBe(false);
     expect(back.text).toContain("page 0 ");
-    expect(back.text).toContain("page 6 ");
+    expect(back.text).toContain("recall cut at 12000");
     const one = await s.call("recall", { tag: tagOf(msgs[3]) });
     expect(one.text).toContain("page 0 ");
   });
