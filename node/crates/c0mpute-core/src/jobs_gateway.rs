@@ -52,6 +52,8 @@ pub const MAX_CONCURRENT_JOBS: usize = 32;
 /// Request envelope around a spec of at most [`workflow::MAX_SPEC_BYTES`].
 const MAX_REQUEST_BYTES: usize = workflow::MAX_SPEC_BYTES + 64 * 1024;
 const MAX_ALLOW_PEERS: usize = 64;
+/// Most peers a job may prefer (routing::Hints::preferred).
+const MAX_PREFER_PEERS: usize = 4;
 
 /// Workloads the bridge runs. Each knows its required capability tags, how
 /// big a result it accepts, and how to check the spec and the result.
@@ -413,6 +415,10 @@ struct JobRequest {
     max_price: Option<f64>,
     #[serde(default)]
     allow_peers: Option<Vec<String>>,
+    /// Peers to rank first when they bid (not a filter): the node that served
+    /// the conversation's previous turn, so its prompt cache is warm.
+    #[serde(default)]
+    prefer_peers: Option<Vec<String>>,
     #[serde(default)]
     timeout_ms: Option<u64>,
     /// Answer as NDJSON: `queued` / `running` events while the job waits and
@@ -512,12 +518,13 @@ async fn submit_inner(
         Some(_) => return Err(bad_request("max_price must be a non-negative number")),
     };
     let allowed = effective_allow_peers(&state.allow_peers, req.allow_peers.as_deref())?;
+    let preferred = preferred_peers(req.prefer_peers.as_deref());
     let timeout = request_timeout(req.timeout_ms);
 
     match tokio::time::timeout(
         timeout,
         run_job_with_progress(
-            state, workload, req.spec, spec_bytes, max_price, allowed, timeout, progress,
+            state, workload, req.spec, spec_bytes, max_price, allowed, preferred, timeout, progress,
         ),
     )
     .await
@@ -537,6 +544,18 @@ fn request_timeout(timeout_ms: Option<u64>) -> Duration {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
     )
+}
+
+/// Peers a caller would rather have, at most [`MAX_PREFER_PEERS`]. Only a
+/// hint, so ids that do not parse are dropped instead of failing the job.
+fn preferred_peers(requested: Option<&[String]>) -> Vec<String> {
+    requested
+        .unwrap_or(&[])
+        .iter()
+        .filter(|p| p.parse::<c0mpute_net::PeerId>().is_ok())
+        .take(MAX_PREFER_PEERS)
+        .cloned()
+        .collect()
 }
 
 /// The request's `allow_peers` narrows the bridge's global list; it may not
@@ -640,7 +659,7 @@ async fn run_job(
     allowed: Vec<String>,
     timeout: Duration,
 ) -> Result<Value, ApiError> {
-    run_job_with_progress(state, workload, spec, spec_bytes, max_price, allowed, timeout, None).await
+    run_job_with_progress(state, workload, spec, spec_bytes, max_price, allowed, Vec::new(), timeout, None).await
 }
 
 /// Run one job until it is answered, it has been requeued
@@ -663,6 +682,7 @@ async fn run_job_with_progress(
     spec_bytes: Vec<u8>,
     max_price: f64,
     allowed: Vec<String>,
+    preferred: Vec<String>,
     timeout: Duration,
     progress: Option<Progress>,
 ) -> Result<Value, ApiError> {
@@ -719,7 +739,7 @@ async fn run_job_with_progress(
         let Some(turn) = turn else {
             return Err(gave_up(workload, &spec, &required, timeout));
         };
-        let reason = match run_round(state, workload, &spec, exact_spec.as_ref(), &required, max_price, &allowed, deadline, turn, progress.as_ref()).await {
+        let reason = match run_round(state, workload, &spec, exact_spec.as_ref(), &required, max_price, &allowed, &preferred, deadline, turn, progress.as_ref()).await {
             Round::Done(r) => return r,
             Round::Requeue(reason) => reason,
         };
@@ -814,6 +834,7 @@ async fn run_round(
     required: &[String],
     max_price: f64,
     allowed: &[String],
+    preferred: &[String],
     deadline: tokio::time::Instant,
     turn: crate::buyer_queue::AuctionTurn,
     progress: Option<&Progress>,
@@ -840,6 +861,7 @@ async fn run_round(
             .with_reawards(false)
             .with_required_capabilities(required)
             .with_allowed_bidders(allowed.to_vec())
+            .with_preferred_bidders(preferred.to_vec())
             .with_fallback_bidders(state.penalties.benched())
             .with_max_price_usd(max_price)
             .with_bid_window(state.bid_window)
@@ -1351,6 +1373,18 @@ mod tests {
         );
         assert!(effective_allow_peers(&global, Some(std::slice::from_ref(&peer_b))).is_err());
         assert!(effective_allow_peers(&[], Some(&["not-a-peer".to_string()])).is_err());
+    }
+
+    #[test]
+    fn prefer_peers_is_a_lenient_capped_hint() {
+        let peer = c0mpute_net::PeerId::random().to_base58();
+        assert!(preferred_peers(None).is_empty());
+        assert_eq!(preferred_peers(Some(&[peer.clone(), "junk".into()])), vec![peer.clone()]);
+        let many: Vec<String> = (0..10).map(|_| c0mpute_net::PeerId::random().to_base58()).collect();
+        assert_eq!(preferred_peers(Some(&many)).len(), MAX_PREFER_PEERS);
+        // Old callers that never send it still parse.
+        let req: JobRequest = serde_json::from_value(json!({"workload": "infernet.inference", "spec": {}})).unwrap();
+        assert!(req.prefer_peers.is_none());
     }
 
     #[test]

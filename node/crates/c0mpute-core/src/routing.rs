@@ -123,6 +123,17 @@ pub struct Hints {
     /// When each bidder last won a job from this buyer (unix ms). A bidder
     /// that is absent never won.
     pub last_won_ms: HashMap<String, u64>,
+    /// Bidders the caller would rather have (the node that served the
+    /// conversation's previous turn, so its prompt cache is warm). A preferred
+    /// bid wins over its peers when it is not overloaded, answers with the
+    /// asked-for model (or better) and is as GPU as the best of them; when the
+    /// preferred node does not bid, nothing changes.
+    pub preferred: Vec<String>,
+}
+
+/// A bid from a preferred bidder that is not a smaller alternative.
+fn is_preferred(bid: &JobBid, hints: &Hints) -> bool {
+    !hints.preferred.is_empty() && hints.preferred.contains(&bid.bidder_peer_id) && !is_downgrade(bid, hints)
 }
 
 /// A smaller alternative to the asked-for model (an upgrade is not one).
@@ -180,6 +191,9 @@ pub fn compare_with(
                 })
                 .then_with(|| yields(a, preferred_idle, hints).cmp(&yields(b, preferred_idle, hints)))
                 .then_with(|| not_gpu(a).cmp(&not_gpu(b)))
+                // A warm prompt cache saves more than an ETA bucket is worth
+                // (re-reading a long history is most of a chat turn's time).
+                .then_with(|| is_preferred(b, hints).cmp(&is_preferred(a, hints)))
                 .then_with(|| eta_bucket(a, fastest).cmp(&eta_bucket(b, fastest)))
                 .then_with(|| last_won(a, hints).cmp(&last_won(b, hints)))
                 .then_with(|| bench_bucket(a, best).cmp(&bench_bucket(b, best)))
@@ -382,7 +396,54 @@ mod tests {
         Hints {
             upgrades: upgrades.iter().map(|m| m.to_string()).collect(),
             last_won_ms: won.iter().map(|(p, t)| (p.to_string(), *t)).collect(),
+            preferred: Vec::new(),
         }
+    }
+
+    fn prefer(peers: &[&str], won: &[(&str, u64)]) -> Hints {
+        Hints { preferred: peers.iter().map(|p| p.to_string()).collect(), ..hints(&[], won) }
+    }
+
+    #[test]
+    fn the_preferred_node_wins_over_its_peers_and_over_rotation() {
+        // Two idle GPU nodes, same model. "warm" won most recently, so the
+        // rotation would hand the job to "cold"; the preference keeps it warm.
+        let warm = gpu(bid("warm", 0.002, 30, Some(1500), Some(0.0)));
+        let cold = gpu(bid("cold", 0.001, 12, Some(1900), Some(0.0)));
+        let h = prefer(&["warm"], &[("warm", 2_000), ("cold", 1_000)]);
+        let mut bids = vec![cold.clone(), warm.clone()];
+        let tied = rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "warm");
+        assert_eq!(tied, 1, "a preferred winner is never rotated away");
+        // Without a preference the other one wins (rotation by last win).
+        let mut bids = vec![warm.clone(), cold.clone()];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &hints(&[], &[("warm", 2_000), ("cold", 1_000)]));
+        assert_eq!(bids[0].bidder_peer_id, "cold");
+    }
+
+    #[test]
+    fn a_preference_never_beats_load_gpu_or_the_asked_for_model() {
+        let h = prefer(&["warm"], &[]);
+        // Overloaded preferred node: the free one wins.
+        let mut bids = vec![gpu(bid("warm", 0.002, 30, Some(1500), Some(0.95))), gpu(bid("free", 0.002, 30, Some(1500), Some(0.0)))];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "free");
+        // A preferred CPU node does not beat an idle GPU.
+        let mut bids = vec![bid("warm", 0.001, 20, Some(9000), Some(0.0)), gpu(bid("gpu", 0.002, 25, Some(1400), Some(0.0)))];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "gpu");
+        // A preferred node offering a smaller alternative is not preferred:
+        // here only the preference could lift it over the rotation.
+        let h = prefer(&["warm"], &[("warm", 2_000)]);
+        let mut small = gpu(bid("warm", 0.002, 12, Some(1500), Some(0.2)));
+        small.model = Some("small".into());
+        small.fallback = Some(true);
+        let mut exact = gpu(bid("exact", 0.002, 12, Some(1500), Some(0.2)));
+        exact.model = Some("asked".into());
+        exact.fallback = Some(false);
+        let mut bids = vec![small, exact];
+        rank_with(&mut bids, SelectionPolicy::Smart, 600, &h);
+        assert_eq!(bids[0].bidder_peer_id, "exact");
     }
 
     #[test]
