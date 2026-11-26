@@ -5,6 +5,7 @@
 import { parseAutoModel } from "@/lib/router";
 import { parseTooling, renderMessages, type Tooling } from "./tools";
 import { expandCommands, usedCommand } from "./command-registry";
+import { contextTokensFromEnv, fitContext, promptBudget } from "./context-budget";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ChatRequest = {
@@ -136,12 +137,27 @@ export function withHousePrompt(messages: ChatMessage[]): ChatMessage[] {
   return [{ role: "system", content: C0_SYSTEM_PROMPT }, ...clean];
 }
 
+/**
+ * The messages a node receives: house prompt, then fitted to the node's
+ * context window (lib/chat/context-budget.ts). Unchanged while they fit.
+ */
+export function wireMessages(req: ChatRequest, contextTokens = contextTokensFromEnv()): ChatMessage[] {
+  const { messages, report } = fitContext(withHousePrompt(req.messages), promptBudget(contextTokens, req.max_tokens));
+  if (report.compacted) {
+    console.info(
+      `chat context: compacted ${report.before} -> ${report.after} tokens (budget ${report.budget}, ` +
+        `clipped ${report.clippedResults} tool results, dropped ${report.droppedMessages} messages)`,
+    );
+  }
+  return messages;
+}
+
 /** Forward to Infernet; the Response (JSON or SSE) is handed back as-is. */
 export async function forwardChat(upstream: Upstream, req: ChatRequest, signal?: AbortSignal) {
   return upstream("/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", accept: req.stream ? "text/event-stream" : "application/json" },
-    body: JSON.stringify({ ...wireBody(req), messages: withHousePrompt(req.messages), p2p_only: true }),
+    body: JSON.stringify({ ...wireBody(req), messages: wireMessages(req), p2p_only: true }),
     signal,
   });
 }
