@@ -6,6 +6,7 @@ import { parseAutoModel } from "@/lib/router";
 import { parseTooling, renderMessages, type Tooling } from "./tools";
 import { expandCommands, usedCommand } from "./command-registry";
 import { contextTokensFromEnv, fitContext, promptBudget } from "./context-budget";
+import { captureWorker, conversationKey, preferredWorker } from "./affinity";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ChatRequest = {
@@ -154,12 +155,18 @@ export function wireMessages(req: ChatRequest, contextTokens = contextTokensFrom
 
 /** Forward to Infernet; the Response (JSON or SSE) is handed back as-is. */
 export async function forwardChat(upstream: Upstream, req: ChatRequest, signal?: AbortSignal) {
-  return upstream("/v1/chat/completions", {
+  // Affinity (lib/chat/affinity.ts): ask for the node that served this
+  // conversation's last turn (its prompt cache is warm) and remember who
+  // answers this one.
+  const key = conversationKey(req.model, req.messages);
+  const prefer = preferredWorker(key);
+  const res = await upstream("/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", accept: req.stream ? "text/event-stream" : "application/json" },
-    body: JSON.stringify({ ...wireBody(req), messages: wireMessages(req), p2p_only: true }),
+    body: JSON.stringify({ ...wireBody(req), messages: wireMessages(req), p2p_only: true, ...(prefer ? { prefer_worker: prefer } : {}) }),
     signal,
   });
+  return res.ok ? captureWorker(res, key) : res;
 }
 
 /** Non-streaming convenience for MCP and server callers: the answer text. */
