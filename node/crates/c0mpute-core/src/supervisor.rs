@@ -331,6 +331,15 @@ impl Supervisor {
                         );
                         return;
                     }
+                    // ChatrXL (~7 GB more) installs behind Z-Image without
+                    // holding up image jobs; the offer filter below keeps
+                    // this node off ChatrXL jobs until its files are here.
+                    {
+                        let gate = config.diffusion.clone();
+                        tokio::spawn(async move {
+                            crate::diffusion::ensure_chatrxl(&gate).await;
+                        });
+                    }
                     let runner_tx = crate::diffusion::spawn_diffusion_runner(
                         net.clone(),
                         store,
@@ -345,13 +354,20 @@ impl Supervisor {
                     // fixed at subscribe time, the box's load is not.
                     let gate = config.diffusion.clone();
                     let filter: dispatch::OfferFilter =
-                        std::sync::Arc::new(move |_offer| crate::diffusion::can_serve(&gate));
+                        std::sync::Arc::new(move |offer| {
+                            crate::diffusion::can_serve(&gate)
+                                && crate::diffusion::offer_model_installed(&offer.required_capabilities)
+                        });
                     dispatch::run_worker_subscriber_with_load(
                         net,
                         crate::diffusion::WORKLOAD_TXT2IMG.to_string(),
                         with_workload_tags(
                             capabilities::tags_from_config(&config),
-                            &[crate::diffusion::ROLE_TAG, crate::diffusion::MODEL_TAG],
+                            &[
+                                crate::diffusion::ROLE_TAG,
+                                crate::diffusion::MODEL_TAG,
+                                crate::diffusion::CHATRXL_MODEL_TAG,
+                            ],
                         ),
                         Some(runner_tx),
                         Some(filter),

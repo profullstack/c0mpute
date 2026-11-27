@@ -4,7 +4,13 @@
 // checks the content policy, forwards, and can hold the request open
 // (`Prefer: wait=N`) until the MP4 is ready.
 
-export const VIDEO_MODELS = ["wan2.1-t2v-1.3b", "wan2.2-ti2v-5b"] as const;
+/**
+ * `chatrxl-uncensored` is a two-step clip (Infernet chains it): a ChatrXL
+ * first frame on a CPU worker, animated by Wan 2.2 5B. SFW only, because
+ * adult mode never takes an image input.
+ */
+export const VIDEO_MODELS = ["wan2.1-t2v-1.3b", "wan2.2-ti2v-5b", "chatrxl-uncensored"] as const;
+export const KEYFRAME_VIDEO_MODELS: readonly string[] = ["chatrxl-uncensored"];
 export const DEFAULT_VIDEO_MODEL = "wan2.1-t2v-1.3b";
 /**
  * Adult clips on the default model render on Wan 2.2 5B (720p on a 24 GiB
@@ -26,7 +32,10 @@ export function parseVideoRequest(body: unknown, opts: { adultModel?: string } =
   const model = b.model === undefined ? DEFAULT_VIDEO_MODEL : b.model;
   if (typeof model !== "string" || !(VIDEO_MODELS as readonly string[]).includes(model)) return `model must be one of: ${VIDEO_MODELS.join(", ")}`;
   if (b.image !== undefined || b.image_base64 !== undefined || b.image_url !== undefined) return "image inputs are not accepted; send a text prompt";
-  const adultModel = opts.adultModel && (VIDEO_MODELS as readonly string[]).includes(opts.adultModel) ? opts.adultModel : ADULT_VIDEO_MODEL;
+  if (b.adult === true && KEYFRAME_VIDEO_MODELS.includes(model)) {
+    return `${model} video animates a drawn first frame, and adult mode never takes an image input; turn adult mode off or use the default video model`;
+  }
+  const adultModel = opts.adultModel && (VIDEO_MODELS as readonly string[]).includes(opts.adultModel) && !KEYFRAME_VIDEO_MODELS.includes(opts.adultModel) ? opts.adultModel : ADULT_VIDEO_MODEL;
   const out: VideoRequest = { prompt, model: b.adult === true && model === DEFAULT_VIDEO_MODEL ? adultModel : model };
   if (typeof b.negative_prompt === "string" && b.negative_prompt.trim()) out.negative_prompt = b.negative_prompt.trim().slice(0, 2000);
   if (b.seed !== undefined && b.seed !== null) {
@@ -58,7 +67,8 @@ export type VideoCommand = { prompt: string; model: string };
 
 /**
  * `/video a paper boat on a pond` (also /clip, /vid): text to video on CPU
- * workers via POST /api/v1/videos. `--model wan2.2-ti2v-5b` picks the GPU model.
+ * workers via POST /api/v1/videos. `--model wan2.2-ti2v-5b` picks the GPU model;
+ * `--model chatrxl-uncensored` draws the first frame with ChatrXL and animates it.
  * Returns null when the line is not a video command, a string (usage or
  * error) when it is one but malformed.
  */

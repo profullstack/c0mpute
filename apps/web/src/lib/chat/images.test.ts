@@ -15,6 +15,13 @@ describe("chat images", () => {
     expect(typeof parseImageRequest({ prompt: "" })).toBe("string");
     expect(typeof parseImageRequest({ prompt: "x", size: "huge" })).toBe("string");
     expect(typeof parseImageRequest(null)).toBe("string");
+    // ChatrXL by field or by a --model flag inside the prompt (chat, TUI).
+    expect(parseImageRequest({ prompt: "a fox --model chatrxl-uncensored" })).toEqual({ prompt: "a fox", size: "landscape", model: "chatrxl-uncensored" });
+    expect(parseImageRequest({ prompt: "a fox", model: "chatrxl-uncensored", adult: true })).toEqual({ prompt: "a fox", size: "landscape", model: "chatrxl-uncensored", adult: true });
+    expect(parseImageRequest({ prompt: "a fox", model: "z-image-turbo" })).toEqual({ prompt: "a fox", size: "landscape" });
+    expect(typeof parseImageRequest({ prompt: "a fox --model flux" })).toBe("string");
+    expect(typeof parseImageRequest({ prompt: "a fox", model: "flux" })).toBe("string");
+    expect(typeof parseImageRequest({ prompt: "--model chatrxl-uncensored" })).toBe("string");
   });
   test("job ids are uuids", () => {
     expect(isJobId("c653a135-1f8f-4b76-8066-01c0175f73f8")).toBe(true);

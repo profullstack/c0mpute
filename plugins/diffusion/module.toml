@@ -11,12 +11,12 @@
 [module]
 id          = "diffusion"
 name        = "Diffusion — image generation"
-version     = "0.3.116"
+version     = "0.3.117"
 kind        = "workload"
 category    = "ai"
 status      = "available"
 builtin     = true
-description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo through stable-diffusion.cpp, provisioned by every node with the RAM for it."
+description = "Decentralized text-to-image on plain CPUs: Z-Image-Turbo and ChatrXL Uncensored (SDXL) through stable-diffusion.cpp, provisioned by every node with the RAM for it."
 author      = "Profullstack"
 license     = "MIT"
 keywords    = ["diffusion", "z-image", "stable-diffusion.cpp", "image", "txt2img", "cpu"]
@@ -44,5 +44,23 @@ precision  = "Q4_K"
 resolution = "256-1024 px, multiples of 64 (default 768x512)"
 workloads  = ["diffusion.txt2img"]
 license    = "Apache-2.0"
+backend    = "stable-diffusion.cpp"
+distilled  = true
+
+# ChatrXL Uncensored (ChatR Labs): SDXL/Pony family, the DMD2 8-step
+# single-file build plus its two textual-inversion embeddings, pinned and
+# SHA-256 checked in diffusion.rs. Installed in the background once
+# Z-Image-Turbo works and 17 GB is free; opt out with
+# C0MPUTE_DIFFUSION_CHATRXL=0. Chatr Labs Model License 1.0 allows commercial
+# use and hosting; its acceptable-use rules (no CSAM, no non-consensual
+# intimate imagery, no deepfakes of real people) are what content_policy
+# enforces on every gateway and worker.
+[module.models."chatrxl-uncensored"]
+repo       = "chatrlabs/ChatrXL-Uncensored"
+params     = "SDXL (2.6B UNet)"
+precision  = "fp16"
+resolution = "256-1024 px, multiples of 64 (chat default 960x640)"
+workloads  = ["diffusion.txt2img"]
+license    = "chatrlabs-model-license-1.0"
 backend    = "stable-diffusion.cpp"
 distilled  = true

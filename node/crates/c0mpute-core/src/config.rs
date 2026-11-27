@@ -606,6 +606,10 @@ pub struct DiffusionConfig {
     /// this high: its renders only use idle CPU.
     #[serde(default = "default_diffusion_max_load_per_cpu")]
     pub max_load_per_cpu: f64,
+    /// Also install ChatrXL Uncensored (SDXL, ~7 GB) once Z-Image-Turbo works
+    /// and the disk has room. `C0MPUTE_DIFFUSION_CHATRXL=0` turns it off.
+    #[serde(default = "default_true")]
+    pub chatrxl: bool,
 }
 
 impl Default for DiffusionConfig {
@@ -617,6 +621,7 @@ impl Default for DiffusionConfig {
             min_free_disk_gb: default_diffusion_min_free_disk_gb(),
             min_cpu_threads: default_diffusion_min_cpu_threads(),
             max_load_per_cpu: default_diffusion_max_load_per_cpu(),
+            chatrxl: true,
         }
     }
 }
@@ -647,6 +652,12 @@ impl DiffusionConfig {
             self.auto_install,
             std::env::var("C0MPUTE_DIFFUSION_AUTO").ok(),
         )
+    }
+
+    /// ChatrXL on top of Z-Image-Turbo: needs diffusion itself enabled.
+    pub fn chatrxl_enabled(&self) -> bool {
+        self.auto_install_enabled()
+            && auto_install_enabled_with(self.chatrxl, std::env::var("C0MPUTE_DIFFUSION_CHATRXL").ok())
     }
 }
 

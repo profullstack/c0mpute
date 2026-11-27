@@ -1814,7 +1814,10 @@ async fn generate_image(
         with_adult_tag(
             vec![
                 crate::diffusion::ROLE_TAG.to_string(),
-                crate::diffusion::MODEL_TAG.to_string(),
+                // validate() above admits only models with a tag.
+                crate::diffusion::model_tag(&input.model)
+                    .unwrap_or(crate::diffusion::MODEL_TAG)
+                    .to_string(),
             ],
             input.adult,
         ),

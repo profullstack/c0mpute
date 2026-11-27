@@ -171,7 +171,7 @@ pub fn role_tags(config: &Config) -> Vec<String> {
                 // tick, so a box that gets busy stops winning image jobs.
                 if crate::diffusion::can_serve(&config.diffusion) {
                     tags.push(crate::diffusion::ROLE_TAG.to_string());
-                    tags.push(crate::diffusion::MODEL_TAG.to_string());
+                    tags.extend(crate::diffusion::installed_model_tags().into_iter().map(String::from));
                 }
             }
             Role::Music => {
