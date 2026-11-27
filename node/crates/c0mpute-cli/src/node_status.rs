@@ -139,7 +139,11 @@ async fn role_state(role: &Role, cfg: &Config) -> RoleState {
                 gated(role, "speech-to-text model not installed (`c0mpute stt setup`)")
             }
         }
-        Role::Diffusion => from_gate(role, diffusion::gate_reason(&cfg.diffusion), "z-image-turbo on CPU"),
+        Role::Diffusion => from_gate(
+            role,
+            diffusion::gate_reason(&cfg.diffusion),
+            &format!("{} on CPU", diffusion::installed_models().join(", ")),
+        ),
         Role::Music => from_gate(role, music::gate_reason(&cfg.music), "ace-step-1.5"),
         Role::Video => {
             video::set_configured_runner(cfg.video.runner);

@@ -21,6 +21,18 @@
 //! - a per-job CPU budget of at least `min_cpu_threads` (a 16-thread box);
 //! - at least `min_free_disk_gb` free before installing;
 //! - opt-out: `C0MPUTE_DIFFUSION_AUTO=0` or `[diffusion] auto_install = false`.
+//!
+//! A second, optional model rides the same runtime: **ChatrXL Uncensored**
+//! (`chatrxl-uncensored`, an SDXL/Pony-family checkpoint by ChatR Labs, Chatr
+//! Labs Model License 1.0: commercial use and hosting allowed; its acceptable
+//! use rules, no CSAM, no non-consensual intimate imagery, no deepfakes of
+//! real people, are what `content_policy` already enforces). We run its DMD2
+//! 8-step build (one 6.94 GB single-file checkpoint with VAE and both CLIP
+//! encoders, LCM sampler, CFG 1.1) plus its two ~0.5 MB textual-inversion
+//! embeddings, all pinned to a repo commit and SHA-256 checked. The 20-step
+//! quality build is too slow for a CPU job. A node installs it in the
+//! background once Z-Image-Turbo works and the disk has room; opt out with
+//! `C0MPUTE_DIFFUSION_CHATRXL=0` or `[diffusion] chatrxl = false`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +55,19 @@ pub const WORKLOAD_TXT2IMG: &str = "diffusion.txt2img";
 pub const ROLE_TAG: &str = "c0mpute:role:diffusion";
 pub const MODEL_ID: &str = "z-image-turbo";
 pub const MODEL_TAG: &str = "c0mpute:diffusion:model:z-image-turbo";
+pub const CHATRXL_MODEL_ID: &str = "chatrxl-uncensored";
+pub const CHATRXL_MODEL_TAG: &str = "c0mpute:diffusion:model:chatrxl-uncensored";
+/// Every model `diffusion.txt2img` accepts, default first.
+pub const MODELS: [&str; 2] = [MODEL_ID, CHATRXL_MODEL_ID];
+
+/// The capability tag a worker needs for a job naming `model`.
+pub fn model_tag(model: &str) -> Option<&'static str> {
+    match model {
+        MODEL_ID => Some(MODEL_TAG),
+        CHATRXL_MODEL_ID => Some(CHATRXL_MODEL_TAG),
+        _ => None,
+    }
+}
 
 /// Largest PNG a worker returns or a buyer accepts. A 1024x1024 PNG is ~2 MB;
 /// the libp2p request-response codec caps a single blob at 10 MiB.
@@ -79,6 +104,32 @@ const WEIGHTS: [WeightFile; 3] = [
     },
 ];
 
+/// ChatrXL's checkpoint, then its two embeddings. sd-cli finds an embedding
+/// by file stem when the prompt names it, so the stems are the tokens.
+const CHATRXL_WEIGHTS: [WeightFile; 3] = [
+    WeightFile {
+        name: "chatrxl-uncensored-dmd2-fp16.safetensors",
+        url: "https://huggingface.co/chatrlabs/ChatrXL-Uncensored/resolve/7bcc200e4306e1ac6d786bc200831c20871b697f/chatrxl-uncensored-dmd2-fp16.safetensors",
+        sha256: "6fee0811a7fd8bc8a0fdca0f7d9b2ab3c952a889f69287e0e669cc72dde1c434",
+    },
+    WeightFile {
+        name: "ChatrXL_General_Positives_V1_PRO.safetensors",
+        url: "https://huggingface.co/chatrlabs/ChatrXL-Uncensored/resolve/7bcc200e4306e1ac6d786bc200831c20871b697f/embeddings/ChatrXL_General_Positives_V1_PRO.safetensors",
+        sha256: "92eedda437e38728e0360805230da309c0320e0da8d8c79d5ed7d7e94ace2e8e",
+    },
+    WeightFile {
+        name: "ChatrXL_Anatomy_Negatives_V1_PRO.safetensors",
+        url: "https://huggingface.co/chatrlabs/ChatrXL-Uncensored/resolve/7bcc200e4306e1ac6d786bc200831c20871b697f/embeddings/ChatrXL_Anatomy_Negatives_V1_PRO.safetensors",
+        sha256: "8dd9c0543b0e1a70f5950c7f5e64799d60e6275ad563aa5ca6abbb4696b51834",
+    },
+];
+/// The model card's prompt recipe: Pony score tags plus the positive embedding.
+const CHATRXL_PROMPT_PREFIX: &str = "score_9, score_8_up, score_7_up, ChatrXL_General_Positives_V1_PRO, ";
+const CHATRXL_NEGATIVE: &str = "ChatrXL_Anatomy_Negatives_V1_PRO";
+/// Disk the ChatrXL files take, and the room to leave beside them.
+const CHATRXL_DISK_GB: u64 = 7;
+const CHATRXL_SPARE_DISK_GB: u64 = 10;
+
 /// What the ready marker must say. Bumping a pin changes it, so nodes
 /// re-provision instead of running stale files.
 fn ready_stamp() -> String {
@@ -96,6 +147,30 @@ pub(crate) fn bin_dir() -> PathBuf {
 }
 pub(crate) fn models_dir() -> PathBuf {
     diffusion_root().join("models")
+}
+/// ChatrXL's checkpoint and embeddings, apart from Z-Image's files so the
+/// embeddings directory sd-cli scans holds only embeddings.
+fn chatrxl_dir() -> PathBuf {
+    models_dir().join("chatrxl")
+}
+fn chatrxl_embd_dir() -> PathBuf {
+    chatrxl_dir().join("embeddings")
+}
+fn chatrxl_path(index: usize) -> PathBuf {
+    if index == 0 {
+        chatrxl_dir().join(CHATRXL_WEIGHTS[0].name)
+    } else {
+        chatrxl_embd_dir().join(CHATRXL_WEIGHTS[index].name)
+    }
+}
+fn chatrxl_ready_marker() -> PathBuf {
+    diffusion_root().join(".ready-chatrxl")
+}
+fn chatrxl_retry_marker() -> PathBuf {
+    diffusion_root().join(".retry-after-chatrxl")
+}
+fn chatrxl_ready_stamp() -> String {
+    format!("sdcpp={SDCPP_RELEASE} model={CHATRXL_MODEL_ID}-dmd2 {}\n", &CHATRXL_WEIGHTS[0].sha256[..16])
 }
 pub(crate) fn sd_cli() -> PathBuf {
     bin_dir().join("sd-cli")
@@ -124,6 +199,35 @@ pub fn installed() -> bool {
     platform_supported()
         && sd_cli().is_file()
         && std::fs::read_to_string(ready_marker()).is_ok_and(|s| s == ready_stamp())
+}
+
+/// True when ChatrXL's pinned files are installed beside a working runtime.
+pub fn chatrxl_installed() -> bool {
+    installed() && std::fs::read_to_string(chatrxl_ready_marker()).is_ok_and(|s| s == chatrxl_ready_stamp())
+}
+
+/// The models this node can render right now (installed, not gated on load).
+pub fn installed_models() -> Vec<&'static str> {
+    let mut models = Vec::new();
+    if installed() {
+        models.push(MODEL_ID);
+        if chatrxl_installed() {
+            models.push(CHATRXL_MODEL_ID);
+        }
+    }
+    models
+}
+
+/// The model tags a worker advertises: one per installed model.
+pub fn installed_model_tags() -> Vec<&'static str> {
+    installed_models().into_iter().filter_map(model_tag).collect()
+}
+
+/// Per-offer check on top of [`can_serve`]: never bid on a job for a model
+/// whose files are not here yet (the subscription tags name both models so
+/// a ChatrXL install that lands later needs no resubscribe).
+pub fn offer_model_installed(required: &[String]) -> bool {
+    !required.iter().any(|tag| tag == CHATRXL_MODEL_TAG) || chatrxl_installed()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -420,6 +524,61 @@ pub async fn install() -> Result<()> {
     Ok(())
 }
 
+/// Install ChatrXL in the background once Z-Image works, when enabled and
+/// the disk has room for it plus a margin. Idempotent and never fatal.
+pub async fn ensure_chatrxl(config: &crate::config::DiffusionConfig) -> bool {
+    if !config.chatrxl_enabled() || !installed() {
+        return false;
+    }
+    if chatrxl_installed() {
+        return true;
+    }
+    let free = free_disk_bytes(&diffusion_root());
+    let need = (CHATRXL_DISK_GB + CHATRXL_SPARE_DISK_GB).saturating_mul(GIB);
+    if free < need {
+        info!(free_gb = free / GIB, required_gb = need / GIB, "skipping ChatrXL install: not enough free disk");
+        return false;
+    }
+    let backoff = std::fs::read_to_string(chatrxl_retry_marker())
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .is_some_and(|retry_after| now_secs() < retry_after);
+    if backoff {
+        return false;
+    }
+    info!("installing ChatrXL Uncensored DMD2 (~7 GB) so this node can serve diffusion.txt2img model {CHATRXL_MODEL_ID}");
+    match install_chatrxl().await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(chatrxl_retry_marker()).await;
+            info!("ChatrXL ready");
+            true
+        }
+        Err(error) => {
+            let retry_after = now_secs().saturating_add(INSTALL_RETRY_BACKOFF_SECS);
+            let _ = tokio::fs::write(chatrxl_retry_marker(), retry_after.to_string()).await;
+            warn!(err = %format!("{error:#}"), "could not install ChatrXL; this node serves Z-Image-Turbo only");
+            false
+        }
+    }
+}
+
+/// Download and verify ChatrXL's checkpoint and embeddings. Public so
+/// `c0mpute diffusion setup` can run it in the foreground.
+pub async fn install_chatrxl() -> Result<()> {
+    if !installed() {
+        bail!("install the diffusion runtime first (Z-Image-Turbo)");
+    }
+    tokio::fs::create_dir_all(chatrxl_embd_dir()).await?;
+    let _ = tokio::fs::remove_file(chatrxl_ready_marker()).await;
+    for (index, weight) in CHATRXL_WEIGHTS.iter().enumerate() {
+        download_verified_streaming(weight.url, &chatrxl_path(index), weight.sha256)
+            .await
+            .with_context(|| format!("download {}", weight.name))?;
+    }
+    tokio::fs::write(chatrxl_ready_marker(), chatrxl_ready_stamp()).await?;
+    Ok(())
+}
+
 /// The pinned sd.cpp runtime alone: download, verify, extract, self-test.
 /// Skipped when the runtime marker already names this release.
 pub(crate) async fn install_runtime() -> Result<()> {
@@ -649,8 +808,8 @@ impl Txt2ImgSpec {
                 "prompt must contain 1 to {MAX_PROMPT_CHARS} characters"
             ));
         }
-        if self.model != MODEL_ID {
-            return Err(format!("model must be {MODEL_ID}"));
+        if !MODELS.contains(&self.model.as_str()) {
+            return Err(format!("model must be one of: {}", MODELS.join(", ")));
         }
         for (name, value) in [("width", self.width), ("height", self.height)] {
             if !(256..=1024).contains(&value) || value % 64 != 0 {
@@ -685,15 +844,43 @@ pub async fn generate(spec: &Txt2ImgSpec, output: &Path) -> Result<()> {
         spec.prompt.clone()
     };
     let seed = spec.seed.unwrap_or_else(rand::random::<u32>);
+    command.env("LD_LIBRARY_PATH", bin_dir());
+    let prompt = if spec.model == CHATRXL_MODEL_ID {
+        if !chatrxl_installed() {
+            bail!("{CHATRXL_MODEL_ID} is not installed on this node");
+        }
+        // One SDXL checkpoint (UNet, VAE, both CLIPs); the model card's
+        // DMD2 recipe: LCM, 8 steps, CFG 1.1, anatomy embedding as the
+        // negative. At CFG 1.1 the negative still steers a little, so an
+        // SFW job also carries the NSFW terms (the classifier below is the
+        // guarantee) and an adult job the minor terms.
+        let extra = if spec.adult {
+            crate::content_policy::adult_negative_terms()
+        } else {
+            crate::content_policy::nsfw_negative_terms()
+        };
+        command
+            .arg("-m")
+            .arg(chatrxl_path(0))
+            .arg("--embd-dir")
+            .arg(chatrxl_embd_dir())
+            .args(["--sampling-method", "lcm", "--scheduler", "sgm_uniform"])
+            .args(["--cfg-scale", "1.1"])
+            .arg("-n")
+            .arg(crate::content_policy::with_negative(CHATRXL_NEGATIVE, extra));
+        format!("{CHATRXL_PROMPT_PREFIX}{}", spec.prompt.trim_start())
+    } else {
+        command
+            .arg("--diffusion-model")
+            .arg(models.join(WEIGHTS[0].name))
+            .arg("--llm")
+            .arg(models.join(WEIGHTS[1].name))
+            .arg("--vae")
+            .arg(models.join(WEIGHTS[2].name))
+            .args(["--cfg-scale", "1.0"]);
+        prompt
+    };
     command
-        .env("LD_LIBRARY_PATH", bin_dir())
-        .arg("--diffusion-model")
-        .arg(models.join(WEIGHTS[0].name))
-        .arg("--llm")
-        .arg(models.join(WEIGHTS[1].name))
-        .arg("--vae")
-        .arg(models.join(WEIGHTS[2].name))
-        .args(["--cfg-scale", "1.0"])
         // Weights stay on disk and stream in per module: 4.0 GB peak RSS
         // instead of 7.6 GB, same ~125 s on dev2 (measured 2026-11-09). On a
         // busy host the bigger footprint got the render killed by earlyoom.
@@ -895,8 +1082,8 @@ async fn run_job(
         bail!("sd-cli output is not a PNG under the 8 MiB result limit");
     }
     // SFW jobs: an explicit image is discarded, not delivered. Z-Image-Turbo
-    // runs at cfg 1.0, where a negative prompt has no effect, so this check
-    // is the SFW guarantee for images.
+    // runs at cfg 1.0 and ChatrXL at 1.1, where a negative prompt does little
+    // or nothing, so this check is the SFW guarantee for images.
     if !spec.adult {
         crate::nsfw::sfw_gate(std::slice::from_ref(&output), &job.accept.job_id).await?;
     }
@@ -1020,6 +1207,37 @@ mod tests {
         assert_eq!((spec.width, spec.height, spec.steps), (768, 512, 8));
         assert_eq!(spec.model, MODEL_ID);
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn chatrxl_is_a_second_model_with_its_own_tag() {
+        let mut s: super::Txt2ImgSpec =
+            serde_json::from_value(serde_json::json!({"prompt": "a lighthouse", "model": "chatrxl-uncensored"})).unwrap();
+        assert!(s.validate().is_ok());
+        assert_eq!(super::model_tag(&s.model), Some(super::CHATRXL_MODEL_TAG));
+        assert_eq!(super::model_tag(super::MODEL_ID), Some(super::MODEL_TAG));
+        s.model = "sdxl".into();
+        assert!(s.validate().unwrap_err().contains("chatrxl-uncensored"));
+        assert_eq!(super::model_tag("sdxl"), None);
+    }
+
+    #[test]
+    fn a_chatrxl_offer_needs_chatrxl_installed() {
+        let z = vec![super::ROLE_TAG.to_string(), super::MODEL_TAG.to_string()];
+        assert!(super::offer_model_installed(&z));
+        let c = vec![super::ROLE_TAG.to_string(), super::CHATRXL_MODEL_TAG.to_string()];
+        // No diffusion data dir in the test environment: never installed.
+        assert_eq!(super::offer_model_installed(&c), super::chatrxl_installed());
+    }
+
+    #[test]
+    fn chatrxl_pins_are_whole() {
+        for w in &super::CHATRXL_WEIGHTS {
+            assert_eq!(w.sha256.len(), 64, "{}", w.name);
+            assert!(w.url.contains("/resolve/7bcc200e4306e1ac6d786bc200831c20871b697f/"), "{}", w.url);
+            assert!(w.url.ends_with(w.name), "{}", w.url);
+        }
+        assert!(super::chatrxl_ready_stamp().contains(super::CHATRXL_MODEL_ID));
     }
 
     #[test]
