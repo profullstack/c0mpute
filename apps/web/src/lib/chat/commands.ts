@@ -7,8 +7,8 @@
 import { commandRows, commandUsage, COMMANDS, needsArgument, splitCommand } from "./command-registry";
 
 export const BUILTIN_COMMANDS: [string, string][] = [
-  ["/image <prompt>", "draw a picture on a c0mpute CPU worker (~2 min)"],
-  ["/video <prompt> [--model wan2.2-ti2v-5b]", "a short clip (Wan 2.1 on CPU, 20-30 min once a worker is free; also /clip, /vid)"],
+  ["/image <prompt> [--model chatrxl-uncensored]", "draw a picture on a c0mpute CPU worker (~2 min; Z-Image-Turbo, or ChatrXL Uncensored)"],
+  ["/video <prompt> [--model wan2.2-ti2v-5b|chatrxl-uncensored]", "a short clip (Wan 2.1 on CPU, 20-30 min once a worker is free; chatrxl-uncensored = ChatrXL first frame animated by Wan 2.2; also /clip, /vid)"],
   ["/music <style>", "a song (ACE-Step 1.5); a line \"lyrics:\" then the words adds vocals"],
   ["/album <idea>", "a band, 8 named songs with lyrics, cover art and a zip"],
   ["/promo <url> [pixar|anime|claymation|flat] [vertical]", "a promo video with narration and music"],

@@ -11,6 +11,10 @@ describe("videos", () => {
     expect(parseVideoRequest({ prompt: "x", adult: true, model: "wan2.2-ti2v-5b" })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
     expect(parseVideoRequest({ prompt: "x", adult: true }, { adultModel: "wan2.1-t2v-1.3b" })).toEqual({ prompt: "x", model: "wan2.1-t2v-1.3b", adult: true });
     expect(parseVideoRequest({ prompt: "x", adult: true }, { adultModel: "bogus" })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
+    // A ChatrXL first-frame clip is SFW only: adult mode never takes an image input.
+    expect(parseVideoRequest({ prompt: "x", model: "chatrxl-uncensored" })).toEqual({ prompt: "x", model: "chatrxl-uncensored" });
+    expect(typeof parseVideoRequest({ prompt: "x", model: "chatrxl-uncensored", adult: true })).toBe("string");
+    expect(parseVideoRequest({ prompt: "x", adult: true }, { adultModel: "chatrxl-uncensored" })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
     expect(typeof parseVideoRequest({ prompt: "x", image_base64: "AAAA" })).toBe("string");
     expect(typeof parseVideoRequest({ prompt: "" })).toBe("string");
     expect(parseVideoRequest({ prompt: "x", adult: true })).toMatchObject({ adult: true });
