@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { liveStatus } from "@/lib/chat/eta";
 import { SignInOptions } from "@/components/sign-in-options";
 import { CodeBlock } from "@/components/CodeBlock";
 import { parseImageCommand, textHistory } from "@/lib/chat/images";
@@ -332,6 +333,25 @@ class StreamStalled extends Error {}
 
 /** No byte for this long means the connection is dead (server keepalives come every 15 s). */
 const STREAM_IDLE_MS = 45_000;
+
+/**
+ * The waiting line before a turn's first word, ticking once a second: an
+ * estimate like "(about 211 s)" counts down from when it arrived, and the
+ * time waited so far is always shown (a static number read like a hang).
+ * Mounted when the turn starts, so its first render is the send time.
+ */
+function LiveStatus({ status }: { status?: string }) {
+  const [started] = useState(() => Date.now());
+  // When the current status arrived (React's "adjust state while rendering" pattern).
+  const [since, setSince] = useState<{ s: string | undefined; at: number }>({ s: status, at: started });
+  if (since.s !== status) setSince({ s: status, at: Date.now() });
+  const [now, setNow] = useState(started);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return <span className="text-[var(--color-dim)] tabular-nums">{`// ${liveStatus(status, since.at, started, Math.max(now, since.at))} ▍`}</span>;
+}
 
 /** The human line in a `: status {...}` SSE comment (where the turn is: queued, running on a node). */
 function statusLine(line: string): string | null {
@@ -1888,7 +1908,7 @@ export function ChatApp({ error }: { error: string | null }) {
                   <div className="whitespace-pre-wrap break-words">
                     {m.content ||
                       (busy && i === active.messages.length - 1 ? (
-                        <span className="text-[var(--color-dim)]">{m.status ? `// ${m.status} ▍` : "// sending it to the network… ▍"}</span>
+                        <LiveStatus status={m.status} />
                       ) : (
                         ""
                       ))}
