@@ -43,7 +43,7 @@ export function musicLine(text: string): string {
 
 export const HELP_COMMANDS: [string, string][] = [
   ["/image <prompt> [--model chatrxl-uncensored]", "draw a picture on a c0mpute CPU worker (~2 min; Z-Image-Turbo, or ChatrXL Uncensored)"],
-  ["/video <prompt> [--model chatrxl-uncensored]", "a short clip (Wan 2.1 on CPU, 20-30 min once a worker is free; chatrxl-uncensored = ChatrXL first frame animated by Wan 2.2)"],
+  ["/video <prompt> [--seconds 5-60] [--vertical] [--model wan2.1-t2v-1.3b|chatrxl-uncensored]", "a 30 s video by default (Wan 2.2 5B on GPU: planned 5 s shots of the same subjects, cut together; --seconds or 'a 15 second video' sets the length, --vertical is 9:16; wan2.1-t2v-1.3b = quick 2 s CPU draft; chatrxl-uncensored = ChatrXL first frame animated by Wan 2.2)"],
   ["/music <style> [lyrics: …]", "a song (ACE-Step 1.5); no lyrics = instrumental"],
   ["/album <idea>", "a band, 8 named songs with lyrics, cover art and a zip"],
   ["/promo <url> [pixar|anime|…] [vertical]", "a promo video with narration and music"],

@@ -1,8 +1,10 @@
-// Video generation on c0mpute.com: POST /api/v1/videos. The clip renders on a
-// c0mpute worker (video.txt2vid, Wan 2.1 1.3B on CPU by default) behind
-// Infernet's /api/chat/video, which owns billing and the free tier; c0mpute.com
-// checks the content policy, forwards, and can hold the request open
-// (`Prefer: wait=N`) until the MP4 is ready.
+// Video generation on c0mpute.com: POST /api/v1/videos. By default a 30 s
+// clip on Wan 2.2 5B (GPU workers): Infernet's /api/chat/video plans 5 s shots
+// of the same subjects, renders each on a c0mpute worker (video.txt2vid) and
+// cuts them together; it owns billing (per shot) and the free tier.
+// c0mpute.com checks the content policy, forwards, and can hold the request
+// open (`Prefer: wait=N`) until the MP4 is ready. Wan 2.1 1.3B (CPU) is a
+// ~2 s draft.
 
 /**
  * `chatrxl-uncensored` is a two-step clip (Infernet chains it): a ChatrXL
@@ -11,18 +13,20 @@
  */
 export const VIDEO_MODELS = ["wan2.1-t2v-1.3b", "wan2.2-ti2v-5b", "chatrxl-uncensored"] as const;
 export const KEYFRAME_VIDEO_MODELS: readonly string[] = ["chatrxl-uncensored"];
-export const DEFAULT_VIDEO_MODEL = "wan2.1-t2v-1.3b";
+export const DEFAULT_VIDEO_MODEL = "wan2.2-ti2v-5b";
+/** Clip length: 30 s by default (the standard short), 5 to 60. */
+export const DEFAULT_VIDEO_SECONDS = 30;
+export const MIN_VIDEO_SECONDS = 5;
+export const MAX_VIDEO_SECONDS = 60;
 /**
- * Adult clips on the default model render on Wan 2.2 5B (720p on a 24 GiB
- * GPU) instead: the 1.3B is clipped to 33 frames of 480x272 for CPU workers
- * and cannot draw what adult mode is for. C0MPUTE_ADULT_VIDEO_MODEL overrides
- * it (set it to wan2.1-t2v-1.3b when no GPU video node is online).
+ * Adult clips on the default model render on Wan 2.2 5B (it carries the adult
+ * LoRAs). C0MPUTE_ADULT_VIDEO_MODEL overrides it.
  */
 export const ADULT_VIDEO_MODEL = "wan2.2-ti2v-5b";
 /** The network queues a clip for a worker up to 2 h; so may a caller wait. */
 export const MAX_WAIT_S = 7200;
 
-export type VideoRequest = { prompt: string; model: string; negative_prompt?: string; seed?: number; adult?: true };
+export type VideoRequest = { prompt: string; model: string; seconds?: number; vertical?: true; negative_prompt?: string; seed?: number; adult?: true };
 
 /** Validate a POST body; returns the body to forward or an error string. Text to video only. */
 export function parseVideoRequest(body: unknown, opts: { adultModel?: string } = {}): VideoRequest | string {
@@ -43,6 +47,12 @@ export function parseVideoRequest(body: unknown, opts: { adultModel?: string } =
     if (!Number.isInteger(seed) || seed < 0 || seed > 4294967295) return "seed must be an integer from 0 to 4294967295";
     out.seed = seed;
   }
+  if (b.seconds !== undefined && b.seconds !== null) {
+    const n = Number(b.seconds);
+    if (!Number.isFinite(n)) return `seconds must be a number from ${MIN_VIDEO_SECONDS} to ${MAX_VIDEO_SECONDS}`;
+    out.seconds = Math.max(MIN_VIDEO_SECONDS, Math.min(MAX_VIDEO_SECONDS, Math.round(n)));
+  }
+  if (b.vertical === true) out.vertical = true;
   if (b.adult === true) out.adult = true;
   return out;
 }
@@ -63,12 +73,15 @@ export const isVideoJobId = (id: string) => UUID.test(id);
 
 // ── the /video chat command (web chat, `c0mpute chat` and the TUI) ──────────
 
-export type VideoCommand = { prompt: string; model: string };
+export type VideoCommand = { prompt: string; model: string; seconds?: number; vertical?: true };
 
 /**
- * `/video a paper boat on a pond` (also /clip, /vid): text to video on CPU
- * workers via POST /api/v1/videos. `--model wan2.2-ti2v-5b` picks the GPU model;
- * `--model chatrxl-uncensored` draws the first frame with ChatrXL and animates it.
+ * `/video a paper boat on a pond` (also /clip, /vid): a 30 s clip via POST
+ * /api/v1/videos (Wan 2.2 5B, planned 5 s shots). `--seconds N` (5-60, also
+ * --duration/--length, or just write "a 15 second video") sets the length;
+ * `--vertical` renders 9:16 for phones. `--model wan2.1-t2v-1.3b` is a quick
+ * ~2 s CPU draft; `--model chatrxl-uncensored` draws the first frame with
+ * ChatrXL and animates it.
  * Returns null when the line is not a video command, a string (usage or
  * error) when it is one but malformed.
  */
@@ -83,9 +96,26 @@ export function parseVideoCommand(text: string): VideoCommand | string | null {
     model = flag[1]!;
     rest = rest.replace(flag[0], " ").trim();
   }
+  let seconds: number | undefined;
+  const len = /(?:^|\s)--(?:seconds|duration|length|secs?)[=\s]+(\S+)/i.exec(rest);
+  if (len) {
+    const n = Number(len[1]!.replace(/s$/i, ""));
+    if (!Number.isFinite(n) || n <= 0) return `--seconds must be a number from ${MIN_VIDEO_SECONDS} to ${MAX_VIDEO_SECONDS}`;
+    seconds = Math.max(MIN_VIDEO_SECONDS, Math.min(MAX_VIDEO_SECONDS, Math.round(n)));
+    rest = rest.replace(len[0], " ").trim();
+  }
+  let vertical = false;
+  const vert = /(?:^|\s)--(?:vertical|portrait|9:16)(?=\s|$)/i.exec(rest);
+  if (vert) {
+    vertical = true;
+    rest = rest.replace(vert[0], " ").trim();
+  }
   if (!rest) return "usage: /video <what happens in the clip>";
   if (rest.length > 2000) return "prompt must contain 1 to 2000 characters";
-  return { prompt: rest, model };
+  const out: VideoCommand = { prompt: rest, model };
+  if (seconds !== undefined) out.seconds = seconds;
+  if (vertical) out.vertical = true;
+  return out;
 }
 
 /**
@@ -93,8 +123,12 @@ export function parseVideoCommand(text: string): VideoCommand | string | null {
  * (attested account AND the switch on), exactly as /image sends it: the key
  * is present only when true, never `adult: false`.
  */
-export function videoRequestBody(cmd: VideoCommand, adult: boolean): { prompt: string; model: string; adult?: true } {
-  return adult ? { prompt: cmd.prompt, model: cmd.model, adult: true } : { prompt: cmd.prompt, model: cmd.model };
+export function videoRequestBody(cmd: VideoCommand, adult: boolean): { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true } {
+  const body: { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true } = { prompt: cmd.prompt, model: cmd.model };
+  if (cmd.seconds !== undefined) body.seconds = cmd.seconds;
+  if (cmd.vertical) body.vertical = true;
+  if (adult) body.adult = true;
+  return body;
 }
 
 export type VideoProgress = { stage?: string | null; detail?: string | null; queue_position?: number | null; eta_s?: number | null; worker?: string | null };

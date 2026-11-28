@@ -17,10 +17,12 @@ const holdCap = () => {
 };
 
 /**
- * Generate a video clip on the c0mpute network (Wan 2.1 1.3B on CPU workers
- * by default; 20-30 minutes once a worker is free, queued up to 2 h).
+ * Generate a video on the c0mpute network: by default a 30 s clip on Wan 2.2
+ * 5B (GPU), cut from planned 5 s shots (Infernet runs the shots and bills per
+ * shot); `seconds` 5-60, `vertical: true` for 9:16; wan2.1-t2v-1.3b is a 2 s
+ * CPU draft. Each shot queues up to 2 h for a worker.
  *
- *   POST { prompt, model?, negative_prompt?, seed?, adult?: true }
+ *   POST { prompt, model?, seconds?, vertical?, negative_prompt?, seed?, adult?: true }
  *     -> 202 { id, status, model, poll, video } (default; `model` is what renders: adult clips move to Wan 2.2 5B)
  *     -> 200 video/mp4                          (with `Prefer: wait=N` and done within N s, N <= 7200)
  *
