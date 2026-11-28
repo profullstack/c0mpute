@@ -84,7 +84,7 @@ function PushCard({ p }: { p: PushView }) {
   );
 }
 
-function VideoCard({ v, revealed, onReveal }: { v: VideoView; revealed: boolean; onReveal: () => void }) {
+function VideoCard({ v, revealed, onReveal, onCancel }: { v: VideoView; revealed: boolean; onReveal: () => void; onCancel?: () => void }) {
   const running = v.status === "starting" || v.status === "pending";
   const hidden = v.adult && !revealed;
   return (
@@ -97,6 +97,11 @@ function VideoCard({ v, revealed, onReveal }: { v: VideoView; revealed: boolean;
         <span className="ml-auto">
           {running ? <Elapsed since={v.started} /> : v.seconds ? <span className="text-[var(--color-dim)]">{clock(v.seconds)}</span> : null}
         </span>
+        {running && v.id && onCancel && (
+          <button type="button" onClick={onCancel} className="border border-[var(--color-warn)] px-2 text-[var(--color-warn)]" title="stop this clip: it leaves the network's queue at once">
+            cancel
+          </button>
+        )}
       </p>
       {running && <p className="text-[var(--color-dim)]">{v.status === "starting" ? "sending it to the network…" : v.progress ?? "queued for a c0mpute worker"}</p>}
       {v.status === "done" && v.url && (
@@ -1085,6 +1090,8 @@ export function ChatApp({ error }: { error: string | null }) {
   );
 
   const polling = useRef(new Set<string>());
+  /** Clip ids the person cancelled: their poll loops stop. */
+  const cancelled = useRef(new Set<string>());
 
   /** Poll a push every 2 s until it is live, failed or deleted, updating its card. */
   const pollPush = useCallback(
@@ -1150,6 +1157,7 @@ export function ChatApp({ error }: { error: string | null }) {
       try {
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 5000));
+          if (cancelled.current.has(view.id)) return;
           const res = await fetch(`/api/v1/videos/${view.id}`, { cache: "no-store" }).catch(() => null);
           const body = res ? await res.json().catch(() => null) : null;
           const out = videoPollOutcome(res?.status ?? 0, body);
@@ -1169,6 +1177,22 @@ export function ChatApp({ error }: { error: string | null }) {
         set({ status: "failed", progress: null, error: "gave up waiting: the network queues a clip for up to 2 hours" });
       } finally {
         polling.current.delete(key);
+      }
+    },
+    [patchMsg],
+  );
+
+  /**
+   * Cancel a clip on the network (DELETE /api/v1/videos/<id>): it leaves the
+   * queue at once instead of waiting up to 2 h in front of later clips, and a
+   * worker already rendering it stops. The card shows it as cancelled.
+   */
+  const cancelVideo = useCallback(
+    async (convoId: string, index: number, id: string | null) => {
+      patchMsg(convoId, index, (m) => (m.video ? { ...m, video: { ...m.video, status: "failed", progress: null, error: "cancelled" } } : m));
+      if (id) {
+        cancelled.current.add(id);
+        await fetch(`/api/v1/videos/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
       }
     },
     [patchMsg],
@@ -1794,6 +1818,13 @@ export function ChatApp({ error }: { error: string | null }) {
                     if (activeId === c.id) setActiveId(next[0]?.id ?? null);
                     return next;
                   });
+                  // Its clips still queued or rendering stop on the network too.
+                  for (const m of c.messages) {
+                    if (m.video?.id && (m.video.status === "pending" || m.video.status === "starting")) {
+                      cancelled.current.add(m.video.id);
+                      void fetch(`/api/v1/videos/${encodeURIComponent(m.video.id)}`, { method: "DELETE" }).catch(() => {});
+                    }
+                  }
                   // Gone on the account too, so other devices drop it at their next sync.
                   if (me) void fetch(`/api/v1/chat/conversations/${encodeURIComponent(c.id)}`, { method: "DELETE" }).catch(() => {});
                 }}
@@ -1928,6 +1959,7 @@ export function ChatApp({ error }: { error: string | null }) {
                     v={m.video}
                     revealed={!!m.revealed}
                     onReveal={() => active && update(active.id, (c) => ({ ...c, messages: c.messages.map((x, k) => (k === i ? { ...x, revealed: true } : x)) }))}
+                    onCancel={() => active && void cancelVideo(active.id, i, m.video?.id ?? null)}
                   />
                 )}
                 {m.image && (
