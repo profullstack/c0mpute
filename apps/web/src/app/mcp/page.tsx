@@ -58,7 +58,7 @@ DELETE /api/v1/chat/plugins/example`}</CodeBlock>
         <p className="leading-relaxed">
           Servers with OAuth open a sign-in window and refresh their own tokens. Servers that take a key get it as{" "}
           <code>Authorization: Bearer</code>: c0mpute checks it against the server first, keeps it encrypted and never
-          shows it again. The catalog has CoinPay, Mercury, ThreatCrush, Microsoft Learn and more, one click each.
+          shows it again. The catalog has CoinPay, Mercury, ThreatCrush, Microsoft Learn, pit.world web search and more, one click each.
         </p>
       </section>
 

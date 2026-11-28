@@ -3,7 +3,7 @@
 // Infernet chat: @profullstack/chat-plugins (src/money.js). This module only
 // re-exports it so the rest of c0mpute imports from one local path.
 //
-// DOCS_CATALOG (Microsoft Learn) comes from the same package: public,
+// DOCS_CATALOG (Microsoft Learn, pit.world web search) comes from the same package: public,
 // read-only documentation servers with no sign-in, on by default, no policy.
 //
 // The gate runs in the tool-call layer (plugins.ts livePlugins/refreshTools):
