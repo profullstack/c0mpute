@@ -20,7 +20,7 @@
 [module]
 id          = "nixamp"
 name        = "nixamp — run a radio station on your node"
-version     = "0.3.119"
+version     = "0.3.120"
 kind        = "service"
 category    = "media"
 status      = "available"
