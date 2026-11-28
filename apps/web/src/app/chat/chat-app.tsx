@@ -1228,7 +1228,12 @@ export function ChatApp({ error }: { error: string | null }) {
   }, [convos, pollVideo, patchMsg]);
 
   async function makeVideo(convo: Convo, text: string, cmd: VideoCommand) {
-    const adult = adultMode;
+    // /video is always a general clip; only /porn asks for 18+, and only with 18+ mode on.
+    if (cmd.adult && !adultMode) {
+      addTurn(convo, text, { role: "assistant", content: "// /porn makes an 18+ clip: verify your age and turn 18+ mode on in settings first. /video makes a general clip." });
+      return;
+    }
+    const adult = cmd.adult === true && adultMode;
     const view: VideoView = { id: null, prompt: cmd.prompt, model: cmd.model, adult, status: "starting", progress: null, seconds: null, url: null, error: null, started: Date.now() };
     const startKey = `video-start:${convo.id}:${convo.messages.length + 1}`;
     polling.current.add(startKey);

@@ -73,7 +73,8 @@ export const isVideoJobId = (id: string) => UUID.test(id);
 
 // ── the /video chat command (web chat, `c0mpute chat` and the TUI) ──────────
 
-export type VideoCommand = { prompt: string; model: string; seconds?: number; vertical?: true };
+/** `adult` is set only by /porn (alias /nsfw): /video is always a general clip, whatever the 18+ switch says. */
+export type VideoCommand = { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true };
 
 /**
  * `/video a paper boat on a pond` (also /clip, /vid): a 30 s clip via POST
@@ -86,9 +87,10 @@ export type VideoCommand = { prompt: string; model: string; seconds?: number; ve
  * error) when it is one but malformed.
  */
 export function parseVideoCommand(text: string): VideoCommand | string | null {
-  const m = /^\/(?:video|clip|vid)(?:\s+([\s\S]*))?$/i.exec(String(text ?? "").trim());
+  const m = /^\/(video|clip|vid|porn|nsfw)(?:\s+([\s\S]*))?$/i.exec(String(text ?? "").trim());
   if (!m) return null;
-  let rest = (m[1] ?? "").trim();
+  const adult = /^(porn|nsfw)$/i.test(m[1]!);
+  let rest = (m[2] ?? "").trim();
   let model: string = DEFAULT_VIDEO_MODEL;
   const flag = /(?:^|\s)--model[=\s]+(\S+)/.exec(rest);
   if (flag) {
@@ -110,20 +112,23 @@ export function parseVideoCommand(text: string): VideoCommand | string | null {
     vertical = true;
     rest = rest.replace(vert[0], " ").trim();
   }
-  if (!rest) return "usage: /video <what happens in the clip>";
+  if (!rest) return adult ? "usage: /porn <what happens in the clip> (18+, needs 18+ mode on)" : "usage: /video <what happens in the clip>";
   if (rest.length > 2000) return "prompt must contain 1 to 2000 characters";
   const out: VideoCommand = { prompt: rest, model };
   if (seconds !== undefined) out.seconds = seconds;
   if (vertical) out.vertical = true;
+  if (adult) out.adult = true;
   return out;
 }
 
 /**
  * The POST /api/v1/videos body for a command. `adult` is the chat's 18+ mode
- * (attested account AND the switch on), exactly as /image sends it: the key
- * is present only when true, never `adult: false`.
+ * (attested account AND the switch on); the clip is 18+ only when the command
+ * was /porn AND 18+ mode is on. /video never sends adult, so a general clip is
+ * checked by the general rules. The key is present only when true.
  */
-export function videoRequestBody(cmd: VideoCommand, adult: boolean): { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true } {
+export function videoRequestBody(cmd: VideoCommand, adultMode: boolean): { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true } {
+  const adult = cmd.adult === true && adultMode;
   const body: { prompt: string; model: string; seconds?: number; vertical?: true; adult?: true } = { prompt: cmd.prompt, model: cmd.model };
   if (cmd.seconds !== undefined) body.seconds = cmd.seconds;
   if (cmd.vertical) body.vertical = true;

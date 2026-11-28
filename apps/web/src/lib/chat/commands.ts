@@ -9,6 +9,7 @@ import { commandRows, commandUsage, COMMANDS, needsArgument, splitCommand } from
 export const BUILTIN_COMMANDS: [string, string][] = [
   ["/image <prompt> [--model chatrxl-uncensored]", "draw a picture on a c0mpute CPU worker (~2 min; Z-Image-Turbo, or ChatrXL Uncensored)"],
   ["/video <prompt> [--seconds 5-60] [--vertical] [--model wan2.1-t2v-1.3b|chatrxl-uncensored]", "a 30 s video by default (Wan 2.2 5B on GPU: planned 5 s shots of the same subjects, cut together; --seconds or 'a 15 second video' sets the length, --vertical is 9:16; wan2.1-t2v-1.3b = quick 2 s CPU draft; chatrxl-uncensored = ChatrXL first frame animated by Wan 2.2; also /clip, /vid)"],
+  ["/porn <prompt> [--seconds 5-60] [--vertical]", "an 18+ clip (verified account with 18+ mode on; same 30 s Wan 2.2 shots as /video; also /nsfw). /video is always a general clip"],
   ["/music <style>", "a song (ACE-Step 1.5); a line \"lyrics:\" then the words adds vocals"],
   ["/album <idea>", "a band, 8 named songs with lyrics, cover art and a zip"],
   ["/promo <url> [pixar|anime|claymation|flat] [vertical]", "a promo video with narration and music"],

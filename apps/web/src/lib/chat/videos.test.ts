@@ -64,8 +64,20 @@ describe("videos", () => {
     expect(parseVideoRequest(videoRequestBody(long, false))).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b", seconds: 10, vertical: true });
   });
 
+  test("/video is always general; /porn (and /nsfw) asks for 18+, sent only with 18+ mode on", () => {
+    const v = parseVideoCommand("/video a cat and a dog in combat gear") as { prompt: string; model: string; adult?: true };
+    expect(v.adult).toBeUndefined();
+    expect(videoRequestBody(v, true)).not.toHaveProperty("adult");
+    const p = parseVideoCommand("/porn two adults on a beach --seconds 10") as { prompt: string; model: string; adult?: true; seconds?: number };
+    expect(p).toEqual({ prompt: "two adults on a beach", model: "wan2.2-ti2v-5b", seconds: 10, adult: true });
+    expect(videoRequestBody(p, true)).toMatchObject({ adult: true });
+    expect(videoRequestBody(p, false)).not.toHaveProperty("adult");
+    expect((parseVideoCommand("/nsfw x") as { adult?: true }).adult).toBe(true);
+    expect(parseVideoCommand("/porn")).toContain("usage: /porn");
+  });
+
   test("adult is sent only in 18+ mode, and only as true", () => {
-    const cmd = { prompt: "a paper boat", model: "wan2.1-t2v-1.3b" };
+    const cmd = { prompt: "a paper boat", model: "wan2.1-t2v-1.3b", adult: true as const };
     expect(videoRequestBody(cmd, false)).toEqual({ prompt: "a paper boat", model: "wan2.1-t2v-1.3b" });
     expect(videoRequestBody(cmd, false)).not.toHaveProperty("adult");
     expect(videoRequestBody(cmd, true)).toEqual({ prompt: "a paper boat", model: "wan2.1-t2v-1.3b", adult: true });
