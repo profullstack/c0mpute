@@ -73,6 +73,6 @@ describe("adult flag wiring", () => {
     expect(src).toContain("const adultMode = adultModeActive(adultPref, me?.adult_verified_at);");
     expect(src).toContain('body: JSON.stringify(adult ? { prompt, adult: true } : { prompt })');
     expect(src).toContain("body: JSON.stringify(videoRequestBody(cmd, adult))");
-    expect(src).toMatch(/async function makeVideo[\s\S]*?const adult = adultMode;/);
+    expect(src).toMatch(/async function makeVideo[\s\S]*?const adult = cmd.adult === true && adultMode;/);
   });
 });
