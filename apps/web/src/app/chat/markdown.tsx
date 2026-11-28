@@ -219,6 +219,12 @@ export function SourceCards({ sources }: { sources: SourceCard[] }) {
   const withImage = sources.filter((s) => s.image);
   return (
     <div className="mt-2 mb-1 text-xs">
+      <p className="text-[var(--color-dim)] mb-1">
+        searched on{" "}
+        <a href="https://pit.world" target="_blank" rel="noopener noreferrer" className="underline">
+          pit.world
+        </a>
+      </p>
       {withImage.length > 0 && (
         <div className="flex gap-2 overflow-x-auto pb-1">
           {withImage.map((s) => (

@@ -202,6 +202,8 @@ const QUEUE_DEADLINE_MS = 3 * 60 * 60_000;
 const clock = (s: number) => (s < 120 ? `${s}s` : `${Math.floor(s / 60)} min`);
 
 const ADULT_MODE = "c0_adult_mode";
+/** "0" = this browser turned web search (pit.world) off; anything else = on (the default). */
+const WEB_SEARCH = "c0_web_search";
 
 /**
  * 18+ mode. Turning it on takes an attestation (a checkbox and a confirm),
@@ -481,6 +483,23 @@ export function ChatApp({ error }: { error: string | null }) {
     } catch {}
   };
   const adultMode = adultModeActive(adultPref, me?.adult_verified_at);
+  // Web search on pit.world: on by default, the composer toggle turns it off for this browser.
+  const [webSearch, setWebSearchState] = useState(true);
+  const webSearchRef = useRef(true);
+  useEffect(() => {
+    try {
+      const off = localStorage.getItem(WEB_SEARCH) === "0";
+      setWebSearchState(!off);
+      webSearchRef.current = !off;
+    } catch {}
+  }, []);
+  const setWebSearch = (v: boolean) => {
+    setWebSearchState(v);
+    webSearchRef.current = v;
+    try {
+      localStorage.setItem(WEB_SEARCH, v ? "1" : "0");
+    } catch {}
+  };
 
   useEffect(() => {
     fetch("/api/v1/me")
@@ -1481,8 +1500,8 @@ export function ChatApp({ error }: { error: string | null }) {
           messages: textHistory(history).map(({ role, content }) => ({ role, content })),
           stream: true,
           plugin_events: true,
-          // Factual questions get searched on the web first (sources shown as cards).
-          web: true,
+          // Questions get searched on pit.world first (sources shown as cards), unless this browser turned it off.
+          web: webSearchRef.current,
           // The server finishes the turn even if this tab closes or the
           // connection drops; the run id lets us (or a reload) reattach.
           resumable: true,
@@ -2130,8 +2149,26 @@ export function ChatApp({ error }: { error: string | null }) {
             )}
             <div ref={bottom} />
           </div>
+          <div className="border-t border-[var(--color-rule)] px-3 pt-2 text-xs text-[var(--color-dim)] flex items-center gap-2">
+            <label className="inline-flex items-center gap-1 cursor-pointer select-none" title="search pit.world before answering a question and cite the pages it used">
+              <input type="checkbox" checked={webSearch} onChange={(e) => setWebSearch(e.target.checked)} />
+              web search
+            </label>
+            <span>
+              {webSearch ? (
+                <>
+                  on ·{" "}
+                  <a href="https://pit.world" target="_blank" rel="noopener noreferrer" className="underline">
+                    pit.world
+                  </a>
+                </>
+              ) : (
+                "off: answers from the model alone"
+              )}
+            </span>
+          </div>
           <form
-            className="relative border-t border-[var(--color-rule)] p-3 flex gap-2"
+            className="relative p-3 flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               send();
