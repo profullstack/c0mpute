@@ -142,6 +142,10 @@ pub struct ReplaceCfg {
     pub gpus: Vec<String>,
     #[serde(default = "d_ram")]
     pub min_gpu_ram_gb: f64,
+    /// Host RAM floor. A video node offloads Wan 2.2 5B to host memory on a
+    /// 24 GB card (~29 GB RSS): a 30 GB box OOM-kills the render (2026-11-28).
+    #[serde(default)]
+    pub min_cpu_ram_gb: f64,
     #[serde(default = "d_rel")]
     pub min_reliability: f64,
     #[serde(default = "d_disk")]
@@ -238,6 +242,7 @@ boot_timeout_minutes = 8
 # max_usd_per_hour = 0.12
 # gpus = ["RTX 3060", "RTX 3070", "RTX 4060 Ti"]
 # min_gpu_ram_gb = 12
+# min_cpu_ram_gb = 0                        # host RAM floor (a 5B video node needs ~60)
 # min_reliability = 0.98
 # disk_gb = 60
 # image = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
@@ -611,7 +616,8 @@ impl Provider {
         let q = json!({
             "verified": {"eq": true}, "external": {"eq": false}, "rentable": {"eq": true}, "rented": {"eq": false},
             "gpu_name": {"in": r.gpus}, "num_gpus": {"eq": 1},
-            "gpu_ram": {"gte": r.min_gpu_ram_gb * 1000.0}, "reliability2": {"gte": r.min_reliability},
+            "gpu_ram": {"gte": r.min_gpu_ram_gb * 1000.0}, "cpu_ram": {"gte": r.min_cpu_ram_gb * 1000.0},
+            "reliability2": {"gte": r.min_reliability},
             "dph_total": {"lte": r.max_usd_per_hour},
             "order": [["dph_total", "asc"]], "type": "on-demand", "allocated_storage": r.disk_gb, "limit": 10
         });
