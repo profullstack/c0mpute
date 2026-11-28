@@ -4,7 +4,7 @@
 // sessions, CLI/API keys, device codes). The table is still called chat_users
 // because chat shipped first; every surface reads it.
 //
-// Storage is the site's SQLite Cloud database (SQLITE_CLOUD_URL). The store is
+// Storage is the site's SQLite database (DATABASE_PATH, a local file). The store is
 // written against a two-method `Sql` interface so tests run it on bun:sqlite.
 
 import { createHash, randomBytes, randomInt } from "node:crypto";

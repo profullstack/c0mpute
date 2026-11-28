@@ -136,7 +136,7 @@ let started = false;
 const HOLDER = `${process.pid}-${randomBytes(4).toString("hex")}`;
 /** Every minute for the life of the server; one server at a time holds the lease. */
 export function startFleetAlerts(everyMs = 60_000) {
-  if (started || env("C0MPUTE_FLEET_ALERTS") === "0" || !env("SQLITE_CLOUD_URL")) return;
+  if (started || env("C0MPUTE_FLEET_ALERTS") === "0" || !(env("DATABASE_PATH") || env("SQLITE_CLOUD_URL"))) return;
   started = true;
   let running = false;
   const tick = async () => {
