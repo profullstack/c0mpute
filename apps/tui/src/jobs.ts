@@ -481,13 +481,13 @@ async function saveBody(res: Response, dest: string): Promise<void> {
 /** The body the start POST sends, per kind (the web chat's exact shapes). */
 export function startBody(
   kind: JobKind,
-  args: { prompt: string; lyrics?: string; adult?: boolean; model?: string; style?: string; vertical?: boolean; brief?: string; url?: string },
+  args: { prompt: string; lyrics?: string; adult?: boolean; model?: string; style?: string; vertical?: boolean; brief?: string; url?: string; seconds?: number },
 ): Record<string, unknown> {
   switch (kind) {
     case "image":
       return args.adult ? { prompt: args.prompt, adult: true } : { prompt: args.prompt };
     case "video":
-      return { prompt: args.prompt, model: args.model, ...(args.adult ? { adult: true } : {}) };
+      return { prompt: args.prompt, model: args.model, ...(args.seconds !== undefined ? { seconds: args.seconds } : {}), ...(args.vertical ? { vertical: true } : {}), ...(args.adult ? { adult: true } : {}) };
     case "music":
       return { prompt: args.prompt, lyrics: args.lyrics ?? "" };
     case "album":

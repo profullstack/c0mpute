@@ -387,7 +387,19 @@ export class Controller {
       case "image":
         return this.generate(text, "image", cmd.prompt, startBody("image", { prompt: cmd.prompt, adult: adultActive(this.state) }));
       case "video":
-        return this.generate(text, "video", cmd.video.prompt, startBody("video", { prompt: cmd.video.prompt, model: cmd.video.model, adult: adultActive(this.state) }));
+        // /video is always a general clip; only /porn (with 18+ on) asks for an adult one.
+        return this.generate(
+          text,
+          "video",
+          cmd.video.prompt,
+          startBody("video", {
+            prompt: cmd.video.prompt,
+            model: cmd.video.model,
+            ...(cmd.video.seconds !== undefined ? { seconds: cmd.video.seconds } : {}),
+            ...(cmd.video.vertical ? { vertical: true } : {}),
+            adult: cmd.video.adult === true && adultActive(this.state),
+          }),
+        );
       case "music":
         return this.generate(text, "music", cmd.music.prompt, startBody("music", { prompt: cmd.music.prompt, lyrics: cmd.music.lyrics }));
       case "album":
