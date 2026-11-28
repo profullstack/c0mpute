@@ -1,5 +1,5 @@
 import { isVideoJobId } from "@/lib/chat/videos";
-import { currentUser, infernet, json, ownsJob, unauthorized } from "@/lib/chat/server";
+import { currentUser, infernet, json, ownsJob, sameOrigin, unauthorized } from "@/lib/chat/server";
 
 export const dynamic = "force-dynamic";
 
@@ -34,4 +34,30 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return json({ id, status: "done", seconds: num(body.seconds) ?? null, bytes: num(body.bytes) ?? null, model: str(body.model) ?? null, adult: body.adult === true, video: `/api/v1/videos/${id}/video` });
   }
   return json({ error: { message: str(body.error) ?? "video failed", code: upstream.status } }, upstream.status);
+}
+
+/**
+ * DELETE /api/v1/videos/<id>: stop a clip that is queued or rendering. The
+ * network drops it from its queue at once (it no longer waits up to 2 h in
+ * front of later clips) and a worker already rendering it is told to stop.
+ * Idempotent: 200 { status: "cancelled" }; 409 once it finished.
+ */
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const user = await currentUser(req);
+  if (!user) return unauthorized();
+  if (!sameOrigin(req)) return json({ error: { message: "cross-site request refused", code: 403 } }, 403);
+  const { id } = await params;
+  if (!isVideoJobId(id)) return json({ error: { message: "unknown video job", code: 404 } }, 404);
+  if (!(await ownsJob(user.id, id))) return json({ error: { message: "unknown video job", code: 404 } }, 404);
+  let upstream: Response;
+  try {
+    upstream = await infernet(`/api/chat/video/${id}`, { method: "DELETE", signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    return json({ error: { message: `network unreachable: ${e instanceof Error ? e.message : e}`, code: 502, retry: true } }, 502);
+  }
+  const body = (await upstream.json().catch(() => null)) as Record<string, unknown> | null;
+  if (upstream.ok) return json({ id, status: "cancelled" });
+  const msg = typeof body?.error === "string" ? body.error.slice(0, 200) : "could not cancel";
+  const code = upstream.status === 404 || upstream.status === 409 ? upstream.status : 502;
+  return json({ error: { message: msg, code } }, code);
 }
