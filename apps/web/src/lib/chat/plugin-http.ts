@@ -62,6 +62,12 @@ export function pluginChatResponse(opts: { userId: string; upstream: Upstream; r
         const r = await run({
           ...opts,
           signal,
+          // The web chat shows these in place of "sending it to the network…".
+          status: (message) => {
+            try {
+              ctrl.enqueue(enc.encode(`: status ${JSON.stringify({ state: "plugins", message })}\n\n`));
+            } catch {}
+          },
           emit: (event) => (opts.events ? send({ object: PLUGIN_EVENT_OBJECT, event }) : asked.push(event)),
         });
         if (!opts.events) r.text += approvalNote(asked);

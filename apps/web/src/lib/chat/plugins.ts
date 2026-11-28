@@ -8,7 +8,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as cp from "@profullstack/chat-plugins";
-import { chatText, type ChatRequest, type Upstream } from "./completions";
+import { streamChatText, type ChatRequest, type Upstream } from "./completions";
 import { contextTokensFromEnv, promptBudget } from "./context-budget";
 import { CONTEXT_SLUG, ContextSession, contextPlugin, contextToolsEnabled, stripLabels } from "./context-tools";
 import { checkPluginUrl, pluginGuard, PluginUrlError } from "./plugin-net";
@@ -537,6 +537,8 @@ export async function runPluginChat(opts: {
   emit: (e: PluginEvent) => void;
   store?: PluginStoreDb;
   signal?: AbortSignal;
+  /** Progress for the person while the turn runs (": status" lines in the web chat). */
+  status?: (message: string) => void;
   /** Tests only: network options for a local MCP server. */
   net?: cp.NetOptions;
   /** Tests only: the money policy for a local URL. */
@@ -547,7 +549,8 @@ export async function runPluginChat(opts: {
   const policy = opts.policy ?? policyFor;
   const plugins = await livePlugins(opts.userId, store, opts.emit, net, policy);
   if (!plugins.length) {
-    const r = await chatText(opts.upstream, { ...opts.req, stream: false }, opts.signal);
+    opts.status?.("asking a node…");
+    const r = await streamChatText(opts.upstream, opts.req, { signal: opts.signal, onStatus: opts.status });
     return { text: r.text, model: r.model, stopped: "done" };
   }
   const budget = stepBudget(opts.userId);
@@ -589,7 +592,8 @@ async function pluginTurn(
       .filter((m) => m.role === "system" || m.role === "user" || m.role === "assistant")
       .map((m) => ({ role: m.role as "system" | "user" | "assistant", content: typeof m.content === "string" ? m.content : "" }));
     const messages = ctx ? (ctx.view(plain) as typeof plain) : plain;
-    const r = await chatText(opts.upstream, { ...opts.req, messages, stream: false }, opts.signal);
+    opts.status?.("asking a node…");
+    const r = await streamChatText(opts.upstream, { ...opts.req, messages }, { signal: opts.signal, onStatus: opts.status });
     model = r.model;
     return ctx ? stripLabels(r.text) : r.text;
   };
@@ -640,6 +644,7 @@ async function pluginTurn(
     onEvent: (e) => {
       if (e.type === "tool_call") {
         countStep(opts.userId);
+        opts.status?.(`running ${e.plugin} · ${e.tool}…`);
         opts.emit({ type: "tool_call", id: e.id, plugin: e.plugin, tool: e.tool, arguments: e.arguments });
       } else if (e.type === "tool_result") {
         opts.emit({ type: "tool_result", id: e.id, plugin: e.plugin, tool: e.tool, ok: !e.isError, text: (e.text || "").slice(0, UI_TEXT) });
