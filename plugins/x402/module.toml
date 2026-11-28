@@ -21,7 +21,7 @@
 [module]
 id          = "x402"
 name        = "x402 — charge bots for hosted files"
-version     = "0.3.117"
+version     = "0.3.118"
 kind        = "service"
 category    = "applications"
 status      = "available"
