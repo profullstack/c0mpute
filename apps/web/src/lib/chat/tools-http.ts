@@ -5,7 +5,7 @@
 // call that could not be read.
 
 import { parseAutoModel } from "@/lib/router";
-import { C0_SYSTEM_PROMPT, forwardChat, listModels, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
+import { C0_SYSTEM_PROMPT, listModels, streamChatText, UpstreamError, type ChatMessage, type ChatRequest, type Upstream } from "./completions";
 import {
   applyChoice,
   autoToolModels,
@@ -34,20 +34,19 @@ type CallResult = { text: string; model: string };
 
 /** One non-streamed model call; throws ToolChatError carrying the upstream status. */
 export async function callModel(upstream: Upstream, model: string, messages: ChatMessage[], req: ChatRequest, signal?: AbortSignal): Promise<CallResult> {
-  const timeout = AbortSignal.timeout(240_000);
-  const res = await forwardChat(
-    upstream,
-    { model, messages, stream: false, ...(req.max_tokens ? { max_tokens: req.max_tokens } : {}), ...(req.temperature !== undefined ? { temperature: req.temperature } : {}) },
-    signal ? AbortSignal.any([signal, timeout]) : timeout,
-  );
-  const type = res.headers.get("content-type") ?? "";
-  if (!type.includes("json")) {
-    await res.body?.cancel().catch(() => {});
-    throw new ToolChatError(503, `the c0mpute network is restarting or busy (upstream HTTP ${res.status}); try again in a minute`);
+  // Streamed underneath (no fixed 240 s ceiling); the upstream status survives.
+  try {
+    const r = await streamChatText(
+      upstream,
+      { model, messages, ...(req.max_tokens ? { max_tokens: req.max_tokens } : {}), ...(req.temperature !== undefined ? { temperature: req.temperature } : {}) },
+      { signal },
+    );
+    return { text: r.text, model: r.model || model };
+  } catch (e) {
+    if (e instanceof UpstreamError) throw new ToolChatError(e.status, e.message);
+    if (e instanceof DOMException && e.name === "TimeoutError") throw new ToolChatError(504, e.message);
+    throw e;
   }
-  const body = (await res.json().catch(() => ({}))) as { model?: string; choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-  if (!res.ok) throw new ToolChatError(res.status, body.error?.message || `inference failed (HTTP ${res.status})`);
-  return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? model };
 }
 
 let modelsCache: { at: number; ids: string[] } | null = null;

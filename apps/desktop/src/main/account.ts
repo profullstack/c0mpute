@@ -241,7 +241,10 @@ export async function complete(
   const body = await api<{ model?: string; choices?: { message?: { content?: string } }[] }>("/v1/chat/completions", {
     method: "POST",
     body: JSON.stringify({ model: model || undefined, messages, stream: false, max_tokens: 4096 }),
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
+    // The server no longer caps a slow node (it streams underneath); 300 s here
+    // cut long answers off with "The operation timed out." (2026-11-28).
+    // 20 min matches the server's own stop for a turn.
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20 * 60_000)]) : AbortSignal.timeout(20 * 60_000),
   });
   const message = body.choices?.[0]?.message;
   return { content: message?.content ?? "", message, model: body.model };

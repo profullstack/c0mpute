@@ -213,7 +213,7 @@ pub async fn ask(a: AskArgs) -> Result<()> {
     let site = base_url(a.site.as_deref());
     let slug = slug_of(&a.expert);
     let http = client()?;
-    let (status, text) = send(http.post(format!("{site}/api/v1/experts/{slug}/ask")).json(&ask_body(&question)).timeout(std::time::Duration::from_secs(320)), Some(key)).await?;
+    let (status, text) = send(http.post(format!("{site}/api/v1/experts/{slug}/ask")).json(&ask_body(&question)).timeout(std::time::Duration::from_secs(1200)) /* the server streams underneath now; 320 s cut slow nodes off */, Some(key)).await?;
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     if !status.is_success() {
         let mut err = api_error(status, &text);

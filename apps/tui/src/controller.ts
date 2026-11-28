@@ -421,7 +421,7 @@ export class Controller {
    */
   private async follow(
     index: number,
-    go: (onDelta: (t: string) => void, signal: AbortSignal, opts: { onRun: (id: string) => void; onReset: () => void }) => Promise<string>,
+    go: (onDelta: (t: string) => void, signal: AbortSignal, opts: { onRun: (id: string) => void; onReset: () => void; onStatus: (s: string) => void }) => Promise<string>,
     run?: string,
   ): Promise<void> {
     this.abort = new AbortController();
@@ -444,6 +444,10 @@ export class Controller {
           onReset: () => {
             acc = "";
             this.patchMsg(index, { content: "" });
+          },
+          // Until the first token: show where the turn is, not a blank bubble.
+          onStatus: (s) => {
+            if (!acc) this.patchMsg(index, { content: `// ${s}` });
           },
         },
       );
@@ -469,7 +473,7 @@ export class Controller {
     const last = msgs[i];
     if (!last || last.role !== "assistant" || !last.run || !this.deps.api.signedIn) return;
     const run = last.run;
-    await this.follow(i, (onDelta, signal, opts) => this.deps.api.resumeRun(run, onDelta, signal, opts.onReset), run);
+    await this.follow(i, (onDelta, signal, opts) => this.deps.api.resumeRun(run, onDelta, signal, opts.onReset, 6, opts.onStatus), run);
   }
 
   // ─── account sync ─────────────────────────────────────────────────────

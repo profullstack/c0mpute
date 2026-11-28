@@ -6,7 +6,7 @@
 // OpenAI-shaped responses with the routing receipt attached.
 
 import { Router, buildProfiles, classify, parseAutoModel, type CallFn, type Effort, type ModelProfile, type Msg, type PriceTable, type Receipt, type RouteOptions, type Snapshot, type StatsStore } from "@/lib/router";
-import { forwardChat, isPoisonedTurn, listModels, type ChatRequest, type Upstream } from "./completions";
+import { forwardChat, isPoisonedTurn, listModels, streamChatText, type ChatRequest, type Upstream } from "./completions";
 import type { Sql } from "./store";
 
 export const ROUTE_HEADER = "x-c0mpute-route";
@@ -110,21 +110,15 @@ export function infernetCall(upstream: Upstream): CallFn {
     const req: ChatRequest = { model, messages, stream: false };
     if (opts.maxTokens) req.max_tokens = opts.maxTokens;
     if (opts.temperature !== undefined) req.temperature = opts.temperature;
-    const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(280_000)]) : AbortSignal.timeout(280_000);
-    const res = await forwardChat(upstream, req, signal);
-    const body = (await res.json().catch(() => ({}))) as {
-      model?: string;
-      choices?: { message?: { content?: string }; finish_reason?: string }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-      error?: { message?: string };
-    };
-    if (!res.ok) throw new Error(body.error?.message || `HTTP ${res.status}`);
+    // Streamed underneath: a fixed 280 s ceiling cut slow nodes off mid-answer
+    // (2026-11-28); now only a first-token budget and an idle gap apply.
+    const r = await streamChatText(upstream, req, { signal: opts.signal });
     return {
-      text: body.choices?.[0]?.message?.content ?? "",
-      model: body.model ?? model,
-      finishReason: body.choices?.[0]?.finish_reason,
-      inTokens: body.usage?.prompt_tokens,
-      outTokens: body.usage?.completion_tokens,
+      text: r.text,
+      model: r.model || model,
+      finishReason: r.finishReason,
+      inTokens: r.usage?.prompt_tokens,
+      outTokens: r.usage?.completion_tokens,
     };
   };
 }

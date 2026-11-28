@@ -421,6 +421,10 @@ enum StreamEnd {
 async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: &mut Vec<Held>, track: Option<&RunTrack>) -> Result<StreamEnd> {
     let mut out = std::io::stdout();
     let mut buf = String::new();
+    // A status line (queued, asking a node, running a tool) shown on stderr
+    // until the first token, then wiped: a slow network is never a blank screen.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let mut status_shown = false;
     loop {
         let chunk = match res.chunk().await {
             Ok(Some(c)) => c,
@@ -436,12 +440,24 @@ async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: 
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim().to_string();
             buf.drain(..=nl);
+            if let Some(s) = line.strip_prefix(": status") {
+                if tty && answer.is_empty() {
+                    if let Some(msg) = serde_json::from_str::<Value>(s.trim()).ok().as_ref().and_then(|v| v["message"].as_str()) {
+                        eprint!("\r\x1b[2K\x1b[2m// {msg}\x1b[0m");
+                        status_shown = true;
+                    }
+                }
+                continue;
+            }
             let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
             if data == "[DONE]" {
                 return Ok(StreamEnd::Done);
             }
             let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
             if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
+                if status_shown {
+                    eprintln!();
+                }
                 out.flush().ok();
                 bail!("{msg}");
             }
@@ -456,6 +472,10 @@ async fn read_stream(res: &mut reqwest::Response, answer: &mut String, waiting: 
                 continue;
             }
             if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                if status_shown {
+                    eprint!("\r\x1b[2K");
+                    status_shown = false;
+                }
                 answer.push_str(t);
                 print!("{t}");
                 out.flush().ok();

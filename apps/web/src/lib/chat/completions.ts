@@ -169,19 +169,21 @@ export async function forwardChat(upstream: Upstream, req: ChatRequest, signal?:
   return res.ok ? captureWorker(res, key) : res;
 }
 
-/** Non-streaming convenience for MCP and server callers: the answer text. */
-export async function chatText(upstream: Upstream, req: ChatRequest, signal?: AbortSignal): Promise<{ text: string; model: string }> {
-  // The caller's signal (a closed connection, Stop, MCP cancel) ends the
-  // upstream request at once, not at the 5-minute ceiling.
-  const timeout = AbortSignal.timeout(300_000);
-  const res = await forwardChat(upstream, { ...req, stream: false }, signal ? AbortSignal.any([timeout, signal]) : timeout);
-  const body = (await res.json().catch(() => ({}))) as {
-    model?: string;
-    choices?: { message?: { content?: string } }[];
-    error?: { message?: string };
-  };
-  if (!res.ok) throw new Error(body.error?.message || `inference failed (HTTP ${res.status})`);
-  return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? req.model ?? "auto" };
+/**
+ * The answer text, for MCP and server callers. Streamed underneath
+ * (streamChatText): no total ceiling, so a slow node that keeps writing
+ * finishes; the caller's signal still ends it at once.
+ */
+export async function chatText(upstream: Upstream, req: ChatRequest, signal?: AbortSignal, onStatus?: (message: string) => void): Promise<{ text: string; model: string }> {
+  const r = await streamChatText(upstream, req, { signal, onStatus });
+  return { text: r.text, model: r.model };
+}
+
+/** An upstream failure that keeps its HTTP status (402 top up, 429, 503...). */
+export class UpstreamError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
 }
 
 /**
@@ -193,6 +195,8 @@ export async function chatText(upstream: Upstream, req: ChatRequest, signal?: Ab
 export const STEP_FIRST_BYTE_MS = 600_000;
 /** How long a streamed step may go without a byte once the node is writing tokens. */
 export const STEP_IDLE_MS = 120_000;
+
+export type StreamedText = { text: string; model: string; finishReason?: string; usage?: { prompt_tokens?: number; completion_tokens?: number } };
 
 /**
  * The answer text like chatText, but streamed from the node so the caller
@@ -207,7 +211,7 @@ export async function streamChatText(
   upstream: Upstream,
   req: ChatRequest,
   opts: { signal?: AbortSignal; onStatus?: (message: string) => void; firstByteMs?: number; idleMs?: number } = {},
-): Promise<{ text: string; model: string }> {
+): Promise<StreamedText> {
   const idle = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, idle.signal]) : idle.signal;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -226,9 +230,24 @@ export async function streamChatText(
     const res = await forwardChat(upstream, { ...req, stream: true }, signal);
     const type = res.headers.get("content-type") ?? "";
     if (!type.includes("event-stream") || !res.body) {
-      const body = (await res.json().catch(() => ({}))) as { model?: string; choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-      if (!res.ok || body.error) throw new Error(body.error?.message || `inference failed (HTTP ${res.status})`);
-      return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? req.model ?? "auto" };
+      if (!type.includes("json")) {
+        // An nginx/HTML page (Infernet restarting, a deploy).
+        await res.body?.cancel().catch(() => {});
+        if (!res.ok) throw new UpstreamError(503, `the c0mpute network is restarting or busy (upstream HTTP ${res.status}); try again in a minute`);
+      }
+      const body = (await res.json().catch(() => ({}))) as {
+        model?: string;
+        choices?: { message?: { content?: string }; finish_reason?: string }[];
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+        error?: { message?: string };
+      };
+      if (!res.ok || body.error) throw new UpstreamError(res.ok ? 502 : res.status, body.error?.message || `inference failed (HTTP ${res.status})`);
+      return {
+        text: body.choices?.[0]?.message?.content ?? "",
+        model: body.model ?? req.model ?? "auto",
+        finishReason: body.choices?.[0]?.finish_reason,
+        usage: body.usage,
+      };
     }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -237,6 +256,9 @@ export async function streamChatText(
     let model = req.model ?? "auto";
     let pieces = 0;
     let lastNote = 0;
+    let finishReason: string | undefined;
+    let usage: StreamedText["usage"];
+    const result = (): StreamedText => ({ text, model, finishReason, usage });
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -260,16 +282,23 @@ export async function streamChatText(
         const data = line.slice(5).trim();
         if (data === "[DONE]") {
           void reader.cancel().catch(() => {});
-          return { text, model };
+          return result();
         }
-        let j: { model?: string; error?: { message?: string }; choices?: { delta?: { content?: string } }[] };
+        let j: {
+          model?: string;
+          error?: { message?: string };
+          choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
         try {
           j = JSON.parse(data);
         } catch {
           continue;
         }
-        if (j.error) throw new Error(j.error.message || "inference failed");
+        if (j.error) throw new UpstreamError(502, j.error.message || "inference failed");
         if (typeof j.model === "string" && j.model) model = j.model;
+        if (j.choices?.[0]?.finish_reason) finishReason = j.choices[0].finish_reason;
+        if (j.usage) usage = j.usage;
         const piece = j.choices?.[0]?.delta?.content;
         if (typeof piece === "string" && piece) {
           if (!started) {
@@ -286,7 +315,7 @@ export async function streamChatText(
         }
       }
     }
-    return { text, model };
+    return result();
   } catch (e) {
     throw reason(e);
   } finally {
