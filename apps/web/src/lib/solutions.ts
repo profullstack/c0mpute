@@ -341,7 +341,7 @@ c0mpute tts auto off           # leave speech to other nodes`,
     label: "c0mpute video",
     desc: "short clips and promo videos",
     summary:
-      "Short clips rendered on network workers with the Wan models, from chat or over the API, and promo videos of a website with narration and music. A clip takes 20 to 30 minutes on CPU once a worker is free.",
+      "Short clips rendered on network workers with the Wan models, from chat or over the API, and promo videos of a website with narration and music. A /video is 30 seconds by default (5 to 60), Wan 2.2 5B shots planned around your subjects and cut together on GPU workers.",
     install: API_KEY,
     example: `curl -sS https://c0mpute.com/api/v1/videos \\
   -H "Authorization: Bearer $C0MPUTE_KEY" -H "Content-Type: application/json" \\

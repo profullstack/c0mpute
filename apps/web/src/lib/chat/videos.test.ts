@@ -3,8 +3,13 @@ import { gateGeneration } from "./adult";
 import { describeVideoProgress, MAX_WAIT_S, parseVideoCommand, parseVideoRequest, preferWait, videoPollOutcome, videoRequestBody } from "./videos";
 
 describe("videos", () => {
-  test("defaults to Wan 2.1 1.3B, text only", () => {
-    expect(parseVideoRequest({ prompt: " a lighthouse at dusk " })).toEqual({ prompt: "a lighthouse at dusk", model: "wan2.1-t2v-1.3b" });
+  test("defaults to Wan 2.2 5B (a 30 s clip upstream), text only", () => {
+    expect(parseVideoRequest({ prompt: " a lighthouse at dusk " })).toEqual({ prompt: "a lighthouse at dusk", model: "wan2.2-ti2v-5b" });
+    expect(parseVideoRequest({ prompt: "x", seconds: 15, vertical: true })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", seconds: 15, vertical: true });
+    expect(parseVideoRequest({ prompt: "x", seconds: 999 })).toMatchObject({ seconds: 60 });
+    expect(parseVideoRequest({ prompt: "x", seconds: 1 })).toMatchObject({ seconds: 5 });
+    expect(typeof parseVideoRequest({ prompt: "x", seconds: "long" })).toBe("string");
+    expect(parseVideoRequest({ prompt: "x", vertical: "yes" })).not.toHaveProperty("vertical");
     expect(typeof parseVideoRequest({ prompt: "x", model: "sora" })).toBe("string");
     // Adult clips on the default model go to the GPU model; an explicit 5B stays; the env override wins.
     expect(parseVideoRequest({ prompt: "x", adult: true })).toEqual({ prompt: "x", model: "wan2.2-ti2v-5b", adult: true });
@@ -37,7 +42,12 @@ describe("videos", () => {
 
   // The same vectors as apps/tui's logic.test.ts: one grammar for /video everywhere.
   test("/video grammar (shared with the TUI)", () => {
-    expect(parseVideoCommand("/video a paper boat")).toEqual({ prompt: "a paper boat", model: "wan2.1-t2v-1.3b" });
+    expect(parseVideoCommand("/video a paper boat")).toEqual({ prompt: "a paper boat", model: "wan2.2-ti2v-5b" });
+    expect(parseVideoCommand("/video --model wan2.1-t2v-1.3b a paper boat")).toEqual({ prompt: "a paper boat", model: "wan2.1-t2v-1.3b" });
+    expect(parseVideoCommand("/video --seconds 15 --vertical rain on a window")).toEqual({ prompt: "rain on a window", model: "wan2.2-ti2v-5b", seconds: 15, vertical: true });
+    expect(parseVideoCommand("/video rain --duration=45s")).toEqual({ prompt: "rain", model: "wan2.2-ti2v-5b", seconds: 45 });
+    expect(parseVideoCommand("/video rain --seconds 500")).toMatchObject({ seconds: 60 });
+    expect(parseVideoCommand("/video rain --seconds lots")).toContain("--seconds must be");
     expect(parseVideoCommand("/clip --model wan2.2-ti2v-5b waves")).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b" });
     expect(parseVideoCommand("/vid waves --model=wan2.2-ti2v-5b")).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b" });
     expect(parseVideoCommand("/video --model nope waves")).toContain("model must be one of");
@@ -49,7 +59,9 @@ describe("videos", () => {
     expect(parseVideoCommand("/video-promo https://c0mpute.com")).toBeNull();
     // Whatever the chat sends passes the API's own validation.
     const cmd = parseVideoCommand("/video a paper boat on a pond") as { prompt: string; model: string };
-    expect(parseVideoRequest(videoRequestBody(cmd, false))).toEqual({ prompt: "a paper boat on a pond", model: "wan2.1-t2v-1.3b" });
+    expect(parseVideoRequest(videoRequestBody(cmd, false))).toEqual({ prompt: "a paper boat on a pond", model: "wan2.2-ti2v-5b" });
+    const long = parseVideoCommand("/video --seconds 10 --vertical waves") as { prompt: string; model: string; seconds: number; vertical: true };
+    expect(parseVideoRequest(videoRequestBody(long, false))).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b", seconds: 10, vertical: true });
   });
 
   test("adult is sent only in 18+ mode, and only as true", () => {

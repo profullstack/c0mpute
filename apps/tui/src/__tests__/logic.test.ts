@@ -82,7 +82,8 @@ describe("commands", () => {
   });
 
   it("parses /video with an optional model", () => {
-    expect(parseVideoCommand("/video a paper boat")).toEqual({ prompt: "a paper boat", model: "wan2.1-t2v-1.3b" });
+    expect(parseVideoCommand("/video a paper boat")).toEqual({ prompt: "a paper boat", model: "wan2.2-ti2v-5b" });
+    expect(parseVideoCommand("/video --seconds 15 waves")).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b", seconds: 15 });
     expect(parseVideoCommand("/clip --model wan2.2-ti2v-5b waves")).toEqual({ prompt: "waves", model: "wan2.2-ti2v-5b" });
     expect(parseVideoCommand("/video --model nope waves")).toContain("model must be one of");
     expect(parseVideoCommand("/video")).toBe("usage: /video <what happens in the clip>");

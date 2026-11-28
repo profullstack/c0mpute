@@ -474,13 +474,16 @@ curl -sS https://c0mpute.com/v1/chat/completions \\
 
       <Section h="videos" title="[ generate video (API) ]">
         <P>
-          <code>POST /api/v1/videos</code> renders a clip on a c0mpute worker
-          (Wan 2.1 1.3B on CPU by default, about 20 to 30 minutes once a worker
-          is free; the network queues a clip for up to 2 hours). Authenticate
+          <code>POST /api/v1/videos</code> renders a clip on c0mpute workers:
+          by default 30 seconds on Wan 2.2 5B, planned as 5 second shots of the
+          same subjects and cut together (<code>seconds</code> 5 to 60, or a
+          length in the prompt; <code>vertical: true</code> for 9:16;{" "}
+          <code>model: &quot;wan2.1-t2v-1.3b&quot;</code> is a quick 2 second CPU
+          draft). The network queues each shot for up to 2 hours. Authenticate
           with an API key from the chat&apos;s keys tab. It answers 202 with a
           status URL; send <code>Prefer: wait=N</code> (up to 7200 seconds) to
           get the MP4 in the same response when it finishes within N seconds,
-          else the same 202. Billed per clip to your compute balance, or one
+          else the same 202. Billed per shot to your compute balance, or one
           free daily query.
         </P>
         <Code>

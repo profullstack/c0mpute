@@ -26,12 +26,34 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   if (upstream.status === 202) {
     return json(
-      { id, status: "pending", seconds: num(body.seconds) ?? null, stage: str(body.stage), detail: str(body.detail), queue_position: num(body.queue_position), eta_s: num(body.eta_s), worker: str(body.worker ?? body.worker_peer_id) },
+      {
+        id,
+        status: "pending",
+        seconds: num(body.seconds) ?? null,
+        stage: str(body.stage),
+        detail: str(body.detail),
+        queue_position: num(body.queue_position),
+        eta_s: num(body.eta_s),
+        worker: str(body.worker ?? body.worker_peer_id),
+        shots: num(body.shots),
+        shots_done: num(body.shots_done),
+        clip_seconds: num(body.clip_seconds),
+      },
       202,
     );
   }
   if (upstream.status === 200) {
-    return json({ id, status: "done", seconds: num(body.seconds) ?? null, bytes: num(body.bytes) ?? null, model: str(body.model) ?? null, adult: body.adult === true, video: `/api/v1/videos/${id}/video` });
+    return json({
+      id,
+      status: "done",
+      seconds: num(body.seconds) ?? null,
+      bytes: num(body.bytes) ?? null,
+      duration: num(body.duration) ?? null,
+      shots: num(body.shots) ?? null,
+      model: str(body.model) ?? null,
+      adult: body.adult === true,
+      video: `/api/v1/videos/${id}/video`,
+    });
   }
   return json({ error: { message: str(body.error) ?? "video failed", code: upstream.status } }, upstream.status);
 }
