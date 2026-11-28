@@ -120,13 +120,14 @@ export class Api {
     model: string | null,
     onDelta: (text: string) => void,
     signal?: AbortSignal,
-    opts: { onRun?: (id: string) => void; onReset?: () => void } = {},
+    opts: { onRun?: (id: string) => void; onReset?: () => void; onStatus?: (s: string) => void } = {},
   ): Promise<string> {
     const res = await this.raw("/api/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...(model ? { model } : {}), messages, stream: true, resumable: true }),
-      timeoutMs: 15 * 60_000,
+      // Past the server's own 20-minute stop for a turn.
+      timeoutMs: 25 * 60_000,
       signal,
     });
     if (!res.ok) {
@@ -137,22 +138,22 @@ export class Api {
     const run = res.headers.get("x-c0mpute-run");
     if (run) opts.onRun?.(run);
     try {
-      return await this.readAnswer(res, onDelta, signal);
+      return await this.readAnswer(res, onDelta, signal, opts.onStatus);
     } catch (e) {
-      if (run && e instanceof ApiError && e.kind === "offline") return this.resumeRun(run, onDelta, signal, opts.onReset);
+      if (run && e instanceof ApiError && e.kind === "offline") return this.resumeRun(run, onDelta, signal, opts.onReset, 6, opts.onStatus);
       throw e;
     }
   }
 
   /** Reattach to a resumable turn (a few tries with backoff); the replay starts at the beginning. */
-  async resumeRun(run: string, onDelta: (text: string) => void, signal?: AbortSignal, onReset?: () => void, tries = 6): Promise<string> {
+  async resumeRun(run: string, onDelta: (text: string) => void, signal?: AbortSignal, onReset?: () => void, tries = 6, onStatus?: (s: string) => void): Promise<string> {
     let last: unknown = null;
     for (let attempt = 0; attempt < tries; attempt++) {
       if (attempt) await new Promise((r) => setTimeout(r, Math.min(8000, 250 * 2 ** attempt)));
       if (signal?.aborted) throw new ApiError("stopped", "aborted");
       let res: Response;
       try {
-        res = await this.raw(`/api/v1/chat/runs/${encodeURIComponent(run)}`, { timeoutMs: 15 * 60_000, signal });
+        res = await this.raw(`/api/v1/chat/runs/${encodeURIComponent(run)}`, { timeoutMs: 25 * 60_000, signal });
       } catch (e) {
         last = e;
         if (e instanceof ApiError && (e.kind === "aborted" || e.kind === "auth")) throw e;
@@ -165,7 +166,7 @@ export class Api {
       }
       onReset?.();
       try {
-        return await this.readAnswer(res, onDelta, signal);
+        return await this.readAnswer(res, onDelta, signal, onStatus);
       } catch (e) {
         last = e;
         if (!(e instanceof ApiError && e.kind === "offline")) throw e;
@@ -210,7 +211,7 @@ export class Api {
     return { ok: true };
   }
 
-  private async readAnswer(res: Response, onDelta: (text: string) => void, signal?: AbortSignal): Promise<string> {
+  private async readAnswer(res: Response, onDelta: (text: string) => void, signal?: AbortSignal, onStatus?: (s: string) => void): Promise<string> {
     if (!res.body) throw new ApiError("empty answer stream", "http", res.status);
     let answer = "";
     const parser = sseParser((data) => {
@@ -228,6 +229,13 @@ export class Api {
         onDelta(t);
       }
       return false;
+    }, (line) => {
+      // ": status {...}": where the turn is (queued, asking a node, running a tool).
+      if (!onStatus || !line.startsWith(": status")) return;
+      try {
+        const s = JSON.parse(line.slice(8).trim()) as { message?: unknown };
+        if (typeof s.message === "string" && s.message) onStatus(s.message);
+      } catch {}
     });
     const decoder = new TextDecoder();
     try {
@@ -273,7 +281,7 @@ export class Api {
  * `data:` payload; when it returns true the stream is finished and the
  * parser reports true from then on.
  */
-export function sseParser(onData: (data: string) => boolean): (chunk: string) => boolean {
+export function sseParser(onData: (data: string) => boolean, onComment?: (line: string) => void): (chunk: string) => boolean {
   let buf = "";
   let done = false;
   return (chunk: string) => {
@@ -283,6 +291,10 @@ export function sseParser(onData: (data: string) => boolean): (chunk: string) =>
     while ((nl = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
+      if (line.startsWith(":")) {
+        onComment?.(line);
+        continue;
+      }
       if (!line.startsWith("data:")) continue;
       if (onData(line.slice(5).trim())) {
         done = true;

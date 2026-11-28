@@ -165,7 +165,8 @@ describe("mcp", () => {
     expect(r.result.content[0].text).toBe("4");
     const sent = calls.find((c) => c.path === "/v1/chat/completions")!.body as Record<string, unknown>;
     expect(sent.p2p_only).toBe(true);
-    expect(sent.stream).toBe(false);
+    // Streamed from the node underneath (no fixed total ceiling); MCP still gets one answer.
+    expect(sent.stream).toBe(true);
     expect(sent.messages).toEqual([
       { role: "system", content: "terse" },
       { role: "user", content: "2+2?" },

@@ -99,7 +99,12 @@ export async function houseLaneChat(opts: {
   const spendable = Number(bal?.total_spendable_usd ?? NaN);
   if (bal && Number.isFinite(spendable) && spendable <= 0) return balanceRequired(deps.topUpUrl, bal.total_spendable_usd);
 
-  const timeout = AbortSignal.timeout(TIMEOUT_MS);
+  // A stream gets the timeout on its headers only: a signal left on fetch also
+  // aborts the body, which cut long answers off at 290 s mid-stream
+  // (2026-11-28). A JSON answer keeps the whole-request ceiling.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new DOMException("timed out waiting for the house lane", "TimeoutError")), TIMEOUT_MS);
+  const timeout = ctl.signal;
   let upstream: Response;
   try {
     upstream = await deps.fetch(`${cfg.infernetUrl}/v1/chat/completions`, {
@@ -124,8 +129,10 @@ export async function houseLaneChat(opts: {
       signal: opts.signal ? AbortSignal.any([timeout, opts.signal]) : timeout,
     });
   } catch {
+    clearTimeout(timer);
     return laneUnavailable();
   }
+  if (req.stream === true) clearTimeout(timer);
 
   const type = upstream.headers.get("content-type") ?? "";
   if (!upstream.ok) {
