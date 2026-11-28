@@ -26,8 +26,9 @@ export type WebSource = {
 export type Grounding = { query: string; sources: WebSource[]; context: string };
 
 /** The whole grounding step (search + reading pages) never takes longer than this. */
-export const GROUNDING_BUDGET_MS = 7_000;
-const SEARCH_MS = 4_500;
+// A cold pit.world answers in ~5 s (warm: ~1 s); 4.5 s dropped those searches.
+export const GROUNDING_BUDGET_MS = 9_500;
+const SEARCH_MS = 6_500;
 const PAGE_MS = 3_500;
 const PAGE_MAX_BYTES = 700_000;
 const PAGES_READ = 5;
@@ -255,7 +256,7 @@ export async function groundQuestion(
   const query = searchQuery(question);
   if (!query) return null;
   const plan = searchPlan(question);
-  opts.onStatus?.(plan.queries.length > 1 ? `searching the web (${plan.queries.length} searches)…` : "searching the web…");
+  opts.onStatus?.(plan.queries.length > 1 ? `searching pit.world (${plan.queries.length} searches)…` : "searching pit.world…");
   // Web searches and place summaries side by side; any of them may fail alone.
   const [lists, places] = await Promise.all([
     Promise.all(
