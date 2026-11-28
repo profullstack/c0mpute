@@ -184,6 +184,106 @@ export async function chatText(upstream: Upstream, req: ChatRequest, signal?: Ab
   return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? req.model ?? "auto" };
 }
 
+/** How long a streamed step may wait for its first byte (headers, queue). */
+export const STEP_FIRST_BYTE_MS = 300_000;
+/** How long a streamed step may go without a byte once the node is answering. */
+export const STEP_IDLE_MS = 120_000;
+
+/**
+ * The answer text like chatText, but streamed from the node so the caller
+ * hears progress (the network's own `: status` lines and a running token
+ * count) and a slow node that keeps writing is never cut off: the only
+ * timeouts are a first-byte wait and an idle gap, not a total ceiling.
+ * chatText's 5-minute ceiling killed long plugin-chat answers from 9B nodes
+ * at ~2 tok/s with "The operation timed out." after minutes of silence
+ * (2026-11-28). A JSON (non-SSE) answer is accepted too.
+ */
+export async function streamChatText(
+  upstream: Upstream,
+  req: ChatRequest,
+  opts: { signal?: AbortSignal; onStatus?: (message: string) => void; firstByteMs?: number; idleMs?: number } = {},
+): Promise<{ text: string; model: string }> {
+  const idle = new AbortController();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, idle.signal]) : idle.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let started = false;
+  const arm = () => {
+    clearTimeout(timer);
+    const ms = started ? (opts.idleMs ?? STEP_IDLE_MS) : (opts.firstByteMs ?? STEP_FIRST_BYTE_MS);
+    const why = started
+      ? `the node stopped answering (nothing for ${Math.round(ms / 1000)} s); try again`
+      : `no node started on this within ${Math.round(ms / 60_000)} min; the network is busy, try again in a minute`;
+    timer = setTimeout(() => idle.abort(new DOMException(why, "TimeoutError")), ms);
+  };
+  const reason = (e: unknown) => (idle.signal.aborted && idle.signal.reason instanceof Error ? idle.signal.reason : e);
+  arm();
+  try {
+    const res = await forwardChat(upstream, { ...req, stream: true }, signal);
+    const type = res.headers.get("content-type") ?? "";
+    if (!type.includes("event-stream") || !res.body) {
+      const body = (await res.json().catch(() => ({}))) as { model?: string; choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+      if (!res.ok || body.error) throw new Error(body.error?.message || `inference failed (HTTP ${res.status})`);
+      return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? req.model ?? "auto" };
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let text = "";
+    let model = req.model ?? "auto";
+    let pieces = 0;
+    let lastNote = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      started = true;
+      arm();
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line.startsWith(": status")) {
+          try {
+            const s = JSON.parse(line.slice(8).trim()) as { message?: unknown };
+            if (typeof s.message === "string" && s.message) opts.onStatus?.(s.message);
+          } catch {}
+          continue;
+        }
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") {
+          void reader.cancel().catch(() => {});
+          return { text, model };
+        }
+        let j: { model?: string; error?: { message?: string }; choices?: { delta?: { content?: string } }[] };
+        try {
+          j = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (j.error) throw new Error(j.error.message || "inference failed");
+        if (typeof j.model === "string" && j.model) model = j.model;
+        const piece = j.choices?.[0]?.delta?.content;
+        if (typeof piece === "string" && piece) {
+          text += piece;
+          pieces++;
+          const t = Date.now();
+          if (t - lastNote >= 1000) {
+            lastNote = t;
+            opts.onStatus?.(`a node is writing… ${pieces} tokens`);
+          }
+        }
+      }
+    }
+    return { text, model };
+  } catch (e) {
+    throw reason(e);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function listModels(upstream: Upstream): Promise<string[]> {
   const res = await upstream("/v1/models", { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`models HTTP ${res.status}`);
