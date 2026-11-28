@@ -40,7 +40,7 @@ pub struct JobProgress {
 
 impl JobProgress {
     pub fn finished(&self) -> bool {
-        self.stage == "done" || self.stage == "failed"
+        self.stage == "done" || self.stage == "failed" || self.stage == "cancelled"
     }
 }
 

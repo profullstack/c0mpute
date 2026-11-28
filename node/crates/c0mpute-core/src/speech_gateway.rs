@@ -75,6 +75,69 @@ struct GatewayState {
     /// Peers whose own capability ads carry `c0mpute:adult`; adult jobs are
     /// awarded only to them.
     adult_peers: AdultPeers,
+    /// The task running each tracked request, so `DELETE /v1/result/{id}`
+    /// can stop it (and its workload, to leave the queue board).
+    tasks: TrackedTasks,
+}
+
+/// Running tracked requests by request id: the task's abort handle and its workload.
+type TrackedTasks = Arc<std::sync::Mutex<std::collections::HashMap<String, (tokio::task::AbortHandle, &'static str)>>>;
+
+/// What `DELETE /v1/result/{id}` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelOutcome {
+    /// It was queued or running and is now stopped.
+    Cancelled,
+    /// A cancel for it already went through.
+    AlreadyCancelled,
+    /// It had already finished (or failed); nothing to stop.
+    Finished,
+    /// Unknown here.
+    NotFound,
+}
+
+/// Stop a tracked request everywhere this gateway holds it: abort its task
+/// (dropping its auction turn and queue slot), forget it on the pending store
+/// (so a restart does not resume it) and the queue board, and record it as
+/// cancelled for GET /v1/result and /v1/progress. Returns the job a worker
+/// was already running for it, which the caller cancels on the network.
+fn cancel_local(
+    tasks: &TrackedTasks,
+    results: &crate::job_progress::ResultStore,
+    pending: &crate::job_progress::PendingStore,
+    board: &crate::buyer_queue::QueueBoard,
+    progress: &crate::job_progress::ProgressBoard,
+    key: &str,
+) -> (CancelOutcome, Option<crate::job_e2e::InFlightJob>) {
+    use crate::job_progress::Stored;
+    let running = tasks.lock().ok().and_then(|mut t| t.remove(key));
+    match results.get(key) {
+        Some(Stored::Failed { status: 410, .. }) => return (CancelOutcome::AlreadyCancelled, None),
+        Some(_) => return (CancelOutcome::Finished, None),
+        None => {}
+    }
+    let workload = running
+        .as_ref()
+        .map(|(_, w)| w.to_string())
+        .or_else(|| board.position(key).map(|(w, _, _)| w));
+    if running.is_none() && workload.is_none() && progress.snapshot(key).is_none() {
+        return (CancelOutcome::NotFound, None);
+    }
+    if let Some((handle, _)) = &running {
+        handle.abort();
+    }
+    let in_flight = pending.in_flight(key);
+    pending.remove(key);
+    if let Some(w) = workload {
+        board.leave(&w, key);
+    }
+    progress.update(key, |p| {
+        p.stage = "cancelled";
+        p.worker = None;
+        p.eta_s = None;
+    });
+    results.put(key, Stored::Failed { status: 410, message: "cancelled by the caller".into() });
+    (CancelOutcome::Cancelled, in_flight)
 }
 
 static ADULT_BUYER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -303,6 +366,7 @@ pub fn router_with(
         pending,
         penalties,
         adult_peers: AdultPeers::default(),
+        tasks: TrackedTasks::default(),
     };
     state.adult_peers.watch(state.net.clone());
     resume_pending(&state);
@@ -318,7 +382,7 @@ pub fn router_with(
         .route("/v1/images", post(generate_image))
         .route("/v1/music", post(generate_music))
         .route("/v1/progress/{request}", get(job_progress))
-        .route("/v1/result/{request}", get(job_result))
+        .route("/v1/result/{request}", get(job_result).delete(cancel_request))
         .route("/v1/videos", post(generate_video))
         // OCR takes a 32 MiB document, above the router-wide audio limit.
         .route(
@@ -1576,7 +1640,9 @@ fn spawn_tracked(
         p.started_at_ms = ctx.queued_at_ms;
     });
     let scope = (st.progress.clone(), key.clone());
-    tokio::spawn(crate::job_progress::CURRENT.scope(
+    let tasks = st.tasks.clone();
+    let task_key = key.clone();
+    let handle = tokio::spawn(crate::job_progress::CURRENT.scope(
         scope,
         crate::job_progress::QUEUE.scope(ctx, crate::job_progress::RESUME.scope(std::sync::Mutex::new(resume), async move {
             crate::job_progress::set_stage("queued");
@@ -1597,9 +1663,18 @@ fn spawn_tracked(
             st.results.put(&key, stored.clone());
             st.pending.remove(&key);
             st.board.leave(workload, &key);
+            if let Ok(mut t) = st.tasks.lock() {
+                t.remove(&key);
+            }
             stored
         })),
-    ))
+    ));
+    if !handle.is_finished()
+        && let Ok(mut t) = tasks.lock()
+    {
+        t.insert(task_key, (handle.abort_handle(), workload));
+    }
+    handle
 }
 
 /// `202 Accepted` for a request still queued or running: its id, stage,
@@ -1766,6 +1841,35 @@ async fn job_result(
             }
             Ok(accepted_response(&state, &request))
         }
+    }
+}
+
+/// `DELETE /v1/result/{request}`: cancel a tracked request (queued, being
+/// auctioned or rendering). 200 `{"cancelled":true}`, also when it was
+/// already cancelled (idempotent); 409 once it has finished; 404 if unknown.
+/// A job a worker already won is cancelled on that worker too.
+async fn cancel_request(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(request): Path<String>,
+) -> ApiResult<Response> {
+    authenticate(&state, &headers)?;
+    if !crate::job_progress::valid_key(&request) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad request id".into()));
+    }
+    let (outcome, in_flight) =
+        cancel_local(&state.tasks, &state.results, &state.pending, &state.board, &state.progress, &request);
+    if let Some(job) = in_flight {
+        let net = state.net.clone();
+        tokio::spawn(async move { crate::buyer::cancel_job(&net, &job).await });
+    }
+    match outcome {
+        CancelOutcome::Cancelled | CancelOutcome::AlreadyCancelled => {
+            tracing::info!(request = %request, already = outcome == CancelOutcome::AlreadyCancelled, "tracked request cancelled by the caller");
+            Ok(Json(serde_json::json!({ "request_id": request, "cancelled": true })).into_response())
+        }
+        CancelOutcome::Finished => Err(ApiError(StatusCode::CONFLICT, "already finished".into())),
+        CancelOutcome::NotFound => Err(ApiError(StatusCode::NOT_FOUND, "no such request".into())),
     }
 }
 
@@ -2271,6 +2375,37 @@ fn default_stt_model() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancel_stops_a_queued_request_once_and_leaves_finished_ones_alone() {
+        use super::{CancelOutcome, TrackedTasks, cancel_local};
+        use crate::job_progress::{PendingStore, ProgressBoard, ResultStore, Stored};
+        let (tasks, results, pending, board, progress) =
+            (TrackedTasks::default(), ResultStore::default(), PendingStore::default(), crate::buyer_queue::QueueBoard::default(), ProgressBoard::default());
+        // A queued video that would wait forever.
+        board.enter("video.txt2vid", "q-1", 1, 10);
+        progress.start("q-1");
+        let task = tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(3600)).await });
+        tasks.lock().unwrap().insert("q-1".into(), (task.abort_handle(), "video.txt2vid"));
+
+        let (out, in_flight) = cancel_local(&tasks, &results, &pending, &board, &progress, "q-1");
+        assert_eq!(out, CancelOutcome::Cancelled);
+        assert!(in_flight.is_none());
+        assert!(task.await.unwrap_err().is_cancelled(), "its task is aborted");
+        assert!(board.position("q-1").is_none(), "it leaves the queue");
+        assert!(tasks.lock().unwrap().is_empty());
+        assert!(matches!(results.get("q-1"), Some(Stored::Failed { status: 410, .. })));
+        assert_eq!(progress.snapshot("q-1").unwrap()["stage"], "cancelled");
+
+        // Idempotent.
+        assert_eq!(cancel_local(&tasks, &results, &pending, &board, &progress, "q-1").0, CancelOutcome::AlreadyCancelled);
+        // A finished one is not rewritten as cancelled.
+        results.put("q-2", Stored::Failed { status: 503, message: "no worker".into() });
+        assert_eq!(cancel_local(&tasks, &results, &pending, &board, &progress, "q-2").0, CancelOutcome::Finished);
+        assert!(matches!(results.get("q-2"), Some(Stored::Failed { status: 503, .. })));
+        // Unknown.
+        assert_eq!(cancel_local(&tasks, &results, &pending, &board, &progress, "q-3").0, CancelOutcome::NotFound);
+    }
+
     use super::*;
 
     #[test]
