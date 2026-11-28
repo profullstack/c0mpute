@@ -1,15 +1,33 @@
 import { Database } from "@sqlitecloud/drivers";
+import { localSql } from "./db/local";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
 import { desc, eq } from "drizzle-orm";
 import Redis from "ioredis";
 import { blogPosts } from "./schema";
 import { isDeadImageUrl, stripDeadLinks } from "./dead-links";
 
-// ── SQLite Cloud + Drizzle ────────────────────────────────────────────────────
+// ── SQLite (local file, DATABASE_PATH) + Drizzle ──────────────────────────────
+
+/** The two call shapes this file uses on the cloud client, over the local file. */
+function localClient(path: string) {
+  const s = localSql(path);
+  return {
+    async sql(a: TemplateStringsArray | { query: string; parameters?: unknown[] }, ...vals: unknown[]): Promise<unknown> {
+      const q = "raw" in a ? a.join("?") : a.query;
+      const p = "raw" in a ? vals : (a.parameters ?? []);
+      // Rows back for anything with parameters (INSERT ... RETURNING too);
+      // bare DDL goes through run(), which takes several statements.
+      if (p.length || /^\s*(select|with|pragma)\b/i.test(q)) return s.all(q, p);
+      await s.run(q, p);
+      return [];
+    },
+  };
+}
 
 type Db = ReturnType<typeof drizzle<{ blogPosts: typeof blogPosts }>>;
 
-let _client: Database | null = null;
+type SqlFn = (a: TemplateStringsArray | { query: string; parameters?: unknown[] }, ...vals: unknown[]) => Promise<unknown>;
+let _client: { sql: SqlFn } | null = null;
 let _db: Db | null = null;
 
 const CONNECTION_ERRORS = new Set([
@@ -27,17 +45,19 @@ function isConnectionError(e: unknown): boolean {
 
 function resetConnection() {
   try {
-    (_client as Database & { disconnect?: () => void })?.disconnect?.();
+    (_client as { disconnect?: () => void } | null)?.disconnect?.();
   } catch {}
   _client = null;
   _db = null;
 }
 
 async function makeConnection(): Promise<Db> {
+  const path = process.env.DATABASE_PATH;
   const url = process.env.SQLITE_CLOUD_URL;
-  if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
+  if (!path && !url) throw new Error("DATABASE_PATH (or, legacy, SQLITE_CLOUD_URL) env var is required");
 
-  const client = new Database(url);
+  // Self-hosted local file (DATABASE_PATH) first; SQLite Cloud only until cutover.
+  const client: { sql: SqlFn } = path ? localClient(path) : (new Database(url!) as unknown as { sql: SqlFn });
 
   // Ensure table + indexes exist (drizzle-kit migrations not yet wired to cloud)
   await client.sql`
@@ -68,7 +88,7 @@ async function makeConnection(): Promise<Db> {
         return { rows: [] };
       }
       const result = await client.sql({ query: sql, parameters: params });
-      const raw = Array.isArray(result) ? result : result ? [result] : [];
+      const raw = (Array.isArray(result) ? result : result ? [result] : []) as Record<string, unknown>[];
       const rows = raw.map((row: Record<string, unknown>) => Object.values(row));
       return { rows };
     },

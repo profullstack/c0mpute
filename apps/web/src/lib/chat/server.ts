@@ -1,4 +1,4 @@
-// Server-side wiring for c0mpute chat: the store on SQLite Cloud, request auth,
+// Server-side wiring for c0mpute chat: the store (a local SQLite file), request auth,
 // CoinPay OAuth, the Infernet upstream and a per-user rate limit.
 import { Database } from "@sqlitecloud/drivers";
 import { labelerFromEnv, moderatePush } from "./moderation";
@@ -19,12 +19,18 @@ import { convoKey, createConvoStore, type ConvoStore } from "./convo-store";
 import { createShareStore, type ShareStore } from "./share-store";
 import { createLiveStore } from "../live/store";
 import { createMediaStore, type MediaKind, type MediaStore } from "./media-owners";
+import { localSql } from "../db/local";
 
 // ── store ────────────────────────────────────────────────────────────────────
+// Self-hosted: a local SQLite file (DATABASE_PATH) on the serving box. The
+// SQLite Cloud path below is kept for one release only, so the cutover is an
+// env change; remove it (and @sqlitecloud/drivers) once DATABASE_PATH is live.
+/** Is any site database configured? */
+export const dbConfigured = () => !!env("DATABASE_PATH") || !!env("SQLITE_CLOUD_URL");
 let client: Database | null = null;
 function db(): Database {
   const url = env("SQLITE_CLOUD_URL");
-  if (!url) throw new Error("SQLITE_CLOUD_URL env var is required");
+  if (!url) throw new Error("DATABASE_PATH (or, legacy, SQLITE_CLOUD_URL) env var is required");
   return (client ??= new Database(url));
 }
 /**
@@ -50,7 +56,7 @@ async function query(q: string, params: unknown[] = []) {
     return await db().sql({ query: q, parameters: params as never[] });
   }
 }
-export const cloudSql: Sql = {
+const remoteSql: Sql = {
   all: async (q, p) => {
     const r = await query(q, p);
     return Array.isArray(r) ? (r.map((row) => ({ ...row })) as Record<string, unknown>[]) : [];
@@ -58,6 +64,12 @@ export const cloudSql: Sql = {
   run: async (q, p) => {
     await query(q, p);
   },
+};
+let local: Sql | null = null;
+/** The site database every store uses (name kept from the SQLite Cloud days). */
+export const cloudSql: Sql = {
+  all: (q, p) => (env("DATABASE_PATH") ? (local ??= localSql(env("DATABASE_PATH"))) : remoteSql).all(q, p),
+  run: (q, p) => (env("DATABASE_PATH") ? (local ??= localSql(env("DATABASE_PATH"))) : remoteSql).run(q, p),
 };
 
 let _store: Store | null = null;

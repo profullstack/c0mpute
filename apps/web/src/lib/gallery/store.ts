@@ -1,4 +1,4 @@
-// Gallery listings in the site's SQLite Cloud database (SQLITE_CLOUD_URL).
+// Gallery listings in the site's SQLite database (DATABASE_PATH).
 // Written against the two-method Sql interface (lib/chat/store.ts) so tests
 // run it on bun:sqlite.
 //
