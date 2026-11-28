@@ -184,9 +184,14 @@ export async function chatText(upstream: Upstream, req: ChatRequest, signal?: Ab
   return { text: body.choices?.[0]?.message?.content ?? "", model: body.model ?? req.model ?? "auto" };
 }
 
-/** How long a streamed step may wait for its first byte (headers, queue). */
-export const STEP_FIRST_BYTE_MS = 300_000;
-/** How long a streamed step may go without a byte once the node is answering. */
+/**
+ * How long a streamed step may wait for its first token, all told: headers,
+ * the network's queue and its retries. Status lines and keepalives do not
+ * reset it (2026-11-28: they did, and a job still queued for a free slot
+ * was failed as "the node stopped answering" 120 s after its last status).
+ */
+export const STEP_FIRST_BYTE_MS = 600_000;
+/** How long a streamed step may go without a byte once the node is writing tokens. */
 export const STEP_IDLE_MS = 120_000;
 
 /**
@@ -236,8 +241,9 @@ export async function streamChatText(
       const { done, value } = await reader.read();
       if (done) break;
       if (!value?.byteLength) continue;
-      started = true;
-      arm();
+      // Before the first token only the fixed queue budget runs; after it,
+      // any byte (token, status, keepalive) proves the node is alive.
+      if (started) arm();
       buf += dec.decode(value, { stream: true });
       let nl;
       while ((nl = buf.indexOf("\n")) !== -1) {
@@ -266,6 +272,10 @@ export async function streamChatText(
         if (typeof j.model === "string" && j.model) model = j.model;
         const piece = j.choices?.[0]?.delta?.content;
         if (typeof piece === "string" && piece) {
+          if (!started) {
+            started = true;
+            arm();
+          }
           text += piece;
           pieces++;
           const t = Date.now();

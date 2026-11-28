@@ -44,6 +44,33 @@ describe("streamChatText", () => {
     await expect(streamChatText(up, { messages: [{ role: "user", content: "x" }] }, { idleMs: 50, firstByteMs: 200 })).rejects.toThrow(/stopped answering/);
   });
 
+  test("status lines while queued do not start the idle clock", async () => {
+    const st = (m: string) => `: status ${JSON.stringify({ message: m })}\n\n`;
+    // Queued: two statuses, then a silent wait longer than idleMs before the first token.
+    const up: Upstream = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          async start(ctrl) {
+            ctrl.enqueue(enc.encode(st("waiting for a free slot (try 1 of 3)")));
+            await new Promise((r) => setTimeout(r, 30));
+            ctrl.enqueue(enc.encode(st("waiting for a free slot (try 3 of 3)")));
+            await new Promise((r) => setTimeout(r, 150));
+            ctrl.enqueue(enc.encode(chunk("ok")));
+            ctrl.enqueue(enc.encode("data: [DONE]\n\n"));
+            ctrl.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    const r = await streamChatText(up, { messages: [{ role: "user", content: "x" }] }, { idleMs: 60, firstByteMs: 1000 });
+    expect(r.text).toBe("ok");
+  });
+
+  test("no first token within the queue budget fails as busy, not as a dead node", async () => {
+    const up = sseUpstream([`: status ${JSON.stringify({ message: "queued" })}\n\n`, chunk("late")], 120);
+    await expect(streamChatText(up, { messages: [{ role: "user", content: "x" }] }, { idleMs: 1000, firstByteMs: 80 })).rejects.toThrow(/network is busy/);
+  });
+
   test("an upstream error chunk becomes the error", async () => {
     const up = sseUpstream([`data: ${JSON.stringify({ error: { message: "no provider" } })}\n\n`]);
     await expect(streamChatText(up, { messages: [{ role: "user", content: "x" }] })).rejects.toThrow("no provider");
